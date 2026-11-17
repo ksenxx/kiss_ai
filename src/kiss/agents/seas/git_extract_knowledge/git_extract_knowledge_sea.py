@@ -243,6 +243,14 @@ repeated.
   42ad3965 steps 20 and 30 each lost a Bash call this way).
 - `Read` takes `file_path`, `start_line` and `max_lines` only (7f5242ac passed `max_line`
   and got a tool error instead of the page).
+- To enumerate the curated pages (the latest `history-N`, `module-<slug>-N` numbers), run
+  `ls <memory directory>` (the directory `index_repo` reports) in one Bash call;
+  `list_knowledge_pages` and the CLI `pages` show about 15 of 1,750 pages (349b6d54 spent
+  [34]-[68] finding this out).
+- A page written in this run is searchable only after the next `index_repo` mirrors it as
+  a note block: after the last `write_knowledge_page`, run `index_repo(repo)` once more
+  (3 s incremental), then do the verification searches (599e69c9 [119]-[121] and ddd88c66
+  [106] discovered this after searches came back empty).
 """
 
 _resolved: dict[str, Path] = {}

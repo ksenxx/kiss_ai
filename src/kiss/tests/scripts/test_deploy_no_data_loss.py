@@ -1070,6 +1070,50 @@ class CarryOverTablesTest(unittest.TestCase):
             ("ROWLESS", "", "no row yet"), ("UNTITLED", "new", "typed elsewhere")])
         self.assertIn("0 row(s) restored, 0 counter(s) raised", self._carry().stdout)
 
+    def test_the_stars_given_to_the_chats_come_back(self) -> None:
+        """A star is the user's own mark, as a title is, and goes back the same way.
+
+        It is put on the chat's row, or on the row its title just made for
+        a chat whose tasks have not written one yet; a star given in the
+        new database stays, and a deleted chat gets nothing.
+        """
+        self._make(self.old, {})
+        self._make(self.new, {})
+        con = sqlite3.connect(self.old)
+        con.executemany(
+            "INSERT INTO chat_summaries(chat_id, summary, user_summary, is_favorite)"
+            " VALUES (?, 'old', ?, ?)",
+            [("STARRED", "", 1), ("ROWLESS", "typed here", 1), ("DELETED", "", 1),
+             ("PLAIN", "", 0), ("BOTH", "", 1)])
+        con.commit()
+        con.close()
+        con = sqlite3.connect(self.new)
+        con.executemany(
+            "INSERT INTO task_history(id, timestamp, task, chat_id) VALUES (?, 1.0, 't', ?)",
+            [(chat, chat) for chat in ("STARRED", "ROWLESS", "PLAIN", "BOTH")])
+        con.executemany(
+            "INSERT INTO chat_summaries(chat_id, summary, is_favorite) VALUES (?, 'new', ?)",
+            [("STARRED", 0), ("PLAIN", 1), ("BOTH", 1)])
+        con.execute("INSERT INTO deleted_chats VALUES ('DELETED', 2000.0)")
+        con.commit()
+        con.close()
+
+        # ROWLESS counts twice: its title made the row, its star went on it.
+        self.assertIn("3 row(s) restored, 0 counter(s) raised", self._carry().stdout)
+
+        con = sqlite3.connect(f"file:{self.new}?mode=ro", uri=True)
+        try:
+            rows = con.execute(
+                "SELECT chat_id, summary, user_summary, is_favorite"
+                " FROM chat_summaries ORDER BY chat_id"
+            ).fetchall()
+        finally:
+            con.close()
+        self.assertEqual(rows, [
+            ("BOTH", "new", "", 1), ("PLAIN", "new", "", 1),
+            ("ROWLESS", "", "typed here", 1), ("STARRED", "new", "", 1)])
+        self.assertIn("0 row(s) restored, 0 counter(s) raised", self._carry().stdout)
+
     def test_a_database_from_before_titles_has_none_to_give(self) -> None:
         """Its older schema is skipped, not tripped over: the tallies still come back."""
         self._make(self.old, {"claude-opus-5": 3})

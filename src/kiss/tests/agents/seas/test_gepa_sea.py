@@ -6,7 +6,7 @@
 
 The SEA is the plain Sorcar agent with the GEPA loop, pseudocode written
 from the official implementation (gepa-ai/gepa), appended to the system
-prompt, on the ``bestrouter`` with the full toolset plus ``reflect``, the
+prompt, on the caller's model with the full toolset plus ``reflect``, the
 reflection step of the official package as a tool.  The tests check the
 text the agent is given, the way the daemon loads the SEA (command
 registry, settings, system-prompt hook, tools), the system message a real
@@ -68,7 +68,7 @@ from kiss.tests.core.models.gemini_sse_harness import GeminiScript, chunk, text_
 
 _SEA_PATH = Path(gepa_sea.__file__).resolve()
 _HEADING = gepa_sea.SECTION_HEADING
-_SETTINGS = {"model": "bestrouter", "tool_profile": "full"}
+_SETTINGS = {"tool_profile": "full"}
 
 _RECORDS: list[dict[str, Any]] = [
     {"Inputs": {"problem": " p ", "n": 3}, "Generated Outputs": ["a", {"b": [1, 2.5, None]}],
@@ -262,10 +262,12 @@ def test_description_is_one_sentence_naming_the_command() -> None:
     assert resolve_agent("gepa", "") == (str(_SEA_PATH), "gepa")
 
 
-def test_settings_name_the_bestrouter_and_the_full_toolset() -> None:
-    """The run's model is the ``bestrouter`` picker entry and its toolset is the full one."""
+def test_settings_name_the_full_toolset_and_keep_the_callers_model() -> None:
+    """The toolset is the full one and the run stays on the caller's model."""
     assert GepaSea().settings({}) == _SETTINGS
-    assert GepaSea().settings({"max_budget": 2.0}) == {"max_budget": 2.0, **_SETTINGS}
+    assert GepaSea().settings({"max_budget": 2.0, "model": "m"}) == {
+        "max_budget": 2.0, "model": "m", **_SETTINGS,
+    }
     assert sea_commands.sea_settings(_SEA_PATH) == _SETTINGS
     assert GepaSea().register_as_model() is False
     assert GepaSea().tools([print]) == [print, gepa_sea.reflect]
@@ -274,10 +276,12 @@ def test_settings_name_the_bestrouter_and_the_full_toolset() -> None:
 
 
 def test_loader_stages_the_rewrite_as_a_system_prompt_hook() -> None:
-    """The daemon-side loader pins the model and profile and stages the prompt hook."""
-    cmd: dict[str, Any] = {"seaPath": str(_SEA_PATH), "appendToSystemPrompt": "CALLER"}
-    assert apply_sea(cmd) == {"model", "toolProfile"}
-    assert cmd["model"] == "bestrouter"
+    """The daemon-side loader pins the profile, keeps the model and stages the prompt hook."""
+    cmd: dict[str, Any] = {
+        "seaPath": str(_SEA_PATH), "appendToSystemPrompt": "CALLER", "model": "m",
+    }
+    assert apply_sea(cmd) == {"toolProfile"}
+    assert cmd["model"] == "m"
     assert cmd["toolProfile"] == "full"
     assert cmd["appendToSystemPrompt"] == "CALLER"
     hook = cmd["systemPromptHook"]

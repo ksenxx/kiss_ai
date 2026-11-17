@@ -135,6 +135,12 @@
 
 - `work_dir`: The ``work_dir`` argument of :meth:`RelentlessAgent.run`.
 
+**`container_limits_line`** — The :data:`CONTAINER_LIMITS_LINE` for these limits, ``""`` when neither is set.<br/>`def container_limits_line(cpus: float | None, memory_bytes: int | None) -> str`
+
+- `cpus`: The container's CPU limit, or ``None``.
+- `memory_bytes`: The container's memory limit in bytes, or ``None``.
+- **Returns:** The prompt line, or ``""``.
+
 ---
 
 #### <a id="kissagentssorcarsorcar_agent"></a>`kiss.agents.sorcar.sorcar_agent` — *Sorcar agent with both coding tools and browser automation.*
@@ -613,6 +619,7 @@
 - `prompt`: The task text.
 - `tab_id`: The tab the run is shown under.
 - `run_token`: The client-minted per-submission run token.
+- `cron_job`: Whether the run is a cron run, settled: :func:`run` has read the environment for its ``None``.
 - `sea_path`: The resolved SEA file (``""`` for none).
 - `timeout`: The seconds recorded as the run's ``timeout`` setting (``None`` for the daemon default).
 - `budget_cap`: The bound a dispatch puts on the run's budget, the caller's unreserved remainder and no more than the job's reservation (``agent_dispatch.budget_cap_of``; wire field ``budgetCap``, set only when not ``None``); the daemon lowers the effective ``maxBudget`` to it after the SEA's settings apply.
@@ -621,7 +628,7 @@
 - `attachments`: The prompt's files, each ``{"mimeType", "data"}`` with base64 *data* (wire field ``attachments``, set only when non-empty).
 - **Returns:** The command dict.
 
-**`run`** — Run *prompt* as a task on the local Sorcar daemon and block until done. Connects to the ``kiss-web`` daemon's local WSS endpoint, sends the same ``run`` command a chat page would, streams the task's events, and returns once the daemon reports the task finished.<br/>`def run(prompt: str, *, work_dir: str = '', scope_work_dir: str = '', parent_task_id: str = '', parent_tab_id: str = '', parent_reviewer: bool = False, side_channel: bool = False, cron_job: bool = False, model: str = '', chat_id: str = '', system_prompt: str = '', sea_path: str = '', max_budget: float | None = None, model_config: dict[str, Any] | None = None, use_web_tools: bool | None = None, auto_classify: bool | None = None, use_memory: bool | None = None, compaction: bool | None = None, is_parallel: bool = True, add_to_system_prompt: str = '', add_to_prompt: str = '', tool_profile: str = '', docker_image: str = '', inherit_tools: bool = False, isolated_repos: dict[str, str] | None = None, workspace: str = '', provenance: dict[str, str] | None = None, timeout: float | None = 3600.0, stop_on_timeout: bool = False, record_timeout: float | None = None, endpoint_file: str | Path | None = None, cancel: threading.Event | None = None, running: threading.Event | None = None, machine: str = '', sea_command: str = '', attachments: list[dict[str, str]] | None = None, budget_cap: float | None = None, reconnect_seconds: float = 300.0) -> TaskResult`
+**`run`** — Run *prompt* as a task on the local Sorcar daemon and block until done. Connects to the ``kiss-web`` daemon's local WSS endpoint, sends the same ``run`` command a chat page would, streams the task's events, and returns once the daemon reports the task finished.<br/>`def run(prompt: str, *, work_dir: str = '', scope_work_dir: str = '', parent_task_id: str = '', parent_tab_id: str = '', parent_reviewer: bool = False, side_channel: bool = False, cron_job: bool | None = None, model: str = '', chat_id: str = '', system_prompt: str = '', sea_path: str = '', max_budget: float | None = None, model_config: dict[str, Any] | None = None, use_web_tools: bool | None = None, auto_classify: bool | None = None, use_memory: bool | None = None, compaction: bool | None = None, is_parallel: bool = True, add_to_system_prompt: str = '', add_to_prompt: str = '', tool_profile: str = '', docker_image: str = '', inherit_tools: bool = False, isolated_repos: dict[str, str] | None = None, workspace: str = '', provenance: dict[str, str] | None = None, timeout: float | None = 3600.0, stop_on_timeout: bool = False, record_timeout: float | None = None, endpoint_file: str | Path | None = None, cancel: threading.Event | None = None, running: threading.Event | None = None, machine: str = '', sea_command: str = '', attachments: list[dict[str, str]] | None = None, budget_cap: float | None = None, reconnect_seconds: float = 300.0) -> TaskResult`
 
 - `prompt`: The task instruction to run.
 - `work_dir`: Working directory for the task; the daemon's current default is used when empty.
@@ -630,7 +637,7 @@
 - `parent_tab_id`: Frontend tab id of the calling task's tab, forwarded on the sub-agent's ``new_tab`` broadcast so the chat page knows which tab spawned it (nested placement and cascade-close).  Only meaningful with *parent_task_id*; empty spawns a parentless sub-agent tab, exactly like a headless ``run_parallel`` fan-out.  No SEA setting.
 - `parent_reviewer`: Whether the dispatched run belongs to a reviewer's sub-tree — the caller is a reviewer sub-agent, or *prompt* itself is a review task (see :mod:`kiss.agents.sorcar.fanout_guard`).  Stamped on the child's ``_subagent_info`` so it and its helpers keep the read-only ``review`` tool profile.  Only meaningful with *parent_task_id*; no SEA setting, for the same reason as *parent_task_id*.
 - `side_channel`: Whether the run is a side channel of the parent — a sub-agent whose result is delivered into the PARENT's transcript (the ``/ask`` answer panel), so its own nested tab is scaffolding that is closed when the run ends and never re-opened by a replay.  Persisted on the child's history row; only meaningful with *parent_task_id*; no SEA setting.
-- `cron_job`: Whether the cron scheduler launched the run (an in-chat job; prompt jobs are recognised by their preamble). Persisted as the history row's ``is_cron`` flag, which the CHATS list hides unless its Cron chip is on; no SEA setting.
+- `cron_job`: Whether the run is a cron run: one the scheduler launched (an in-chat job; prompt jobs are recognised by their preamble) or one that a cron command job's script starts.  ``None`` (default) takes it from the environment: true when :data:`CRON_JOB_ENV` is ``1``, which the scheduler sets for every command job.  Persisted as the history row's ``is_cron`` flag, which the CHATS list hides unless its Cron chip is on; no SEA setting.
 - `model`: Model name; the daemon's selected default when empty.
 - `chat_id`: Optional existing chat session id to continue.  Pass the ``chat_id`` of a previous :class:`TaskResult` to run this task in the same chat — the agent then sees the prior tasks and results of that chat as context.  A new chat is started when empty.
 - `system_prompt`: Optional custom system prompt for the run. When non-empty it is used as the system prompt of the agent AND of every sub-agent it spawns (``run_parallel``), replacing the default system prompt shipped in ``src/kiss/SYSTEM.md``.  The daemon still appends its per-run operational instructions (work directory, process id, ``$KISS_HOME/AGENTS.md``) so the agent's tool contract keeps working.  Empty (default) runs with the default system prompt as usual.

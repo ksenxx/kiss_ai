@@ -23,8 +23,9 @@ objects — that:
 
 The OpenRouter account may only have free-tier credit, so the tests use
 ``:free`` models with tool support and retry across several candidates on
-upstream 429 rate limits and 404s (OpenRouter regularly drops models from
-the free tier), skipping only if every candidate is unavailable.
+upstream 429 rate limits, 404s (OpenRouter regularly drops models from
+the free tier) and a provider that failed mid-generation, skipping only
+if every candidate is unavailable.
 """
 
 from __future__ import annotations
@@ -38,6 +39,7 @@ import pytest
 import kiss.core.user_config as user_config
 from kiss.agents.sorcar import persistence as sorcar_persistence
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+from kiss.core.kiss_error import KISSError
 from kiss.core.models.model_info import model as model_factory
 from kiss.core.models.openai_compatible_model import (
     OpenAICompatibleBase,
@@ -55,11 +57,20 @@ from kiss.tests.core.models.test_multihop_model_switching import (
 )
 from kiss.tests.persistence_helpers import close_db
 
+# The ``:free`` ids of https://openrouter.ai/api/v1/models whose
+# ``supported_parameters`` include ``tools`` and that answered a live tool
+# turn on 2026-11-15, in the order tried; gemma was rate-limited (429) that
+# day and stays as the last resort.  Refresh the list from that endpoint
+# when the test skips: of the previous four, two had left the free tier
+# (404 "unavailable for free") and one had no endpoint left under the
+# account's data policy (404 "0 endpoints ... matching your guardrail
+# restrictions").
 _FREE_TOOL_MODELS = [
+    "openrouter/cohere/north-mini-code:free",
+    "openrouter/recursive/flint-v1.0:free",
+    "openrouter/inclusionai/ling-3.2-flash:free",
+    "openrouter/dots-studio/dots-3-note-preview:free",
     "openrouter/google/gemma-4-26b-a4b-it:free",
-    "openrouter/nvidia/nemotron-3.5-lightning:free",
-    "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
-    "openrouter/z-ai/glm-5.2:free",
 ]
 
 # Per-request cap for one ``:free`` candidate.  The free tier queues
@@ -213,6 +224,16 @@ class TestSorcarOpenRouterLive:
                 # Other connection errors (DNS, TLS, resets) stay loud: they
                 # mean the environment is broken, not that a candidate is
                 # busy.
+                candidate_errors.append(f"{name}: {e}")
+            except KISSError as e:
+                # OpenRouter answered 200 and ended the choice with
+                # ``finish_reason="error"``: the candidate's provider failed
+                # mid-generation (one did in the full-suite run of
+                # 2026-11-15).  The transport refuses that completion, as it
+                # must; the candidate is unavailable upstream, so try the
+                # next one.  Any other KISSError stays loud.
+                if "finish_reason='error'" not in str(e):
+                    raise
                 candidate_errors.append(f"{name}: {e}")
             except AssertionError as e:
                 # The candidate answered but never called the tool.  Free

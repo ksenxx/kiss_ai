@@ -885,10 +885,10 @@ def is_cron_run(agent: Any) -> bool:
     """True when *agent* is a cron-launched task or a descendant of one.
 
     The daemon stamps ``is_cron_job`` on the agent at launch
-    (``task_runner``: the ``cronJob`` wire flag of an in-chat job, or an
-    unattended task text); ``dispatch_command`` passes the flag on to
-    every sub-task so the whole run is hidden or shown together by the
-    CHATS list's Cron chip.
+    (``task_runner``: the ``cronJob`` wire flag of an in-chat job or of
+    a task a command job's script starts, or an unattended task text);
+    ``dispatch_command`` passes the flag on to every sub-task so the
+    whole run is hidden or shown together by the CHATS list's Cron chip.
 
     Args:
         agent: A running agent, or None.
@@ -1472,7 +1472,11 @@ def _run_command_job(
     process group with an empty stdin, and a timeout — or an interrupt of the calling
     thread, which is re-raised — kills the WHOLE process tree, not
     just the shell; see :func:`_kill_command_tree` for the exact
-    guarantees and residual limitations per platform.
+    guarantees and residual limitations per platform.  Its environment
+    says it is a cron run (``KISS_CRON_JOB=1``,
+    :data:`~kiss.agents.sorcar.daemon_client.CRON_JOB_ENV`): a task the
+    command starts through :func:`~kiss.agents.sorcar.daemon_client.run`
+    is recorded as one.
 
     Args:
         job: The job dict (uses ``command``).
@@ -1486,6 +1490,8 @@ def _run_command_job(
         succeeds with empty output, ``("ok", stdout)`` on success, and
         ``("error", output)`` on non-zero exit or timeout.
     """
+    from kiss.agents.sorcar.daemon_client import CRON_JOB_ENV
+
     # A variable no other process has: the kill finds by it the
     # descendants that left the command's process group and parent chain.
     mark = f"KISS_CRON_RUN_{uuid.uuid4().hex}"
@@ -1498,9 +1504,11 @@ def _run_command_job(
             # The command sees the state directory this daemon uses (the
             # brand's default unless KISS_HOME already overrides it), so a
             # script it runs with another interpreter reads and writes the
-            # same files.  Its stdin is empty: nobody answers an unattended
-            # command, and the scheduler's own stdin (a terminal, the pipe
-            # of the daemon's launcher) is not the command's to read.
+            # same files.  It is also told that it is a cron run, so a task
+            # such a script starts on the daemon gets a cron row.  Its stdin
+            # is empty: nobody answers an unattended command, and the
+            # scheduler's own stdin (a terminal, the pipe of the daemon's
+            # launcher) is not the command's to read.
             start_process_group(
                 proc,
                 stdin=subprocess.DEVNULL,
@@ -1510,7 +1518,12 @@ def _run_command_job(
                 encoding="utf-8",
                 errors="replace",
                 cwd=str(run_dir),
-                env={**os.environ, "KISS_HOME": str(kiss_home()), mark: "1"},
+                env={
+                    **os.environ,
+                    "KISS_HOME": str(kiss_home()),
+                    CRON_JOB_ENV: "1",
+                    mark: "1",
+                },
                 **_popen_kwargs(str(job["command"])),
             )
             stdout, stderr = _communicate(proc, timeout)

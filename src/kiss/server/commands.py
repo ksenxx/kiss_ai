@@ -37,6 +37,7 @@ from kiss.agents.sorcar.persistence import (
     _record_model_usage,
     _record_steer_input,
     _save_last_model,
+    _set_chat_favorite,
     _set_chat_summary,
     _set_task_favorite,
     _task_tree,
@@ -1433,6 +1434,18 @@ class _CommandsMixin:
             return
         summary = cmd.get("summary")
         _set_chat_summary(chat_id, summary.strip() if isinstance(summary, str) else "")
+        self.printer.broadcast({"type": "tasks_updated"})
+
+    def _cmd_set_chat_favorite(self, cmd: dict[str, Any]) -> None:
+        """Persist the favourite star the user gave a chat in the CHATS panel.
+
+        Every page is nudged to refresh its history so the other
+        surfaces show the star too.
+        """
+        chat_id = _opt_str(cmd.get("chatId"))
+        if not chat_id:
+            return
+        _set_chat_favorite(chat_id, bool(cmd.get("isFavorite", False)))
         self.printer.broadcast({"type": "tasks_updated"})
 
     def _cmd_open_external(self, cmd: dict[str, Any]) -> None:
@@ -3468,6 +3481,7 @@ class _CommandsMixin:
         "getTaskUsage": _cmd_get_task_usage,
         "setFavorite": _cmd_set_favorite,
         "setChatSummary": _cmd_set_chat_summary,
+        "setChatFavorite": _cmd_set_chat_favorite,
         "deleteTask": _cmd_delete_task,
         "deleteChat": _cmd_delete_chat,
         "openExternal": _cmd_open_external,

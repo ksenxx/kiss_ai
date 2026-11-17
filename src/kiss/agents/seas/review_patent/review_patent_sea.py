@@ -78,9 +78,6 @@ _GATE_NOTES = {
 }
 """Notes of the ``/review_paper`` word gates reworded for a patent review (no ``\\cite``)."""
 
-SECOND_OPINION_MODEL = "gpt-5.6-sol"
-"""The model that checks the review when the task names no other (``/review_paper`` uses it too)."""
-
 SYSTEM_PROMPT = f"""\
 # Patent-reviewing agent
 
@@ -164,7 +161,7 @@ description, enablement), MPEP 2173 (definiteness, antecedent basis) and MPEP 21
    and obviousness 0.2 L, Definiteness and support 0.14 L, Drafting defects 0.06 L,
    Recommendations 0.1 L, Scores the rest; be at 95% of L before step 9, which adds words.
    If over, cut whole bullets in one ``Edit`` pass; do not rewrite the file repeatedly.
-9. Second opinion.  When the task names a second model (default ``{SECOND_OPINION_MODEL}``),
+9. Second opinion.  When the task names a second model,
    have it check the review read-only through ``run_parallel(tasks, model=<second model>,
    tool_profile="review")``: give it the application and review paths, say that
    ``pdftotext <pdf> -`` in Bash (or ``Read`` for a text file) yields the text, and ask
@@ -362,12 +359,11 @@ class ReviewPatentSea(BaseSea):
         return tools + [read_patent, check_patent, check_patent_review]
 
     def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
-        """Browse for prior art, skip the classifier, route through the bestrouter."""
+        """Browse for prior art, skip the classifier."""
         return settings | {
             "use_web_tools": True,
             "auto_classify": False,
             "timeout": DISPATCH_TIMEOUT_SECONDS,
-            "model": "bestrouter",
         }
 
 

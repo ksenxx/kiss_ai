@@ -82,8 +82,9 @@ def build_server(home: Path, port: int) -> Any:
     must not see the benchmark home as the user's last daemon home.  It
     pins every task tree to the model the trial names
     (:data:`~kiss.agents.sorcar.agent_dispatch.PIN_TASK_MODEL_ENV`): a trial
-    agent can neither ``set_model`` nor give a sub-task another model, so the
-    run scores the one model it is about.
+    agent can neither ``set_model`` nor give a sub-task another model, and a
+    refusal or provider error of the model is not handed to a fallback model
+    (the trial ends on it), so the run scores the one model it is about.
 
     Args:
         home: The private ``KISS_HOME`` (prepared by :func:`prepare_home`).

@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""GEPA agent: reflective text evolution on a Pareto frontier, on the bestrouter.
+"""GEPA agent: reflective text evolution on a Pareto frontier.
 
 The agent is the plain Sorcar agent with :data:`GEPA_INSTRUCTIONS`, the
 GEPA loop written as pseudocode (``GEPA``, ``MUTATE``, ``MERGE``, ``ADD``
@@ -98,12 +98,9 @@ may override the values the pseudocode names.  The official
 ``optimize`` has no default budget and requires a stopping condition; a
 task that names none gets ten validation passes of metric calls.
 
-The run's model is ``bestrouter`` and the toolset is the full one, as
-for ``/discover``: the daemon resolves the name to the model the
-bestrouter's own settings name
-(:data:`kiss.agents.seas.bestrouter.bestrouter_sea.SIMPLE_MODEL`, the
-model a bestrouter tab starts on).  The reflection model is the model
-the run is on unless the task names another.
+The run is on the caller's model and the toolset is the full one, as
+for ``/discover``.  The reflection model is the model the run is on
+unless the task names another.
 
 Three ways to run it::
 
@@ -284,9 +281,6 @@ REFLECT(text, records) := your tool reflect(text_file, records_file, new_text_fi
     the proposal as it stands: one call per iteration, repeated only when the call failed
 ```"""
 """The GEPA loop appended to the system prompt of every ``/gepa`` run."""
-
-MODEL = "bestrouter"
-"""The run's model: the ``bestrouter`` model-picker SEA, resolved to the model it starts on."""
 
 TOOL_PROFILE = "full"
 """The run's toolset: every built-in tool."""
@@ -473,8 +467,8 @@ class GepaSea(BaseSea):
         """Return the one-sentence help text shown by ``/gepa help``."""
         return (
             "Runs GEPA (Genetic-Pareto), the reflective optimizer of the text components of a "
-            "system (prompts, instructions, code, configuration), on the bestrouter with the "
-            "full toolset, as the loop of the official implementation (gepa-ai/gepa) with a "
+            "system (prompts, instructions, code, configuration), with the full toolset,"
+            " as the loop of the official implementation (gepa-ai/gepa) with a "
             "fresh call of its model on the official reflection prompt as the reflection LM: it "
             "scores the seed texts on the validation set, then per iteration draws a candidate "
             "from the per-example Pareto front, runs it on a minibatch of 3 training examples, "
@@ -499,8 +493,8 @@ class GepaSea(BaseSea):
         return system_prompt.rstrip("\n") + "\n\n" + GEPA_INSTRUCTIONS + "\n"
 
     def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
-        """Run on :data:`MODEL` with the :data:`TOOL_PROFILE` toolset."""
-        return settings | {"model": MODEL, "tool_profile": TOOL_PROFILE}
+        """Run with the :data:`TOOL_PROFILE` toolset on the caller's model."""
+        return settings | {"tool_profile": TOOL_PROFILE}
 
     def tools(self, tools: list[Callable[..., Any]]) -> list[Callable[..., Any]]:
         """Return *tools* with :func:`reflect`, the run's reflection LM, added."""

@@ -1844,6 +1844,28 @@ class DockerManager:
         )
         return str(resp["Id"])
 
+    def resource_limits(self) -> tuple[float | None, int | None]:
+        """The open container's CPU and memory limits.
+
+        Inside the container ``nproc`` and ``/proc`` report the host's
+        cores and memory, not these limits, so the agent is told them.
+
+        Returns:
+            ``(cpus, memory_bytes)``: the CPU limit (``--cpus``, or a CFS
+            quota over its period) and the memory limit; ``None`` for a
+            limit that is not set or when no container is open.
+        """
+        if self.container is None:
+            return None, None
+        host_config = self.container.attrs.get("HostConfig") or {}
+        cpus: float | None = None
+        if host_config.get("NanoCpus"):
+            cpus = host_config["NanoCpus"] / 1e9
+        elif (host_config.get("CpuQuota") or 0) > 0:
+            # A quota set without a period uses the kernel's 100 ms default.
+            cpus = host_config["CpuQuota"] / (host_config.get("CpuPeriod") or 100_000)
+        return cpus, host_config.get("Memory") or None
+
     @property
     def private_dir(self) -> str | None:
         """The private folder :meth:`make_private_dir` made in the container, if any."""

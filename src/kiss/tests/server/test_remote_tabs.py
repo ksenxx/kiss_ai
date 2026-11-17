@@ -1943,6 +1943,61 @@ class TestRemoteTabs(RemoteTabsHarness):
         late = await self._late_replay(sub)
         self.assertEqual(late["task_events"]["task"], "Typed into the sub-agent tab")
 
+    async def test_a_running_sub_agent_of_a_chat_shown_from_a_machine_is_fetched(self) -> None:
+        """The transcript a machine offers for a sub-agent tab is fetched over its stream.
+
+        A chat opened from a machine's row while its sub-agent runs:
+        the stream never saw the sub-agent's ``new_tab``.  The
+        machine's replay announces the tab and offers its transcript
+        (``replay_deferred``), and the page answers the offer when the
+        user opens the tab, with a ``scoped`` resume that names the
+        sub-agent's chat.  Taken for a local chat opened in the tab,
+        that fetch took the tab off the stream: it showed the
+        sub-agent's task and none of its events, for good.
+        """
+        remote_tabs = self.server._server_api.remote_tabs
+        spawned = await self._fan_out("tab-p")
+        await self._send({"type": "closeTab", "tabId": "tab-p"})
+        await self._until("tabs_state")
+        tab = "tab-click"
+        sub = f"{tab}__sub_{spawned['task_id']}"
+        await self._send({"type": "openTab", "tabId": tab, "title": "Fan out to a sub-agent"})
+        await self._click_history_row(tab, await self._box_row("Fan out to a sub-agent"))
+        await self._replay_of(tab)
+        # A page showing the chat is offered the running sub-agent's
+        # transcript and fetches it as requestDeferredReplay (main.js) does.
+        reader, writer = await open_local_connection(self.server)
+        self.addCleanup(writer.close)
+        writer.write(
+            json.dumps({"type": "ready", "tabId": tab, "restoredTabs": []}).encode() + b"\n",
+        )
+        await writer.drain()
+        offer = (await _frames_to(reader, "replay_deferred", sub))[-1]
+        writer.write(json.dumps({
+            "type": "resumeSession", "chatId": offer["chatId"], "tabId": sub,
+            "scoped": True, "taskId": offer["taskId"],
+        }).encode() + b"\n")
+        await writer.drain()
+        events: dict[str, Any] = {}
+        async for msg in _late_frames(reader):
+            self.assertNotEqual(
+                (msg.get("type"), msg.get("tabId"), msg.get("machine")), ("tabMachine", sub, ""),
+                "the fetch took the sub-agent tab off its machine's stream",
+            )
+            if (msg.get("type"), msg.get("tabId")) == ("task_events", sub):
+                events = msg
+                break
+        self.assertEqual(str(events.get("task_id")), spawned["task_id"])
+        self.assertEqual(machine_of(remote_tabs, sub), "box")
+        # Still the stream's tab: the sub-agent's end reaches it.
+        _release_model()
+        ended: list[str] = []
+        async for msg in _late_frames(reader):
+            ended = _ended_tabs([msg])
+            if ended == [sub]:
+                break
+        self.assertEqual(ended, [sub])
+
     async def _late_bindings(self, *tabs: str) -> dict[str, str]:
         """Connect a surface, send ``ready``, and return the machine its replay binds *tabs* to."""
         reader, writer = await open_local_connection(self.server)

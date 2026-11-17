@@ -255,8 +255,7 @@ class TestUpdateCheckHandlesNetworkErrors(_UpdateCheckTestBase):
         reader, writer = await self._connect_local()
         try:
             await self._send_ready(writer, "tab-update-3")
-            focus = await self._wait_for_event(reader, "focusInput",
-                                               timeout=2.0)
+            focus = await self._wait_for_event(reader, "focusInput")
             self.assertEqual(focus.get("tabId"), "tab-update-3")
         finally:
             writer.close()

@@ -73,13 +73,10 @@ from kiss.agents.seas.write_paper.write_paper_sea import (
     _section,
 )
 
-SECOND_OPINION_MODEL = "gpt-5.6-sol"
-"""Model that checks the review against the paper when the task does not name one."""
-
 DEFAULT_WORD_LIMIT = 700
 """Word limit of the review when the task does not name one."""
 
-SYSTEM_PROMPT = f"""\
+SYSTEM_PROMPT = """\
 # Paper-reviewing agent
 
 You are William Strunk Jr. and E. B. White and a senior computer scientist. Review a
@@ -237,7 +234,7 @@ candor move a paper within it, never above it.
    95% of L (950 for L = 1000), not
    L - 1: step 7 adds words. If over, cut whole sentences or bullets in one `Edit` pass;
    do not rewrite the whole file repeatedly.
-7. When the task names a second model (default `{SECOND_OPINION_MODEL}`), have it check
+7. When the task names a second model, have it check
    the review read-only through `run_parallel(tasks, model=<second model>,
    tool_profile="review")`. It lacks `read_paper`: give it the paper and review paths
    and say `pdftotext <paper> -` in Bash (or Read for a text file) yields the text. Ask:
@@ -418,7 +415,6 @@ class ReviewPaperSea(BaseSea):
             "use_web_tools": True,
             "auto_classify": False,
             "timeout": DISPATCH_TIMEOUT_SECONDS,
-            "model": "bestrouter",
         }
 
 

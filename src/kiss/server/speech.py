@@ -526,6 +526,13 @@ def _connect(
             return socket.create_connection(
                 (sockaddr[0] + scope, sockaddr[1]), min(timeout, left), source_address
             )
+        except TimeoutError as exc:
+            error = exc
+            if left <= timeout:
+                # The deadline bounded this connect, but the wait can end a
+                # clock tick before ``time.monotonic()`` reaches it (Windows):
+                # see it out, so the caller reports the deadline.
+                time.sleep(max(deadline - time.monotonic(), 0.0))
         except OSError as exc:
             error = exc
     raise error
@@ -609,6 +616,16 @@ class _WatchedHandler(urllib.request.HTTPHandler, urllib.request.HTTPSHandler):
             self._expired = True
             _shut_down(self._sockets)
 
+    def passed(self) -> bool:
+        """Whether the deadline has passed: by the clock, or by :meth:`expire` having run.
+
+        The timer calling :meth:`expire` can fire a clock tick before
+        ``time.monotonic()`` reaches the deadline (Windows), and the
+        transfer it cut short must still be reported as the deadline.
+        """
+        with self._lock:
+            return self._expired or time.monotonic() >= self.deadline
+
     def http_open(self, req: urllib.request.Request) -> http.client.HTTPResponse:
         """Open *req* over a :class:`_WatchedHTTP` connection."""
         return self.do_open(functools.partial(_WatchedHTTP, watch=self), req)
@@ -663,12 +680,12 @@ def _download_url_to_file(url: str, dest: Path) -> None:
         ):
             while chunk := response.read1(65536):
                 out.write(chunk)
-            if time.monotonic() >= deadline:
+            if watched.passed():
                 raise TimeoutError(exceeded)
             if getattr(response, "length", None):  # bytes promised, never sent (not file://)
                 raise http.client.IncompleteRead(b"", response.length)
     except Exception as exc:
-        if time.monotonic() >= deadline and not isinstance(exc, TimeoutError):
+        if watched.passed() and not isinstance(exc, TimeoutError):
             raise TimeoutError(exceeded) from exc
         raise
     finally:

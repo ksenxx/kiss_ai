@@ -1654,13 +1654,15 @@ def _init_tables(conn: sqlite3.Connection) -> None:
         -- that task's completion instant (0 while it runs).
         -- Maintained by _save_task_extra when a task finishes.
         -- user_summary is the title the user typed over it in the
-        -- CHATS panel ('' = none); it survives every recompute.
+        -- CHATS panel ('' = none) and is_favorite the star the user
+        -- gave the chat there; both survive every recompute.
         CREATE TABLE IF NOT EXISTS chat_summaries (
             chat_id TEXT PRIMARY KEY,
             summary TEXT DEFAULT '',
             last_launched INTEGER DEFAULT 0,
             last_finished INTEGER DEFAULT 0,
-            user_summary TEXT DEFAULT ''
+            user_summary TEXT DEFAULT '',
+            is_favorite INTEGER DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -5258,10 +5260,12 @@ def _chat_summaries(chat_ids: list[str]) -> dict[str, dict[str, object]]:
 
     Returns:
         Mapping of chat id to ``{"summary": str, "last_launched": int,
-        "last_finished": int}`` (instants in epoch ms; ``last_finished``
-        is 0 while the newest task runs); ``summary`` is the title the
-        user typed in the CHATS panel when there is one, else the
-        computed one.  Chats without a row are absent.
+        "last_finished": int, "is_favorite": bool}`` (instants in epoch
+        ms; ``last_finished`` is 0 while the newest task runs);
+        ``summary`` is the title the user typed in the CHATS panel when
+        there is one, else the computed one, and ``is_favorite`` the
+        star the user gave the chat there.  Chats without a row are
+        absent.
     """
     ids = sorted({c for c in chat_ids if c})
     if not ids:
@@ -5270,7 +5274,7 @@ def _chat_summaries(chat_ids: list[str]) -> dict[str, dict[str, object]]:
     placeholders = ",".join("?" * len(ids))
     # One SELECT, no ``_rw_lock``: see the module docstring.
     rows = db.execute(
-        "SELECT chat_id, summary, last_launched, last_finished, user_summary "
+        "SELECT chat_id, summary, last_launched, last_finished, user_summary, is_favorite "
         f"FROM chat_summaries WHERE chat_id IN ({placeholders})",
         ids,
     ).fetchall()
@@ -5279,6 +5283,7 @@ def _chat_summaries(chat_ids: list[str]) -> dict[str, dict[str, object]]:
             "summary": _safe_str(r["user_summary"]) or _safe_str(r["summary"]),
             "last_launched": _safe_int(r["last_launched"], 0),
             "last_finished": _safe_int(r["last_finished"], 0),
+            "is_favorite": bool(r["is_favorite"]),
         }
         for r in rows
     }
@@ -5351,6 +5356,33 @@ def _set_chat_summary(chat_id: str, summary: str) -> bool:
             "INSERT INTO chat_summaries (chat_id, user_summary) VALUES (?, ?) "
             "ON CONFLICT(chat_id) DO UPDATE SET user_summary = excluded.user_summary",
             (chat_id, summary),
+        )
+    return True
+
+
+def _set_chat_favorite(chat_id: str, is_favorite: bool) -> bool:
+    """Set the ``is_favorite`` flag of chat *chat_id*: its star in the CHATS panel.
+
+    The flag is the chat's own, whatever stars its tasks carry
+    (:func:`_set_task_favorite`), and stays through every recompute of
+    the chat's row.  A chat that has no ``chat_summaries`` row yet (no
+    finished task) gets one, as in :func:`_set_chat_summary`.
+
+    Args:
+        chat_id: The chat session id.
+        is_favorite: New value for the ``is_favorite`` flag.
+
+    Returns:
+        True when a row was written, False for an empty *chat_id*.
+    """
+    if not chat_id:
+        return False
+    db = _get_db()
+    with _rw_lock.write_lock():
+        db.execute(
+            "INSERT INTO chat_summaries (chat_id, is_favorite) VALUES (?, ?) "
+            "ON CONFLICT(chat_id) DO UPDATE SET is_favorite = excluded.is_favorite",
+            (chat_id, 1 if is_favorite else 0),
         )
     return True
 

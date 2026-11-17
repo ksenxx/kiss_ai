@@ -161,6 +161,6 @@ class WriteSea(BaseSea):
         ``timeout`` tells a ``run_agent`` call how long to block for the run
         before returning its ``agent_job`` id and letting it finish detached.
         """
-        return settings | {"timeout": DISPATCH_TIMEOUT_SECONDS, "model": "bestrouter"}
+        return settings | {"timeout": DISPATCH_TIMEOUT_SECONDS}
 
 

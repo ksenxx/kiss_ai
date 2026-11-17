@@ -912,6 +912,7 @@ LAUNCH_KWARG_NAMES = frozenset(
         "model_config",
         "web_tools",
         "is_parallel",
+        "cron_job",
     }
 )
 """The keyword parameters of ``run_agent_via_kiss_web``."""
@@ -1062,7 +1063,7 @@ class BaseChannelAgent:
             prompt_template: The task prompt.
             **kwargs: Launcher keyword arguments (``model_name``,
                 ``work_dir``, ``max_budget``, ``model_config``,
-                ``web_tools``, ``is_parallel``).
+                ``web_tools``, ``is_parallel``, ``cron_job``).
 
         Returns:
             YAML string with 'success' and 'summary' keys.
@@ -1538,7 +1539,10 @@ class ChannelRunner:
         it is resumed (so a threaded conversation continues the same
         daemon chat), and after the run the resulting chat id and
         *last_reply_ts* are stored back into the state.  A best-effort
-        typing indicator is sent right before the launch.
+        typing indicator is sent right before the launch.  The task is
+        never a cron run, though the tick that starts it usually is a
+        cron command job: it answers a person's message and stays in
+        the CHATS list like a task typed there.
 
         Args:
             channel_id: Channel the message arrived in.
@@ -1567,6 +1571,7 @@ class ChannelRunner:
             model_name=self._model_name,
             max_budget=self._max_budget,
             work_dir=self._work_dir,
+            cron_job=False,
         )
         self._store_thread_state(thread_ts, agent.chat_id, last_reply_ts)
         return result

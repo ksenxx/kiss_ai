@@ -1310,14 +1310,17 @@ def test_a_bundled_script_is_linted_against_the_bundled_commands(
 ) -> None:
     """What ``SEAS.md`` registers does not change the findings of a bundled script.
 
-    A user's ``/bestrouter`` that is no model picker made the bundled
-    ``/write``, whose model is the bundled picker of that name, an
-    ``unknown-model`` finding, and a user's ``/write`` took the bundled
-    script's command name (its ``no-description`` check) away.  A user's
-    own script is still checked against the registry its run reads.
+    A user's command of a bundled script's name took the script's command
+    name (its ``no-description`` check) away, and a user's ``/bestrouter``
+    that is no model picker made a bundled script whose model was the
+    bundled picker of that name an ``unknown-model`` finding.  No bundled
+    script names a picker any more (``/write`` and
+    ``/revise_and_review_paper`` were the last) and a test cannot add one
+    to the package, so the second rule is checked on the lookup it makes
+    for a bundled script, ``model_sea(name, bundled=True)``.  A user's own
+    script is still checked against the registry its run reads.
     """
-    write = bundled_commands()["write"]
-    assert sea_settings_of(write)["model"] == "bestrouter"
+    script = bundled_commands()["revise_and_review_paper"]
     folder = tmp_path / "seas"
     mine = write_sea(folder, DESCRIPTION + """
     def settings(self, settings):
@@ -1325,14 +1328,15 @@ def test_a_bundled_script_is_linted_against_the_bundled_commands(
 """, "mine")
     (isolated_home / "SEAS.md").write_text(f"{folder}\n", encoding="utf-8")
     sea_commands.refresh_registry()
-    assert lint_all([write, mine]) == []
-    shadows = [write_sea(folder, DESCRIPTION, name) for name in ("bestrouter", "write")]
+    assert lint_all([script, mine]) == []
+    names = ("bestrouter", "revise_and_review_paper")
+    shadows = [write_sea(folder, DESCRIPTION, name) for name in names]
     sea_commands.refresh_registry()
-    assert [sea_commands.get_command(name) for name in ("bestrouter", "write")] == shadows
+    assert [sea_commands.get_command(name) for name in names] == shadows
     assert sea_commands.model_sea("bestrouter") is None
-    assert [(f.path, f.code) for f in lint_all([write, mine])] == [(mine, "unknown-model")]
+    assert [(f.path, f.code) for f in lint_all([script, mine])] == [(mine, "unknown-model")]
     assert sea_commands.model_sea("bestrouter", bundled=True) == bundled_commands()["bestrouter"]
-    assert registered_commands()[write] == "write" == registered_commands()[shadows[1]]
+    assert registered_commands()[script] == names[1] == registered_commands()[shadows[1]]
 
 
 def test_cli_folder_paths_fix_and_exit_codes(

@@ -387,7 +387,9 @@ def test_a_cancelled_hook_is_reaped_by_the_thread_that_signals_its_group_alone(
     assert reaped_before_signal == [None], (
         "the relay reaped the hook before its group was signalled"
     )
-    assert proc.returncode == -signal.SIGTERM
+    # The close of its stdin (EOF on ``read``) races the SIGTERM sent right
+    # after it: a hook that sees the EOF first exits 0 on its own.
+    assert proc.returncode in (0, -signal.SIGTERM)
     assert [e["type"] for e in events] == ["signinUrl"], events
     assert proc.stdin is not None and proc.stdin.closed
     assert proc.stdout is not None and proc.stdout.closed

@@ -280,6 +280,7 @@ def run_agent_via_kiss_web(
     model_config: dict[str, Any] | None = None,
     web_tools: bool | None = None,
     is_parallel: bool = True,
+    cron_job: bool | None = None,
 ) -> str:
     """Launch *agent*'s task through :func:`kiss.server.sorcar.run`.
 
@@ -331,6 +332,12 @@ def run_agent_via_kiss_web(
         web_tools: Per-task browser-tool enablement override. ``None``
             uses the kiss-web config default.
         is_parallel: Whether the agent may spawn parallel sub-agents.
+        cron_job: Whether the run is a cron run (a row the CHATS list
+            hides unless its Cron chip is on).  ``None`` leaves it to
+            :func:`kiss.server.sorcar.run`, which says yes inside a cron
+            command job.  The channel runner passes ``False``: its tick
+            is such a job, but the tasks it starts answer a person's
+            message.
 
     Returns:
         YAML string with 'success' and 'summary' keys.
@@ -379,6 +386,7 @@ def run_agent_via_kiss_web(
         model_config=model_config,
         use_web_tools=web_tools,
         is_parallel=is_parallel,
+        cron_job=cron_job,
         workspace=agent.workspace,
         provenance=provenance,
         timeout=None,

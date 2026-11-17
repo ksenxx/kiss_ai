@@ -18,6 +18,7 @@ branded cases run the same code from a re-branded copy of the package
 from __future__ import annotations
 
 import contextlib
+import errno
 import http.server
 import json
 import os
@@ -27,6 +28,7 @@ import shlex
 import shutil
 import socket
 import socketserver
+import struct
 import subprocess
 import sys
 import threading
@@ -178,6 +180,42 @@ def _site(port: int = 0) -> tuple[_Site, str]:
     httpd = _Site(port)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     return httpd, f"http://127.0.0.1:{httpd.server_port}/"
+
+
+@contextlib.contextmanager
+def _no_daemon_port() -> Iterator[int]:
+    """Hold a loopback port that refuses every connection, for a daemon that is not up yet.
+
+    ``find_free_port`` only says that a port is free now.  While a test
+    waits on one as the port no daemon answers on yet, another test
+    process of the parallel run can start a site on it (one did, in the
+    full run of 2026-11-15: it answered the start page's probe, and the
+    page moved on).  So the port is held for the block: it is the local
+    end of an established loopback connection, as in the third-party
+    agents' ``refusing_port`` fixture.  Being in use, it is no port
+    ``find_free_port`` returns to another process (its probe, a socket
+    without ``SO_REUSEADDR``, cannot bind it) nor one the kernel hands
+    out; a socket that sets ``SO_REUSEADDR`` and names the port itself
+    can still bind it on macOS.  A connection to it is refused at once,
+    on macOS too (where one to a socket that is merely bound times out
+    instead).
+
+    The connection is closed with a reset (``SO_LINGER`` 0), which
+    frees the port as the block ends: the test's own site can start on
+    it then.  The port is ``find_free_port``'s, below the range the
+    kernel assigns other processes' connections from, for that later
+    bind.
+    """
+    with (
+        socket.socket(socket.AF_INET, socket.SOCK_STREAM) as anchor,
+        socket.socket(socket.AF_INET, socket.SOCK_STREAM) as holder,
+    ):
+        anchor.bind(("127.0.0.1", 0))
+        anchor.listen(1)
+        holder.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+        holder.bind(("127.0.0.1", find_free_port()))
+        holder.connect(anchor.getsockname())
+        yield int(holder.getsockname()[1])
 
 
 @pytest.fixture
@@ -354,6 +392,32 @@ def test_a_closed_site_answers_nothing_on_a_connection_it_accepted() -> None:
         assert answer == b""
     finally:
         spare.close()
+
+
+def test_a_no_daemon_port_refuses_connections_until_the_site_starts_on_it() -> None:
+    """A :func:`_no_daemon_port` refuses, is not free to a port probe, and is the site's after.
+
+    The start-page tests count on all three: a connection that timed
+    out instead would leave the page without a failed probe, a test
+    process that ``find_free_port`` gave the port would start a site
+    that answers the probe, and the test's own site starts on the port
+    as the block ends.
+    """
+    with _no_daemon_port() as port:
+        with pytest.raises(ConnectionRefusedError):
+            socket.create_connection(("127.0.0.1", port), timeout=5)
+        assert not standalone_app.daemon_answers(f"http://127.0.0.1:{port}/")
+        # As find_free_port probes a port: a socket without SO_REUSEADDR.
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            with pytest.raises(OSError) as in_use:
+                probe.bind(("127.0.0.1", port))
+        assert in_use.value.errno == errno.EADDRINUSE
+    httpd, url = _site(port)
+    try:
+        assert standalone_app.daemon_answers(url)
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
 
 
 def test_start_page_url_names_the_app_and_the_daemon_probe() -> None:
@@ -566,9 +630,10 @@ def test_a_daemon_not_answering_yet_gets_the_start_page(tmp_path: Path) -> None:
     """
     log = tmp_path / "browser.log"
     stub = _write_stub_browser(tmp_path / "bin" / "chrome", log, exit_code=0)
-    url = f"http://127.0.0.1:{find_free_port()}"
-    started = time.monotonic()
-    proc = _run(["--url", url, "--wait", "0"], _env(tmp_path, KISS_APP_BROWSER=str(stub)))
+    with _no_daemon_port() as port:
+        url = f"http://127.0.0.1:{port}"
+        started = time.monotonic()
+        proc = _run(["--url", url, "--wait", "0"], _env(tmp_path, KISS_APP_BROWSER=str(stub)))
     assert proc.returncode == 0, proc.stderr
     assert time.monotonic() - started < standalone_app.STARTUP_GRACE_SECS + 2
     flag = _stub_calls(log)[0]
@@ -596,19 +661,19 @@ def test_the_start_page_waits_for_the_daemon_and_then_shows_the_app(tmp_path: Pa
     """
     from playwright.sync_api import sync_playwright
 
-    port = find_free_port()
-    daemon = f"http://127.0.0.1:{port}"
-    url = standalone_app.start_page_url(f"{daemon}/landing", daemon)
     with sync_playwright() as p:
         browser = p.chromium.launch()
         try:
             page = browser.new_page()
-            page.goto(url)
-            assert page.title() == BRAND["product_name"]
-            assert page.text_content("#name") == BRAND["product_name"]
-            page.wait_for_timeout(1500)
-            assert page.url == url, "the page moved on without a daemon"
-            assert page.text_content("#dots")
+            with _no_daemon_port() as port:
+                daemon = f"http://127.0.0.1:{port}"
+                url = standalone_app.start_page_url(f"{daemon}/landing", daemon)
+                page.goto(url)
+                assert page.title() == BRAND["product_name"]
+                assert page.text_content("#name") == BRAND["product_name"]
+                page.wait_for_timeout(1500)
+                assert page.url == url, "the page moved on without a daemon"
+                assert page.text_content("#dots")
             httpd, _ = _site(port)
             try:
                 page.wait_for_url(f"{daemon}/landing", timeout=5000)

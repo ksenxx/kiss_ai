@@ -15,6 +15,7 @@ scripted model receives come from the real tools.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from kiss.agents.seas.base.base_sea import BaseSea
 from kiss.agents.seas.discover import discover_sea
@@ -30,6 +31,7 @@ from kiss.agents.sorcar.agent_dispatch import (
     DEFAULT_DISPATCH_TIMEOUT_SECONDS,
     resolve_timeout,
 )
+from kiss.agents.sorcar.sea_apply import apply_sea
 from kiss.agents.sorcar.sea_settings import resolve_settings
 from kiss.tests.agents.seas.sea_contract import assert_appending_sea_run, assert_no_removed_getters
 from kiss.tests.agents.sorcar.local_model_server import (
@@ -60,7 +62,7 @@ def _review(tmp_path: Path, name: str, tail: str) -> Path:
 
 
 def test_sea_methods_follow_the_user_contract() -> None:
-    """The SEA appends the coordinator rules, offers three tools and routes via bestrouter."""
+    """The SEA appends the coordinator rules, offers three tools and keeps the caller's model."""
     agent = ReviseAndReviewPaperSea()
     assert agent.system_prompt("ASSEMBLED") == "ASSEMBLED\n\n" + sea.SYSTEM_PROMPT
     prompt = sea.SYSTEM_PROMPT
@@ -78,16 +80,19 @@ def test_sea_methods_follow_the_user_contract() -> None:
         "auto_classify": False,
         "tool_profile": "full",
         "timeout": sea.DISPATCH_TIMEOUT_SECONDS,
-        "model": "bestrouter",
     }
     # Web tools are no longer forced off: the base's choice passes through,
-    # while the SEA's model wins over the base's.
+    # and so does the caller's model, which the daemon-side loader leaves alone.
     assert agent.settings({"model": "m", "use_web_tools": True}) == {
+        "model": "m",
         "use_web_tools": True,
         **agent.settings({}),
     }
+    cmd: dict[str, Any] = {"seaPath": sea.__file__, "model": "m"}
+    assert apply_sea(cmd) == {"classifyTasks", "prompt", "toolProfile"}
+    assert cmd["model"] == "m"
     assert sea.DISPATCH_TIMEOUT_SECONDS == 86400
-    # A plain ``BaseSea``: the resolved settings are these four keys and
+    # A plain ``BaseSea``: the resolved settings are these three keys and
     # nothing else; the deprecated getters are gone.
     assert type(agent).__bases__ == (BaseSea,)
     assert resolve_settings(agent.settings({})) == agent.settings({})

@@ -205,26 +205,27 @@ def test_read_patent_returns_pages_of_a_built_pdf_and_a_draft(tmp_path: Path) ->
 
 
 def test_sea_description_prompt_tools_and_settings() -> None:
-    """The SEA appends its rules, exposes the three tools, browses and routes through bestrouter."""
+    """The SEA appends its rules, exposes the three tools, browses and keeps the caller's model."""
     sea = review_patent_sea.ReviewPatentSea()
     assert sea.description().startswith("Reviews a patent application draft or a published patent")
     prompt = sea.system_prompt("DEFAULT")
     assert prompt.startswith("DEFAULT\n\n# Patent-reviewing agent")
-    # The second-opinion pass names the model the SEA pins, not a literal.
-    assert review_patent_sea.SECOND_OPINION_MODEL in prompt
+    # The second-opinion pass runs only on a model the task names: no default model.
+    assert "When the task names a second model," in prompt
+    assert "gpt-" not in prompt
     assert "set_model" in prompt
     assert [tool.__name__ for tool in sea.tools([])] == [
         "read_patent",
         "check_patent",
         "check_patent_review",
     ]
-    settings = sea.settings({"max_budget": 1})
+    settings = sea.settings({"max_budget": 1, "model": "m"})
     assert settings == {
         "max_budget": 1,
+        "model": "m",
         "use_web_tools": True,
         "auto_classify": False,
         "timeout": review_patent_sea.DISPATCH_TIMEOUT_SECONDS,
-        "model": "bestrouter",
     }
     assert_no_removed_getters(review_patent_sea)
 

@@ -147,6 +147,7 @@ class TestDeleteRows:
         th._save_task_result("done", task_id=second_id)
         th._save_task_extra({"endTs": 4_000}, task_id=second_id)
         assert th._set_chat_summary(chat_id, "My title")
+        assert th._set_chat_favorite(chat_id, True)
         before = th._chat_summaries([chat_id])[chat_id]
         assert (before["last_launched"], before["last_finished"]) == (3_000, 4_000)
 
@@ -173,10 +174,11 @@ class TestDeleteRows:
         assert len(refresh) == 1 and begin[-1] < refresh[0] < commit[-1], statements
 
         # The last listable task gone: nothing derived is left on the row,
-        # the title is (the chat may run its next task).
+        # the title and the star are (the chat may run its next task).
         assert th._delete_task(first_id) == 1
         assert th._chat_summaries([chat_id])[chat_id] == {
-            "summary": "My title", "last_launched": 0, "last_finished": 0}
+            "summary": "My title", "last_launched": 0, "last_finished": 0,
+            "is_favorite": True}
         assert _count(
             "SELECT COUNT(*) FROM chat_summaries WHERE chat_id = ? AND summary = ''", chat_id
         ) == 1

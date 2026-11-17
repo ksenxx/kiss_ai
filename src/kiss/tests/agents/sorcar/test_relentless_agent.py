@@ -504,16 +504,22 @@ class TestWorkDirLine(unittest.TestCase):
 
     @pytest.mark.slow
     @unittest.skipUnless(_docker_available(), "Docker daemon not available")
-    def test_attached_container_without_the_mount_omits_the_work_dir(self) -> None:
-        """An attached ``container:<id>`` that does not mount the work dir hides the line.
+    def test_attached_container_without_the_mount_names_its_own_work_dir(self) -> None:
+        """An attached ``container:<id>`` that does not mount the work dir names its own.
 
         The caller owns that container; naming a host path its Bash/Read
-        cannot see would mislead the model.
+        cannot see would mislead the model, and naming no directory at all
+        leaves it to guess where the task's files are.
+
+        Not covered: the wording for an exec bridge that does not know its
+        working directory (``ExecBridge.workdir`` is ``None`` when its
+        ``pwd`` fails).  Reaching it takes a bridge that misbehaves, which
+        would have to be a fake.
         """
         import docker
 
         container = docker.from_env().containers.run(
-            "ubuntu:latest", command="sleep infinity", detach=True,
+            "ubuntu:latest", command="sleep infinity", detach=True, working_dir="/srv/job",
         )
         try:
             requests: list[dict] = []
@@ -522,8 +528,11 @@ class TestWorkDirLine(unittest.TestCase):
                     [_succeed("done")], work_dir=td,
                     docker_image=f"container:{container.id}", requests=requests,
                 )
+                host_work_dir = str(Path(td).resolve())
             prompt = _system_prompt(requests[0])
-            self.assertNotIn("Work dir", prompt)
+            self.assertIn("- Work dir: /srv/job, inside the container that your shell", prompt)
+            self.assertIn("describe this machine, not the container.\n", prompt)
+            self.assertNotIn(host_work_dir, prompt)
             self.assertIn("- Current process PID:", prompt)
         finally:
             container.remove(force=True)

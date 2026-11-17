@@ -104,7 +104,9 @@ def test_server_readme_names_the_browser_fallback() -> None:
     assert hasattr(browser_tab.BrowserTabService, "_launch_resolved")
     assert f"cut\n  at {browser_tab._FAILURE_LINE_LIMIT} characters" in _SERVER_README
     assert "`browserError`" in _SERVER_README
-    assert "bundled Chromium" in _ROOT_README.split("- A **Browser tab**", 1)[1].split("\n", 1)[0]
+    # The README's Browser tab entry is a top-level item whose nested list ends at the next one.
+    browser_tab_entry = _ROOT_README.split("\n- **Browser tab**\n", 1)[1].split("\n- ", 1)[0]
+    assert "bundled Chromium" in browser_tab_entry
 
 
 def test_server_readme_names_the_finish_guards_and_the_side_call_charge(tmp_path: Path) -> None:

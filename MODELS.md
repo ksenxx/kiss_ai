@@ -1,6 +1,6 @@
 # Models in the bundled catalog
 
-KISS Sorcar ships a catalog of **1092 models** across **10 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json); `uv run python -m kiss.scripts.update_models` refreshes that file and rewrites the counts and lists below, so do not edit them by hand. Models are grouped by the provider that routes them (whose API key or CLI serves the model); open-weight `openai/gpt-oss-*` and `google/gemma-*` models are served via Together AI. How costs are computed from these prices is described in [README.md](README.md#models-supported).
+KISS Sorcar ships a catalog of **1089 models** across **10 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json); `uv run python -m kiss.scripts.update_models` refreshes that file and rewrites the counts and lists below, so do not edit them by hand. Models are grouped by the provider that routes them (whose API key or CLI serves the model); open-weight `openai/gpt-oss-*` and `google/gemma-*` models are served via Together AI. How costs are computed from these prices is described in [README.md](README.md#models-supported).
 
 The Amazon Bedrock entries (`bedrock/<Bedrock model or inference-profile id>`, such as `bedrock/us.anthropic.claude-opus-4-6-v1` or `bedrock/global.anthropic.claude-haiku-4-5-20251001-v1:0`) are the Claude ids the updater found in its AWS region (`AWS_REGION`, default `us-east-1`): the system-defined cross-region inference profiles and any foundation model id that accepts on-demand calls there. Each one is a copy of its `claude-*` entry (same context length, capabilities and `-low`/`-medium`/`-high`/`-max` effort suffixes) with the prices scaled by Bedrock's regional premium: a `global.` profile costs the same as the `claude-*` entry, a geographic (`us.`, `eu.`, `apac.`, `jp.`, `au.`) or in-region (`anthropic.`) id of a Claude 4.5-or-later model 10% more. Configure `AWS_BEARER_TOKEN_BEDROCK` or an `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` pair, plus `AWS_REGION`, to use them; re-running the updater on a machine in another region relists the ids that region serves. An id the region serves that is not in the catalog can still be used by name or added under Settings → Custom Models.
 
@@ -13,14 +13,14 @@ The Amazon Bedrock entries (`bedrock/<Bedrock model or inference-profile id>`, s
 | Together AI | 109 |
 | Z.AI | 8 |
 | Moonshot AI | 10 |
-| OpenRouter | 503 |
+| OpenRouter | 500 |
 | Claude Code CLI (`cc/*`) | 79 |
 | Codex CLI (`codex/*`) | 11 |
 
 Current catalog capability totals:
 
-- **1042** generation-capable models
-- **885** function-calling-capable models
+- **1039** generation-capable models
+- **883** function-calling-capable models
 - **8** embedding models
 - **34** decision models
 
@@ -568,7 +568,7 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>OpenRouter (503)</strong></summary>
+<summary><strong>OpenRouter (500)</strong></summary>
 
 - `openrouter/aion-labs/aion-2.0`
 - `openrouter/aion-labs/aion-3.0`
@@ -930,7 +930,6 @@ Full model list:
 - `openrouter/qwen/qwen3-next-80b-a3b-instruct`
 - `openrouter/qwen/qwen3-vl-235b-a22b-instruct`
 - `openrouter/qwen/qwen3-vl-30b-a3b-instruct`
-- `openrouter/qwen/qwen3-vl-30b-a3b-thinking`
 - `openrouter/qwen/qwen3-vl-8b-instruct`
 - `openrouter/qwen/qwen3.5-122b-a10b`
 - `openrouter/qwen/qwen3.5-27b`
@@ -967,10 +966,8 @@ Full model list:
 - `openrouter/sao10k/l3.1-euryale-70b`
 - `openrouter/scaledown/classify-1`
 - `openrouter/scaledown/summarize`
-- `openrouter/stepfun/step-3.5-flash`
 - `openrouter/stepfun/step-3.7-flash`
 - `openrouter/stepfun/step-5-preview`
-- `openrouter/tencent/hunyuan-a13b-instruct`
 - `openrouter/tencent/hy-mt2-1.8b`
 - `openrouter/tencent/hy-mt2-30b-a3b`
 - `openrouter/tencent/hy-mt2-7b`

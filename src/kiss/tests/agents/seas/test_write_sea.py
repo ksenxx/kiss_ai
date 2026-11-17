@@ -55,20 +55,17 @@ def test_description_is_one_sentence_naming_the_command() -> None:
 
 
 def test_dispatch_timeout_of_the_sea_is_an_hour() -> None:
-    """The file's ``timeout`` is an hour and its model is the ``bestrouter``.
+    """The file's ``timeout`` is an hour and it sets no model.
 
     The slash command runs the SEA directly (no ``run_agent`` relay), so
     the timeout matters on the ``run_agent`` path only: an empty
     ``timeout`` argument resolves to ``settings()["timeout"]`` and an
     explicit argument wins over it.
     """
-    assert WriteSea().settings({}) == {
-        "timeout": write_sea.DISPATCH_TIMEOUT_SECONDS,
-        "model": "bestrouter",
-    }
+    assert WriteSea().settings({}) == {"timeout": write_sea.DISPATCH_TIMEOUT_SECONDS}
     assert write_sea.DISPATCH_TIMEOUT_SECONDS == 3600
     settings = sea_commands.sea_settings(_SEA_PATH)
-    assert settings == {"timeout": 3600.0, "model": "bestrouter"}
+    assert settings == {"timeout": 3600.0}
     assert resolve_timeout(None, settings) == 3600.0
     assert resolve_timeout(120.0, settings) == 120.0
     # The timeout lives in ``settings()`` alone: no removed getter
@@ -82,12 +79,14 @@ def test_loader_stages_the_protocol_as_a_system_prompt_hook() -> None:
     The caller's ``appendToSystemPrompt`` is not the SEA's business: the
     hook receives the assembled prompt (default + suffix) and appends.
     """
-    cmd: dict[str, Any] = {"seaPath": str(_SEA_PATH), "appendToSystemPrompt": "CALLER"}
-    # The SEA pins only its model and has no ``prompt``: ``model`` is the
-    # one setting reported as overridden (the four hooks are written on
-    # every run, not listed).
-    assert apply_sea(cmd) == {"model"}
-    assert cmd["model"] == "bestrouter"
+    cmd: dict[str, Any] = {
+        "seaPath": str(_SEA_PATH), "appendToSystemPrompt": "CALLER", "model": "m",
+    }
+    # The SEA pins no run setting and has no ``prompt``: nothing is reported
+    # as overridden (the four hooks are written on every run, not listed)
+    # and the caller's model stays.
+    assert apply_sea(cmd) == set()
+    assert cmd["model"] == "m"
     assert cmd["appendToSystemPrompt"] == "CALLER"
     hook = cmd["systemPromptHook"]
     assert hook("BASE\n\nCALLER") == "BASE\n\nCALLER\n\n" + write_sea.SYSTEM_PROMPT

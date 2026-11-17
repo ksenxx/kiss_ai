@@ -1883,7 +1883,7 @@ def test_a_deleted_task_takes_its_sub_tasks_wherever_they_are(tmp_path: Path) ->
 def test_a_deleted_chat_loses_its_summary_row_but_a_deleted_task_does_not(
     tmp_path: Path,
 ) -> None:
-    """Only a chat deletion drops the chat's row: a task deletion keeps its title.
+    """Only a chat deletion drops the chat's row: a task deletion keeps its title and star.
 
     A chat deleted long ago and started again is a deleted chat once
     more when its last task goes: its row is dropped by the merge that
@@ -1905,12 +1905,13 @@ def test_a_deleted_chat_loses_its_summary_row_but_a_deleted_task_does_not(
     add_task(dst, "s1", chat_id="chat-sub", parent_task_id="elsewhere", events=1)
     dst.execute(
         "CREATE TABLE chat_summaries (chat_id TEXT PRIMARY KEY, summary TEXT,"
-        " last_launched INTEGER, last_finished INTEGER, user_summary TEXT DEFAULT '')"
+        " last_launched INTEGER, last_finished INTEGER, user_summary TEXT DEFAULT '',"
+        " is_favorite INTEGER DEFAULT 0)"
     )
-    dst.execute("INSERT INTO chat_summaries VALUES ('chat-kept', 's', 1, 1, 'My title')")
-    dst.execute("INSERT INTO chat_summaries VALUES ('chat-gone', 's', 1, 1, '')")
-    dst.execute("INSERT INTO chat_summaries VALUES ('chat-again', 's', 2000, 1, 'Again')")
-    dst.execute("INSERT INTO chat_summaries VALUES ('chat-sub', 's', 2000, 1, 'Sub')")
+    dst.execute("INSERT INTO chat_summaries VALUES ('chat-kept', 's', 1, 1, 'My title', 1)")
+    dst.execute("INSERT INTO chat_summaries VALUES ('chat-gone', 's', 1, 1, '', 1)")
+    dst.execute("INSERT INTO chat_summaries VALUES ('chat-again', 's', 2000, 1, 'Again', 0)")
+    dst.execute("INSERT INTO chat_summaries VALUES ('chat-sub', 's', 2000, 1, 'Sub', 0)")
     dst.close()
 
     done = sync(str(source), str(target))
@@ -1919,8 +1920,8 @@ def test_a_deleted_chat_loses_its_summary_row_but_a_deleted_task_does_not(
     assert task_ids(target) == []
     # What was worked out from the deleted task goes with it, as in the web app.
     assert rows(target, "SELECT * FROM chat_summaries ORDER BY chat_id") == [
-        ("chat-kept", "", 0, 0, "My title"),
-        ("chat-sub", "s", 2000, 1, "Sub"),
+        ("chat-kept", "", 0, 0, "My title", 1),
+        ("chat-sub", "s", 2000, 1, "Sub", 0),
     ]
     assert "3 chat summary row(s) refreshed" in done.stdout
     assert "0 chat summary row(s) refreshed" in sync(str(source), str(target)).stdout

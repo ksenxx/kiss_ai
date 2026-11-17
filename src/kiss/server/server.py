@@ -1578,7 +1578,8 @@ class AgentServer(
         # The chat-panel headers in the History sidebar show each chat's
         # summary (``chat_summaries``, once a task has finished) or else
         # its FIRST task, which may be older than any row on this page,
-        # and the launch time of its LATEST task (``chat_summaries``).
+        # the launch time of its LATEST task and the star the user gave
+        # the chat (both ``chat_summaries``).
         chat_ids = [str(s["id"]) for s in sessions]
         first_tasks = _chat_first_tasks(chat_ids)
         summaries = _chat_summaries(chat_ids)
@@ -1595,6 +1596,7 @@ class AgentServer(
             session["chat_summary"] = summary.get("summary", "")
             session["chat_last_launched"] = summary.get("last_launched", 0)
             session["chat_last_finished"] = summary.get("last_finished", 0)
+            session["chat_is_favorite"] = summary.get("is_favorite", False)
         min_ts, max_ts = (None, None) if remote_only else _history_date_range()
         if machines or remote_only:
             page = merged_history(

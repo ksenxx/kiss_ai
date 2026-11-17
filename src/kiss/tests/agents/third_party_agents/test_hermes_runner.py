@@ -1063,9 +1063,11 @@ class TestContinuationFailureCursor:
         assert state["threads"]["100.0"]["last_reply_ts"] == "105.0"
 
     def test_successful_continuation_advances_cursor(
-        self, tmp_path: Path, launch_daemon: RecordingDaemon
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launch_daemon: RecordingDaemon
     ) -> None:
         """A fully successful continuation tick commits the new cursor."""
+        # A gateway tick is a cron command job, whose environment says so.
+        monkeypatch.setenv("KISS_CRON_JOB", "1")
         state_path = tmp_path / "s.json"
         self._seed_state(state_path, "100.0", "101.0")
         backend = ThreadBackend(
@@ -1075,13 +1077,22 @@ class TestContinuationFailureCursor:
         runner = _make_runner(backend, state_path)
         assert runner.run_once() == 1
         # The continuation resumed the seeded chat on the wire and the
-        # thread now carries the chat id the daemon reported.
-        assert launch_daemon.run_commands[-1]["chatId"] == "c1"
+        # thread now carries the chat id the daemon reported.  The task
+        # answers a person, so it is no cron run, whatever ran the tick.
+        wire = launch_daemon.run_commands[-1]
+        assert (wire["chatId"], wire["cronJob"]) == ("c1", False)
         state = load_channel_state(state_path)
         assert state["cursor"] == "99"
         assert state["threads"]["100.0"]["last_reply_ts"] == "105.0"
         assert state["threads"]["100.0"]["chat_id"] == "chat-cont"
         assert any(_CONTINUATION_TEXT in text for _, text, _ in backend.sent)
+        # A one-shot run in the same job (``kiss-telegram -t ...`` scheduled
+        # as a command) is a cron run: the launcher leaves the answer to
+        # the client, which reads the variable.
+        _kiss_web_launcher.run_agent_via_kiss_web(
+            _kiss_web_launcher.KissWebChatAgent("probe"), "scheduled digest"
+        )
+        assert launch_daemon.run_commands[-1]["cronJob"] is True
 
     def test_thread_poll_failure_keeps_cursor_without_breaker(self, tmp_path: Path) -> None:
         """A thread-poll failure keeps the cursor and skips the breaker."""

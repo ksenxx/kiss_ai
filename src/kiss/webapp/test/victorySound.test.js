@@ -147,6 +147,9 @@ test('a tab this page does not show (closed by the user) still plays; an unknown
   // shows; the daemon marks its end `subagent: true`.
   send(win, {type: 'task_done', success: true, tabId: 'api-0f3a', subagent: true});
   assert.strictEqual(played.length, 1, 'dispatched sub-agent: ' + JSON.stringify(played));
+  // A run the cron scheduler launched ends marked `cron: true`.
+  send(win, {type: 'task_done', success: true, tabId: 'tab-of-a-cron-job', cron: true});
+  assert.strictEqual(played.length, 1, 'cron run: ' + JSON.stringify(played));
 });
 
 test('the copy of a task end sent to a tab viewing the task ends that tab in silence', () => {

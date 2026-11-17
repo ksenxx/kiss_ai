@@ -854,7 +854,7 @@ DISPATCH_TIMEOUT_SECONDS = 3600.0
 
 class WriteSea(BaseSea):
     def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
-        return settings | {"timeout": DISPATCH_TIMEOUT_SECONDS, "model": "bestrouter"}
+        return settings | {"timeout": DISPATCH_TIMEOUT_SECONDS}
 ```
 
 The setting is read for every `run_agent` and `run_parallel` dispatch,
@@ -1580,10 +1580,15 @@ removed: ...` for `add_to_system_prompt`, `add_to_prompt` and
   command for).  How a run on a `machine` names a SEA the machine has
   under its own paths; `run_agent` sets it when `agent` is a command
   name and `machine` is given.  Empty (the default) sends `sea_path`.
-- **`cron_job`** — whether the cron scheduler launched the run (an
-  in-chat job; a prompt job is recognised by its unattended preamble
-  in the submitted text, and a cron run's sub-tasks say so on the
-  wire), sent as `cronJob` and persisted as the history row's
+- **`cron_job`** — whether the run is a cron run: one the cron
+  scheduler launched (an in-chat job; a prompt job is recognised by
+  its unattended preamble in the submitted text, and a cron run's
+  sub-tasks say so on the wire) or one a cron command job's script
+  starts.  `None` (the default) reads the environment: the scheduler
+  starts every command job with `KISS_CRON_JOB=1`
+  (`daemon_client.CRON_JOB_ENV`), so a script it runs gets a cron row
+  without saying so, and the same script run by hand a plain one.
+  Sent as `cronJob` and persisted as the history row's
   `is_cron` flag, which the CHATS list hides unless its Cron chip is
   on.  The unattended verdict is decided on the text as submitted
   (plus `appendToPrompt`), before the SEA a `/xxx` prompt turns into
@@ -1663,8 +1668,9 @@ removed: ...` for `add_to_system_prompt`, `add_to_prompt` and
   string `system_prompt()` returns is used verbatim, with no
   placeholder rendering.  Either way the agent still appends its
   per-run operational instructions after the prompt
-  (`RelentlessAgent.perform_task`): the work directory (omitted when
-  the tools run in an attached container that does not mount it), the
+  (`RelentlessAgent.perform_task`): the work directory (the
+  container's own working directory when the tools run in an attached
+  container that does not mount the host's), the
   process id, the task settings (model, budget, start time in local
   and UTC, parallel mode, the `Interpreter` the work dir's Python
   runs on (`project_interpreter.project_interpreter`: the `.venv` of
@@ -1674,7 +1680,10 @@ removed: ...` for `add_to_system_prompt`, `add_to_prompt` and
   container; every pytest run prints the same line first, from the
   root `conftest.py`, so a fixer, a reviewer and the full run can be
   seen to share one Python), the `Scratch dir` the prompt sends temporary
-  files to — `./tmp/<task-id>/` under a chat, `./tmp/` without one,
+  files to — `./tmp/<task-id>/` under a chat, `./tmp/` without one
+  (`/tmp/kiss-scratch/` in place of `./tmp/` when the tools run in an
+  attached container that does not mount the work dir, whose `./tmp/`
+  would be inside the caller's directory),
   and for a sub-agent a private folder `<system temp dir>/kiss-sub-…`
   (`SorcarAgent._private_dir`; when its commands run in a container,
   the container's `/tmp/kiss-sub-…`, `DockerManager.make_private_dir`)
@@ -2076,6 +2085,17 @@ removed: ...` for `add_to_system_prompt`, `add_to_prompt` and
   launched its process, an attached Chrome only the tool's own driver,
   and a Browser-tab page its hung script, which the daemon stops (the
   tab is closed only when the page stays unresponsive after that).
+  The kill (`web_use_tool._terminate_pid_escalating`, SIGTERM then
+  SIGKILL) re-checks the process's recorded identity before each
+  signal and refuses a pid it cannot verify; on Linux the signals go
+  through a pidfd opened before the first check, and on Windows a
+  handle on the browser (`processes.pin_process`) keeps its pid from
+  being reused, and once the browser is killed its descendants are
+  ended in the same step (`processes.end_pinned_descendants`: only a
+  process that records the browser's pid as its parent and started no
+  earlier than it, each held open while it is checked), since Windows
+  ends no child with its parent and a killed Chromium used to leave
+  its renderer, GPU and utility processes running.
   An iframe of another site, whose renderer is not the page's own, no
   longer costs the browser when its script never returns: each move
   of the pointer's curved path gets a round trip to be acknowledged
@@ -4090,7 +4110,12 @@ provider error (no such model, no credit) still switches to
 `get_fallback_model`'s choice whatever its family — the catalog's
 explicit `fallback` when there is one, else the OpenRouter twin when
 `OPENROUTER_API_KEY` is configured — and with neither the error is
-raised.  The `stop_reason` of every reply is in its `llm_call` event
+raised.  A daemon that pins every task to its model
+(`KISS_PIN_TASK_MODEL`, `model_families.task_model_pinned`, set by
+the benchmark daemons) makes no switch at all: a refusal gets only
+the one `REFUSAL_RETRY_MSG` retry, and a filter, a cap (after its low-effort retry), two empty
+responses or a non-retryable error end the run, so a benchmark trial
+is never finished by another model.  The `stop_reason` of every reply is in its `llm_call` event
 (`kiss_agent.stop_reason_of`: Anthropic's `stop_reason`, a Chat
 Completions `finish_reason`, the Responses `status` or
 `incomplete_details.reason`, and a Gemini candidate's `finish_reason`
@@ -4208,7 +4233,8 @@ SEA's hooks, so a hook author knows what the model reads:
   contract).  `set_model` refuses itself, outside the guard, under a
   daemon that pins every task tree to its launch model
   (`KISS_PIN_TASK_MODEL`, set by the benchmark daemons so a score
-  measures one model; `agent_dispatch.task_model_pinned`, which also
+  measures one model; `model_families.task_model_pinned`, re-exported
+  with `PIN_TASK_MODEL_ENV` by `agent_dispatch`, which also
   refuses a `run_agent` naming another `model` or a `model_config`,
   one whose SEA's `settings()` names another `model` or a
   `model_config` (`pinned_model_conflict` checks the SEA's effective
@@ -4723,6 +4749,29 @@ output, $0.60 cache read, $7.50 and $12 cache writes).  Sonnet 4.6
 and every other Claude model bill long prompts at their standard
 rates.
 
+An `openrouter/*` entry holds the prices of the model's record in
+OpenRouter's `/api/v1/models` listing, with one exception
+(`update_models.prefer_standard_endpoint_prices`).  The listing shows
+the price of one of the model's endpoints, and for a closed-weight
+model (a record whose `hugging_face_id` is null or empty; a `~` alias
+through its `alias_target`) that can be a regional endpoint's
+(`azure/us`, `amazon-bedrock/us-east-1`, `google-vertex/us`: the list
+price plus a surcharge), which a request to `https://openrouter.ai` is
+not routed to while a standard-priced endpoint exists.  So the updater
+reads such a model's `/api/v1/models/<id>/endpoints` and, when the
+headline is the price of its cheapest serving standard-tier endpoint
+(`status` 0, a null `service_tier`, a prompt price above zero) plus a
+premium of at most 50% (`_MAX_REGIONAL_SURCHARGE`), takes that
+endpoint's whole price sheet instead: base, cache, image, audio and
+long-prompt tiers.  An open-weight model, a free or per-request-priced
+one and a `:variant` id keep the headline, and so does every model
+from the first endpoint listing that cannot be read.  For an
+`openrouter/*` call these catalog prices are what the model picker
+shows and the estimate used when a response reports no cost; the cost
+recorded for a call is the one OpenRouter reports for it
+(`usage.cost`, plus `usage.cost_details.upstream_inference_cost` when
+`usage.is_byok` is true: `extract_cost_from_response`).
+
 `$KISS_HOME/MY_MODELS.json` is the custom-model registry the
 settings panel's Add / Edit / Delete buttons maintain
 (`model_info.save_custom_model`, `delete_custom_model`); an entry is
@@ -4980,7 +5029,7 @@ def run(
     parent_tab_id: str = "",
     parent_reviewer: bool = False,
     side_channel: bool = False,
-    cron_job: bool = False,
+    cron_job: bool | None = None,
     model: str = "",
     chat_id: str = "",
     system_prompt: str = "",
@@ -5472,7 +5521,7 @@ which the daemon then never answered.
   the `blind_verifier_written` event of the second run says `retry:
   true`) on a model of another family, or on the configured author
   model again when this daemon pins every task to its model
-  (`agent_dispatch.task_model_pinned`: the retry then switches to no
+  (`model_families.task_model_pinned`: the retry then switches to no
   model the configuration did not name), while an author run that
   fails with an error, no such model, no credential, a provider down,
   is not retried; the
@@ -5596,7 +5645,21 @@ which the daemon then never answered.
   `blind_verifier` to `none`, `same` standing for the trial's model
   and `none` for `""`; `run.py` takes them as `--reviewer`,
   `--reading-check` and `--blind-verifier`, `harbor_command` passing
-  each as an `--ak` option) follows those defaults.  A text-only turn, the implicit
+  each as an `--ak` option) follows those defaults.  The vanilla
+  launcher (`benchmarks/terminal_bench/vanilla_agent.py`,
+  `VanillaSorcarAgent`) runs none of this: it sends the trial's
+  instruction unchanged to the benchmark daemon's default Sorcar
+  agent, tools attached to the trial's `main` container
+  (`container:<id>`), with `TOOL_PROFILE`
+  `shell+edit+agents+control`, `use_web_tools`, `use_memory` and
+  `auto_classify` off, Harbor's per-task `timeout_sec` as the
+  wall-clock limit and its `--ak` options `budget_usd` (USD cap of a
+  trial, 50) and `home` (the daemon's `KISS_HOME`); it writes the
+  trial's metrics (`model`, `container`, `agent_success`, `cost_usd`,
+  `tokens`, `steps`, `task_id`, `final_text`, `error`, `seconds`) to
+  `result.json`, keeping the spend the daemon reported for a trial
+  Harbor's timeout cancelled or whose daemon connection was lost, and
+  records a daemon failure instead of raising it.  A text-only turn, the implicit
   finish that consults the hook with no arguments, is vetoed once with
   a request for an explicit `finish`, and a second one ends the run
   (logged as `implicit_finish`); a `finish` delivered once the
@@ -5800,12 +5863,12 @@ which the daemon then never answered.
   `description()`, which a task naming `/discover` sees, tells that
   task to run its improvement work through the SEA, again while the
   goal is unmet — on
-  the `bestrouter` with the full toolset; the loop,
+  the caller's model with the full toolset; the loop,
   `discover_sea.DISCOVERY_INSTRUCTIONS`, was the `## AI discovery, auto
   research, and optimization` section of `SYSTEM.md` and is now the
   SEA's alone: its `system_prompt()` appends it at the end of the
   assembled prompt, cutting out a leftover copy first, and its
-  `settings()` is `{"model": "bestrouter", "tool_profile": "full"}`;
+  `settings()` is `{"tool_profile": "full"}`;
   `/revise_and_review_paper` and `/rsi7d` do not copy that text: the
   writer task of the first ends with `_DISCOVER_RULES`, the SEA's
   `description()` plus how to call `run_agent(agent="discover", ...)`
@@ -5850,8 +5913,8 @@ which the daemon then never answered.
   command made to learn its output is not counted.  The run stops at the task's
   metric-call budget, `10 * |valset|` without one, and reports the
   candidate with the best validation average; `settings()` is
-  `{"model": "bestrouter", "tool_profile": "full"}`
-  (`gepa_sea.MODEL`, `TOOL_PROFILE`)),
+  `{"tool_profile": "full"}` (`gepa_sea.TOOL_PROFILE`), so the run is on
+  the caller's model),
   `/git_extract_knowledge` (builds and refreshes a repository's
   knowledge memory and can schedule its daily refresh), `/good_morning`
   (a `WorkerSea` whose only tools are `finish` and `stored_recommendations`:
@@ -5986,9 +6049,13 @@ which the daemon then never answered.
   failed, `_close_thread_db`, while a caller that already held one
   keeps it); the
   favourite star and delete button of a remote machine's row, and the
-  rename pencil and delete button of a chat whose rows are all that
-  machine's, act on that machine's `history.db`: `setFavorite`,
-  `setChatSummary`, `deleteTask` and `deleteChat` stamped `machine`
+  favourite star, rename pencil and delete button of a chat whose rows
+  are all that machine's, act on that machine's `history.db`:
+  `setFavorite`, `setChatSummary`, `setChatFavorite` (the chat's star,
+  `chat_summaries.is_favorite`, which each history row carries as
+  `chat_is_favorite` and the CHATS panel's Favorites filter honours
+  beside the task's own star), `deleteTask` and `deleteChat` stamped
+  `machine`
   (`sidebar_panels.MACHINE_HISTORY_WRITES`, `machine_history_write`)
   are forwarded on the machine's default link lane, in the order
   clicked per connection and machine, and followed by a
@@ -6119,8 +6186,13 @@ which the daemon then never answered.
   tab one of its own, to every client, so no frame of the tab can
   overtake it; a sub-agent tab that leaves the stream for a chat, a
   `resumeSession` with a `chatId`, has the binding announced gone the
-  same way, while a resume of a task the stream never saw keeps it on
-  the stream and is answered here with nothing running),
+  same way, while a `scoped` resume of the task the sub-agent tab is
+  named after is the tab's own fetch of its deferred transcript and is
+  forwarded to the machine — the machine's replay of the parent offers
+  it, with the sub-agent's chat, to a stream that never saw the
+  sub-agent's `new_tab` when the chat was opened here while it ran —
+  and a resume of any other task the stream never saw keeps it on the
+  stream and is answered here with nothing running),
   and a surface's `ready` is told every binding, the bound tabs' and
   their sub-agent tabs', in one `tabMachines` frame before any
   transcript (the page drops a binding it holds that the frame does
@@ -6532,7 +6604,7 @@ which the daemon then never answered.
   `/write` (writes prose for a general audience in concise, professional
   American English that reads as human-written; it defines only
   `description()`, a `system_prompt()` that appends its style guide
-  and a `settings()` of `{"timeout": 3600.0, "model": "bestrouter"}`), `/write_paper` (writes
+  and a `settings()` of `{"timeout": 3600.0}`), `/write_paper` (writes
   or revises a research paper; it plans the contribution first, the
   research question, the central claim and the controlled comparison
   that tests it, narrows the claim to what the evidence tests rather

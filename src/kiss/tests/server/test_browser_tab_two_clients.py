@@ -127,6 +127,24 @@ class BrowserTabTwoClientsTest(TwoClientHarness):
     def _wait_title(self, client: Client, tab_id: str, title: str) -> dict[str, Any]:
         return self.wait_event(client, "browserState", timeout=60, tab_id=tab_id, title=title)
 
+    def _snapshot(self, client: Client) -> dict[str, Any]:
+        """The daemon's own ``browserTabs`` snapshot *client* got for its ``ready``.
+
+        A ``ready`` is answered with two ``browserTabs`` events: this
+        one, and one flagged ``remote`` that lists the pages of the
+        registered machines (``RemoteViews.replay_to``; none here, so
+        it is always empty).  While a browser runs the daemon's own goes
+        through the browser service's loop and the remote one comes from
+        a worker thread of the server, so either may reach the client
+        first; the webapp reconciles its local tabs against the first
+        and its remote tabs against the second, whatever the order.
+        """
+        own: list[dict[str, Any]] = self.wait_for(
+            lambda: [e for e in client.of_type("browserTabs") if not e.get("remote")],
+            what=f"{client.name}: the daemon's own browserTabs snapshot",
+        )
+        return own[0]
+
     # -- the test ------------------------------------------------------------
 
     def test_browser_tab_open_everywhere_closed_everywhere(self) -> None:
@@ -136,7 +154,7 @@ class BrowserTabTwoClientsTest(TwoClientHarness):
         b.ready()
         for client in (a, b):
             self.assertEqual(
-                self.wait_event(client, "browserTabs")["tabs"], [],
+                self._snapshot(client)["tabs"], [],
                 "no browser tab before anyone opens one",
             )
 
@@ -173,7 +191,7 @@ class BrowserTabTwoClientsTest(TwoClientHarness):
         #    snapshot, unfocused.
         c = self.open_client("c")
         c.ready()
-        snapshot = self.wait_event(c, "browserTabs")
+        snapshot = self._snapshot(c)
         self.assertEqual([t["tab_id"] for t in snapshot["tabs"]], [tab_id])
         self.assertFalse(any(t["focus"] for t in snapshot["tabs"]))
         self.assertEqual(snapshot["tabs"][0]["title"], "Home Page")
@@ -217,7 +235,7 @@ class BrowserTabTwoClientsTest(TwoClientHarness):
             self._wait_title(client, tab_id, "/moved")
         b2 = self.open_client("b2")
         b2.ready()
-        snapshot = self.wait_event(b2, "browserTabs")
+        snapshot = self._snapshot(b2)
         self.assertEqual([t["tab_id"] for t in snapshot["tabs"]], [tab_id])
         self.assertEqual(snapshot["tabs"][0]["title"], "/moved")
         self.assertEqual(snapshot["tabs"][0]["url"], self.base + "/moved")
@@ -237,6 +255,6 @@ class BrowserTabTwoClientsTest(TwoClientHarness):
         )
         late = self.open_client("late")
         late.ready()
-        self.assertEqual(self.wait_event(late, "browserTabs")["tabs"], [])
+        self.assertEqual(self._snapshot(late)["tabs"], [])
         time.sleep(0.3)
         self.assertEqual(late.of_type("openBrowserTab"), [])

@@ -289,7 +289,6 @@ class ReviseAndReviewPaperSea(BaseSea):
             "auto_classify": False,
             "tool_profile": "full",
             "timeout": DISPATCH_TIMEOUT_SECONDS,
-            "model": "bestrouter",
         }
 
 

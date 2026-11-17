@@ -366,7 +366,16 @@ when the task caps the reviewer's share, sum the costs the reviewers' results re
   no-op entry ("new_string must be different from old_string") rejects the whole batch.
 - In a worktree, run project commands as the shared environment's binary:
   `PYTHONPATH=<worktree>/src:<worktree>/projects /home/ksen/kiss/.venv/bin/<cmd>`, never
-  `uv run <cmd>` (it times out after 600 s)."""
+  `uv run <cmd>` (it times out after 600 s).
+- Your progress file is `tmp/<task id>/PROGRESS.md` in the scratch dir, the file you
+  created; never `Edit` `<worktree>/tmp/PROGRESS.md` (it does not exist: two refused Edits
+  in one round, cf5db742 [711], [1123]).
+- To fit a page limit, measure the overflow once after a build (`pdftotext -f N -l N+1`
+  line counts past the limit), cut about 1.2x that amount in one `Edit` batch (whole
+  paragraphs, a subsection moved to an appendix), then rebuild: at most two
+  build/measure cycles per round, never a trim-build-measure loop (cf5db742 ran
+  `build_paper` 16 times and the page probe 5 times, [522]-[567]; 6ff2fd766 three
+  cycles, [561]-[631])."""
 """The template's rules, appended to the default system prompt."""
 
 # LaTeX environments whose bodies are not prose: verbatim prompts, listings, table
