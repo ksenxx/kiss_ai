@@ -59,6 +59,7 @@ from kiss.agents.sorcar.persistence import (
     _load_latest_chat_events_by_chat_id,
     _load_model_usage,
     _load_subagent_rows_by_parent_task_id,
+    _load_task_events_by_seq,
     _recover_orphaned_tasks,
 )
 from kiss.agents.sorcar.sorcar_agent import _subagent_done_event
@@ -69,7 +70,7 @@ from kiss.core.models.model_info import (
     list_custom_models,
 )
 from kiss.core.utils import is_root_dir
-from kiss.server import agent_state
+from kiss.server import agent_state, lazy_replay
 from kiss.server.agent_state import AgentState
 from kiss.server.autocomplete import (
     _AutocompleteMixin,
@@ -286,21 +287,26 @@ def _lazy_replay_images(evs: list[dict[str, Any]], task_id: str) -> list[dict[st
     out: list[dict[str, Any]] = []
     index = 0
     for ev in evs:
-        if not _event_images(ev):
-            out.append(ev)
-            continue
-        images: list[Any] = []
-        for im in ev["images"]:
-            if _is_embedded_image(im):
-                images.append(
-                    {k: v for k, v in im.items() if k != "b64"}
-                    | {"lazy": {"taskId": task_id, "index": index}}
-                )
-                index += 1
-            else:
-                images.append(im)
-        out.append({**ev, "images": images})
+        out.append(_lazy_event_images(ev, task_id, index))
+        index += len(_event_images(ev))
     return out
+
+
+def _lazy_event_images(ev: dict[str, Any], task_id: str, index: int) -> dict[str, Any]:
+    """Return *ev* with its embedded pictures replaced by handles numbered from *index*."""
+    if not _event_images(ev):
+        return ev
+    images: list[Any] = []
+    for im in ev["images"]:
+        if _is_embedded_image(im):
+            images.append(
+                {k: v for k, v in im.items() if k != "b64"}
+                | {"lazy": {"taskId": task_id, "index": index}}
+            )
+            index += 1
+        else:
+            images.append(im)
+    return {**ev, "images": images}
 
 
 def _replay_image(events: object, index: int) -> dict[str, Any] | None:
@@ -353,19 +359,143 @@ def _coalesced_replay_events(events: object, task_id: str = "") -> list[dict[str
     if task_id:
         evs = _lazy_replay_images(evs, task_id)
     for ev in evs:
-        legacy = ev.get("_timestamp")
-        if "_timestamp" in ev and not (
-            isinstance(legacy, (int, float)) and math.isfinite(legacy)
-        ):
-            # Junk from the dynamically typed SQLite column: bytes are
-            # not JSON-serializable and a non-finite float is written as
-            # ``Infinity``/``NaN``, which the page's ``JSON.parse``
-            # rejects, so the key must not reach the frame sizing or
-            # the transport.
-            del ev["_timestamp"]
-        elif "ts" not in ev and isinstance(legacy, (int, float)) and 0 < legacy <= 8.64e12:
-            ev["ts"] = int(legacy * 1000)
+        _stamp_replay_event(ev)
     return _bound_replay_events(_coalesce_events(evs))
+
+
+def _stamp_replay_event(ev: dict[str, Any]) -> None:
+    """Give a stored event its ``ts`` from its row's ``_timestamp``, in place."""
+    legacy = ev.get("_timestamp")
+    if "_timestamp" in ev and not (isinstance(legacy, (int, float)) and math.isfinite(legacy)):
+        # Junk from the dynamically typed SQLite column: bytes are
+        # not JSON-serializable and a non-finite float is written as
+        # ``Infinity``/``NaN``, which the page's ``JSON.parse``
+        # rejects, so the key must not reach the frame sizing or
+        # the transport.
+        del ev["_timestamp"]
+    elif "ts" not in ev and isinstance(legacy, (int, float)) and 0 < legacy <= 8.64e12:
+        ev["ts"] = int(legacy * 1000)
+
+
+def _lazy_piece_events(
+    source: lazy_replay.Recorded | lazy_replay.Stored,
+    piece: lazy_replay.Piece,
+    task_id: str,
+    upto: int | None = None,
+) -> list[dict[str, Any]]:
+    """The events of *piece* of a lazily loaded transcript, as a replay sends them.
+
+    Only the piece's events are read from *source*.  Each is prepared
+    as :func:`_coalesced_replay_events` prepares a whole transcript's:
+    its pictures become handles numbered over the whole transcript, a
+    ``summary`` call that folded panels names them (``lazy: {taskId,
+    seg}``, what the page asks ``getTaskEvents`` for), and streamed
+    deltas are merged, but only where they are neighbours in the
+    transcript, so a piece shows the panels the whole replay shows.
+
+    Args:
+        source: Where the transcript's events are read from.
+        piece: The piece to send (a method of the source's ``plan``
+            returns it).
+        task_id: The task the handles name.
+        upto: The ``upto`` of the handle *piece* was asked for with,
+            which the handles of its ``summary`` calls then name too:
+            the panels opened inside it are read from that transcript.
+    """
+    handle: dict[str, Any] = {"taskId": task_id}
+    if upto is not None:
+        handle["upto"] = upto
+    plan = source.plan
+    loaded = source.load([item for item in piece if isinstance(item, int)])
+    pictures = plan.pictures_before()
+    out: list[dict[str, Any]] = []
+    run: list[dict[str, Any]] = []
+    previous = -2
+    for item in piece:
+        if not isinstance(item, int) or item != previous + 1:
+            out += _coalesce_events(run)
+            run = []
+        if not isinstance(item, int):
+            out.append(item)
+            previous = -2
+        elif item in loaded:  # not deleted since the scan
+            ev = _lazy_event_images(loaded[item], task_id, pictures[item])
+            if item in plan.summaries:
+                ev = {**ev, "lazy": {**handle, "seg": plan.summaries[item]}}
+            _stamp_replay_event(ev)
+            run.append(ev)
+            previous = item
+    return _bound_replay_events(out + _coalesce_events(run))
+
+
+#: What the page reads of a message typed into a task (``settleLostPrompt`` in main.js).
+_STEER_FIELDS = ("type", "steer", "text", "promptIds")
+
+
+def _first_piece_events(task_id: str, kept: dict[str, Any]) -> list[dict[str, Any]]:
+    """The events of a stored task's first piece *kept*, as a replay sends them.
+
+    Only the rows the piece names are read (``lazy_replay.first_piece``).
+    Each is prepared as :func:`_lazy_piece_events` prepares it, and the
+    ``trajectory`` stub is told what the user typed into the task
+    (``steers``: the :data:`_STEER_FIELDS` of those messages).  A row
+    deleted since the piece was kept is left out.
+
+    Args:
+        task_id: The task the handles name.
+        kept: The piece and the messages, by the ``seq`` of their rows.
+    """
+    rows = {item[0] for item in kept["piece"] if isinstance(item, list)}
+    by_seq = _load_task_events_by_seq(
+        task_id, [(seq, seq) for seq in sorted(rows.union(kept["steers"]))],
+    )
+    steers = [
+        {key: by_seq[seq][key] for key in _STEER_FIELDS if key in by_seq[seq]}
+        for seq in kept["steers"]
+        if seq in by_seq
+    ]
+    out: list[dict[str, Any]] = []
+    for item in kept["piece"]:
+        if isinstance(item, list):
+            if item[0] in by_seq:
+                ev = _lazy_event_images(by_seq[item[0]], task_id, item[1])
+                _stamp_replay_event(ev)
+                out.append(ev)
+        elif steers and item["type"] == "trajectory":
+            out.append({**item, "steers": steers})
+        else:
+            out.append(item)
+    return _bound_replay_events(out)
+
+
+def _replay_events(
+    session: dict[str, Any], events: object, task_id: str, lazy: bool = False, live: bool = False,
+) -> list[dict[str, Any]]:
+    """The events a replay of *session* sends for its transcript *events*.
+
+    All of them, or with *lazy* only the piece the page shows first
+    (:mod:`kiss.server.lazy_replay`): the outline of a running task, the
+    results of a finished one beside its Trajectory stub.
+
+    Args:
+        session: The loader session the row-derived events come from
+            (:func:`with_synthesized_events`).
+        events: The transcript read so far: the row's events, or a
+            running task's recording.  Not read for a lazy replay of
+            a task that is not running: its first piece is read where
+            the database keeps it.
+        task_id: The task the picture and piece handles name.
+        lazy: Send the first piece only.
+        live: The task is running.
+    """
+    if not (lazy and task_id):
+        return with_synthesized_events(_coalesced_replay_events(events, task_id), session)
+    if live:
+        source = lazy_replay.transcript(task_id, events if isinstance(events, list) else [])
+        shown = _lazy_piece_events(source, source.plan.outline(live=True), task_id)
+    else:
+        shown = _first_piece_events(task_id, lazy_replay.first_piece(task_id))
+    return with_synthesized_events(shown, session)
 
 
 #: A replayed delta event's ``text`` is cut to this many characters
@@ -2784,6 +2914,7 @@ class AgentServer(
         replay_id: str = "",
         reopen: bool = False,
         recovery: bool = False,
+        lazy: bool = False,
     ) -> None:
         """Replay recorded chat events for a previous chat session.
 
@@ -2854,6 +2985,12 @@ class AgentServer(
                 surface, its subscription headless exactly as the close
                 left it (:meth:`_attach_viewer_to_running_chat`,
                 :meth:`_drop_tab_state_locked`); audit1101 S4 F2.
+            lazy: The page loads the transcript in pieces
+                (:mod:`kiss.server.lazy_replay`): the ``task_events``
+                carry the outline of a running task, or the results of
+                a finished one beside a ``trajectory`` stub, and the
+                page asks for the rest as its panels are opened
+                (:meth:`task_events_piece`).
         """
         if not tab_id:
             logger.debug("_replay_session called without tab_id; ignoring")
@@ -2864,7 +3001,7 @@ class AgentServer(
         row = None
         live: AgentState | None = None
         if task_id is not None:
-            row = _load_chat_events_by_task_id(task_id)
+            row = _load_chat_events_by_task_id(task_id, with_events=not lazy)
             if row:
                 chat_id = str(row.get("chat_id", "") or chat_id)
                 if not recovery and self._unpin_past_of_running_chat(tab_id, chat_id, row):
@@ -2881,7 +3018,7 @@ class AgentServer(
                 # it allocates the row, possibly before the attach.
                 live = self._live_task_named(task_id)
         if not row and live is None:
-            row = _load_latest_chat_events_by_chat_id(chat_id)
+            row = _load_latest_chat_events_by_chat_id(chat_id, with_events=not lazy)
         no_row = not row
         # A run allocates its history row after setup, so the chat can
         # be live without a row: replay it as an empty row whose
@@ -2982,7 +3119,7 @@ class AgentServer(
             # client gets.
             self._replay_session(
                 shown[0], tab_id, task_id=shown[1] or None, conn_id=conn_id,
-                replay_id=replay_id,
+                replay_id=replay_id, lazy=lazy,
             )
             return
         _race_delay()  # test hook: widens the attach-to-commit window
@@ -2996,7 +3133,7 @@ class AgentServer(
             # finished task.  The run the tab was attached to got its
             # row since, or has none yet (its setup, the gap between
             # two subtasks) and is replayed as in a chat without rows.
-            row = _load_chat_events_by_task_id(attached_task_id)
+            row = _load_chat_events_by_task_id(attached_task_id, with_events=not lazy)
             no_row = not row
             result = row or {
                 "task": "", "task_id": None, "chat_id": chat_id, "extra": "", "events": [],
@@ -3184,9 +3321,9 @@ class AgentServer(
                 return
             if live_events:
                 result["events"] = live_events
-            replayed_events = with_synthesized_events(
-                _coalesced_replay_events(result["events"], str(result.get("task_id") or "")),
-                result,
+            replayed_events = _replay_events(
+                result, result["events"], str(result.get("task_id") or ""), lazy,
+                live=rebound_state is not None,
             )
             self.printer.broadcast(
                 {**replay_payload, "events": replayed_events},
@@ -3200,6 +3337,7 @@ class AgentServer(
                 result,
                 chat_id=bound_chat,
                 task_id=bound_task,
+                lazy=lazy,
             )
         self._emit_pending_ask(tab_id)
         if subagent_info is not None and not recovery and not is_done:
@@ -3396,6 +3534,36 @@ class AgentServer(
             result = _load_chat_events_by_task_id(task_id)
             events = result["events"] if result else []
         return _replay_image(events, index)
+
+    def task_events_piece(
+        self, task_id: str, seg: int, upto: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """A piece of *task_id*'s lazily loaded transcript, asked for when its panel is opened.
+
+        A lazy replay (:meth:`_replay_session`) leaves out the panels
+        the page shows folded; the page asks for them by the handle of
+        the panel the reader opens (``getTaskEvents``).  The transcript
+        is read where the replay read it: the printer's live recording
+        while the task runs, else the events table (up to the handle's
+        ``upto``), of which only the piece's rows are loaded.
+
+        Args:
+            task_id: The task whose transcript holds the piece.
+            seg: The ordinal of the ``summary`` call whose folded panels
+                are asked for (its ``lazy.seg``); negative for the
+                outline, which a finished task's Trajectory panel holds.
+            upto: The handle's ``upto``: the ``seq`` of the last stored
+                event of the transcript the handle was made for.
+
+        Returns:
+            The piece's events (:mod:`kiss.server.lazy_replay`); empty
+            for an unknown task or summary.
+        """
+        source = lazy_replay.transcript(
+            task_id, self.printer.peek_recording_for_task(task_id), upto,
+        )
+        piece = source.plan.outline(live=False) if seg < 0 else source.plan.segment(seg)
+        return _lazy_piece_events(source, piece, task_id, upto)
 
     def _emit_pending_ask(self, tab_id: str) -> None:
         """Re-broadcast a still-pending ask-user question to *tab_id*.
@@ -4235,6 +4403,7 @@ class AgentServer(
         session: dict[str, Any] | None = None,
         chat_id: str = "",
         task_id: str = "",
+        lazy: bool = False,
     ) -> None:
         """Correct *tab_id*'s status when *source* died during the attach.
 
@@ -4296,18 +4465,20 @@ class AgentServer(
                 checked when *task_id* is empty too.
             task_id: The task the replay pinned (``""``: the chat's
                 latest), part of the binding checked.
+            lazy: The replay sent the transcript's outline
+                (:meth:`_replay_session`); so does the re-snapshot.
         """
         terminal: list[dict[str, Any]] = []
         if session is not None and not any(ev.get("type") == "result" for ev in replayed_events):
             with self._state_lock:
                 if source.running() or self._viewer_owns_other_busy_run(tab_id, source):
                     return
-            events = with_synthesized_events(
-                _coalesced_replay_events(
-                    self.printer.peek_recording_for_task(source.task_id),
-                    str(source.task_id or ""),
-                ),
+            events = _replay_events(
                 session,
+                self.printer.peek_recording_for_task(source.task_id),
+                str(source.task_id or ""),
+                lazy,
+                live=True,
             )
             if any(ev.get("type") == "result" for ev in events):
                 terminal = events
@@ -4335,6 +4506,7 @@ class AgentServer(
         *,
         view: tuple[str, str] | None = None,
         conn_id: str = "",
+        lazy: bool = False,
     ) -> None:
         """Send events for the adjacent task in the same chat session.
 
@@ -4381,6 +4553,8 @@ class AgentServer(
                 in the lock hold that resolved *chat_id*; ``None``
                 captures it here.
             conn_id: Connection that asked (``""`` reaches all).
+            lazy: The page loads transcripts in pieces: the neighbour
+                is sent as a finished task is (:meth:`_replay_session`).
         """
         with self._state_lock:
             shown = self._tab_chat_id_locked(tab_id)
@@ -4391,7 +4565,7 @@ class AgentServer(
                 view = current
             elif view != current:
                 return
-        result = _get_adjacent_task_by_chat_id(chat_id, task_id, direction)
+        result = _get_adjacent_task_by_chat_id(chat_id, task_id, direction, with_events=not lazy)
         event: dict[str, Any] = {
             "type": "adjacent_task_events",
             "direction": direction,
@@ -4399,10 +4573,7 @@ class AgentServer(
             "task": result["task"] if result else "",
             "task_id": result["task_id"] if result else None,
             "events": (
-                with_synthesized_events(
-                    _coalesced_replay_events(result["events"], str(result["task_id"] or "")),
-                    result,
-                )
+                _replay_events(result, result["events"], str(result["task_id"] or ""), lazy)
                 if result
                 else []
             ),

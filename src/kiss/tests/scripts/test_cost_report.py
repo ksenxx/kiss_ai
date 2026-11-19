@@ -394,13 +394,19 @@ def test_a_report_of_a_database_in_use_reads_one_snapshot(tmp_path: Path) -> Non
     stop = threading.Event()
     writer = threading.Thread(target=_charge_until, args=(db, stop))
     writer.start()
+    loads: list[cost_report.TaskRow] = []
+    deadline = time.monotonic() + 60
     try:
-        loads = [cost_report.load_tasks(str(db), 0)["t0"] for _ in range(10)]
+        # Ten loads at least, and as many more as the writer needs to commit between the
+        # first and the last of them: ten loads take 10 ms, less than the writer's first
+        # commit on a loaded machine.
+        while len(loads) < 10 or loads[-1].llm_calls == loads[0].llm_calls:
+            assert time.monotonic() < deadline, "the writer never committed between two loads"
+            loads.append(cost_report.load_tasks(str(db), 0)["t0"])
     finally:
         stop.set()
         writer.join()
-    assert [row.cost - row.llm_cost for row in loads] == [0.0] * 10
-    assert loads[-1].llm_calls > loads[0].llm_calls  # the writer did commit in between
+    assert [row.cost - row.llm_cost for row in loads] == [0.0] * len(loads)
 
 
 def test_absolute_window(seeded_db: Path) -> None:

@@ -711,7 +711,6 @@ def test_main_test_existing_skips_generated_xhigh_alias(
     monkeypatch.setattr(mod, "MODEL_INFO_PATH", target)
     monkeypatch.setattr(mod, "README_PATH", tmp_path / "README.md")
     monkeypatch.setattr(mod, "fetch_openrouter", lambda verbose=False: {})
-    monkeypatch.setattr(mod, "fetch_together", lambda verbose=False: {})
     monkeypatch.setattr(mod, "fetch_anthropic", lambda verbose=False: {})
     monkeypatch.setattr(mod, "fetch_gemini", lambda verbose=False: {})
     monkeypatch.setattr(mod, "fetch_openai", lambda verbose=False: {})

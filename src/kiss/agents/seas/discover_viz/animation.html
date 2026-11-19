@@ -1,0 +1,588 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__TITLE__</title>
+<style>
+:root {
+  color-scheme: light dark;
+  --bg: #f7f6f2; --panel: #ffffff; --ink: #1d2126; --muted: #5f6b7a; --line: #c5cad1;
+  --frontier: #0f766e; --frontier-ink: #ffffff; --frontier-soft: #d5ebe8;
+  --overfit: #b45309; --overfit-soft: #fbecd3;
+  --off: #7b8794; --off-soft: #eceef1;
+  --candidate: #1d4ed8; --candidate-soft: #e3ebfd;
+  --best: #c28f00;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14171a; --panel: #1b1f24; --ink: #e7eaee; --muted: #9aa5b1; --line: #3b424a;
+    --frontier: #2fbfb0; --frontier-ink: #04211e; --frontier-soft: #12403b;
+    --overfit: #f0a04b; --overfit-soft: #4a3115;
+    --off: #8b96a3; --off-soft: #262b31;
+    --candidate: #7aa2ff; --candidate-soft: #1c2a4d;
+    --best: #f2c744;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--bg); color: var(--ink);
+  font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+header { padding: 18px 24px 6px; }
+h1 { margin: 0 0 4px; font-size: 20px; }
+header p { margin: 0; color: var(--muted); }
+main {
+  display: grid; grid-template-columns: minmax(0, 1fr) 380px; gap: 16px;
+  padding: 12px 24px 24px; align-items: start;
+}
+@media (max-width: 900px) { main { grid-template-columns: minmax(0, 1fr); } }
+#stage, #story { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
+
+#controls {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px;
+  padding: 10px 12px; border-bottom: 1px solid var(--line);
+}
+#controls button, #controls select {
+  font: inherit; padding: 4px 10px; border: 1px solid var(--line); border-radius: 6px;
+  background: var(--bg); color: var(--ink);
+}
+#controls button { cursor: pointer; min-width: 36px; }
+#controls button:disabled { opacity: .45; cursor: default; }
+#play { min-width: 76px; }
+#scrub { flex: 1 1 140px; min-width: 100px; accent-color: var(--frontier); }
+#position { color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+#controls label { color: var(--muted); white-space: nowrap; }
+#canvas { overflow: auto; max-height: 68vh; }
+#graph { display: block; margin: 0 auto; }
+
+.edge { fill: none; stroke: var(--line); stroke-width: 2; transition: opacity .4s, stroke .4s; }
+.edge.merged { stroke-dasharray: 7 5; }
+.edge.absent { opacity: 0; }
+.edge.candidate { stroke: var(--candidate); }
+.edge.failed, .edge.tie { opacity: .5; }
+
+.node { outline: none; }
+.node.absent { visibility: hidden; }
+.pop {
+  transform-box: fill-box; transform-origin: center;
+  transition: transform .45s cubic-bezier(.3, 1.5, .6, 1);
+}
+.node.absent .pop { transform: scale(0); }
+.disc { fill: var(--off-soft); stroke: var(--off); stroke-width: 2; transition: fill .4s, stroke .4s; }
+.name {
+  fill: var(--ink); font-weight: 600; text-anchor: middle; dominant-baseline: central;
+  transition: fill .4s;
+}
+.score {
+  fill: var(--muted); font-size: 12px; text-anchor: middle;
+  paint-order: stroke; stroke: var(--panel); stroke-width: 4px; stroke-linejoin: round;
+}
+.halo { fill: none; stroke: none; stroke-width: 3; }
+.node.candidate .disc { fill: var(--candidate-soft); stroke: var(--candidate); stroke-dasharray: 5 4; }
+.node.candidate .score { visibility: hidden; }
+.node.frontier .disc { fill: var(--frontier); stroke: var(--frontier); }
+.node.frontier .name { fill: var(--frontier-ink); }
+.node.dominated .disc { fill: var(--frontier-soft); stroke: var(--frontier); }
+.node.overfit .disc { fill: var(--overfit-soft); stroke: var(--overfit); }
+.node.failed .disc { fill: none; stroke-dasharray: 3 4; }
+.node.failed .name, .node.tie .name { fill: var(--muted); }
+.node.focus .halo { stroke: var(--candidate); opacity: .6; }
+.node.parent .halo { stroke: var(--ink); opacity: .4; stroke-dasharray: 2 4; }
+.node.best .halo { stroke: var(--best); stroke-width: 5; opacity: 1; }
+.node:focus-visible .disc { stroke-width: 4; }
+@keyframes pulse { 50% { opacity: .15; } }
+.node.candidate.focus .halo { animation: pulse 1.2s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) {
+  .pop, .edge, .disc, .name { transition: none; }
+  .node.candidate.focus .halo { animation: none; }
+}
+body.hide-discarded .node.failed, body.hide-discarded .node.tie,
+body.hide-discarded .edge.failed, body.hide-discarded .edge.tie { display: none; }
+
+#legend {
+  display: flex; flex-wrap: wrap; gap: 6px 16px; margin: 0; padding: 8px 12px;
+  border-bottom: 1px solid var(--line); list-style: none; color: var(--muted); font-size: 13px;
+}
+#legend svg { vertical-align: -4px; margin-right: 5px; }
+
+#story { padding: 14px 16px; }
+#story h2 { margin: 0 0 10px; font-size: 17px; }
+#story h3 {
+  margin: 16px 0 6px; font-size: 12px; letter-spacing: .06em; text-transform: uppercase;
+  color: var(--muted);
+}
+#story p { margin: 0 0 8px; overflow-wrap: anywhere; }
+.verdict {
+  display: inline-block; padding: 2px 9px; border-radius: 999px; font-weight: 600;
+  font-size: 13px; background: var(--off-soft); color: var(--ink);
+}
+.verdict.frontier { background: var(--frontier); color: var(--frontier-ink); }
+.verdict.tie, .verdict.failed { border: 1px dashed var(--off); }
+.verdict.candidate { background: var(--candidate-soft); }
+.draw { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
+#frontier, #log { margin: 0; padding: 0; list-style: none; }
+#log { max-height: 34vh; overflow-y: auto; }
+#frontier li {
+  display: inline-block; margin: 0 6px 6px 0; padding: 2px 9px; border-radius: 999px;
+  background: var(--frontier); color: var(--frontier-ink); font-weight: 600; font-size: 13px;
+}
+#log li {
+  display: flex; gap: 8px; align-items: baseline; justify-content: space-between;
+  padding: 4px 0; border-top: 1px solid var(--line);
+}
+#log li.current { font-weight: 600; }
+#log button { all: unset; cursor: pointer; }
+#log button:hover, #log button:focus-visible { text-decoration: underline; }
+
+#tooltip {
+  position: fixed; z-index: 10; max-width: min(440px, 92vw); max-height: calc(100vh - 16px);
+  overflow-y: auto; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px;
+  background: var(--panel); color: var(--ink); box-shadow: 0 6px 24px rgb(0 0 0 / .18);
+  font-size: 13px;
+}
+#tooltip[hidden] { display: none; }
+#tooltip table { border-collapse: collapse; margin-top: 6px; }
+#tooltip th {
+  padding: 2px 10px 2px 0; text-align: left; vertical-align: top; color: var(--muted);
+  font-weight: 500; white-space: nowrap;
+}
+#tooltip td { padding: 2px 0; overflow-wrap: anywhere; }
+#tooltip .source { margin-top: 6px; color: var(--muted); font-size: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1 id="title"></h1>
+  <p id="goal"></p>
+</header>
+<main>
+  <section id="stage" aria-label="Evaluated points, each under its parent">
+    <div id="controls">
+      <button id="prev" type="button" aria-label="Previous step">&#9664;</button>
+      <button id="play" type="button">Play</button>
+      <button id="next" type="button" aria-label="Next step">&#9654;</button>
+      <input id="scrub" type="range" min="0" value="0" step="1" aria-label="Step">
+      <span id="position"></span>
+      <label>Speed
+        <select id="speed">
+          <option value="0.5">0.5x</option>
+          <option value="1" selected>1x</option>
+          <option value="2">2x</option>
+          <option value="4">4x</option>
+        </select>
+      </label>
+      <label><input id="discarded" type="checkbox" checked> Discarded ideas</label>
+    </div>
+    <ul id="legend"></ul>
+    <div id="canvas">
+      <svg id="graph" xmlns="http://www.w3.org/2000/svg" role="group" aria-labelledby="title">
+        <g id="edges"></g>
+        <g id="nodes"></g>
+      </svg>
+    </div>
+  </section>
+  <aside id="story" aria-live="polite">
+    <h2 id="step-title"></h2>
+    <div id="step-body"></div>
+    <h3>Frontier now</h3>
+    <ul id="frontier"></ul>
+    <h3>Rounds so far</h3>
+    <ol id="log"></ol>
+  </aside>
+</main>
+<div id="tooltip" role="tooltip" hidden></div>
+<noscript><p style="padding: 0 24px">This animation needs JavaScript.</p></noscript>
+<script id="discover-viz-data" type="application/json">__DATA__</script>
+<script>
+(function () {
+  "use strict";
+  const data = JSON.parse(document.getElementById("discover-viz-data").textContent);
+  const SVG_NS = "http://www.w3.org/2000/svg";
+  const RADIUS = data.radius;
+  const PICK_MS = 2600;
+  const RESULT_MS = 4200;
+  const STATE_TEXT = {
+    candidate: "being evaluated",
+    frontier: "on the Pareto frontier",
+    dominated: "off the frontier: a later point dominates it (DOMINATED)",
+    overfit: "off the frontier: it failed the held-out check (OVERFIT)",
+    tie: "discarded: it equals a frontier point (TIE)",
+    failed: "discarded: a frontier point dominates it (FAILED)",
+  };
+  const LEGEND = {
+    frontier: "on the frontier", dominated: "dominated later",
+    overfit: "failed the held-out check", tie: "discarded: tie",
+    failed: "discarded: dominated", candidate: "being evaluated",
+  };
+  const VERDICT = {
+    KEPT: "Added to the Pareto frontier",
+    TIE: "Discarded: it equals a frontier point (TIE)",
+    FAILED: "Discarded: a frontier point dominates it (FAILED)",
+  };
+  const VERDICT_STATE = {KEPT: "frontier", TIE: "tie", FAILED: "failed"};
+  const CHANGE = {
+    DOMINATED: "leaves the frontier, dominated",
+    OVERFIT: "failed the held-out check",
+    KEPT: "joins the frontier",
+  };
+
+  const byId = (id) => document.getElementById(id);
+  const points = Object.fromEntries(data.points.map((point) => [point.id, point]));
+  const rounds = Object.fromEntries(data.rounds.map((round) => [round.id, round]));
+  const last = data.frames.length - 1;
+  const nodes = {};
+  const edges = [];
+  const tooltip = byId("tooltip");
+  let current = 0;
+  let timer = 0;
+  let tipFor = null;
+  let tipTimer = 0;
+
+  // Every text of the run goes in through textContent, never as markup.
+  function element(tag, className, text) {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text !== undefined) node.textContent = text;
+    return node;
+  }
+
+  function svg(tag, attributes) {
+    const node = document.createElementNS(SVG_NS, tag);
+    for (const [name, value] of Object.entries(attributes)) node.setAttribute(name, value);
+    return node;
+  }
+
+  function clipped(text, limit) {
+    return text.length > limit ? text.slice(0, limit - 1) + "\u2026" : text;
+  }
+
+  function buildScene() {
+    const graph = byId("graph");
+    graph.setAttribute("width", data.width);
+    graph.setAttribute("height", data.height);
+    graph.setAttribute("viewBox", `0 0 ${data.width} ${data.height}`);
+    for (const edge of data.edges) {
+      const path = svg("path", {d: edge.path});
+      byId("edges").append(path);
+      edges.push({to: edge.to, merged: edge.merged, path});
+    }
+    for (const point of data.points) {
+      const node = svg("g", {
+        transform: `translate(${point.x},${point.y})`, tabindex: "0", "data-id": point.id,
+      });
+      const pop = svg("g", {class: "pop"});
+      const size = point.id.length > 5 ? 10 : point.id.length > 3 ? 13 : 16;
+      const name = svg("text", {class: "name", "font-size": size});
+      name.textContent = clipped(point.id, 7);
+      pop.append(
+        svg("circle", {class: "halo", r: RADIUS + 7}), svg("circle", {class: "disc", r: RADIUS}),
+        name,
+      );
+      const score = svg("text", {class: "score", y: RADIUS + 18});
+      score.textContent = clipped(rounds[point.id].score, 16);
+      node.append(pop, score);
+      node.addEventListener("mouseenter", () => showTip(point.id));
+      node.addEventListener("mouseleave", hideTipSoon);
+      node.addEventListener("focus", () => showTip(point.id));
+      node.addEventListener("blur", hideTip);
+      byId("nodes").append(node);
+      nodes[point.id] = node;
+    }
+  }
+
+  function buildLegend() {
+    const legend = byId("legend");
+    for (const [state, text] of Object.entries(LEGEND)) {
+      const swatch = svg("svg", {width: 18, height: 18, "aria-hidden": "true"});
+      const group = svg("g", {class: `node ${state}`});
+      group.append(svg("circle", {class: "disc", cx: 9, cy: 9, r: 7}));
+      swatch.append(group);
+      const item = element("li");
+      item.append(swatch, text);
+      legend.append(item);
+    }
+    for (const [merged, text] of [["", "parent"], [" merged", "merged in by a compose"]]) {
+      const swatch = svg("svg", {width: 26, height: 18, "aria-hidden": "true"});
+      swatch.append(svg("path", {class: `edge${merged}`, d: "M1,9 L25,9"}));
+      const item = element("li");
+      item.append(swatch, text);
+      legend.append(item);
+    }
+  }
+
+  function pickedText(round) {
+    const [parent, ...merged] = round.parents;
+    switch (round.operator) {
+      case "baseline":
+        return "The starting point of the run.";
+      case "initial":
+        return `First idea of the run, built on ${parent}. No draw.`;
+      case "variant":
+        return `Variant: one change to ${parent}.`;
+      case "compose":
+        return `Compose: ${merged.join(" and ")} merged into ${parent}.`;
+      case "fork":
+        return `Fork: a second branch from ${parent}, so that two branches can be composed `
+          + "later.";
+      default:
+        return `Fresh idea, built on ${parent}.`;
+    }
+  }
+
+  function heading(text) {
+    return element("h3", "", text);
+  }
+
+  function verdict(state, text) {
+    const line = element("p");
+    line.append(element("span", `verdict ${state}`, text));
+    return line;
+  }
+
+  function changeLines(changes) {
+    return changes.map((change) => element(
+      "p", "change", `${change.id} ${CHANGE[change.status]} (${change.status}): ${change.why}`,
+    ));
+  }
+
+  function renderStep(frame, round) {
+    const body = byId("step-body");
+    body.replaceChildren();
+    if (round === null) {
+      byId("step-title").textContent = "Finish";
+      body.append(
+        heading("Best point"), verdict("frontier", data.finish.best),
+        element("p", "", data.finish.reason), ...changeLines(data.finish.changes),
+      );
+      return;
+    }
+    byId("step-title").textContent = round.number === 0
+      ? `Baseline ${round.id}` : `Round ${round.number} of ${data.total}: ${round.id}`;
+    body.append(
+      heading("Idea"), element("p", "", round.idea),
+      heading("How it was picked"), element("p", "", pickedText(round)),
+    );
+    if (round.draw) body.append(element("p", "draw", `Draw: ${round.draw}`));
+    body.append(element("p", "", round.picked), heading("Result"));
+    if (frame.phase === "pick") {
+      body.append(verdict("candidate", "Being evaluated"));
+      return;
+    }
+    body.append(verdict(VERDICT_STATE[round.status], VERDICT[round.status]));
+    if (round.score) body.append(element("p", "", `${data.metric}: ${round.score}`));
+    body.append(element("p", "", round.outcome), ...changeLines(round.changes));
+  }
+
+  function renderFrontier(frame) {
+    const onFrontier = data.points.filter((point) => frame.states[point.id] === "frontier");
+    byId("frontier").replaceChildren(...onFrontier.map((point) => {
+      const score = rounds[point.id].score;
+      return element("li", "", score ? `${point.id} \u00b7 ${score}` : point.id);
+    }));
+  }
+
+  function renderLog() {
+    const items = [];
+    for (let index = 0; index <= current; index++) {
+      const frame = data.frames[index];
+      if (frame.phase !== "result") continue;
+      const round = data.rounds[frame.round];
+      const item = element("li", data.frames[current].round === frame.round ? "current" : "");
+      const jump = element("button", "", `${round.id} \u00b7 ${round.operator}`);
+      jump.type = "button";
+      jump.addEventListener("click", () => go(index));
+      item.append(jump, element("span", `verdict ${VERDICT_STATE[round.status]}`, round.status));
+      items.push(item);
+    }
+    const log = byId("log");
+    log.replaceChildren(...items);
+    log.scrollTop = log.scrollHeight;  // the newest round is the last entry
+  }
+
+  function stateText(state) {
+    return STATE_TEXT[state] || "not evaluated yet";
+  }
+
+  // The details are built once per point, so a long tooltip keeps its scroll position while
+  // the frames change under it; only its first line, the point's state, follows the frame.
+  function showTip(id) {
+    clearTimeout(tipTimer);
+    const point = points[id];
+    if (tipFor !== id) {
+      const table = element("table");
+      for (const [field, value] of point.details) {
+        const row = element("tr");
+        row.append(element("th", "", field), element("td", "", value));
+        table.append(row);
+      }
+      const source = element("div", "source", `Details from ${point.source}`);
+      tooltip.replaceChildren(element("div"), table, source);
+      tipFor = id;
+    }
+    const state = stateText(data.frames[current].states[id]);
+    tooltip.firstChild.replaceChildren(element("strong", "", id), ` \u00b7 ${state}`);
+    tooltip.hidden = false;
+    const disc = nodes[id].querySelector(".disc").getBoundingClientRect();
+    const tip = tooltip.getBoundingClientRect();
+    let left = disc.right + 12;
+    if (left + tip.width > window.innerWidth - 8) left = disc.left - 12 - tip.width;
+    const top = disc.top + disc.height / 2 - tip.height / 2;
+    tooltip.style.left = `${Math.max(8, left)}px`;
+    tooltip.style.top = `${Math.max(8, Math.min(top, window.innerHeight - tip.height - 8))}px`;
+  }
+
+  function hideTip() {
+    clearTimeout(tipTimer);
+    tooltip.hidden = true;
+    tipFor = null;
+  }
+
+  // Leaves the reader time to move from a point onto its tooltip and scroll it.
+  function hideTipSoon() {
+    clearTimeout(tipTimer);
+    tipTimer = setTimeout(hideTip, 250);
+  }
+
+  // Scroll the drawing, not the page, until the point of the step is in view.
+  function reveal(point) {
+    const canvas = byId("canvas");
+    const pad = 90;
+    canvas.scrollLeft = Math.min(
+      Math.max(canvas.scrollLeft, point.x + pad - canvas.clientWidth), Math.max(0, point.x - pad),
+    );
+    canvas.scrollTop = Math.min(
+      Math.max(canvas.scrollTop, point.y + pad - canvas.clientHeight), Math.max(0, point.y - pad),
+    );
+  }
+
+  function show(index) {
+    current = Math.max(0, Math.min(index, last));
+    const frame = data.frames[current];
+    const round = frame.round === null ? null : data.rounds[frame.round];
+    for (const point of data.points) {
+      const state = frame.states[point.id] || "absent";
+      const classes = ["node", state];
+      if (round !== null && round.id === point.id) classes.push("focus");
+      if (round !== null && frame.phase === "pick" && round.parents.includes(point.id)) {
+        classes.push("parent");
+      }
+      if (frame.best === point.id) classes.push("best");
+      nodes[point.id].setAttribute("class", classes.join(" "));
+      nodes[point.id].setAttribute("aria-label", `${point.id}, ${stateText(state)}`);
+    }
+    for (const edge of edges) {
+      const state = frame.states[edge.to] || "absent";
+      edge.path.setAttribute("class", `edge ${state}${edge.merged ? " merged" : ""}`);
+    }
+    renderStep(frame, round);
+    renderFrontier(frame);
+    renderLog();
+    byId("scrub").value = current;
+    byId("position").textContent = `Step ${current + 1} of ${last + 1}`;
+    byId("prev").disabled = current === 0;
+    byId("next").disabled = current === last;
+    reveal(points[round === null ? frame.best : round.id]);
+    if (tipFor !== null) {
+      if (frame.states[tipFor]) showTip(tipFor); else hideTip();
+    }
+  }
+
+  function pause() {
+    clearTimeout(timer);
+    timer = 0;
+    byId("play").textContent = current === last ? "Replay" : "Play";
+  }
+
+  function arm() {
+    const wait = data.frames[current].phase === "pick" ? PICK_MS : RESULT_MS;
+    timer = setTimeout(tick, wait / Number(byId("speed").value));
+    byId("play").textContent = "Pause";
+  }
+
+  function tick() {
+    show(current + 1);
+    if (current < last) arm(); else pause();
+  }
+
+  function play() {
+    if (current === last) show(0);
+    arm();
+  }
+
+  // A step the reader asks for stops the playback.
+  function go(index) {
+    show(index);
+    pause();
+  }
+
+  // Draw every frame and report what does not match it, then stay on the last frame; the
+  // agent runs this after rendering.
+  function selfCheck() {
+    const errors = [];
+    pause();
+    for (let index = 0; index <= last; index++) {
+      show(index);
+      const frame = data.frames[index];
+      for (const point of data.points) {
+        const state = frame.states[point.id] || "absent";
+        if (!nodes[point.id].classList.contains(state)) {
+          errors.push(`frame ${index}: ${point.id} is not drawn as ${state}`);
+        }
+      }
+      if (!byId("step-title").textContent || !byId("step-body").textContent) {
+        errors.push(`frame ${index}: the step panel is empty`);
+      }
+    }
+    for (const point of data.points) {
+      showTip(point.id);
+      if (tooltip.querySelectorAll("tr").length !== point.details.length) {
+        errors.push(`${point.id}: the tooltip does not list its ${point.details.length} details`);
+      }
+    }
+    hideTip();
+    go(last);
+    return {ok: errors.length === 0, frames: last + 1, points: data.points.length, errors};
+  }
+
+  document.title = data.title;
+  byId("title").textContent = data.title;
+  byId("goal").textContent = `Goal: ${data.goal}`;
+  byId("scrub").max = last;
+  buildScene();
+  buildLegend();
+  byId("prev").addEventListener("click", () => go(current - 1));
+  byId("next").addEventListener("click", () => go(current + 1));
+  byId("play").addEventListener("click", () => (timer ? pause() : play()));
+  byId("scrub").addEventListener("input", (event) => go(Number(event.target.value)));
+  byId("discarded").addEventListener("change", (event) => {
+    document.body.classList.toggle("hide-discarded", !event.target.checked);
+  });
+  tooltip.addEventListener("mouseenter", () => clearTimeout(tipTimer));
+  tooltip.addEventListener("mouseleave", hideTip);
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") hideTip();
+    if (event.target.closest("input, select")) return;  // the arrows move the slider itself
+    if (event.key === "ArrowRight") go(current + 1);
+    if (event.key === "ArrowLeft") go(current - 1);
+  });
+
+  // "#frame=N" opens on that step and stays there; otherwise the run plays from the start.
+  function openAsked() {
+    const asked = /^#frame=(\d+)$/.exec(window.location.hash);
+    if (asked) go(Number(asked[1]));
+    return asked !== null;
+  }
+  window.addEventListener("hashchange", openAsked);
+  go(0);
+  if (!openAsked() && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) play();
+
+  window.discoverViz = {
+    show: go, play, pause, selfCheck, frameCount: last + 1,
+    get frame() { return current; },
+    get playing() { return timer !== 0; },
+  };
+})();
+</script>
+</body>
+</html>

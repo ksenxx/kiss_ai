@@ -861,7 +861,7 @@ def test_agent_emits_a_compaction_event_with_the_tokens_removed(
 # earlier turn's reasoning back (DeepSeek), where a turn goes out entire.
 # ---------------------------------------------------------------------------
 
-PASSBACK_MODEL = "deepseek-ai/DeepSeek-V4-Pro"
+PASSBACK_MODEL = "openrouter/deepseek/deepseek-v4-pro"
 """A catalog name of the DeepSeek family; the local server answers for it."""
 
 

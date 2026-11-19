@@ -104,7 +104,7 @@ You can also steer the agent's execution and ask for status when an agent is run
 
 Go to the Settings panel and copy the URL at the top. This URL contains a message showing the latest cloudflared URL where you can find the {{PRODUCT_NAME}} web app. Send the URL from the Settings page to your mobile device. Also view or set the remote password on the Settings page. You can SMS, Slack, or email the URL to the mobile device.
 
-Open the URL in a browser on the mobile device and enter your remote password. You will see your familiar Codex-like chat interface.
+Open the URL in a browser on the mobile device and enter your remote password. You will see the same chat interface as on your desktop.
 
 On a phone the four desktop panes are four screens: swipe left or right to move between your chats, the chat, the open file, and the Task Info panel. The file screen is skipped while no file is open.
 

@@ -24,10 +24,12 @@ import importlib
 import logging
 import os
 import signal
+import subprocess
 import sys
 import threading
 import time
 from collections.abc import Callable
+from pathlib import Path
 from types import CodeType
 from typing import Any
 
@@ -171,6 +173,31 @@ def _serve() -> tuple[http.server.ThreadingHTTPServer, str]:
     srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return srv, f"http://127.0.0.1:{srv.server_address[1]}"
+
+
+def _lingering_browser_processes(profile: Path, seconds: float = 30.0) -> list[str]:
+    """Return the command lines that still name *profile* after *seconds* of waiting.
+
+    Every process of a Chromium (browser, renderers, crash handlers)
+    carries its user data directory on its command line.
+    """
+    if sys.platform == "win32":
+        listing = [
+            "powershell",
+            "-NoProfile",
+            "-Command",
+            "Get-CimInstance Win32_Process | ForEach-Object { $_.CommandLine }",
+        ]
+    else:
+        listing = ["ps", "-axww", "-o", "command="]
+    deadline = time.monotonic() + seconds
+    while True:
+        output = subprocess.run(listing, capture_output=True, timeout=120).stdout
+        lines = output.decode(errors="replace").splitlines()
+        left = [line for line in lines if str(profile) in line]
+        if not left or time.monotonic() >= deadline:
+            return left
+        time.sleep(0.5)
 
 
 def _drive(
@@ -474,6 +501,9 @@ def test_input_watchdog_without_a_browser_pid_kills_the_driver(tmp_path):
             tool.close()
         srv.shutdown()
         srv.server_close()
+    # The wedged renderer must go with its browser: on Windows it outlived
+    # the killed driver and kept a core busy.
+    assert _lingering_browser_processes(tmp_path / "prof") == []
 
 
 def _driver_pid(tool: WebUseTool) -> int:

@@ -6,12 +6,12 @@
 
 A sub-agent (``_subagent_info`` set, as the daemon does for every
 ``run_agent`` / ``run_parallel`` child) gets a private folder in the
-system temp directory.  The folder is its scratch dir, holds its job
+agents' temp directory.  The folder is its scratch dir, holds its job
 logs and spilled tool output, and is the temp directory of every command
 its tools start; when the run ends, however it ends, its background jobs
 and every process still carrying the folder in its environment are
-killed and the folder is deleted.  A top-level task keeps ``./tmp/`` and
-its jobs.
+killed and the folder is deleted.  A top-level task keeps its scratch dir
+(the agents' temp directory, or its folder there) and its jobs.
 
 Real agents against the scripted local model server, real processes,
 real containers.
@@ -35,12 +35,12 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import shlex
 import shutil
 import signal
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -64,6 +64,7 @@ from kiss.agents.sorcar.docker_manager import (
     remove_private_dir_script,
 )
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+from kiss.core.kiss_tmp import kiss_tmp_dir
 from kiss.core.processes import (
     _SWEEP_SECONDS,
     _env_marked_pids,
@@ -338,7 +339,7 @@ def test_sub_agent_leaves_no_process_no_temp_file_and_nothing_in_the_work_tree(
     scratch = _scratch_dir(requests[0])
     folder = Path(scratch)
     assert scratch.endswith("/") and folder.name.startswith("kiss-sub-")
-    assert folder.parent.resolve() == Path(tempfile.gettempdir()).resolve()
+    assert folder.parent == kiss_tmp_dir()
     assert (work_dir / "env.txt").read_text().strip() == "|".join([str(folder)] * 4)
     assert (work_dir / "parallel.txt").read_text().strip() == str(folder)
     # the job's log and the spilled output were in the folder, as the model was told
@@ -356,8 +357,12 @@ def test_sub_agent_leaves_no_process_no_temp_file_and_nothing_in_the_work_tree(
     assert not (work_dir / "tmp").exists()
 
 
-def test_top_level_task_keeps_its_tmp_dir_and_its_jobs(tmp_path: Path) -> None:
-    """A top-level task is as before: ``./tmp/`` scratch, the daemon's temp dir, jobs kept."""
+def test_top_level_task_keeps_its_scratch_dir_and_its_jobs(tmp_path: Path) -> None:
+    """A top-level task: the agents' temp directory as scratch, the daemon's temp dir, jobs kept.
+
+    With no task id the scratch dir is the agents' temp directory itself; the job's log
+    stays in it after the run, and no ``tmp`` folder is made in the work dir.
+    """
     script = [
         _bash('echo "${KISS_SUBAGENT_DIR-unset}|${TMPDIR-unset}" > env.txt'),
         _bash(f"echo $$ > job.pid; exec {FOREVER}", background=True),
@@ -368,13 +373,14 @@ def test_top_level_task_keeps_its_tmp_dir_and_its_jobs(tmp_path: Path) -> None:
     try:
         result = _run(agent, tmp_path, script, requests)
         assert result["success"] is True
-        assert _scratch_dir(requests[0]) == "./tmp/"
+        assert _scratch_dir(requests[0]) == f"{kiss_tmp_dir().as_posix()}/"
         # what this process has itself (no mark, unless a sub-agent runs this test)
         assert (tmp_path / "env.txt").read_text().strip() == "|".join(
             os.environ.get(name, "unset") for name in ("KISS_SUBAGENT_DIR", "TMPDIR"))
-        assert f"{tmp_path}/tmp/bash_jobs/" in _tool_results(requests[2])[-1]
-        assert list((tmp_path / "tmp" / "bash_jobs").glob("*.log"))
+        log = Path(_tool_results(requests[2])[-1].partition("Log: ")[2].partition("\n")[0])
+        assert log.parent == kiss_tmp_dir() / "bash_jobs" and log.is_file()
         assert _running(_pid_from(tmp_path / "job.pid"))
+        assert not (tmp_path / "tmp").exists()
     finally:
         for job in agent._background_jobs.values():
             job.kill.set()
@@ -491,7 +497,7 @@ def test_sub_agent_in_a_container_is_cleaned_up_in_the_container(
     ], requests, docker_image=attached)
     assert result["success"] is True
     folder = _scratch_dir(requests[0]).rstrip("/")
-    assert folder.startswith("/tmp/kiss-sub-")
+    assert re.fullmatch(r"/tmp/kiss-tmp/kiss-sub-[0-9a-f]{8}", folder)
     assert _sh(container, "cat env.txt") == "|".join([folder] * 4)
     # the job kept its files in the folder, none in the directory the container's tasks share
     assert f"; log: {folder}/kiss-jobs/" in _tool_results(requests[2])[-1]
@@ -502,18 +508,20 @@ def test_sub_agent_in_a_container_is_cleaned_up_in_the_container(
     assert _alive_in(container, pids) == []
     assert _sh(container, f"ls -d {folder} 2>/dev/null") == ""
     assert _sh(container, "grep -l KISS_SUBAGENT_DIR /proc/[0-9]*/environ 2>/dev/null") == ""
-    # a top-level task in the same container: a scratch dir under the container's /tmp (the
-    # work tree is the caller's directory), no mark, and the shared directory for its job's
-    # files, which stay
+    # a top-level task in the same container: the agents' temp directory of the container as
+    # its scratch dir (the work tree is the caller's directory), no mark, and the shared
+    # directory for its job's files, which stay
     top: list[dict] = []
     _run(SorcarAgent("docker-top"), tmp_path, [
         _bash('echo "${KISS_SUBAGENT_DIR-unset}|${TMPDIR-unset}" > top.txt'), job, done,
     ], top, docker_image=attached)
-    assert _scratch_dir(top[0]) == "/tmp/kiss-scratch/"
+    assert _scratch_dir(top[0]) == "/tmp/kiss-tmp/"
     assert _sh(container, "cat top.txt") == "unset|unset"
     assert f"; log: {JOBS_DIR}/" in _tool_results(top[2])[-1]
     assert _sh(container, f"ls {JOBS_DIR}/*.log") != ""
     assert _alive_in(container, _sh(container, "cat job.pid").split()) != []
+    # neither task made a tmp folder in the work dir, the host's or the container's
+    assert not (tmp_path / "tmp").exists() and _sh(container, "ls -d tmp 2>/dev/null") == ""
 
 
 def test_a_sub_agents_container_jobs_keep_their_files_in_its_folder(container: Any) -> None:
@@ -734,16 +742,20 @@ def test_host_tools_of_a_sub_agent_in_a_container_write_to_a_host_folder(
     assert saved.startswith("Screenshot saved to ")
     shot = Path(saved.removeprefix("Screenshot saved to ").partition(" (")[0])
     assert shot.name.startswith("chrome-shot-") and shot.parent.name.startswith("kiss-sub-")
-    assert shot.parent.parent.resolve() == Path(tempfile.gettempdir()).resolve()
+    assert shot.parent.parent == kiss_tmp_dir()
     in_container = _sh(container, "cat folder.txt")
     assert _scratch_dir(requests[0]) == f"{in_container}/" and in_container != str(shot.parent)
     assert not shot.parent.exists() and not (tmp_path / "tmp").exists()
 
 
-def test_a_container_that_cannot_hold_the_folder_leaves_the_scratch_dir_in_the_work_tree(
+def test_a_container_that_cannot_hold_the_folder_gets_the_scratch_dir_of_a_task_there(
     tmp_path: Path,
 ) -> None:
-    """Read-only, the container gets no folder: the scratch dir is ``./tmp/``, not the host's."""
+    """Read-only, the container gets no folder: the scratch dir is the one a task has there.
+
+    That is the container's ``/tmp/kiss-tmp/``: not the folder the tools that run on the
+    host keep for the sub-agent, and nothing in the work tree.
+    """
     container = _start_container(read_only=True)
     try:
         requests: list[dict] = []
@@ -754,7 +766,9 @@ def test_a_container_that_cannot_hold_the_folder_leaves_the_scratch_dir_in_the_w
     finally:
         container.remove(force=True)
     assert result["success"] is True
-    assert _scratch_dir(requests[0]) == "./tmp/" and "unset" in _tool_results(requests[1])[-1]
+    assert _scratch_dir(requests[0]) == "/tmp/kiss-tmp/"
+    assert "unset" in _tool_results(requests[1])[-1]
+    assert not (tmp_path / "tmp").exists()
 
 
 class _EndsBeforeTheSecondListing:

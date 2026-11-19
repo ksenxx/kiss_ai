@@ -393,7 +393,6 @@ _PROVIDER_KEYS = (
     "OPENAI_API_KEY",
     "GEMINI_API_KEY",
     "OPENROUTER_API_KEY",
-    "TOGETHER_API_KEY",
 )
 
 # Enough for git (and every other POSIX tool the agent shells out to)

@@ -4,7 +4,7 @@
 # add your name here
 """A search worker whose own failure is a ``TimeoutError`` must not hang the search.
 
-``MemoryTools._search`` waits for each worker future in short
+``MemoryTools.search`` waits for each worker future in short
 ``future.result(timeout=...)`` slices and catches the ``TimeoutError``
 those slices raise so a Stop can land between them.  A worker whose
 embedder times out on the wire raises a ``TimeoutError`` of its own

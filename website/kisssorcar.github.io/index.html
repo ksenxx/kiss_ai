@@ -4,14 +4,14 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>KISS Sorcar — Tell it what to do, in English. It picks the best LLM and ships the work.</title>
-  <meta name="description" content="Open-source AI agent. Tell it what to do in English — it picks the best LLM, runs on your laptop, and ships the work. Apache 2.0, 695 models. Works as a web/mobile app, a Python API, and a terminal command.">
+  <meta name="description" content="Open-source AI agent. Tell it what to do in English — it picks the best LLM, runs on your laptop, and ships the work. Apache 2.0, 988 models. Works as a web/mobile app, a Python API, and a terminal command.">
   <link rel="canonical" href="https://kisssorcar.github.io/">
   <link rel="alternate" type="text/markdown" href="https://kisssorcar.github.io/index.html.md" title="This page as Markdown">
   <link rel="llms-txt" type="text/plain" href="https://kisssorcar.github.io/llms.txt" title="LLM-friendly content index">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://kisssorcar.github.io/">
   <meta property="og:title" content="KISS Sorcar — Tell it what to do, in English. It picks the best LLM and ships the work.">
-  <meta property="og:description" content="Open-source AI agent. Tell it what to do in English — it picks the best LLM, runs on your laptop, and ships the work. Apache 2.0, 695 models.">
+  <meta property="og:description" content="Open-source AI agent. Tell it what to do in English — it picks the best LLM, runs on your laptop, and ships the work. Apache 2.0, 988 models.">
   <meta property="og:image" content="https://kisssorcar.github.io/assets/KISS-Sorcar.png">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
@@ -1967,7 +1967,7 @@
     <h1>Tell it what to do, in any language and give it a concrete goal. It picks the best LLMs, runs on your laptop, and ships the work.</h1>
     <div class="hero-trust" aria-label="At a glance">
       <span><strong>Apache 2.0</strong> · open source</span>
-      <span><strong>695 models</strong> · 9 providers</span>
+      <span><strong>988 models</strong> · 7 providers</span>
       <span><strong>~3,000 lines</strong> of core agents code</span>
     </div>
   </div>
@@ -2081,7 +2081,7 @@
             </tr>
             <tr>
               <th class="cap">Multiple models from multiple vendors in the same task</th>
-              <td class="kiss"><span class="yes">✓</span> Mix OpenAI, Anthropic, Gemini, Together, Z.AI, Moonshot AI, OpenRouter, Claude Code CLI, and Codex CLI</td>
+              <td class="kiss"><span class="yes">✓</span> Mix OpenAI, Anthropic, Amazon Bedrock, Gemini, OpenRouter, Claude Code CLI, and Codex CLI</td>
               <td><span class="no">✗</span> Anthropic Claude models only</td>
               <td><span class="no">✗</span> One model per task</td>
             </tr>
@@ -2099,7 +2099,7 @@
             </tr>
             <tr>
               <th class="cap">Models in bundled catalog</th>
-              <td class="kiss">695 across 9 provider categories</td>
+              <td class="kiss">988 across 7 provider categories</td>
               <td>Claude family only</td>
               <td>Subset chosen by Cursor</td>
             </tr>
@@ -2917,9 +2917,6 @@ At each step, keep track of the best prompt, which has the maximum number of suc
             <div class="code-line"><span class="c">export</span> <span class="f">ANTHROPIC_API_KEY</span>=<span class="s">...</span></div>
             <div class="code-line"><span class="c">export</span> <span class="f">OPENAI_API_KEY</span>=<span class="s">...</span></div>
             <div class="code-line"><span class="c">export</span> <span class="f">GEMINI_API_KEY</span>=<span class="s">...</span></div>
-            <div class="code-line"><span class="c">export</span> <span class="f">TOGETHER_API_KEY</span>=<span class="s">...</span></div>
-            <div class="code-line"><span class="c">export</span> <span class="f">ZAI_API_KEY</span>=<span class="s">...</span></div>
-            <div class="code-line"><span class="c">export</span> <span class="f">MOONSHOT_API_KEY</span>=<span class="s">...</span></div>
             <div class="code-line"><span class="c">export</span> <span class="f">OPENROUTER_API_KEY</span>=<span class="s">...</span></div>
           </div>
           <p style="margin-top:0.7rem;">You can also set API keys, a custom model endpoint, and custom HTTP headers in the Settings panel of the web app &mdash; or per task via the Python API&rsquo;s <code>model_config</code> option. You can register your own models (e.g. a local vLLM/Ollama endpoint) in the <strong>Custom Models</strong> section of the Settings panel; entries are stored in <code>~/.kiss/MY_MODELS.json</code> and appear in the model picker alongside the bundled catalog.</p>
@@ -3054,23 +3051,21 @@ At each step, keep track of the best prompt, which has the maximum number of suc
   <div class="section-wrap">
   <section id="models" class="section-card">
     <span class="num">§ 11 — Models Supported</span>
-    <h2>🤖 695 models. 9 provider categories.<a href="#models" class="anchor">¶</a></h2>
-    <p class="sub">KISS Sorcar ships a catalog of <strong>695 models</strong> across <strong>9 provider categories</strong>, with built-in prices, context lengths, and capability flags (<code>fc</code> function calling, <code>gen</code> generation, <code>emb</code> embedding). The source of truth is <a href="https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/core/models/MODEL_INFO.json">src/kiss/core/models/MODEL_INFO.json</a>. Models are grouped by the provider that routes them (i.e., whose API key or CLI serves the model); open-weight <code>openai/gpt-oss-*</code> and <code>google/gemma-*</code> models are served via Together AI.</p>
+    <h2>🤖 988 models. 7 provider categories.<a href="#models" class="anchor">¶</a></h2>
+    <p class="sub">KISS Sorcar ships a catalog of <strong>988 models</strong> across <strong>7 provider categories</strong>, with built-in prices, context lengths, and capability flags (<code>fc</code> function calling, <code>gen</code> generation, <code>emb</code> embedding, <code>dec</code> typed decisions via OpenRouter&rsquo;s <code>/api/alpha/decisions</code>). The source of truth is <a href="https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/core/models/MODEL_INFO.json">src/kiss/core/models/MODEL_INFO.json</a>. Models are grouped by the provider that routes them (i.e., whose API key or CLI serves the model).</p>
 
     <div class="section-body">
       <div class="grid-2">
         <div class="inner-card" style="--i:0">
           <h3>Provider categories</h3>
           <div style="margin-top:0.5rem;">
-            <div class="provider-row"><span class="label">OpenAI</span><span class="count">102</span></div>
-            <div class="provider-row"><span class="label">Anthropic</span><span class="count">14</span></div>
-            <div class="provider-row"><span class="label">Gemini</span><span class="count">24</span></div>
-            <div class="provider-row"><span class="label">Together AI</span><span class="count">103</span></div>
-            <div class="provider-row"><span class="label">Z.AI</span><span class="count">8</span></div>
-            <div class="provider-row"><span class="label">Moonshot AI</span><span class="count">10</span></div>
-            <div class="provider-row"><span class="label">OpenRouter</span><span class="count">378</span></div>
-            <div class="provider-row"><span class="label">Claude Code CLI (<code>cc/*</code>)</span><span class="count">14</span></div>
-            <div class="provider-row"><span class="label">Codex CLI (<code>codex/*</code>)</span><span class="count">8</span></div>
+            <div class="provider-row"><span class="label">OpenAI</span><span class="count">99</span></div>
+            <div class="provider-row"><span class="label">Anthropic</span><span class="count">82</span></div>
+            <div class="provider-row"><span class="label">Amazon Bedrock (<code>bedrock/*</code>)</span><span class="count">144</span></div>
+            <div class="provider-row"><span class="label">Gemini</span><span class="count">57</span></div>
+            <div class="provider-row"><span class="label">OpenRouter</span><span class="count">514</span></div>
+            <div class="provider-row"><span class="label">Claude Code CLI (<code>cc/*</code>)</span><span class="count">79</span></div>
+            <div class="provider-row"><span class="label">Codex CLI (<code>codex/*</code>)</span><span class="count">13</span></div>
           </div>
         </div>
 
@@ -3079,16 +3074,20 @@ At each step, keep track of the best prompt, which has the maximum number of suc
           <p>Across all bundled providers, the catalog currently reports:</p>
           <div class="stat-row">
             <div class="stat-pill">
-              <div class="n">641</div>
+              <div class="n">937</div>
               <div class="l">generation-capable models</div>
             </div>
             <div class="stat-pill">
-              <div class="n">483</div>
+              <div class="n">803</div>
               <div class="l">function-calling-capable models</div>
             </div>
             <div class="stat-pill">
-              <div class="n">11</div>
+              <div class="n">6</div>
               <div class="l">embedding models</div>
+            </div>
+            <div class="stat-pill">
+              <div class="n">37</div>
+              <div class="l">decision models</div>
             </div>
           </div>
           <p style="margin-top:0.9rem;font-size:0.88rem;">See the <a href="https://github.com/ksenxx/kiss_ai/blob/main/MODELS.md">full per-provider model list</a> in MODELS.md, including the <code>cc/*</code> and <code>codex/*</code> namespaces that let KISS Sorcar run on top of the Claude Code and Codex CLIs.</p>
@@ -3867,7 +3866,7 @@ At each step, keep track of the best prompt, which has the maximum number of suc
     (function () {
       if (!('IntersectionObserver' in window)) return;
       const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-      // Find hero-trust strong elements containing numeric content (e.g. "695 models").
+      // Find hero-trust strong elements containing numeric content (e.g. "988 models").
       const strongs = document.querySelectorAll('.hero-trust strong');
       const items = [];
       strongs.forEach(el => {

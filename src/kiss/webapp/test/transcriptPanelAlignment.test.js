@@ -6,23 +6,36 @@
 'use strict';
 
 // The panels holding the user's own words -- the task panel and a
-// steering Message -- are right-justified, a tenth of the chat's width
-// clear on their left; every other transcript panel (Prompt, System
-// Prompt, tool calls, Thoughts, results, status lines) is
-// left-justified, a twentieth clear on its right, so the thread reads
-// as a conversation.  A panel nested
-// inside another (a tool error under its tool call) fills its parent.
-// The thinking tokens inside a Thoughts panel are plain text, not a
-// boxed "Thinking" subpanel with a header of its own.
+// steering Message -- are bubbles: as wide as their text (at most 85%
+// of the chat column) against the column's right edge.  Every other
+// transcript panel (Prompt, System Prompt, tool calls, Thoughts,
+// results, status lines) runs the column's full width from its left
+// edge, so the thread reads as a conversation.  A panel nested inside
+// another (a tool error under its tool call) fills its parent.  The
+// thinking tokens inside a Thoughts panel are plain text, not a boxed
+// "Thinking" subpanel with a header of its own.
 
 const assert = require('assert');
+const fs = require('fs');
+const path = require('path');
 const harness = require('./simplify2_harness');
+const {installTokenisedCss, lastCssRule} = require('./designTokens');
 const {readyTabId, output} = harness;
 
-/** The harness page with main.css applied; `win.__posted` is its ledger. */
+const MAIN_CSS = fs.readFileSync(
+  path.join(__dirname, '..', 'media', 'main.css'),
+  'utf8',
+);
+
+/**
+ * The harness page with main.css applied; `win.__posted` is its ledger.
+ * The design tokens are inlined: jsdom drops the longhands of a
+ * shorthand that holds a var() (the bubble's `margin`), so the spacing
+ * and radius tokens are read as their concrete values.
+ */
 function makePage() {
   const {win, posted} = harness.makePage();
-  harness.loadMainCss(win);
+  installTokenisedCss(win, 'main.css');
   win.__posted = posted;
   return win;
 }
@@ -68,17 +81,27 @@ function testUserPanelsRightAgentPanelsLeft() {
     const cs = win.getComputedStyle(panel);
     assert.strictEqual(
       cs.width,
-      '90%',
-      'the ' + name + ' leaves a tenth of the chat clear',
+      'fit-content',
+      'the ' + name + ' is as wide as its text',
+    );
+    assert.strictEqual(
+      cs.maxWidth,
+      '85%',
+      'the ' + name + ' leaves the left of the chat column clear',
+    );
+    assert.strictEqual(
+      cs.minWidth,
+      '120px',
+      'the ' + name + ' keeps its label and copy button apart',
     );
     assert.strictEqual(
       cs.marginLeft,
       'auto',
       'the ' + name + ' is pushed to the right edge',
     );
-    assert.notStrictEqual(
+    assert.strictEqual(
       cs.marginRight,
-      'auto',
+      '0px',
       'the ' + name + ' touches the right edge',
     );
     assert.strictEqual(
@@ -98,13 +121,19 @@ function testUserPanelsRightAgentPanelsLeft() {
     const cs = win.getComputedStyle(panel);
     assert.strictEqual(
       cs.width,
-      '95%',
-      'the ' + name + ' leaves a twentieth of the chat clear',
-    );
-    assert.notStrictEqual(
-      cs.marginLeft,
       'auto',
-      'the ' + name + ' stays on the left edge',
+      'the ' + name + ' runs the full width of the chat column',
+    );
+    assert.strictEqual(cs.maxWidth, 'none', 'the ' + name + ' has no cap');
+    assert.strictEqual(
+      cs.marginLeft,
+      '0px',
+      'the ' + name + ' starts at the left edge',
+    );
+    assert.strictEqual(
+      cs.marginRight,
+      '0px',
+      'the ' + name + ' ends at the right edge',
     );
     assert.strictEqual(
       cs.boxSizing,
@@ -114,7 +143,7 @@ function testUserPanelsRightAgentPanelsLeft() {
   }
   win.close();
   console.log(
-    '  ok - user panels are right-justified at 90%, the rest left at 95%',
+    '  ok - user panels are right-justified bubbles, the rest full width',
   );
 }
 
@@ -139,7 +168,7 @@ function testNestedPanelFillsItsParent() {
   assert.strictEqual(
     win.getComputedStyle(nested).width,
     'auto',
-    'a panel nested in another fills its parent instead of 95% of it',
+    'a panel nested in another fills its parent',
   );
   win.close();
   console.log('  ok - a nested panel fills its parent');
@@ -165,7 +194,7 @@ function testSummaryAdoptedPanelsFillTheSummary() {
     assert.strictEqual(
       win.getComputedStyle(panel).width,
       'auto',
-      'the adopted ' + name + ' fills the summary instead of 95% of it',
+      'the adopted ' + name + ' fills the summary',
     );
   }
   win.close();
@@ -216,14 +245,13 @@ function testThinkingIsPlainTextInsideThoughts() {
   );
 }
 
-// On a narrow sidebar 90% and 95% look alike, so the bubbles carry
-// the cue themselves: the user's panels wear the deeper accent wash
-// (--bubble-user-tint, not the --accent-tint of other accent-marked
-// panels) with a tight top-right corner; the result card wears the
-// deeper neutral wash (--bubble-agent-tint) with a tight top-left
-// corner; the tool panels in between keep the plain surface.  JSDOM
-// hands back the unresolved var() names, which is what we compare.
-function testBubbleTintsAndTailCorners() {
+// Only the user's words sit in a bubble: a neutral wash
+// (--bubble-user-tint) with one 10px corner all round and no outline.
+// The agent's side is plain on the canvas: a tool call is a line with
+// no fill and no frame, and the result is prose under a hairline.
+// JSDOM hands back the unresolved var() names of the colours, which is
+// what we compare.
+function testOnlyTheUserPanelsAreBubbles() {
   const win = makePage();
   renderTranscript(win);
   send(win, {
@@ -247,14 +275,14 @@ function testBubbleTintsAndTailCorners() {
       'the ' + name + ' wears the user bubble tint',
     );
     assert.strictEqual(
-      cs.borderTopRightRadius,
-      'var(--radius-sm)',
-      'the ' + name + ' has a tight top-right corner',
+      cs.borderRadius,
+      '10px',
+      'the ' + name + ' has one 10px corner all round',
     );
     assert.strictEqual(
-      cs.borderRadius,
-      'var(--radius-lg)',
-      'the ' + name + ' keeps its round corners elsewhere',
+      cs.borderTopStyle,
+      'none',
+      'the ' + name + ' draws no outline',
     );
   }
   const taskText = userPanels['task panel'].querySelector('.task-panel-text');
@@ -267,47 +295,37 @@ function testBubbleTintsAndTailCorners() {
   assert.ok(result, 'the transcript rendered the result card');
   const rcs = win.getComputedStyle(result);
   assert.strictEqual(
-    rcs.background,
-    'var(--bubble-agent-tint)',
-    'the result card wears the agent bubble tint',
+    rcs.backgroundColor,
+    'rgba(0, 0, 0, 0)',
+    'the result is prose on the canvas, with no fill of its own',
   );
-  assert.strictEqual(
-    rcs.borderTopLeftRadius,
-    'var(--radius-sm)',
-    'the result card has a tight top-left corner',
-  );
-  assert.strictEqual(
-    rcs.borderRadius,
-    'var(--radius-xl)',
-    'the result card keeps its round corners elsewhere',
+  assert.strictEqual(rcs.borderRadius, '', 'the result has no card corner');
+  // jsdom cannot read back a border shorthand with a var() colour, so
+  // the hairline over the result is read from the stylesheet text.
+  assert.match(
+    lastCssRule(MAIN_CSS, '.rc'),
+    /(?:^|[;\s])border-top:\s*1px solid var\(--border\)\s*;/,
+    'a hairline sets the result off from the tool lines above it',
   );
   assert.strictEqual(
     rcs.width,
-    '95%',
-    'the result card stays a left-justified agent panel',
-  );
-  assert.notStrictEqual(
-    rcs.marginLeft,
     'auto',
-    'the result card stays on the left edge',
+    'the result runs the full width of the chat column',
+  );
+  assert.strictEqual(
+    rcs.marginLeft,
+    '0px',
+    'the result starts at the left edge',
   );
   const tool = out.querySelector(':scope > .ev.tc');
   const tcs = win.getComputedStyle(tool);
   assert.strictEqual(
-    tcs.background,
-    'var(--surface)',
-    'a tool call keeps the plain surface',
+    tcs.backgroundColor,
+    'rgba(0, 0, 0, 0)',
+    'a tool call is a line on the canvas, with no fill of its own',
   );
-  assert.notStrictEqual(
-    tcs.borderTopLeftRadius,
-    'var(--radius-sm)',
-    'a tool call has no tail corner',
-  );
-  assert.notStrictEqual(
-    tcs.borderTopRightRadius,
-    'var(--radius-sm)',
-    'a tool call has no tail corner',
-  );
+  assert.strictEqual(tcs.borderTopStyle, 'none', 'a tool call has no frame');
+  assert.strictEqual(tcs.borderRadius, '', 'a tool call has no card corner');
   // Both tints resolve on this main.css page and on a remote page (whose
   // remote-codex.css re-derives them for its themes).
   const remote = harness.makePage({
@@ -316,7 +334,7 @@ function testBubbleTintsAndTailCorners() {
   }).win;
   for (const page of [win, remote]) {
     const root = page.getComputedStyle(page.document.documentElement);
-    for (const token of ['--bubble-user-tint', '--bubble-agent-tint']) {
+    for (const token of ['--bubble-user-tint', '--panel-tint']) {
       assert.ok(
         root.getPropertyValue(token).includes('color-mix('),
         `${token} is a defined colour mix on the page`,
@@ -326,12 +344,12 @@ function testBubbleTintsAndTailCorners() {
   remote.close();
   win.close();
   console.log(
-    '  ok - the user and result bubbles carry their own tint and tail corner',
+    '  ok - the user panels are bubbles, the agent panels plain on the canvas',
   );
 }
 
 testUserPanelsRightAgentPanelsLeft();
-testBubbleTintsAndTailCorners();
+testOnlyTheUserPanelsAreBubbles();
 testNestedPanelFillsItsParent();
 testSummaryAdoptedPanelsFillTheSummary();
 testThinkingIsPlainTextInsideThoughts();

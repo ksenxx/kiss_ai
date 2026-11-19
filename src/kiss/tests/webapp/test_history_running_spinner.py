@@ -2,13 +2,13 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""End-to-end test: the task history panel renders a green spinner
+"""End-to-end test: the task history panel renders a clay spinner
 circle next to every task that is currently running.
 
 This is the running-indicator counterpart to
 ``test_history_failed_red_cross.py``.  It exercises the full
 pipeline used by the History sidebar to surface the
-``.sidebar-item-running`` green spinner:
+``.sidebar-item-running`` clay spinner:
 
 * The **backend** half — :meth:`AgentServer._get_running_task_ids`
   must report the row id of a task whose worker thread is alive.
@@ -20,8 +20,8 @@ pipeline used by the History sidebar to surface the
 * The **frontend** half — ``renderHistory`` in ``media/main.js``
   must render a visible ``.sidebar-item-running`` spinner as the FIRST
   child of every row whose ``is_running`` is ``True``: a 12x12 ring
-  whose leading edge is the theme green (``--status-ok`` -> ``--theme-charts-green``,
-  ``#6a9955`` = ``rgb(106, 153, 85)`` in the harness),
+  whose leading edge is Claude's clay, the working colour
+  (``--brand-clay``, ``#d97757`` = ``rgb(217, 119, 87)``),
   rotated by the ``status-spin`` keyframe animation -- the same ring,
   same animation as the composer's ``#wait-spinner``.
   Rows whose ``is_running`` is ``False`` must NOT render the spinner.
@@ -57,6 +57,10 @@ _API_JS = _MEDIA_DIR / "api.js"
 _PANEL_COPY_JS = _MEDIA_DIR / "panelCopy.js"
 _JS = _MEDIA_DIR / "main.js"
 _HTML = _MEDIA_DIR / "chat.html"
+
+# The working colour of every running indicator: main.css's
+# ``--brand-clay`` (#d97757), a brand constant no theme overrides.
+_CLAY = "rgb(217, 119, 87)"
 
 
 def _build_test_page() -> str:
@@ -266,7 +270,7 @@ def _post_history(
 
 def test_running_session_renders_spinner(_browser) -> None:
     """Every ``s.is_running`` session must render exactly one visible
-    green spinner inside its row.
+    clay spinner inside its row.
 
     Asserts the element exists, is painted, and matches the intended
     geometry / colour / animation from ``main.css``.
@@ -341,9 +345,9 @@ def test_running_session_renders_spinner(_browser) -> None:
         assert dot["borderTopWidth"] == "2px", (
             f"running spinner ring must be 2px thick; got {dot['borderTopWidth']!r}"
         )
-        assert dot["borderTopColor"] == "rgb(106, 153, 85)", (
-            "running spinner is not the green colour: "
-            f"border-top-color={dot['borderTopColor']!r}; expected rgb(106, 153, 85)"
+        assert dot["borderTopColor"] == _CLAY, (
+            "running spinner is not the clay working colour: "
+            f"border-top-color={dot['borderTopColor']!r}; expected {_CLAY}"
         )
         assert dot["animationName"] == "status-spin", (
             "running spinner must animate via 'status-spin'; "
@@ -496,7 +500,7 @@ def test_status_running_true_event_triggers_history_refresh(_browser) -> None:
             "() => !document.querySelector("
             "'#history-list .sidebar-item .sidebar-item-running'"
             ")"
-        ), "no green dot expected before the task starts running"
+        ), "no running dot expected before the task starts running"
 
         page.evaluate(
             "() => { window.__postedMessages.length = 0; }"
@@ -532,7 +536,7 @@ def test_status_running_true_event_triggers_history_refresh(_browser) -> None:
             "() => !!document.querySelector("
             "'#history-list .sidebar-item .sidebar-item-running'"
             ")"
-        ), "green dot must appear after status running=true refresh"
+        ), "running dot must appear after status running=true refresh"
 
         page.evaluate("() => { window.__postedMessages.length = 0; }")
         page.evaluate(
@@ -562,7 +566,7 @@ def test_status_running_true_event_triggers_history_refresh(_browser) -> None:
             "() => !document.querySelector("
             "'#history-list .sidebar-item .sidebar-item-running'"
             ")"
-        ), "green dot must disappear after status running=false refresh"
+        ), "running dot must disappear after status running=false refresh"
     finally:
         context.close()
 
@@ -574,7 +578,7 @@ def test_running_spinner_is_centered_middle_left_in_history_task_panel(
     middle-left of the task panel's first text line.
 
     The History sidebar renders each task as a multi-line panel with
-    title, metrics, and workspace metadata.  The green running marker
+    title, metrics, and workspace metadata.  The clay running marker
     should stay on the left edge, vertically centered on the first line
     of the task title.  The action buttons occupy a line of their own
     below the title, so centering on the whole panel would drop the
@@ -647,20 +651,21 @@ def test_search_results_can_render_running_spinner(_browser) -> None:
         )
         dot_visible = page.evaluate(
             """
-            () => {
+            (clay) => {
               const row = document.querySelector('#history-list .sidebar-item');
               const dot = row && row.querySelector('.sidebar-item-running');
               return !!row && row.offsetParent !== null &&
                 row.querySelector('.sidebar-item-text').textContent ===
                   'running task' &&
                 !!dot && dot.offsetParent !== null &&
-                getComputedStyle(dot).borderTopColor === 'rgb(106, 153, 85)' &&
+                getComputedStyle(dot).borderTopColor === clay &&
                 getComputedStyle(dot).animationName === 'status-spin';
             }
-            """
+            """,
+            _CLAY,
         )
         assert dot_visible, (
-            "running search result did not show a visible green spinner"
+            "running search result did not show a visible clay spinner"
         )
     finally:
         context.close()
@@ -713,7 +718,7 @@ def test_backend_history_event_renders_spinner_end_to_end(
 ) -> None:
     """Drive a real ``getHistory`` broadcast (with a synthetic alive
     worker thread) through the real frontend renderer and assert the
-    green spinner is visible on the row backed by the real DB."""
+    clay spinner is visible on the row backed by the real DB."""
     context, page = _open_history_page(_browser)
     try:
         event = _history_event_from_real_backend(fake_running_task_id="-1")
@@ -740,7 +745,7 @@ def test_backend_history_event_renders_spinner_end_to_end(
         )
         dot_visible = page.evaluate(
             """
-            () => {
+            (clay) => {
               const row = document.querySelector(
                 '#history-list .sidebar-item[data-category="running"]',
               );
@@ -749,14 +754,15 @@ def test_backend_history_event_renders_spinner_end_to_end(
               const cs = getComputedStyle(dot);
               return row.offsetParent !== null &&
                 dot.offsetParent !== null &&
-                cs.borderTopColor === 'rgb(106, 153, 85)' &&
+                cs.borderTopColor === clay &&
                 cs.animationName === 'status-spin';
             }
-            """
+            """,
+            _CLAY,
         )
         assert dot_visible, (
             "real backend → frontend pipeline did not render a visible "
-            "green spinner on the running row"
+            "clay spinner on the running row"
         )
     finally:
         context.close()

@@ -1220,6 +1220,9 @@ def test_sea_getters_and_tools_follow_the_contract(tmp_path: Path) -> None:
     declared = {"tool_profile": "shell"}
     assert_worker_contract(skillopt_sea, skillopt, declared)
     assert skillopt.system_prompt("") == skillopt_sea.SYSTEM_PROMPT
+    # The artifacts default to the scratch dir, in the agents' temp directory, not to ``tmp/``.
+    assert ("artifact dir (default: <scratch dir>/skillopt/<target stem>, in the Scratch dir "
+            "of Task Settings)") in " ".join(skillopt_sea.SYSTEM_PROMPT.split())
     assert sea_commands.sea_settings(_SKILLOPT_SEA) == WORKER_DEFAULTS | declared
     cmd: dict[str, Any] = {"seaPath": str(_SKILLOPT_SEA), "prompt": "x.py evals.json"}
     # The hooks are written on every run, so the set lists the settings only.

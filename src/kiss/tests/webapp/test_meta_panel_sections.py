@@ -1330,7 +1330,7 @@ def test_a_long_task_update_leaves_the_apps_list_a_usable_share(
         )
         # Seven equal shares of a 700px panel after the headers, status
         # lines and separators leave the Apps list at least 35px at the
-        # 13px Cursor scale.
+        # 13px root size.
         assert geo["apps"] >= 35, geo
         assert geo["update"] == pytest.approx(geo["apps"], abs=1), geo
         assert geo["updateScrolls"], geo
@@ -1410,6 +1410,53 @@ def test_every_surface_gives_the_expanded_sections_equal_heights(
         assert sum(dragged[3:]) == pytest.approx(sum(heights[3:]) - 30, abs=2), (
             heights, dragged,
         )
+    finally:
+        page.close()
+
+
+# Lists one chat in the Chats sidebar (the answer to the page's own
+# getHistory request) and reads the font of its summary and of each
+# kind of text in the Task Info and Task update sections.
+_FONTS_JS = """
+() => {
+  const asked = window.__posted.filter(m => m.type === 'getHistory').pop();
+  window.dispatchEvent(new MessageEvent('message', {data: {
+    type: 'history', offset: 0, generation: asked ? asked.generation : 0,
+    sessions: [{id: 'c1', task_id: 1, title: 'Fix the flaky search test',
+                preview: 'Fix the flaky search test', has_events: true,
+                failed: false, is_running: false, timestamp: 1790440000}]}}));
+  const font = selector => {
+    const cs = getComputedStyle(document.querySelector(selector));
+    return [cs.fontFamily, cs.fontSize, cs.fontWeight, cs.fontStyle, cs.lineHeight];
+  };
+  return {
+    summary: font('#history-list .history-chat-title'),
+    panels: Object.fromEntries([
+      '#meta-list .meta-item', '#meta-list .meta-label', '#meta-list .meta-value',
+      '#meta-info-status', '#meta-info-content', '#meta-info-content p',
+      '#meta-info-content li',
+    ].map(selector => [selector, font(selector)])),
+  };
+}
+"""
+
+
+@pytest.mark.parametrize("surface", list(_SURFACES))
+def test_task_info_and_task_update_text_is_set_like_a_chat_summary(
+    browser: Browser, remote_url: str, surface: str
+) -> None:
+    """The rows of Task Info and the text of Task update (its status
+    line and its report) have the font of a chat's summary in the Chats
+    sidebar: the same family, size, weight, style and line height."""
+    width, setup = _SURFACES[surface]
+    page = _open_page(browser, remote_url, width)
+    try:
+        page.evaluate(f"() => {{ {setup} }}")
+        _show_task_update(page, "<p>Read the data.</p><ul><li>Ran the baseline.</li></ul>")
+        fonts = page.evaluate(_FONTS_JS)
+        assert fonts["summary"][1].endswith("px"), fonts
+        for selector, font in fonts["panels"].items():
+            assert font == fonts["summary"], (selector, fonts)
     finally:
         page.close()
 

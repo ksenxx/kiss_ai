@@ -179,13 +179,18 @@ def _sets_noexec(args: list[str]) -> bool:
 def verifier_command(commands: list[SimpleCommand], verifier_path: str) -> SimpleCommand | None:
     """The first of the scanned *commands* that runs the verifier at *verifier_path*, or ``None``.
 
-    ``bash ./tmp/<id>/verify.sh`` (``sh``, with no option but the
+    ``bash <scratch dir>/verify.sh`` (``sh``, with no option but the
     switches of :data:`SHELL_SWITCH`: ``bash -n`` parses the script
     without running it, ``bash -s`` reads one from stdin instead),
-    or the script itself as the command, from the work dir or after
-    a ``cd`` the scanner follows (the two paths are compared as the
-    filesystem resolves them: ``sub/../verify.sh`` is another file when
-    ``sub`` is a symbolic link).  ``--`` or ``-`` ends the options:
+    or the script itself as the command, named by its absolute path
+    (a verifier kept in the scratch dir, a folder of ``kiss-tmp`` in
+    the system's temp directory, is outside the work dir) or by a
+    relative one, from the work dir or after a ``cd`` the scanner
+    follows (the two paths are compared as the filesystem resolves
+    them: ``/var/folders/x/T/kiss-tmp/<id>/verify.sh`` is the script in
+    ``/private/var/folders/x/T/kiss-tmp/<id>/`` on macOS, and
+    ``sub/../verify.sh`` is another file when ``sub`` is a symbolic
+    link).  ``--`` or ``-`` ends the options:
     the word after it is the script whatever it starts with (``bash
     -- -x verify.sh`` runs a file named ``-x`` with the verifier as
     its argument).

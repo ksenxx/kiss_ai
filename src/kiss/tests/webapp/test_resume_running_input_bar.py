@@ -120,14 +120,16 @@ class TestStartTimerRendersImmediately:
             "to statusText.textContent"
         )
 
-    def test_start_timer_sets_accent_color(self) -> None:
-        """The theme accent is the 'running' indicator on the status-text
-        label (the timer rests in --dim once the task ends)."""
+    def test_start_timer_sets_running_color(self) -> None:
+        """--running-fg, the clay of every running indicator, is the
+        'running' colour of the status-text label (the timer rests in
+        --dim once the task ends)."""
         body = _extract_function_body(_read_main_js(), "startTimer")
-        assert "var(--accent)" in body, (
-            "startTimer must colour statusText in the accent to signal the "
-            "running state visually"
+        assert "var(--running-fg)" in body, (
+            "startTimer must colour statusText in --running-fg to signal "
+            "the running state visually"
         )
+        assert "var(--accent)" not in body, "the accent is for links and focus"
         assert "var(--red)" not in body, "a running task is not an error"
 
 

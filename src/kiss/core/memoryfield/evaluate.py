@@ -12,7 +12,10 @@ that answered it? Each probe query has exactly one gold page, so we report
 Recall@1/3/5 (was the gold page in the top k?) and MRR (1/rank of the gold
 page) for several retrievers:
 
-* ``vector``  the memoryfield index with the default embedding model
+* ``vector``  the memoryfield index with the default embedding model (pages
+  ranked by their own embedding and their best statement's)
+* ``pages``   the same index ranked by one vector per page, the ranking
+  before statement vectors
 * ``hashed``  the same index with the offline feature-hashing embedding
 * ``bm25``    SQLite FTS5 keyword search (the "just grep it" baseline)
 * ``hybrid``  reciprocal-rank fusion of ``vector`` and ``bm25``
@@ -31,6 +34,10 @@ page per topic.
 Run::
 
     uv run python -m kiss.core.memoryfield.evaluate --limit 300 --llm-probes 40
+
+The corpus with its indexes (``--memory-dir``) and the report (``--out``)
+go by default to ``memoryfield-eval/`` in the agents' temp directory
+(``<OS temp dir>/kiss-tmp``), which a reboot empties.
 """
 
 import argparse
@@ -51,6 +58,7 @@ from pathlib import Path
 
 from kiss.core.config import kiss_home
 from kiss.core.html_to_markdown import html_to_markdown
+from kiss.core.kiss_tmp import kiss_tmp_dir
 from kiss.core.memoryfield.index import (
     DEFAULT_EMBEDDING_MODEL,
     HASHED_EMBEDDING_MODEL_CODE,
@@ -502,7 +510,8 @@ def run_evaluation(
     Args:
         memory: The memory directory under test.
         probes: Queries with gold pages.
-        vector_index: Index built with the neural embedding model.
+        vector_index: Index built with the neural embedding model; its
+            rows are also ranked by page embedding alone, as ``pages``.
         hashed_index: Index built with :func:`hashed_embedding`.
         keyword_index: FTS5 baseline.
         families: Page name -> family key for family-level recall; by default
@@ -514,7 +523,17 @@ def run_evaluation(
     """
     if families is None:
         families = {}
-    ranks: dict[str, list[int | None]] = {"vector": [], "hashed": [], "bm25": [], "hybrid": []}
+    # The rows of vector_index, ranked without their statement vectors.  A
+    # second index object, so it embeds each query itself, as "vector" does.
+    page_index = VectorIndex(
+        vector_index.memory,
+        embed=vector_index.embed,
+        model_code=vector_index.model_code,
+        statements=False,
+    )
+    ranks: dict[str, list[int | None]] = {
+        key: [] for key in ("vector", "pages", "hashed", "bm25", "hybrid")
+    }
     family_ranks: dict[str, list[int | None]] = {key: [] for key in ranks}
     latencies: dict[str, list[float]] = {key: [] for key in ranks}
     rows: list[dict[str, object]] = []
@@ -528,8 +547,11 @@ def run_evaluation(
         t3 = time.perf_counter()
         hybrid_ranking = reciprocal_rank_fusion([vector_ranking, bm25_ranking], k=k)
         t4 = time.perf_counter()
+        page_ranking = [hit.name for hit in page_index.search(probe.query, k=k)]
+        t5 = time.perf_counter()
         rankings = {
             "vector": vector_ranking,
+            "pages": page_ranking,
             "hashed": hashed_ranking,
             "bm25": bm25_ranking,
             "hybrid": hybrid_ranking,
@@ -538,6 +560,7 @@ def run_evaluation(
             ranks[key].append(rank_of(probe.gold, ranking))
             family_ranks[key].append(family_rank_of(probe.gold, ranking, families))
         latencies["vector"].append((t1 - t0) * 1000)
+        latencies["pages"].append((t5 - t4) * 1000)
         latencies["hashed"].append((t2 - t1) * 1000)
         latencies["bm25"].append((t3 - t2) * 1000)
         latencies["hybrid"].append(((t1 - t0) + (t3 - t2) + (t4 - t3)) * 1000)
@@ -591,8 +614,9 @@ def main(argv: list[str] | None = None) -> int:
     """
     parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n\n")[0])
     parser.add_argument("--db", type=Path, default=DEFAULT_DB_PATH, help="path to history.db")
-    parser.add_argument("--memory-dir", type=Path, default=Path("./tmp/memoryfield-eval/memory"))
-    parser.add_argument("--out", type=Path, default=Path("./tmp/memoryfield-eval/results.json"))
+    eval_dir = kiss_tmp_dir() / "memoryfield-eval"
+    parser.add_argument("--memory-dir", type=Path, default=eval_dir / "memory")
+    parser.add_argument("--out", type=Path, default=eval_dir / "results.json")
     parser.add_argument("--limit", type=int, default=300, help="number of past tasks to index")
     parser.add_argument(
         "--min-result-chars", type=int, default=300, help="skip tasks with shorter results"

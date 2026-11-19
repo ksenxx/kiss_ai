@@ -19,6 +19,9 @@ The fix has two halves, both exercised here:
   break mid-text — a too-narrow panel (the 90vw mobile sheet) pushes
   whole buttons onto the next line instead.
 
+The same rendering checks that a checkbox sits on the first line of its
+label, however many lines the label wraps to.
+
 Everything is measured in a real headless Chromium against the real
 ``media/main.css``, the real ``media/remote-codex.css`` and the real
 ``<div id="settings-panel">`` markup from ``media/chat.html``, under the
@@ -54,6 +57,10 @@ _DESKTOP_VIEWPORT = ViewportSize(width=1440, height=900)
 
 #: A phone, where the drawer falls back to the responsive 90vw mobile sheet.
 _PHONE_VIEWPORT = ViewportSize(width=390, height=844)
+
+#: That phone zoomed in to 250%: the checkbox labels, one line each on
+#: the phone itself, run to several lines.
+_ZOOMED_PHONE_VIEWPORT = ViewportSize(width=156, height=338)
 
 
 def _extract_settings_panel_markup() -> str:
@@ -114,7 +121,6 @@ def _build_remote_page(body_class: str = "remote-chat remote-desktop") -> str:
       --theme-font-size: 16px;
       --theme-font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI',
         Roboto, 'Helvetica Neue', Arial, sans-serif;
-      --theme-editor-font-size: 16px;
       --theme-editor-background: #1e1e1e;
       --theme-editor-foreground: #cccccc;
       --theme-input-background: #3c3c3c;
@@ -175,6 +181,23 @@ _MEASURE_JS = """
       .querySelector('.config-update-row')
       .getBoundingClientRect().height,
     buttons: buttons,
+    // Per checkbox on show: the lines its label runs to, and how far the
+    // box's centre is from the centre of the label's first line.
+    checkboxes: Array.from(panel.querySelectorAll('.config-checkbox'))
+      .filter((label) => label.offsetParent)
+      .map((label) => {
+        const walker = document.createTreeWalker(label, NodeFilter.SHOW_TEXT);
+        let text = walker.nextNode();
+        while (!text.textContent.trim()) text = walker.nextNode();
+        const range = document.createRange();
+        range.selectNodeContents(text);
+        const lines = Array.from(range.getClientRects());
+        const box = label.querySelector('input').getBoundingClientRect();
+        return {
+          lines: new Set(lines.map((r) => Math.round(r.top))).size,
+          offCentre: box.top + box.height / 2 - (lines[0].top + lines[0].height / 2),
+        };
+      }),
   };
 }
 """
@@ -323,4 +346,20 @@ def test_narrow_sheet_keeps_buttons_inside_and_labels_unwrapped(
             "the sheet's content box at "
             f"x={_phone_measurements['panelContentRight']:.1f} — nowrap "
             "buttons must wrap, not overflow."
+        )
+
+
+def test_checkboxes_sit_on_the_first_line_of_their_labels() -> None:
+    """A checkbox is centred on the first line of its label, not on the
+    whole paragraph: on a zoomed-in phone, where a label runs to
+    several lines, its box is level with the label's first words, as
+    the box of a one-line label is."""
+    boxes = _measure_action_row(_ZOOMED_PHONE_VIEWPORT, "remote-chat")["checkboxes"]
+    assert max(box["lines"] for box in boxes) >= 3, (
+        f"no label wraps, so nothing is exercised: {boxes}"
+    )
+    for box in boxes:
+        assert abs(box["offCentre"]) <= 1.5, (
+            f"a checkbox sits {box['offCentre']:.1f}px off the first line "
+            f"of its label: {boxes}"
         )

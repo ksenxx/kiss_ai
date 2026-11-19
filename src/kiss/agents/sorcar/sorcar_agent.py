@@ -38,10 +38,7 @@ from kiss.agents.sorcar.commit_message import fallback_commit_message
 from kiss.agents.sorcar.container_jobs import ContainerJobs
 from kiss.agents.sorcar.decide_tool import decisions_tool_available, make_decide_tool
 from kiss.agents.sorcar.docker_manager import DockerManager
-from kiss.agents.sorcar.fanout_guard import (
-    SUBAGENT_DIR_PREFIX,
-    is_implementation_task,
-)
+from kiss.agents.sorcar.fanout_guard import is_implementation_task
 from kiss.agents.sorcar.git_worktree import (
     _PRECOMMIT_FIX_LINES,
     _WORKTREE_SLUG_PREFIX,
@@ -86,6 +83,7 @@ from kiss.agents.sorcar.useful_tools import (
     BackgroundJob,
     UsefulTools,
     _absolutize,
+    _is_scratch_path,
     wait_instead_of_sleep,
 )
 from kiss.agents.sorcar.web_use_tool import WebUseTool
@@ -93,6 +91,7 @@ from kiss.core.base import SYSTEM_PROMPT, SYSTEM_PROMPT_LITE
 from kiss.core.config import DEFAULT_CONFIG
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.kiss_error import BudgetExceededError, KISSError
+from kiss.core.kiss_tmp import CONTAINER_TMP_DIR, SUBAGENT_DIR_PREFIX, kiss_tmp_dir
 from kiss.core.llm_reply import LLMReply
 from kiss.core.locked import locked_call
 from kiss.core.memoryfield.tools import MemoryTools
@@ -310,7 +309,7 @@ RESTRICTED_PROFILE_NOTE = """
 
 # Restricted tool profile: {profile}
 This sub-agent has only these tools plus finish: {tools}. Rules above that
-require any tool not listed here (e.g. Write/Edit files, tmp/PROGRESS.md,
+require any tool not listed here (e.g. Write/Edit files, PROGRESS.md,
 browser research, memory writes, run_parallel, run_agent) do not apply: do
 not attempt them. Report everything in finish(summary_in_html=...).
 """
@@ -1779,6 +1778,7 @@ class SorcarAgent(RelentlessAgent):
                 work_dir=self.work_dir,
                 jobs=self._background_jobs,
                 private_dir=self._private_dir,
+                scratch_dir=self._host_scratch_dir(),
             )
             # The Write/Edit a shell rewrite stands for is made through
             # this agent's tool path (ToolRedirect), not by Bash itself;
@@ -1813,7 +1813,7 @@ class SorcarAgent(RelentlessAgent):
                 work_dir=self.work_dir,
                 ephemeral=self._subagent_info is not None,
                 live_browser=self._live_browser,
-                private_dir=self._private_dir,
+                scratch_dir=self._host_scratch_dir(),
             )
             tools.extend(self.web_use_tool.get_tools())
         def number_of_cores() -> int:
@@ -2241,35 +2241,41 @@ class SorcarAgent(RelentlessAgent):
     def _scratch_dir(self) -> str:
         """The task's scratch directory as the system prompt names it.
 
-        A sub-agent's is its private folder, outside the work tree
-        (absolute; the container's when its commands run in one, never
-        the host's then), any other task's is in the work tree
-        (:meth:`_tree_scratch_dir`), and so is that of a sub-agent whose
-        container could not hold a folder (its ``/tmp`` is not writable).
-        A top-level task in a container that does not mount the work dir
-        (an attached ``container:<id>``) would scratch in the caller's own
-        directory, so its folder goes under the container's
-        ``/tmp/kiss-scratch/`` instead of ``./tmp/``.
+        A folder of ``kiss-tmp`` in the temp directory of the machine or
+        the container the tools run in, never in the work tree: on this
+        machine :meth:`_host_scratch_dir`; in a container the private
+        folder made there for a sub-agent, else the task's folder
+        (:meth:`_scratch_name`) of
+        :data:`~kiss.core.kiss_tmp.CONTAINER_TMP_DIR`, which is also what
+        a sub-agent gets for which no private folder was made there: its
+        container's ``/tmp`` is not writable, or its commands run through
+        an exec bridge, which makes none.
         """
-        if self.docker_image:
-            folder = getattr(self.docker_manager, "private_dir", None)
-        else:
-            folder = self._private_dir
-        if folder:
-            return f"{Path(folder).as_posix()}/"
-        manager = self.docker_manager
-        top_level = self._subagent_info is None
-        if top_level and manager is not None and self.work_dir not in manager.volumes:
-            return "/tmp/kiss-scratch/" + self._tree_scratch_dir().removeprefix("./tmp/")
-        return self._tree_scratch_dir()
+        if not self.docker_image:
+            return self._host_scratch_dir()
+        folder = getattr(self.docker_manager, "private_dir", None)
+        return f"{folder}/" if folder else f"{CONTAINER_TMP_DIR}/{self._scratch_name()}"
 
-    def _tree_scratch_dir(self) -> str:
-        """The scratch directory in the work tree, relative to the work dir.
+    def _host_scratch_dir(self) -> str:
+        """The task's scratch directory on this machine, in POSIX form with a trailing slash.
 
-        A run without a task id (no chat) scratches in ``./tmp/`` itself;
-        ``ChatSorcarAgent`` narrows this to ``./tmp/<task-id>/``.
+        A sub-agent's is its private folder; any other task's is its
+        folder (:meth:`_scratch_name`) of the agents' temp directory
+        (:func:`~kiss.core.kiss_tmp.kiss_tmp_dir`), made by whoever
+        writes to it first.  The tools that run on this machine keep
+        their own files there, the browser's in a container run too.
         """
-        return "./tmp/"
+        if self._private_dir:
+            return f"{Path(self._private_dir).as_posix()}/"
+        return f"{kiss_tmp_dir().as_posix()}/{self._scratch_name()}"
+
+    def _scratch_name(self) -> str:
+        """The task's folder in the agents' temp directory, with its trailing slash.
+
+        A run without a task id (no chat) scratches in the temp directory
+        itself (``""``); ``ChatSorcarAgent`` narrows this to ``<task-id>/``.
+        """
+        return ""
 
     def _reset_task_classification(self) -> None:
         """Forget the classification state of the run that just ended.
@@ -2805,12 +2811,12 @@ class SorcarAgent(RelentlessAgent):
         try:
             try:
                 if self._subagent_info is not None:
-                    # Resolved, so that the tools compare one path
-                    # (macOS keeps its temp directory behind a symlink).  With
-                    # a container it is the folder of the tools that run on
-                    # the host; the commands get one of their own in there.
-                    self._private_dir = os.path.realpath(
-                        tempfile.mkdtemp(prefix=SUBAGENT_DIR_PREFIX))
+                    # In the agents' temp directory (a resolved path, so
+                    # that the tools compare one).  With a container it is
+                    # the folder of the tools that run on the host; the
+                    # commands get one of their own in there.
+                    self._private_dir = tempfile.mkdtemp(
+                        prefix=SUBAGENT_DIR_PREFIX, dir=kiss_tmp_dir())
                 # Decided once per run: the restricted-profile note and
                 # the toolset both follow this verdict.
                 profile = self._run_profile = self._tool_profile(task_text)
@@ -2863,7 +2869,10 @@ class SorcarAgent(RelentlessAgent):
                 )
                 if memory_root is not None:
                     self._memory_tools = MemoryTools(
-                        memory_root, domains=_repo_memory_domains(work_dir)
+                        memory_root,
+                        domains=_repo_memory_domains(work_dir),
+                        # Stamped on every page this run writes.
+                        task_id=_persisted_task_id(self),
                     )
                 # The two notes below reconcile the base prompt's rules with
                 # the toolset this run builds.  No note without a built-in
@@ -3509,8 +3518,9 @@ class SorcarAgent(RelentlessAgent):
           when no worktree isolates it the refusal asks for
           ``create_worktree`` of that repository first.  Paths inside
           a worktree, checkout paths of the work dir's own worktree
-          (the tools remap them), git-ignored paths, and repositories
-          whose worktree setup failed pass.
+          (the tools remap them), git-ignored paths, scratch files (the
+          agents' temp directory may itself lie in a checkout) and
+          repositories whose worktree setup failed pass.
         * ``rollback`` is refused the same way while the work dir is in
           a repository checkout (see :meth:`_guard_rollback`).
         * The first ``finish`` while a worktree is unmerged is refused
@@ -3550,6 +3560,7 @@ class SorcarAgent(RelentlessAgent):
         repo = GitWorktreeOps.discover_repo(_existing_ancestor(path))
         if (
             repo is None
+            or _is_scratch_path(path, self.work_dir)
             or not _in_checkout_of(path, repo)
             or repo.resolve() in self._unisolated_repos
             or GitWorktreeOps.is_ignored(repo, path)

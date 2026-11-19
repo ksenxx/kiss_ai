@@ -5,11 +5,13 @@ not shown the model through ``Read`` or written itself.  The rule used to be
 a sentence in ``SYSTEM.md`` only; these tests pin the enforced behavior.
 """
 
+import tempfile
 from pathlib import Path
 
 import pytest
 
 from kiss.agents.sorcar.useful_tools import UsefulTools
+from kiss.core.kiss_tmp import kiss_tmp_dir
 
 
 @pytest.fixture
@@ -120,52 +122,57 @@ def test_oversized_binary_read_does_not_mark_file(repo: Path) -> None:
     assert tools.Write(str(big), "text\n").startswith("Error:")
 
 
-def test_write_overwrites_unread_scratch_file_under_tmp(repo: Path) -> None:
-    """Scratch files under a ``tmp`` directory inside the work dir may be
-    overwritten without a Read.
+def test_write_overwrites_unread_scratch_file_in_the_agents_temp_dir(repo: Path) -> None:
+    """Scratch files, those in the agents' temp directory, may be overwritten
+    without a Read.
 
     All eleven read-before-write refusals in the 2026-09-22 audit were on
-    ``tmp/`` notes (``tmp/ideas.md``, a cron run's own report file), each a
+    scratch notes (``ideas.md``, a cron run's own report file), each a
     wasted step; so were three of the seven read-before-edit refusals of the
-    2026-11-03 audit (``tmp/<id>/information.md``, edited by a later session),
+    2026-11-03 audit (``<id>/information.md``, edited by a later session),
     so ``Edit`` of a scratch file goes through unread too, its result showing
-    the region changed.  Source files keep the guard, and a ``tmp``-named
-    *file* is not a scratch dir.
+    the region changed.  Source files keep the guard, and so do the files of
+    a ``tmp`` directory of the work dir, which is a directory like any other.
     """
     tools = UsefulTools(work_dir=str(repo))
-    scratch = repo / "tmp" / "notes.md"
-    scratch.parent.mkdir()
+    scratch = Path(tempfile.mkdtemp(dir=kiss_tmp_dir())) / "notes.md"
     scratch.write_text("old\n", encoding="utf-8")
     assert tools.Write(str(scratch), "new\n").startswith("Successfully wrote")
     assert scratch.read_text() == "new\n"
-    nested = repo / "work" / "tmp" / "deep" / "state.json"
-    nested.parent.mkdir(parents=True)
-    nested.write_text("{}", encoding="utf-8")
-    assert tools.Write("work/tmp/deep/state.json", "[]").startswith("Successfully wrote")
-    assert nested.read_text() == "[]"
     other = UsefulTools(work_dir=str(repo))
     out = other.Edit(str(scratch), "new", "newer")
     assert out.startswith("Successfully replaced 1 occurrence(s)") and "1 | newer" in out
     assert scratch.read_text() == "newer\n"
-    tmp_named_file = repo / "tmp"
     assert other.Write(str(repo / "a.py"), "x = 9\n").startswith("Error:")
     out = other.Edit(str(repo / "a.py"), "x = 1", "x = 2")
     assert out.startswith("Error:") and "had not been read" in out
-    assert tmp_named_file.is_dir()
+    in_tree = repo / "work" / "tmp" / "state.json"
+    in_tree.parent.mkdir(parents=True)
+    in_tree.write_text("{}", encoding="utf-8")
+    out = other.Write("work/tmp/state.json", "[]")
+    assert out.startswith("Error:") and "has not been read" in out
+    out = other.Edit(str(in_tree), "{}", "[]")
+    assert out.startswith("Error:") and "had not been read" in out
+    assert in_tree.read_text() == "{}"
 
 
-def test_tmp_outside_the_work_dir_is_not_scratch(tmp_path: Path) -> None:
-    """A checkout living under a ``tmp`` directory, or a file outside the work
-    dir, keeps the read-before-overwrite guard; the cron work directory under
-    ``$KISS_HOME`` is scratch everywhere."""
-    checkout = tmp_path / "home" / "tmp" / "checkout"
-    checkout.mkdir(parents=True)
+def test_work_dir_in_the_agents_temp_dir_is_not_scratch(tmp_path: Path) -> None:
+    """A checkout a task made in its scratch dir and works in, or a file outside
+    the agents' temp directory, keeps the read-before-overwrite guard; the
+    task's scratch files next to that checkout, and the cron work directory
+    under ``$KISS_HOME``, are scratch."""
+    task_dir = Path(tempfile.mkdtemp(dir=kiss_tmp_dir()))
+    checkout = task_dir / "clone"
+    checkout.mkdir()
     source = checkout / "core.py"
     source.write_text("x = 1\n", encoding="utf-8")
     tools = UsefulTools(work_dir=str(checkout))
     out = tools.Write(str(source), "x = 2\n")
     assert out.startswith("Error:") and "has not been read" in out
     assert source.read_text() == "x = 1\n"
+    note = task_dir / "PROGRESS.md"
+    note.write_text("old", encoding="utf-8")
+    assert tools.Write(str(note), "new").startswith("Successfully wrote")
     outside = tmp_path / "elsewhere" / "tmp" / "note.md"
     outside.parent.mkdir(parents=True)
     outside.write_text("old", encoding="utf-8")

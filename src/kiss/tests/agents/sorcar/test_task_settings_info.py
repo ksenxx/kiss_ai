@@ -53,6 +53,7 @@ from kiss.agents.sorcar.relentless_agent import (
 )
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.sorcar.useful_tools import uv_in_worktree
+from kiss.core.kiss_tmp import kiss_tmp_dir
 from kiss.server import agent_state
 from kiss.server.json_printer import (
     JsonPrinter,
@@ -176,7 +177,8 @@ class TestSystemPromptTaskSettings(_DBRedirect):
         assert f"- Task id: {agent.last_task_id}" in body
         assert "- Is subagent: no" in body
         assert "- Parent task id:" not in body
-        assert f"- Scratch dir: ./tmp/{agent.last_task_id}/" in body
+        assert f"- Scratch dir: {kiss_tmp_dir().as_posix()}/{agent.last_task_id}/" in body
+        assert not (Path(self.tmpdir) / "tmp").exists()
         # A run with no built-in toolset gets the lite prompt, whose
         # rules point at that scratch dir.
         assert "<identity>" in body
@@ -237,7 +239,7 @@ class TestSystemPromptTaskSettings(_DBRedirect):
             srv.shutdown()
             container.remove(force=True)
         system_text = json.loads(_FinishHandler.bodies[0])["messages"][0]["content"]
-        assert f"- Scratch dir: /tmp/kiss-scratch/{agent.last_task_id}/" in system_text
+        assert f"- Scratch dir: /tmp/kiss-tmp/{agent.last_task_id}/" in system_text
         assert "- Work dir: /srv/job, inside the container that your shell" in system_text
         assert f"- Work dir: {self.tmpdir}" not in system_text
 
@@ -334,7 +336,7 @@ class TestSystemPromptTaskSettings(_DBRedirect):
         assert f"- Task id: {'b' * 32}" in section
         assert "- Is subagent: yes" in section
         assert f"- Parent task id: {PARENT_ID}" in section
-        assert f"- Scratch dir: ./tmp/{'b' * 32}/" in section
+        assert f"- Scratch dir: {kiss_tmp_dir().as_posix()}/{'b' * 32}/" in section
 
     def test_base_agents_report_model_budget_and_time(self) -> None:
         """RelentlessAgent / SorcarAgent report their own settings."""

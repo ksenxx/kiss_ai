@@ -38,7 +38,7 @@ PRIMARY_MODEL = "openrouter/anthropic/claude-fable-5.2-max"
 REVIEW_MODEL = "openrouter/openai/gpt-6-astra-xhigh"
 """The model that reviews and debugs the primary model's work: GPT-6 Astra via OpenRouter."""
 
-WRITER_MODEL = "openrouter/google/gemini-4-carbon"
+WRITER_MODEL = "openrouter/google/gemini-4-neon"
 """The model that writes documents, papers, reports and results: Gemini 4 Carbon via OpenRouter."""
 
 SYSTEM_PROMPT = routing_prompt(

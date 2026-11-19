@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -29,6 +30,7 @@ import pytest
 from kiss.agents.sorcar import task_digest
 from kiss.agents.sorcar.persistence import _add_task, _append_chat_event, _flush_chat_events
 from kiss.agents.sorcar.useful_tools import UsefulTools
+from kiss.core.kiss_tmp import kiss_tmp_dir
 from kiss.core.tool_interrupt import USER_INTERRUPTED_MESSAGE
 from kiss.core.tool_verdict import ToolRedirect
 
@@ -315,11 +317,12 @@ def test_a_here_document_append_replays_only_the_text_it_appended(tmp_path: Path
     put their whole content.
     """
     now = time.time()
-    log = tmp_path / "tmp" / "PROGRESS.md"
+    log = Path(tempfile.mkdtemp(dir=kiss_tmp_dir())) / "PROGRESS.md"  # a scratch dir's log
     _write(log, "# another task\n- OTHER-TASK-ENTRY\n")
     tools = UsefulTools(work_dir=str(tmp_path))
     tools.redirect = True  # as under an agent
-    command = "cat >> tmp/PROGRESS.md <<'EOF'\n- MY-ENTRY\nEOF"
+    # as_posix: bash eats the backslashes of a Windows path.
+    command = f"cat >> {log.as_posix()} <<'EOF'\n- MY-ENTRY\nEOF"
     with pytest.raises(ToolRedirect) as redirect:
         tools.Bash(command=command, description="log")
     content = redirect.value.arguments["content"]
@@ -332,7 +335,7 @@ def test_a_here_document_append_replays_only_the_text_it_appended(tmp_path: Path
     assert _log_of(_task(tmp_path, appended, now - 60)) == "- MY-ENTRY"
     overwritten = [
         {"type": "tool_call", "name": "Bash",
-         "command": "cat > tmp/PROGRESS.md <<'EOF'\n# mine\nEOF"},
+         "command": f"cat > {log.as_posix()} <<'EOF'\n# mine\nEOF"},
         *_write_call(log, "# mine\n"),
         {"type": "tool_result", "content": "ok", "tool_name": "Bash"},
     ]

@@ -20,6 +20,13 @@ waiting out ``REQUEST_TIMEOUT``).
   after another, before the one for the mention on screen.  Of the
   requests that waited together behind one on its way, only the last is
   forwarded now; the page drops every list but the current one anyway.
+* Regression (2026-11-18): a read forwarded to a machine (a transcript's
+  file-link check, the Source Control view's status and log, a folded
+  panel's events) was awaited before the connection's next command was
+  taken, so opening a machine's chat held up everything the page sent
+  after it, the chat's earlier tasks among it, a round trip per read.
+  The reads are answered in the background now, the Explorer's and the
+  Source Control view's still in the order asked.
 * Regression (audit A13): the per-machine locks are keyed by the name
   the client sent and were never dropped, so every unknown or retired
   name ever asked about kept a lock for the daemon's life.  A lock now
@@ -203,6 +210,36 @@ class TestMachineQueues(IsolatedAsyncioTestCase):
         while len(order) < 2:
             order.append((await self._next_answer())["type"])
         self.assertEqual(order, ["machines", "machineWorkDirs"])
+
+    async def test_a_stalled_machines_reads_hold_up_no_later_command(self) -> None:
+        self._register_silent_machine("mute")
+        started = time.monotonic()
+        for read in (
+            {"type": "checkPaths", "paths": ["a.py"]}, {"type": "gitStatus"},
+            {"type": "gitLog"}, {"type": "getTaskEvents", "taskId": "t-1"},
+        ):
+            await self._send({**read, "tabId": "tab-1", "machine": "mute"})
+        seen = await self._ping()  # every read is on its way or waits for one that is
+        self.assertLess(
+            time.monotonic() - started, mach.REQUEST_TIMEOUT / 2,
+            "the ping waited for the machine's answers",
+        )
+        answers = ("pathsExist", "gitStatus", "gitLog", "taskEventsPiece")
+        self.assertEqual([m for m in seen if m["type"] in answers], [], "mute did not stall")
+        self.silent.close()  # mute's handshakes fail now
+        replies: list[dict[str, Any]] = []
+        while len(replies) < len(answers):
+            msg = await self._next()
+            if msg["type"] in answers:
+                replies.append(msg)
+        for reply in replies:
+            self.assertEqual(reply["machine"], "mute")
+            self.assertNotEqual(reply["error"], "")
+        # The panel's events travel apart from the workspace's reads,
+        # which are answered in the order asked.
+        self.assertEqual(
+            [r["type"] for r in replies if r["type"] != "taskEventsPiece"], list(answers[:3]),
+        )
 
     async def test_outdated_file_requests_are_never_forwarded(self) -> None:
         self._register_silent_machine("mute")

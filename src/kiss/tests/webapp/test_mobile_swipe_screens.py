@@ -929,3 +929,31 @@ def test_stop_and_save_chat_on_the_file_screen_act_on_the_chat_swiped_from(
         assert "Visitor task" in (reports / saved[0]).read_text()
     finally:
         context.close()
+
+
+def test_a_swipe_that_begins_on_a_row_menu_closes_it_with_the_drawer(browser, harness):
+    """The "…" menu of a chat hangs from its row in the Chats drawer.  A
+    finger that lands on the menu dismisses nothing, so a swipe from
+    there turns to the chat screen with the menu still open: the menu
+    closes with the drawer instead of staying open out of sight."""
+    _seed_chat(harness, "menu-chat", "Menu task")
+    context, page, cdp = _open_mobile(browser, harness)
+    try:
+        _swipe_right(cdp)
+        _wait_screen(page, "chats")
+        header = page.locator(
+            "#history-list .history-chat-group[data-chat-id='menu-chat'] .history-chat-header"
+        )
+        header.locator(":scope > .sidebar-item-more").click(timeout=30000)
+        menu = header.locator(":scope > .sidebar-item-actions")
+        menu.wait_for(state="visible")
+        box = menu.bounding_box()
+        assert box is not None
+        # From the menu's last line (when the chat's last task ran) to
+        # the left.
+        start = (box["x"] + box["width"] - 10, box["y"] + box["height"] - 10)
+        _quick_drag(cdp, start, (start[0] - 250, start[1]))
+        _wait_screen(page, "chat")
+        assert not menu.evaluate("menu => menu.matches(':popover-open')")
+    finally:
+        context.close()

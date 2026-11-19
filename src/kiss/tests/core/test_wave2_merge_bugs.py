@@ -31,17 +31,17 @@ class TestSourceShellEnvMultilineValues:
         (home / ".bashrc").write_text(
             'export INNOCENT="first line\n'
             'OPENAI_API_KEY=forged-by-multiline-value"\n'
-            "export TOGETHER_API_KEY=real-together-key\n"
+            "export OPENROUTER_API_KEY=real-openrouter-key\n"
         )
         monkeypatch.setenv("HOME", str(home))
         monkeypatch.setenv("SHELL", "/bin/bash")
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-        monkeypatch.delenv("TOGETHER_API_KEY", raising=False)
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
         monkeypatch.delenv("INNOCENT", raising=False)
 
         load_api_keys()
 
-        assert os.environ.get("TOGETHER_API_KEY") == "real-together-key"
+        assert os.environ.get("OPENROUTER_API_KEY") == "real-openrouter-key"
         assert os.environ.get("OPENAI_API_KEY") != "forged-by-multiline-value"
 
     def test_multiline_api_key_value_never_truncated(

@@ -34,7 +34,6 @@ class TestFastModelForReturnsActuallyFastModels(TestCase):
             config_module.DEFAULT_CONFIG = type(orig)()
             config_module.DEFAULT_CONFIG.ANTHROPIC_API_KEY = ""
             config_module.DEFAULT_CONFIG.OPENROUTER_API_KEY = ""
-            config_module.DEFAULT_CONFIG.TOGETHER_API_KEY = ""
             config_module.DEFAULT_CONFIG.GEMINI_API_KEY = "test-key"
             config_module.DEFAULT_CONFIG.OPENAI_API_KEY = ""
 

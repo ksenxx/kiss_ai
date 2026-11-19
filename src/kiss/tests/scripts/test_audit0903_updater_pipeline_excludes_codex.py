@@ -60,7 +60,7 @@ def _run_pipeline(codex_slugs: set[str]) -> None:
     """One real updater pass: deprecation, change computation, file write."""
     current = json.loads(update_models.MODEL_INFO_PATH.read_text(encoding="utf-8"))
     deprecated = find_deprecated_models(current, {}, {}, {}, {}, codex_slugs)
-    updates, new_models = compute_changes(current, {}, {}, {}, {}, {}, codex_slugs)
+    updates, new_models = compute_changes(current, {}, {}, {}, {}, codex_slugs)
     apply_updates_to_file(updates, new_models, deprecated, current, dry_run=False)
 
 

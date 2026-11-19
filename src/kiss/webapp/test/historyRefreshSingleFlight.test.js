@@ -90,7 +90,7 @@ function testBurstFoldsIntoTheFlightAndEveryReplyShows() {
   // machine's rows included.
   send(win, reply(first.generation, SESSIONS));
   assert.deepStrictEqual(rowTitles(win), ['lab task', 'box task', 'local one']);
-  assert.deepStrictEqual(chips(win), ['lab', 'box']);
+  assert.deepStrictEqual(chips(win), ['lab', 'box', 'myhost']);
   // ... and the folded refresh goes out exactly once, as a new page one.
   const after = ofType(posted, 'getHistory');
   assert.strictEqual(after.length, 1, 'one trailing refetch');

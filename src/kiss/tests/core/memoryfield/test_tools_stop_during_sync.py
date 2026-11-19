@@ -4,7 +4,7 @@
 # add your name here
 """A memory search can be stopped while its index sync runs on a worker thread.
 
-``MemoryTools._search`` runs one sync-and-search per memory on a
+``MemoryTools.search`` runs one sync-and-search per memory on a
 ``ThreadPoolExecutor`` and waited for them with ``future.result()`` and
 the executor's ``shutdown(wait=True)``, both unbounded waits in C.  The
 runner's Stop delivers ``KeyboardInterrupt`` with

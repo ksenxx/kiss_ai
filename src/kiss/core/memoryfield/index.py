@@ -15,13 +15,22 @@ deleted pages are dropped. Every agent process syncs the same index file,
 so writes are compare-and-swaps on the ``revision`` token (see
 :meth:`VectorIndex.sync`).
 
-Search is an exhaustive cosine scan: one numpy float32 matrix-vector product
-over the stored embeddings selects candidates, which are then rescored
-exactly with :func:`math.sumprod`. Each :class:`VectorIndex` keeps the
-decoded rows in memory until a write to the index changes its change token
-(see :meth:`VectorIndex._rows`). No SQLite extension is needed
-(``sqlite-vec`` cannot be loaded by the macOS system Python). The index is
-a cache: deleting the ``.sqlite3`` file loses nothing.
+Beside each page row the ``statements`` table holds the unit embeddings of
+the page's statements (:mod:`kiss.core.memoryfield.statements`: its bullets,
+paragraphs, table rows and code blocks) as one float16 BLOB, written in the
+same transaction as the page row and valid only while it carries that row's
+``revision``.
+
+Search has two stages. An exhaustive cosine scan, one numpy float32
+matrix-vector product over the page embeddings, shortlists the best pages;
+the shortlist is then ranked by the mean similarity of each page and its
+best statement, or, while statement vectors are missing for some of it, by
+page embedding, rescored exactly with :func:`math.sumprod`. Each
+:class:`VectorIndex` keeps the decoded page rows in memory until a write to
+the index changes its change token (see :meth:`VectorIndex._rows`);
+statement vectors are read per search, for the shortlist only. No SQLite
+extension is needed (``sqlite-vec`` cannot be loaded by the macOS system
+Python). The index is a cache: deleting the ``.sqlite3`` file loses nothing.
 """
 
 import hashlib
@@ -29,15 +38,17 @@ import itertools
 import json
 import logging
 import math
+import operator
 import os
 import re
 import sqlite3
+import struct
 import threading
 import time
 import uuid
 from array import array
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from contextlib import closing
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -50,6 +61,7 @@ from kiss.core.memoryfield.pages import (
     page_title,
     split_frontmatter,
 )
+from kiss.core.memoryfield.statements import STATEMENT_FORMAT, page_statements
 from kiss.core.utils import read_bytes_waiting_for_writer
 
 if TYPE_CHECKING:
@@ -89,7 +101,17 @@ _ADDED_COLUMNS = (
 # that finds it (and the model code and generation) skips all DDL and
 # writes, so opening the index for a search takes no write lock.  An index
 # file created by an older process lacks the key and gets migrated.
-SCHEMA_VERSION = "3"
+SCHEMA_VERSION = "4"  # "4" added the statements table
+
+# Pages the first search stage hands to the second, which ranks them with
+# their statement vectors (at least the *k* asked for).  Statement vectors are
+# read from the index file for these pages only: all of them would be
+# several times the page matrix, loaded by every task.
+SHORTLIST_PAGES = 100
+
+# Pages per query of :meth:`VectorIndex._best_statements`, under SQLite's
+# limit on bound parameters (999 before 3.32).
+_STATEMENT_QUERY_PAGES = 500
 
 # Rows per block of the pairwise similarity matrix in
 # :meth:`VectorIndex.near_duplicates` (bounds its memory to
@@ -163,6 +185,18 @@ def serialize_float32(vector: list[float]) -> bytes:
     if packed.itemsize != 4:  # pragma: no cover - platform without 4-byte floats
         raise RuntimeError("array('f') is not 32-bit on this platform")
     return packed.tobytes()
+
+
+def serialize_float16(vectors: list[list[float]]) -> bytes:
+    """Pack *vectors*, scaled to unit length, as consecutive little-endian float16 values.
+
+    The layout of a page's ``statements.embeddings`` BLOB: half the bytes
+    of float32, and no measured change in ranking.
+
+    Args:
+        vectors: Embeddings of one length.
+    """
+    return b"".join(struct.pack(f"<{len(vector)}e", *normalize(vector)) for vector in vectors)
 
 
 class ModelEmbedder:
@@ -310,35 +344,59 @@ def float32_dot_error(dims: int) -> float:
     return (dims + 2) * 2.0**-24
 
 
-_Pending = tuple[str, bytes, str, str, str]
-"""A page awaiting embedding: filename, sha256, raw text, stat key, embedding input."""
+def _highest(scores: "np.ndarray", n: int) -> list[int]:
+    """Positions of the *n* highest *scores*, exactly *n*: equal scores in position order."""
+    import numpy as np
+
+    if len(scores) <= n:
+        return list(range(len(scores)))
+    nth_best = np.partition(scores, len(scores) - n)[len(scores) - n]
+    above = np.flatnonzero(scores > nth_best)
+    tied = np.flatnonzero(scores == nth_best)[: n - len(above)]
+    return [*above.tolist(), *tied.tolist()]
+
+
+_Pending = tuple[str, bytes, str, str, list[str]]
+"""A page awaiting embedding: filename, sha256, raw text, stat key and its
+embedding inputs (the page's own, then one per statement)."""
 
 
 def _batches(pending: list[_Pending]) -> list[list[_Pending]]:
-    """Split pending pages into embedding requests within the batch limits."""
+    """Split pending pages into embedding requests within the batch limits.
+
+    A page's inputs travel in one request, so that its row and its
+    statement vectors are written together.
+    """
     batches: list[list[_Pending]] = []
-    size = 0
+    inputs = size = 0
     for item in pending:
-        length = len(item[4].encode("utf-8"))
+        length = sum(len(text.encode("utf-8")) for text in item[4])
         if (
             not batches
-            or len(batches[-1]) >= EMBED_BATCH_INPUTS
+            or inputs + len(item[4]) > EMBED_BATCH_INPUTS
             or size + length > EMBED_BATCH_BYTES
         ):
             batches.append([])
-            size = 0
+            inputs = size = 0
         batches[-1].append(item)
+        inputs += len(item[4])
         size += length
     return batches
 
 
 def _embed_all(embed: Embedder, texts: list[str]) -> list[list[float]]:
-    """Embed *texts* with one ``embed_many`` call when *embed* has one, else one by one."""
+    """Embed *texts* with one ``embed_many`` call when *embed* has one, else one by one.
+
+    Raises:
+        ValueError: If the embedder returns another number of vectors.
+    """
     embed_many = getattr(embed, "embed_many", None)
-    if embed_many is not None:
-        vectors: list[list[float]] = embed_many(texts)
-        return vectors
-    return [embed(text) for text in texts]
+    vectors: list[list[float]] = (
+        embed_many(texts) if embed_many is not None else [embed(text) for text in texts]
+    )
+    if len(vectors) != len(texts):
+        raise ValueError(f"The embedder returned {len(vectors)} vectors for {len(texts)} inputs.")
+    return vectors
 
 
 def _frontmatter_json(frontmatter: dict[str, Any]) -> str:
@@ -366,13 +424,24 @@ class SearchHit:
 
     Attributes:
         name: Page name (without ``.md``).
-        score: Cosine similarity in ``[-1, 1]``; higher is closer.
+        score: Similarity to the query in ``[-1, 1]``; higher is closer.
+            The cosine of the page embedding, averaged with that of the
+            page's best statement unless *statement* is ``None``.
         frontmatter: The page's frontmatter as stored in the index.
+        statement: Position of the best statement in
+            :func:`~kiss.core.memoryfield.statements.page_statements`, or
+            ``None`` for a page scored by its page embedding alone.
+        by_page: Whether the search ranked by page embedding alone (asked
+            to, or for want of statement vectors): its scores are lower
+            than, and do not compare with, those of a search that ranked
+            with statements.
     """
 
     name: str
     score: float
     frontmatter: dict[str, Any]
+    statement: int | None = None
+    by_page: bool = False
 
     @property
     def title(self) -> str:
@@ -400,13 +469,19 @@ class _Rows:
     """Decoded index rows that share one embedding dimension, in filename order.
 
     Attributes:
+        generation: The ``generation`` of the index the rows were read from.
         names: Page names (without ``.md``).
         frontmatter: Each row's frontmatter as stored (JSON text).
+        revisions: Each row's ``revision``, which its statement vectors
+            must carry, in that generation, to count (see
+            :meth:`VectorIndex._write`).
         vectors: ``len(names) x dims`` float32 matrix of unit embeddings.
     """
 
+    generation: str
     names: list[str]
     frontmatter: list[str]
+    revisions: list[int]
     vectors: "np.ndarray"
 
 
@@ -421,6 +496,11 @@ class VectorIndex:
             file so indexes from different models never mix. Defaults to the
             embedder's ``model_name`` when it has one, else
             :data:`HASHED_EMBEDDING_MODEL_CODE`.
+        statements: Embed each page's statements beside the page and rank
+            a page by both.  ``False`` keeps one vector per
+            page and ranks by it (the baseline of the search evaluations);
+            such an index never writes statement vectors and ignores
+            stored ones.
     """
 
     def __init__(
@@ -428,8 +508,10 @@ class VectorIndex:
         memory: MemoryDir,
         embed: Embedder | None = None,
         model_code: str | None = None,
+        statements: bool = True,
     ) -> None:
         self.memory = memory
+        self.statements = statements
         if embed is None:
             embed = default_embedder()
         self.embed = embed
@@ -556,6 +638,22 @@ class VectorIndex:
             "CREATE INDEX IF NOT EXISTS pages_sync"
             " ON pages (filename, sha256, input_format, revision, stat_key)"
         )
+        # One row per page: the float16 unit embeddings of its statements,
+        # end to end.  The row counts only while its ``revision`` equals the
+        # page row's and its ``format`` is STATEMENT_FORMAT (see _write), so
+        # a page row rewritten by a process that predates this table simply
+        # outdates it.  The index covers sync's snapshot query, as above.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS statements ("
+            " filename TEXT PRIMARY KEY,"
+            " revision INTEGER NOT NULL,"
+            " format TEXT NOT NULL,"
+            " embeddings BLOB NOT NULL)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS statements_sync"
+            " ON statements (filename, revision, format)"
+        )
         conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
         conn.executemany(
             "INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)",
@@ -583,11 +681,20 @@ class VectorIndex:
             return text
         return data[:MAX_PAGE_BYTES].decode("utf-8", errors="ignore")
 
-    def sync(self, verify: bool = False, cancel: threading.Event | None = None) -> SyncReport:
+    def sync(
+        self,
+        verify: bool = False,
+        cancel: threading.Event | None = None,
+        names: Collection[str] | None = None,
+        backfill_seconds: float | None = None,
+    ) -> SyncReport:
         """Bring the index in line with the pages on disk.
 
         A page is skipped when its row was embedded under the current
-        :data:`EMBEDDING_INPUT_FORMAT` and either its stored stat key (size,
+        :data:`EMBEDDING_INPUT_FORMAT`, its statement vectors (on an index
+        with statements) were written with that row under the current
+        :data:`~kiss.core.memoryfield.statements.STATEMENT_FORMAT`, and
+        either its stored stat key (size,
         mtime, ctime and inode, see :func:`stat_key`) equals the file's
         current one — no read at all — or its stored sha256 matches the
         file's content.  A stat key is stored only once the file's
@@ -599,6 +706,14 @@ class VectorIndex:
         has synced — are re-embedded, in batches of at most
         :data:`EMBED_BATCH_INPUTS` inputs / :data:`EMBED_BATCH_BYTES` bytes
         (one request each when the embedder has an ``embed_many`` method).
+        A page's statements are embedded in the request of the page and
+        stored in the transaction of its row.  A page whose row is current
+        and only lacks statement vectors (every page of an index that
+        predates them, or a row written since by a process that does) is
+        embedded again too, after the new and modified pages and, with
+        *backfill_seconds*, only for that long: :meth:`search` ranks by
+        page embeddings where statement vectors are missing, so this
+        backfill can be spread over several syncs.
         Rows for pages that no longer exist are removed.  Embeddings are
         computed with no database transaction open, and each batch's rows
         are then written in one short transaction, so an interrupted build
@@ -638,13 +753,21 @@ class VectorIndex:
                 timestamps).
             cancel: Once set, no further embedding batch starts; the batch
                 in flight is still written, as with an interrupted build.
+            names: Sync only these pages: every other page and row is
+                left as it is (``memory_write`` indexes the page it wrote).
+            backfill_seconds: Once the sync has run this long, no further
+                batch of pages that only lack statement vectors starts;
+                they are left to a later sync and counted in no category.
+                ``None`` embeds them all.
 
         Returns:
             A :class:`SyncReport` with per-category counts of the writes
             that were actually applied.
         """
+        started = time.monotonic()
         unchanged = 0
         with closing(self._connect()) as conn:
+            conn.execute("BEGIN")  # one snapshot for the three reads
             meta = conn.execute("SELECT value FROM meta WHERE key = 'generation'").fetchone()
             generation = meta[0]
             stored = {
@@ -653,20 +776,38 @@ class VectorIndex:
                     "SELECT filename, sha256, input_format, revision, stat_key FROM pages"
                 )
             }
+            # filename -> (the revision its statement vectors carry, their format)
+            statements: dict[str, tuple[int, str]] = {}
+            if self.statements:
+                statements = {
+                    row[0]: (row[1], row[2])
+                    for row in conn.execute("SELECT filename, revision, format FROM statements")
+                }
         scan_ns = time.time_ns()
         pages = self.memory.page_stats()
+        if names is not None:
+            pages = {name: st for name, st in pages.items() if name in names}
+            stored = {filename: row for filename, row in stored.items() if filename[:-3] in names}
         on_disk = {f"{name}.md" for name in pages}
         restats: list[tuple[str, str, bytes]] = []
-        pending: list[_Pending] = []
+        pending: list[_Pending] = []  # new and modified pages
+        backfill: list[_Pending] = []  # pages whose current row only lacks statement vectors
         for name in sorted(pages):
             filename = f"{name}.md"
             snapshot = stored.get(filename)
             # The row, if it was embedded under the current input mapping.
             current = (
-                snapshot if snapshot is not None and snapshot[1] == EMBEDDING_INPUT_FORMAT else None
+                snapshot
+                if snapshot is not None and snapshot[1] == EMBEDDING_INPUT_FORMAT
+                else None
+            )
+            has_statements = not self.statements or (
+                current is not None
+                and statements.get(filename) == (current[2], STATEMENT_FORMAT)
             )
             if (
                 current is not None
+                and has_statements
                 and not verify
                 and current[3]
                 and current[3] == stat_key(pages[name], scan_ns, current[0])
@@ -683,28 +824,43 @@ class VectorIndex:
                 continue
             digest = hashlib.sha256(data).digest()
             key = stat_key(pages[name], scan_ns, digest)
+            queue = pending
             if current is not None and current[0] == digest:
-                unchanged += 1
-                if key != current[3]:
-                    restats.append((key, filename, digest))
-                continue
+                if has_statements:
+                    unchanged += 1
+                    if key != current[3]:
+                        restats.append((key, filename, digest))
+                    continue
+                queue = backfill
             raw = data.decode("utf-8", errors="replace")
             # An embeddings API rejects an empty input and, with it, the whole
             # batch: one empty page file would fail every sync.  A page with
             # nothing to embed is embedded as its name, which is its title.
             text = self.embedding_input(raw)
-            pending.append((filename, digest, raw, key, text if text.strip() else name))
+            inputs = [text if text.strip() else name]
+            if self.statements:
+                inputs += page_statements(name, raw)
+            queue.append((filename, digest, raw, key, inputs))
 
         stale = sorted(stored.keys() - on_disk)
         report = SyncReport(added=0, updated=0, removed=0, unchanged=unchanged)
         if restats:
             report = self._write(stored, [], restats, [], report, generation)
-        for batch in _batches(pending):
+        batches = [(batch, False) for batch in _batches(pending)]
+        batches += [(batch, True) for batch in _batches(backfill)]
+        for batch, is_backfill in batches:
             if cancel is not None and cancel.is_set():
                 break
-            vectors = _embed_all(self.embed, [item[4] for item in batch])
+            if (
+                is_backfill
+                and backfill_seconds is not None
+                and time.monotonic() - started >= backfill_seconds
+            ):
+                break
+            vectors = iter(_embed_all(self.embed, [text for item in batch for text in item[4]]))
             rows = []
-            for (filename, digest, raw, key, _), vector in zip(batch, vectors, strict=True):
+            for filename, digest, raw, key, inputs in batch:
+                vector, *statement_vectors = itertools.islice(vectors, len(inputs))
                 path = self.memory.root / filename  # validated by page_path above
                 try:
                     changed = hashlib.sha256(read_bytes_waiting_for_writer(path)).digest() != digest
@@ -726,6 +882,7 @@ class VectorIndex:
                         serialize_float32(normalize(vector)),
                         EMBEDDING_INPUT_FORMAT,
                         key,
+                        serialize_float16(statement_vectors) if self.statements else None,
                     )
                 )
             report = self._write(stored, rows, [], [], report, generation)
@@ -736,7 +893,7 @@ class VectorIndex:
     def _write(
         self,
         stored: dict[str, tuple[bytes, str, int, str]],
-        rows: list[tuple[str, str, float, bytes, bytes, str, str]],
+        rows: list[tuple[str, str, float, bytes, bytes, str, str, bytes | None]],
         restats: list[tuple[str, str, bytes]],
         stale: list[str],
         report: SyncReport,
@@ -744,9 +901,15 @@ class VectorIndex:
     ) -> SyncReport:
         """Apply one batch of :meth:`sync` writes in a single transaction.
 
+        A page's statement vectors are stored under the ``revision`` its
+        row gets here, and only when that row was written: whoever writes
+        the row later, with or without statements, outdates them.
+
         Args:
             stored: The snapshot the sync started from (the CAS tokens).
-            rows: Embedded rows to insert or update.
+            rows: Embedded rows to insert or update: the columns of a
+                ``pages`` row, then the page's statement vectors (``None``
+                on an index without statements).
             restats: ``(stat_key, filename, sha256)`` for unchanged rows.
             stale: Filenames whose rows should be deleted.
             report: Counts so far.
@@ -776,8 +939,7 @@ class VectorIndex:
             revision = int(
                 conn.execute("SELECT value FROM meta WHERE key = 'revision'").fetchone()[0]
             )
-            for row in rows:
-                filename = row[0]
+            for filename, *columns, statements in rows:
                 snapshot = stored.get(filename)
                 revision += 1
                 if snapshot is None:
@@ -785,7 +947,7 @@ class VectorIndex:
                         "INSERT OR IGNORE INTO pages"
                         " (filename, frontmatter, last_modified, sha256, embedding, input_format,"
                         " stat_key, revision) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                        (*row, revision),
+                        (filename, *columns, revision),
                     ).rowcount
                     added += applied
                 else:
@@ -793,11 +955,17 @@ class VectorIndex:
                         "UPDATE pages SET frontmatter = ?, last_modified = ?, sha256 = ?,"
                         " embedding = ?, input_format = ?, stat_key = ?, revision = ?"
                         " WHERE filename = ? AND revision = ?",
-                        (*row[1:], revision, filename, snapshot[2]),
+                        (*columns, revision, filename, snapshot[2]),
                     ).rowcount
                     updated += applied
                 if not applied:
                     logger.info(skipped_message, filename)
+                elif statements is not None:
+                    conn.execute(
+                        "INSERT OR REPLACE INTO statements (filename, revision, format, embeddings)"
+                        " VALUES (?, ?, ?, ?)",
+                        (filename, revision, STATEMENT_FORMAT, statements),
+                    )
             for filename in stale:
                 revision += 1  # a delete changes the token that _rows() caches on
                 applied = conn.execute(
@@ -807,6 +975,12 @@ class VectorIndex:
                 removed += applied
                 if not applied:
                     logger.info(skipped_message, filename)
+            if stale:
+                # The statement vectors of the removed pages, and of pages
+                # whose row a process that predates the table removed.
+                conn.execute(
+                    "DELETE FROM statements WHERE filename NOT IN (SELECT filename FROM pages)"
+                )
             conn.execute("UPDATE meta SET value = ? WHERE key = 'revision'", (str(revision),))
         return SyncReport(added=added, updated=updated, removed=removed, unchanged=report.unchanged)
 
@@ -831,16 +1005,20 @@ class VectorIndex:
             if cache is not None and cache[0] == token:
                 return cache[1]
             rows = conn.execute(
-                "SELECT filename, frontmatter, embedding FROM pages ORDER BY filename"
+                "SELECT filename, frontmatter, revision, embedding FROM pages ORDER BY filename"
             ).fetchall()
-        by_dims: dict[int, list[tuple[str, str, bytes]]] = {}
-        for filename, frontmatter_json, blob in rows:
-            by_dims.setdefault(len(blob) // 4, []).append((filename[:-3], frontmatter_json, blob))
+        by_dims: dict[int, list[tuple[str, str, int, bytes]]] = {}
+        for filename, frontmatter_json, revision, blob in rows:
+            by_dims.setdefault(len(blob) // 4, []).append(
+                (filename[:-3], frontmatter_json, revision, blob)
+            )
         groups = {
             dims: _Rows(
+                generation=token[0],
                 names=[row[0] for row in group],
                 frontmatter=[row[1] for row in group],
-                vectors=np.frombuffer(b"".join(row[2] for row in group), dtype=np.float32).reshape(
+                revisions=[row[2] for row in group],
+                vectors=np.frombuffer(b"".join(row[3] for row in group), dtype=np.float32).reshape(
                     len(group), dims
                 ),
             )
@@ -861,8 +1039,25 @@ class VectorIndex:
             for name, frontmatter in zip(rows.names, rows.frontmatter, strict=True)
         }
 
-    def search(self, query: str, k: int = 5, min_score: float = 0.0) -> list[SearchHit]:
+    def search(
+        self, query: str, k: int = 5, min_score: float = 0.0, by_page: bool = False
+    ) -> list[SearchHit]:
         """Return the *k* pages most similar to *query*.
+
+        On an index with statements the :data:`SHORTLIST_PAGES` pages (at
+        least *k*, and no more: equal float32 scores in name order) whose
+        page embeddings are closest to the query are ranked by the mean
+        of two cosine similarities: the page's and its best statement's
+        (the page's own again, exactly, for a page with no statement).
+        The page embedding tells what the page is about, the
+        statement finds the fact asked for; on the stores measured the
+        mean ranked better than either alone.  A best statement scores
+        higher than its whole page does, so a page scored by its page
+        embedding among pages scored with a statement is buried: while any
+        shortlisted page has no statement vectors in step with its row
+        (the backfill of :meth:`sync` has not reached it), the whole
+        shortlist is ranked by page embedding, as on an index without
+        statements.
 
         Rows whose stored dimension differs from the query's (written by a
         different embedder into a shared index file) are skipped with a
@@ -871,9 +1066,12 @@ class VectorIndex:
         Args:
             query: Natural-language query.
             k: Maximum number of hits.
-            min_score: Drop hits whose cosine similarity is not above this
+            min_score: Drop hits whose score is not above this
                 value. The default drops orthogonal pages (no overlap at all);
                 pass ``-1.0`` to always return *k* hits when the index has them.
+            by_page: Rank by page embedding alone, whatever statement
+                vectors are stored: the scores then compare with those of
+                an index that fell back to it.
 
         Returns:
             Hits sorted by descending score (ties in page-name order).
@@ -897,32 +1095,136 @@ class VectorIndex:
         rows = groups.get(len(query_vector))
         if rows is None:
             return []
-        # float32 BLAS scores only select candidates; each is within slack
-        # of its exact score.  The k best approximate rows all score at least
-        # kth_best - slack exactly, so every true top-k row does too and its
-        # approximation is at least kth_best - 2 * slack.  Every row above
-        # that floor (or within slack of min_score) is rescored exactly with
-        # math.sumprod, so scores, ties and the min_score cut are the same
-        # as an exact scan (an orthogonal page scores 0.0).
-        approx = rows.vectors @ np.asarray(query_vector, dtype=np.float32)
-        slack = float32_dot_error(len(query_vector))
-        floor = min_score - slack
-        if len(approx) > k:
-            kth_best = float(np.partition(approx, len(approx) - k)[len(approx) - k])
-            floor = max(floor, kth_best - 2 * slack)
-        scored = sorted(
-            (-math.sumprod(rows.vectors[i].tolist(), query_vector), int(i))
-            for i in np.flatnonzero(approx >= floor)
-        )
+        query32 = np.asarray(query_vector, dtype=np.float32)
+        approx = rows.vectors @ query32
+        shortlist: list[int] = []
+        best = None
+        if self.statements and not by_page:
+            shortlist = _highest(approx, max(k, SHORTLIST_PAGES))
+            best = self._best_statements(rows, shortlist, query32)
+        scored: list[tuple[float, int, int | None]] = []
+        if best is None:
+            # float32 BLAS scores only select candidates; each is within
+            # slack of its exact score.  The k best approximate rows all
+            # score at least kth_best - slack exactly, so every true top-k
+            # row does too and its approximation is at least kth_best -
+            # 2 * slack.  Every row above that floor (or within slack of
+            # min_score) is rescored exactly with math.sumprod, so scores,
+            # ties and the min_score cut are the same as an exact scan (an
+            # orthogonal page scores 0.0).
+            slack = float32_dot_error(len(query_vector))
+            floor = min_score - slack
+            if len(approx) > k:
+                kth_best = float(np.partition(approx, len(approx) - k)[len(approx) - k])
+                floor = max(floor, kth_best - 2 * slack)
+            shortlist = [int(i) for i in np.flatnonzero(approx >= floor)]
+        for i in shortlist:
+            if best is not None and i in best:
+                # No more exact than the float16 statement vectors: the
+                # float32 page score will do.
+                cosine, statement = best[i]
+                scored.append((-(float(approx[i]) + cosine) / 2, i, statement))
+            else:
+                exact = math.sumprod(rows.vectors[i].tolist(), query_vector)
+                scored.append((-exact, i, None))
+        scored.sort(key=operator.itemgetter(0, 1))
+        # With statements only the final score is cut: a page under
+        # min_score may hold a statement that lifts it above.
         return [
             SearchHit(
                 name=rows.names[i],
                 score=-negated,
                 frontmatter=json.loads(rows.frontmatter[i]),
+                statement=statement,
+                by_page=best is None,
             )
-            for negated, i in scored[:k]
+            for negated, i, statement in scored[:k]
             if -negated > min_score
         ]
+
+    def _best_statements(
+        self, rows: _Rows, candidates: list[int], query: "np.ndarray"
+    ) -> dict[int, tuple[float, int]] | None:
+        """Score the candidate pages by their best statement.
+
+        Args:
+            rows: The decoded page rows the candidates index into.
+            candidates: Positions in *rows* of the shortlisted pages.
+            query: The unit query embedding as float32.
+
+        Returns:
+            ``{position: (cosine of the best statement, its ordinal)}``,
+            without the pages that have no statement; ``None`` when some
+            candidate has no statement vectors that carry its row's
+            ``revision`` (none stored yet, or the row was rewritten or the
+            index rebuilt since) and the current format.
+        """
+        import numpy as np
+
+        position = {f"{rows.names[i]}.md": i for i in candidates}
+        filenames = list(position)
+        best: dict[int, tuple[float, int]] = {}
+        in_step = 0
+        with closing(self._connect()) as conn:
+            for start in range(0, len(filenames), _STATEMENT_QUERY_PAGES):
+                chunk = filenames[start : start + _STATEMENT_QUERY_PAGES]
+                # No row counts once the index is another build than the one
+                # *rows* was read from (the file deleted and rebuilt since):
+                # its revisions start over and could match by coincidence.
+                found = conn.execute(
+                    "SELECT filename, revision, embeddings FROM statements"
+                    f" WHERE format = ? AND filename IN ({','.join('?' * len(chunk))})"
+                    " AND (SELECT value FROM meta WHERE key = 'generation') = ?",
+                    (STATEMENT_FORMAT, *chunk, rows.generation),
+                )
+                for filename, revision, blob in found:
+                    i = position[filename]
+                    if revision != rows.revisions[i]:
+                        continue
+                    in_step += 1
+                    if not blob or len(blob) % (2 * len(query)):
+                        continue  # no statement (or not vectors of this dimension)
+                    vectors = np.frombuffer(blob, dtype="<f2").reshape(-1, len(query))
+                    scores = vectors.astype(np.float32) @ query
+                    ordinal = int(scores.argmax())
+                    best[i] = (float(scores[ordinal]), ordinal)
+        return best if in_step == len(candidates) else None
+
+    def similar_pages(
+        self, name: str, threshold: float = 0.9, k: int = 3
+    ) -> list[tuple[str, float]]:
+        """Return the pages whose embeddings are at least *threshold* similar to page *name*'s.
+
+        The comparison :meth:`near_duplicates` makes for every pair, for
+        one page: page embeddings, rescored exactly.
+
+        Args:
+            name: An indexed page (without ``.md``).
+            threshold: Minimum cosine similarity.
+            k: Maximum number of pages returned.
+
+        Returns:
+            ``(other name, score)`` by descending score (ties in name
+            order); empty when *name* is not in the index.
+        """
+        import numpy as np
+
+        for rows in self._rows().values():
+            if name not in rows.names:
+                continue
+            vectors = rows.vectors
+            page = rows.names.index(name)
+            floor = threshold - float32_dot_error(vectors.shape[1])
+            exact = vectors[page].tolist()
+            similar = [
+                (rows.names[i], math.sumprod(exact, vectors[i].tolist()))
+                for i in np.flatnonzero(vectors @ vectors[page] >= floor)
+                if i != page
+            ]
+            similar = [pair for pair in similar if pair[1] >= threshold]
+            similar.sort(key=lambda pair: (-pair[1], pair[0]))
+            return similar[:k]
+        return []
 
     def near_duplicates(self, threshold: float = 0.9) -> list[tuple[str, str, float]]:
         """Return page pairs whose embeddings are at least *threshold* similar.
@@ -979,4 +1281,5 @@ class VectorIndex:
         with closing(self._connect()) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
             conn.execute("DELETE FROM pages")
+            conn.execute("DELETE FROM statements")
             conn.execute("UPDATE meta SET value = ? WHERE key = 'generation'", (uuid.uuid4().hex,))

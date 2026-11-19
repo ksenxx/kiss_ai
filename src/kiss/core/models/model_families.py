@@ -56,22 +56,12 @@ _FAMILY_PREFIXES: tuple[tuple[str, str], ...] = (
     ("gemini-", "google"),
     ("deepseek", "deepseek"),
     ("moonshotai/", "moonshot"),
-    ("kimi-", "moonshot"),
-    ("glm-", "z-ai"),
-    ("zai-org/", "z-ai"),
     ("qwen/", "qwen"),
     ("meta-llama/", "meta"),
     ("mistralai/", "mistral"),
     ("x-ai/", "xai"),
 )
-"""Name prefixes (lower-case) that name a family, checked in order.
-
-A vendor's own API spells its models without a vendor segment
-(``kimi-k3``, ``glm-4.7``) while Together and OpenRouter prefix one
-(``moonshotai/Kimi-K3``, ``zai-org/GLM-4.7``, ``z-ai/glm-4.7``): the
-direct spellings are listed so the two routes of one model are one
-family.
-"""
+"""Name prefixes (lower-case) that name a family, checked in order."""
 
 SECOND_OPINION_MODELS: tuple[str, ...] = (
     "gpt-6-astra",
@@ -81,12 +71,8 @@ SECOND_OPINION_MODELS: tuple[str, ...] = (
     "openrouter/anthropic/claude-opus-5.5",
     "openrouter/google/gemini-3.1-pro-preview",
     "openrouter/deepseek/deepseek-v4-pro",
-    "moonshotai/Kimi-K3",
-    "deepseek-ai/DeepSeek-V4-Pro",
     "cc/opus",
     "codex/default",
-    "glm-4.7",
-    "kimi-k3",
     BEDROCK_PREFIX,
 )
 """Strong models of each family, in the order a second opinion prefers them.
@@ -443,8 +429,8 @@ VISION_FAMILIES: frozenset[str] = frozenset({"anthropic", "openai", "google", "x
 TEXT_ONLY_NAME_MARKS: tuple[str, ...] = ("gpt-oss", "gemma-2-", "gpt-audio")
 """Name fragments of the models of a vision family that take no image.
 
-The open-weight GPT-OSS models (``openai/gpt-oss-120b`` and its
-thinking aliases, ``gpt-oss-safeguard``) and Gemma 2 accept text only,
+The open-weight GPT-OSS models (``openrouter/openai/gpt-oss-120b`` and
+its thinking aliases, ``gpt-oss-safeguard``) and Gemma 2 accept text only,
 and ``gpt-audio`` text and audio: their providers declare no image
 input (OpenRouter's model metadata, checked 2026-11-01).
 """
@@ -460,7 +446,7 @@ def model_supports_images(model_name: str) -> bool:
     see images (:data:`VISION_FAMILIES`) unless its name marks it as
     text-only (:data:`TEXT_ONLY_NAME_MARKS`), or a name with a segment
     that marks a vision model (:data:`VISION_NAME_WORDS`, as in
-    ``Qwen/Qwen3-VL-8B-Instruct`` or ``clef-omni``).  Everything else
+    ``qwen/qwen3-vl-8b-instruct`` or ``clef-omni``).  Everything else
     (deepseek, moonshot, text qwen, meta, mistral, an unknown local
     model) is taken to be text-only: such a model is handed an image
     read as raw base64 it cannot use, so image-centred work fails on it

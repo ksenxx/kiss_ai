@@ -109,19 +109,22 @@ function testUnitLadder() {
       testCase.text,
       `row ${i} (${testCase.ago} ms old)`,
     );
-    // "Next to the show details button": the label lives in the same
-    // action strip, immediately after the collapse toggle.
+    // The label lives in the row's "…" menu (the action strip), under
+    // its buttons, the show-details one among them.
     const actions = row.querySelector('.sidebar-item-actions');
     assert.strictEqual(
       ago.parentElement,
       actions,
       `row ${i} label sits in the action strip`,
     );
-    const toggle = row.querySelector('.sidebar-item-collapse');
+    assert.ok(
+      actions.querySelector('.sidebar-item-collapse ~ .sidebar-item-launched'),
+      `row ${i} label comes after the show-details button`,
+    );
     assert.strictEqual(
-      toggle.nextElementSibling,
-      ago,
-      `row ${i} label is adjacent to the show-details button`,
+      actions.querySelector('.sidebar-item-launched ~ button'),
+      null,
+      `row ${i} label comes after every button of the menu`,
     );
     // The tooltip carries the absolute launch time.
     assert.ok(

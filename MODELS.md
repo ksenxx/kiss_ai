@@ -1,33 +1,30 @@
 # Models in the bundled catalog
 
-KISS Sorcar ships a catalog of **1089 models** across **10 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json); `uv run python -m kiss.scripts.update_models` refreshes that file and rewrites the counts and lists below, so do not edit them by hand. Models are grouped by the provider that routes them (whose API key or CLI serves the model); open-weight `openai/gpt-oss-*` and `google/gemma-*` models are served via Together AI. How costs are computed from these prices is described in [README.md](README.md#models-supported).
+KISS Sorcar ships a catalog of **988 models** across **7 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json); `uv run python -m kiss.scripts.update_models` refreshes that file and rewrites the counts and lists below, so do not edit them by hand. Models are grouped by the provider that routes them (whose API key or CLI serves the model). How costs are computed from these prices is described in [README.md](README.md#models-supported).
 
 The Amazon Bedrock entries (`bedrock/<Bedrock model or inference-profile id>`, such as `bedrock/us.anthropic.claude-opus-4-6-v1` or `bedrock/global.anthropic.claude-haiku-4-5-20251001-v1:0`) are the Claude ids the updater found in its AWS region (`AWS_REGION`, default `us-east-1`): the system-defined cross-region inference profiles and any foundation model id that accepts on-demand calls there. Each one is a copy of its `claude-*` entry (same context length, capabilities and `-low`/`-medium`/`-high`/`-max` effort suffixes) with the prices scaled by Bedrock's regional premium: a `global.` profile costs the same as the `claude-*` entry, a geographic (`us.`, `eu.`, `apac.`, `jp.`, `au.`) or in-region (`anthropic.`) id of a Claude 4.5-or-later model 10% more. Configure `AWS_BEARER_TOKEN_BEDROCK` or an `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` pair, plus `AWS_REGION`, to use them; re-running the updater on a machine in another region relists the ids that region serves. An id the region serves that is not in the catalog can still be used by name or added under Settings → Custom Models.
 
 | Provider category | Catalog entries |
 |---|---:|
-| OpenAI | 89 |
+| OpenAI | 99 |
 | Anthropic | 82 |
 | Amazon Bedrock (`bedrock/*`) | 144 |
 | Gemini | 57 |
-| Together AI | 109 |
-| Z.AI | 8 |
-| Moonshot AI | 10 |
-| OpenRouter | 500 |
+| OpenRouter | 514 |
 | Claude Code CLI (`cc/*`) | 79 |
-| Codex CLI (`codex/*`) | 11 |
+| Codex CLI (`codex/*`) | 13 |
 
 Current catalog capability totals:
 
-- **1039** generation-capable models
-- **883** function-calling-capable models
-- **8** embedding models
-- **34** decision models
+- **937** generation-capable models
+- **803** function-calling-capable models
+- **6** embedding models
+- **37** decision models
 
 Full model list:
 
 <details>
-<summary><strong>OpenAI (89)</strong></summary>
+<summary><strong>OpenAI (99)</strong></summary>
 
 - `gpt-4.1`
 - `gpt-4.1-2025-04-14`
@@ -104,6 +101,16 @@ Full model list:
 - `gpt-6.1-terra-low`
 - `gpt-6.1-terra-medium`
 - `gpt-6.1-terra-xhigh`
+- `gpt-6.2-astra`
+- `gpt-6.2-astra-high`
+- `gpt-6.2-astra-low`
+- `gpt-6.2-astra-medium`
+- `gpt-6.2-astra-xhigh`
+- `gpt-6.2-sol`
+- `gpt-6.2-sol-high`
+- `gpt-6.2-sol-low`
+- `gpt-6.2-sol-medium`
+- `gpt-6.2-sol-xhigh`
 - `gpt-audio`
 - `gpt-audio-1.5`
 - `gpt-audio-2025-08-28`
@@ -423,152 +430,7 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>Together AI (109)</strong></summary>
-
-- `BAAI/bge-base-en-v1.5`
-- `Qwen/QwQ-32B`
-- `Qwen/Qwen2-1.5B-Instruct`
-- `Qwen/Qwen2-VL-72B-Instruct`
-- `Qwen/Qwen2.5-14B-Instruct`
-- `Qwen/Qwen2.5-72B-Instruct`
-- `Qwen/Qwen2.5-72B-Instruct-Turbo`
-- `Qwen/Qwen2.5-7B-Instruct-Turbo`
-- `Qwen/Qwen2.5-Coder-32B-Instruct`
-- `Qwen/Qwen2.5-VL-72B-Instruct`
-- `Qwen/Qwen3-235B-A22B-Instruct-2507-tput`
-- `Qwen/Qwen3-235B-A22B-Thinking-2507`
-- `Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8`
-- `Qwen/Qwen3-Coder-Next-FP8`
-- `Qwen/Qwen3-Next-80B-A3B-Instruct`
-- `Qwen/Qwen3-Next-80B-A3B-Thinking`
-- `Qwen/Qwen3-VL-32B-Instruct`
-- `Qwen/Qwen3-VL-8B-Instruct`
-- `Qwen/Qwen3.5-397B-A17B`
-- `Qwen/Qwen3.5-9B`
-- `Qwen/Qwen3.6-Plus`
-- `Qwen/Qwen3.7-Max`
-- `Qwen/Qwen3.7-Plus`
-- `Qwen/Qwen3.8-2.4T-A95B`
-- `Qwen/Qwen3.8-Flash`
-- `arcee-ai/trinity-mini`
-- `deepcogito/cogito-v1-preview-llama-70B`
-- `deepcogito/cogito-v1-preview-llama-70B-Turbo`
-- `deepcogito/cogito-v1-preview-llama-8B`
-- `deepcogito/cogito-v1-preview-qwen-14B`
-- `deepcogito/cogito-v1-preview-qwen-32B`
-- `deepcogito/cogito-v2-1-671b`
-- `deepseek-ai/DeepSeek-R1`
-- `deepseek-ai/DeepSeek-R1-0528`
-- `deepseek-ai/DeepSeek-R1-0528-tput`
-- `deepseek-ai/DeepSeek-R1-Distill-Llama-70B`
-- `deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B`
-- `deepseek-ai/DeepSeek-R1-Distill-Qwen-14B`
-- `deepseek-ai/DeepSeek-V3-0324`
-- `deepseek-ai/DeepSeek-V3.1`
-- `deepseek-ai/DeepSeek-V4-Flash-0731`
-- `deepseek-ai/DeepSeek-V4-Pro`
-- `deepseek-ai/DeepSeek-V4-Pro-0813`
-- `deepseek-ai/DeepSeek-V4.1-Flash`
-- `deepseek-ai/DeepSeek-V4.1-Flash-1017`
-- `deepseek-ai/deepseek-coder-33b-instruct`
-- `essentialai/rnj-1-instruct`
-- `google/gemma-2-27b-it`
-- `google/gemma-3n-E4B-it`
-- `google/gemma-4-31B-it`
-- `intfloat/multilingual-e5-large-instruct`
-- `meta-llama/Llama-3-70b-chat-hf`
-- `meta-llama/Llama-3-8b-chat-hf`
-- `meta-llama/Llama-3.1-405B-Instruct`
-- `meta-llama/Llama-3.2-1B-Instruct`
-- `meta-llama/Llama-3.2-3B-Instruct-Turbo`
-- `meta-llama/Llama-3.3-70B-Instruct-Turbo`
-- `meta-llama/Llama-3.3-70B-Instruct-Turbo-test`
-- `meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8`
-- `meta-llama/Llama-4-Scout-17B-16E-Instruct`
-- `meta-llama/Meta-Llama-3-70B-Instruct-Turbo`
-- `meta-llama/Meta-Llama-3-8B-Instruct`
-- `meta-llama/Meta-Llama-3-8B-Instruct-Lite`
-- `meta-llama/Meta-Llama-3.1-70B-Instruct-Reference`
-- `meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo`
-- `meta-llama/Meta-Llama-3.1-8B-Instruct-Reference`
-- `meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo`
-- `mistralai/Ministral-3-14B-Instruct-2512`
-- `mistralai/Mistral-7B-Instruct-v0.1`
-- `mistralai/Mistral-7B-Instruct-v0.2`
-- `mistralai/Mistral-7B-Instruct-v0.3`
-- `mistralai/Mistral-Small-24B-Instruct-2501`
-- `mistralai/Mixtral-8x7B-Instruct-v0.1`
-- `moonshotai/Kimi-K2-Instruct`
-- `moonshotai/Kimi-K2-Instruct-0905`
-- `moonshotai/Kimi-K2-Thinking`
-- `moonshotai/Kimi-K2.5`
-- `moonshotai/Kimi-K2.6`
-- `moonshotai/Kimi-K2.7-Code`
-- `moonshotai/Kimi-K3`
-- `moonshotai/Kimi-K3-high`
-- `moonshotai/Kimi-K3-low`
-- `moonshotai/Kimi-K3-max`
-- `moonshotai/Kimi-K3.1-Pro`
-- `moonshotai/Kimi-K3.1-Pro-high`
-- `moonshotai/Kimi-K3.1-Pro-low`
-- `moonshotai/Kimi-K3.1-Pro-max`
-- `nvidia/Llama-3.1-Nemotron-70B-Instruct-HF`
-- `nvidia/NVIDIA-Nemotron-3.5-Super-VL`
-- `nvidia/NVIDIA-Nemotron-Nano-9B-v2`
-- `nvidia/nemotron-3-ultra-550b-a55b`
-- `openai/gpt-oss-120b`
-- `openai/gpt-oss-120b-high`
-- `openai/gpt-oss-120b-low`
-- `openai/gpt-oss-120b-medium`
-- `openai/gpt-oss-20b`
-- `openai/gpt-oss-20b-high`
-- `openai/gpt-oss-20b-low`
-- `openai/gpt-oss-20b-medium`
-- `zai-org/GLM-4.5-Air-FP8`
-- `zai-org/GLM-4.6`
-- `zai-org/GLM-4.7`
-- `zai-org/GLM-5`
-- `zai-org/GLM-5.1`
-- `zai-org/GLM-5.2`
-- `zai-org/GLM-5.2-high`
-- `zai-org/GLM-5.2-max`
-- `zai-org/GLM-5.3`
-- `zai-org/GLM-5.3-Flash`
-
-</details>
-
-<details>
-<summary><strong>Z.AI (8)</strong></summary>
-
-- `glm-4-32b-0414-128k`
-- `glm-4.5`
-- `glm-4.5-air`
-- `glm-4.5-airx`
-- `glm-4.5-flash`
-- `glm-4.5-x`
-- `glm-4.6`
-- `glm-4.7`
-
-</details>
-
-<details>
-<summary><strong>Moonshot AI (10)</strong></summary>
-
-- `kimi-k2.5`
-- `kimi-k2.6`
-- `kimi-k2.7-code`
-- `kimi-k3`
-- `kimi-k3-high`
-- `kimi-k3-low`
-- `kimi-k3-max`
-- `moonshot-v1-128k`
-- `moonshot-v1-32k`
-- `moonshot-v1-8k`
-
-</details>
-
-<details>
-<summary><strong>OpenRouter (500)</strong></summary>
+<summary><strong>OpenRouter (514)</strong></summary>
 
 - `openrouter/aion-labs/aion-2.0`
 - `openrouter/aion-labs/aion-3.0`
@@ -741,6 +603,8 @@ Full model list:
 - `openrouter/liquid/d1`
 - `openrouter/liquid/d1-ultra`
 - `openrouter/liquid/d1.1`
+- `openrouter/liquid/d1.2`
+- `openrouter/liquid/d1.2-ultra`
 - `openrouter/liquid/lfm-2.5-24b-a2b`
 - `openrouter/liquid/lfm-3-1.7b`
 - `openrouter/mancer/weaver`
@@ -761,6 +625,7 @@ Full model list:
 - `openrouter/meta/muse-spark-open`
 - `openrouter/meta/muse-wonder`
 - `openrouter/microsoft/microsoft-decision-1`
+- `openrouter/microsoft/microsoft-decision-1.1`
 - `openrouter/microsoft/phi-4`
 - `openrouter/mistralai/codestral-2508`
 - `openrouter/mistralai/devstral-2512`
@@ -884,6 +749,16 @@ Full model list:
 - `openrouter/openai/gpt-6.1-terra-low`
 - `openrouter/openai/gpt-6.1-terra-medium`
 - `openrouter/openai/gpt-6.1-terra-xhigh`
+- `openrouter/openai/gpt-6.2-astra`
+- `openrouter/openai/gpt-6.2-astra-high`
+- `openrouter/openai/gpt-6.2-astra-low`
+- `openrouter/openai/gpt-6.2-astra-medium`
+- `openrouter/openai/gpt-6.2-astra-xhigh`
+- `openrouter/openai/gpt-6.2-sol`
+- `openrouter/openai/gpt-6.2-sol-high`
+- `openrouter/openai/gpt-6.2-sol-low`
+- `openrouter/openai/gpt-6.2-sol-medium`
+- `openrouter/openai/gpt-6.2-sol-xhigh`
 - `openrouter/openai/gpt-audio`
 - `openrouter/openai/gpt-audio-mini`
 - `openrouter/openai/gpt-chat-latest`
@@ -974,6 +849,7 @@ Full model list:
 - `openrouter/tencent/hy3`
 - `openrouter/tencent/hy3-preview`
 - `openrouter/tencent/hy4`
+- `openrouter/tencent/hy4-flash`
 - `openrouter/tencent/hy4-preview`
 - `openrouter/thedrummer/cydonia-24b-v4.1`
 - `openrouter/thedrummer/skyfall-36b-v2`
@@ -1159,7 +1035,7 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>Codex CLI (codex/*) (11)</strong></summary>
+<summary><strong>Codex CLI (codex/*) (13)</strong></summary>
 
 - `codex/codex-auto-review`
 - `codex/default`
@@ -1172,5 +1048,7 @@ Full model list:
 - `codex/gpt-6-sol`
 - `codex/gpt-6.1-sol`
 - `codex/gpt-6.1-terra`
+- `codex/gpt-6.2-astra`
+- `codex/gpt-6.2-sol`
 
 </details>

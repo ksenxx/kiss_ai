@@ -13,6 +13,7 @@ import threading
 import time
 from abc import abstractmethod
 from collections.abc import Callable
+from datetime import UTC, datetime
 from functools import partial
 from typing import TYPE_CHECKING, Any, TypeVar
 from urllib.parse import urlparse
@@ -268,7 +269,8 @@ EMBEDDINGS_TIMEOUT = 60.0
 # holds (https://developers.openai.com/api/docs/pricing, tier switcher).
 # Flex bills Batch rates (half of Standard) and Ultrafast six times
 # (gpt-6-astra $60/$6/$75/$300 on $10/$1/$12.50/$50) for every model
-# offering the tier; ``default``/``auto``/``scale`` bill Standard.  Fast
+# offering the tier, except GPT-6.2 during its launch promotion (below);
+# ``default``/``auto``/``scale`` bill Standard.  Fast
 # (formerly Priority) is twice Standard on the GPT-5.x/GPT-6 line
 # (gpt-6-astra $20/$2/$25/$100, gpt-5.4 $5/$0.50/$30, gpt-5.2
 # $3.50/$0.35/$28, gpt-5 $2.50/$0.25/$20) but not uniformly so on older
@@ -287,6 +289,38 @@ _OPENAI_FAST_EXCEPTIONS = (
     ("o4-mini", 2.0 / 1.1),  # $2/$0.50/$8 on $1.10/$0.275/$4.40
     ("o3", 1.75),  # $3.50/$0.875/$14 on $2/$0.50/$8
 )
+# The GPT-6.2 launch promotion (pricing page of 2026-11-18): "For GPT-6.2
+# Astra and GPT-6.2 Sol, Ultrafast costs 3 times the Standard rate through
+# February 28, 2027, and 6 times the Standard rate starting March 1, 2027
+# (Pacific time)" (gpt-6.2-astra $24/$1.20/$30/$120, gpt-6.2-sol
+# $6/$0.30/$7.50/$30, on $8/$0.40/$10/$40 and $2/$0.10/$2.50/$10).  March
+# 1, 2027 00:00 in Los Angeles is 08:00 UTC: daylight time starts on
+# March 14.
+_OPENAI_ULTRAFAST_PROMO_PREFIX = "gpt-6.2-"
+_OPENAI_ULTRAFAST_PROMO_MULTIPLIER = 3.0
+_OPENAI_ULTRAFAST_PROMO_END = datetime(2027, 3, 1, 8, tzinfo=UTC)
+
+
+def _openai_tier_bare_name(model_name: str) -> str:
+    """Return the OpenAI model id whose processing-tier rates *model_name* bills.
+
+    Args:
+        model_name: The catalog model name.
+
+    Returns:
+        The name without thinking alias and provider prefix:
+        ``openrouter/openai/gpt-5.5`` and ``gpt-5.5-high`` both bill as
+        ``gpt-5.5``.
+    """
+    from kiss.core.models.model_info import (
+        _openai_bare_name,
+        _strip_provider_prefix,
+        _strip_thinking_alias,
+    )
+
+    return _openai_bare_name(model_name) or _strip_thinking_alias(
+        _strip_provider_prefix(model_name)
+    )
 
 
 def _openai_fast_multiplier(model_name: str) -> float:
@@ -300,20 +334,33 @@ def _openai_fast_multiplier(model_name: str) -> float:
         The published Fast/Standard ratio from
         :data:`_OPENAI_FAST_EXCEPTIONS`, else :data:`_OPENAI_FAST_MULTIPLIER`.
     """
-    from kiss.core.models.model_info import (
-        _openai_bare_name,
-        _strip_provider_prefix,
-        _strip_thinking_alias,
-    )
-
-    # ``openrouter/openai/gpt-5.5`` and ``gpt-5.5-high`` both bill as gpt-5.5.
-    bare = _openai_bare_name(model_name) or _strip_thinking_alias(
-        _strip_provider_prefix(model_name)
-    )
+    bare = _openai_tier_bare_name(model_name)
     for prefix, factor in _OPENAI_FAST_EXCEPTIONS:
         if bare.startswith(prefix):
             return factor
     return _OPENAI_FAST_MULTIPLIER
+
+
+def _openai_ultrafast_multiplier(model_name: str, now: datetime | None = None) -> float:
+    """Return the Ultrafast-tier factor over Standard for *model_name* at *now*.
+
+    Args:
+        model_name: The catalog model name (thinking aliases and
+            provider prefixes are ignored).
+        now: The moment the request is billed, timezone-aware; the
+            current time when omitted.
+
+    Returns:
+        :data:`_OPENAI_ULTRAFAST_PROMO_MULTIPLIER` for a GPT-6.2 model
+        before :data:`_OPENAI_ULTRAFAST_PROMO_END`, else
+        :data:`_OPENAI_ULTRAFAST_MULTIPLIER`.
+    """
+    if (
+        _openai_tier_bare_name(model_name).startswith(_OPENAI_ULTRAFAST_PROMO_PREFIX)
+        and (now or datetime.now(UTC)) < _OPENAI_ULTRAFAST_PROMO_END
+    ):
+        return _OPENAI_ULTRAFAST_PROMO_MULTIPLIER
+    return _OPENAI_ULTRAFAST_MULTIPLIER
 
 
 def _usd_amount(value: Any) -> float | None:
@@ -410,7 +457,6 @@ DEEPSEEK_REASONING_MODELS = {
     "deepseek/deepseek-r1-distill-qwen-32b",
     "deepseek/deepseek-r1-distill-llama-70b",
     "deepseek-ai/DeepSeek-R1",
-    "deepseek-ai/DeepSeek-R1-0528-tput",
     "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
     "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
     "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B",
@@ -1440,9 +1486,11 @@ class OpenAICompatibleBase(Model):
         Flex at half the Standard rate, Fast (``service_tier`` ``fast``,
         or ``priority`` as GPT-5.6 and earlier still report it) at the
         model's published Fast ratio (see :func:`_openai_fast_multiplier`),
-        and Ultrafast at six times.  The response's ``service_tier``
-        names the tier actually used, so a Fast request downgraded under
-        the ramp-rate limit comes back ``default`` and bills Standard.
+        and Ultrafast at six times, three for GPT-6.2 during its launch
+        promotion (see :func:`_openai_ultrafast_multiplier`).  The
+        response's ``service_tier`` names the tier actually used, so a
+        Fast request downgraded under the ramp-rate limit comes back
+        ``default`` and bills Standard.
         Endpoints without tiers never send the field and bill Standard.
 
         Args:
@@ -1458,7 +1506,7 @@ class OpenAICompatibleBase(Model):
         if tier in ("fast", "priority"):
             return _openai_fast_multiplier(self.model_name)
         if tier == "ultrafast":
-            return _OPENAI_ULTRAFAST_MULTIPLIER
+            return _openai_ultrafast_multiplier(self.model_name)
         return 1.0
 
     def extract_cost_from_response(self, response: Any) -> float | None:
@@ -2787,15 +2835,6 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
                 cached_tokens = getattr(details, "cached_tokens", 0) or 0
                 cache_write_tokens = getattr(details, "cache_write_tokens", 0) or 0
                 audio_input_tokens = getattr(details, "audio_tokens", 0) or 0
-            if not cached_tokens:
-                # Together reports the cached prompt tokens of some
-                # (non-reasoning) models flat on ``usage.cached_tokens``,
-                # with no details object; the SDK keeps the extra field.
-                # Read only when the nested count is absent, never added
-                # to it.  (https://docs.together.ai/docs/inference/openai-compatibility)
-                flat_cached = _get_attr_or_key(usage, "cached_tokens")
-                if isinstance(flat_cached, int | float) and not isinstance(flat_cached, bool):
-                    cached_tokens = max(0, int(flat_cached))
             completion_details = getattr(usage, "completion_tokens_details", None)
             if completion_details is not None:
                 audio_output_tokens = getattr(completion_details, "audio_tokens", 0) or 0

@@ -71,8 +71,8 @@ SorcarAgent with chat-session state management.
 - **chat_id** *(property)* — Current chat session ID ("" means new session).
 - **new_chat()** — Reset to a new chat session (retires any pending worktree first).
 - **resume_chat_by_id(chat_id)** — Resume a chat session by stable identifier.
-- **resume_from_task_id(task_id)** — One-shot seed of the next prompt's context from a task's parent chain.
-- **build_chat_prompt(prompt) -> str** — Load chat context and prepend previous tasks/results to the prompt.
+- **resume_from_task_id(task_id)** — One-shot: the next task continues *task_id* in the chat's tree of tasks instead of the chat's last task.
+- **build_chat_prompt(prompt) -> str** — Prepend the tasks and results on the path from the chat's first task to the task being continued (at most 10).
 - **`run(prompt_template='', **kwargs) -> str`** — Run with chat-session context: loads prior context, persists the new task, runs the underlying agent, and saves the result to history. A worktree still pending from an earlier run is retired first (committed to its own branch, kept for review); a run that ends with a worktree unmerged marks its branch preserved so no other process merges it; an unexpected exception becomes a `success: false` result.
 
 ## `kiss.agents.sorcar.git_worktree` — Git worktree operations

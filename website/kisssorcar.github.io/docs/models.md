@@ -1,29 +1,27 @@
 # Models Supported by KISS Sorcar
 
-> KISS Sorcar ships a catalog of **761 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`).
+> KISS Sorcar ships a catalog of **988 models** across **7 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`).
 
-The machine-readable source of truth is [`src/kiss/core/models/MODEL_INFO.json`](https://raw.githubusercontent.com/ksenxx/kiss_ai/main/src/kiss/core/models/MODEL_INFO.json) in the source repository. Models are grouped by the provider that routes them (i.e., whose API key or CLI serves the model); open-weight `openai/gpt-oss-*` and `google/gemma-*` models are served via Together AI.
+The machine-readable source of truth is [`src/kiss/core/models/MODEL_INFO.json`](https://raw.githubusercontent.com/ksenxx/kiss_ai/main/src/kiss/core/models/MODEL_INFO.json) in the source repository. Models are grouped by the provider that routes them (i.e., whose API key or CLI serves the model).
 
 ## Provider Categories
 
 | Provider category | Catalog entries |
 |---|---:|
-| OpenAI | 111 |
-| Anthropic | 76 |
-| Gemini | 20 |
-| Together AI | 103 |
-| Z.AI | 8 |
-| Moonshot AI | 10 |
-| OpenRouter | 406 |
-| Claude Code CLI (`cc/*`) | 17 |
-| Codex CLI (`codex/*`) | 10 |
+| OpenAI | 99 |
+| Anthropic | 82 |
+| Amazon Bedrock (`bedrock/*`) | 144 |
+| Gemini | 57 |
+| OpenRouter | 514 |
+| Claude Code CLI (`cc/*`) | 79 |
+| Codex CLI (`codex/*`) | 13 |
 
 ## Capability Totals
 
-- **736** generation-capable models
-- **578** function-calling-capable models
-- **7** embedding models
-- **11** decision models
+- **937** generation-capable models
+- **803** function-calling-capable models
+- **6** embedding models
+- **37** decision models
 
 ## Configuring Model Access
 
@@ -32,11 +30,8 @@ Set one or more environment variables:
 ```bash
 export ANTHROPIC_API_KEY=...
 export OPENAI_API_KEY=...
-export ZAI_API_KEY=...
-export MOONSHOT_API_KEY=...
-export TOGETHER_API_KEY=...
-export OPENROUTER_API_KEY=...
 export GEMINI_API_KEY=...
+export OPENROUTER_API_KEY=...
 ```
 
 Claude models can also run through Amazon Bedrock: use the model name `bedrock/<Bedrock model or inference-profile id>` (for example `bedrock/us.anthropic.claude-opus-4-6-v1:0`) and set `AWS_BEARER_TOKEN_BEDROCK`, or `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` (+ `AWS_SESSION_TOKEN` for temporary credentials), plus `AWS_REGION` (default `us-east-1`). Such a model is priced as its `claude-*` catalog entry; add it under Settings → Custom Models (name only) to pick it in the web app.
@@ -46,7 +41,7 @@ Or point at any OpenAI-compatible local/self-hosted endpoint by setting a custom
 ## Model Namespaces
 
 - Plain names (e.g. `claude-sonnet-4-6`, `gpt-4.1`) map to the native provider APIs.
-- `openrouter/...` routes through OpenRouter (406 entries, including `openrouter/~vendor/model-latest` aliases that always track the newest model).
+- `openrouter/...` routes through OpenRouter (514 entries, including `openrouter/~vendor/model-latest` aliases that always track the newest model).
 - `cc/haiku`, `cc/sonnet`, `cc/opus` run on top of the Claude Code CLI.
 - `codex/...` (e.g. `codex/gpt-5.6-sol`) run on top of the Codex CLI.
 

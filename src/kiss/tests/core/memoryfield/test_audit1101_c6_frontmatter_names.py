@@ -81,7 +81,7 @@ def test_unquoted_yaml_timestamp_counts_as_stale(tmp_path: Path) -> None:
         )
     tools.memory_write("fresh", "Database notes written just now.")
     out = tools.memory_refresh(stale_days=30)
-    stale_section = out.split("Pages not updated in 30 days")[1]
+    stale_section = out.split("Pages not verified or updated in 30 days")[1]
     for name in ("quoted", "unquoted", "offset", "naive"):
         assert f"  {name}  (updated " in stale_section, name
     assert "mangled" not in stale_section

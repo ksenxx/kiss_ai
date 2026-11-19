@@ -8,7 +8,8 @@ This module implements the *data* half of the memoryfield pattern
 (https://github.com/calpaterson/memoryfield-spec): a memory is a flat
 directory of short Markdown "pages". Each page may start with a YAML
 frontmatter block carrying ``title``, ``uuid``, ``summary``, ``created`` and
-``updated``. The pages are the canonical data; the vector index built by
+``updated``, followed by the page's provenance (:data:`PROVENANCE_KEYS`).
+The pages are the canonical data; the vector index built by
 :mod:`kiss.core.memoryfield.index` is a regenerable cache.
 
 Deleting a page leaves a *tombstone*, ``<memory>/.tombstones/<name>``,
@@ -64,6 +65,28 @@ MUTATION_LOCK_TIMEOUT = 60.0
 
 FRONTMATTER_KEYS = ("title", "uuid", "summary", "created", "updated")
 
+# Who wrote a page and on what evidence: ``task`` is the task that last
+# wrote it (its events are in history.db), ``writer`` is ``agent`` or the
+# kind of maintenance job, ``verified`` is when an agent holding the
+# evidence last wrote it (unlike ``updated``, a job's rewrite does not
+# move it: see :func:`evidence_time`), ``sources`` is where its facts come
+# from and ``review_after`` is the date after which they need re-verifying.
+PROVENANCE_KEYS = ("task", "writer", "verified", "sources", "review_after")
+
+# Provenance set by the writing code alone (``MemoryDir.write(extra=...)``):
+# a value for these in a page body is ignored, so a page copied with its
+# frontmatter into a new body cannot pass as verified.
+CODE_SET_KEYS = frozenset({"task", "writer", "verified"})
+
+# The ``writer`` that holds the evidence for what it writes, and so verifies
+# a page by writing it.  Any other writer is a maintenance job, which
+# rewrites pages without verifying their facts.
+AGENT = "agent"
+
+
+class PageChangedError(Exception):
+    """A page is no longer the text a conditional write or delete expected; nothing was done."""
+
 
 def page_title(frontmatter: dict[str, Any], name: str) -> str:
     """The page title from *frontmatter*, falling back to the page *name*."""
@@ -75,6 +98,25 @@ def page_summary(frontmatter: dict[str, Any]) -> str:
     """The one-line summary from *frontmatter*, or an empty string."""
     summary = frontmatter.get("summary")
     return str(summary) if summary else ""
+
+
+def evidence_time(frontmatter: dict[str, Any]) -> tuple[str, str]:
+    """The frontmatter key and time of a page's last write by an agent, which held the evidence.
+
+    Args:
+        frontmatter: The page's frontmatter.
+
+    Returns:
+        ``("verified", time)``; without a ``verified`` time,
+        ``("updated", time)`` when an agent wrote the page last (as on every
+        page from before provenance, which has no ``writer``); else
+        ``("", "")``, for a page that only a maintenance job has written.
+    """
+    if frontmatter.get("verified"):
+        return "verified", str(frontmatter["verified"])
+    if str(frontmatter.get("writer") or AGENT) != AGENT:
+        return "", ""
+    return "updated", str(frontmatter.get("updated") or "")
 
 
 @dataclass(frozen=True)
@@ -196,9 +238,10 @@ def split_frontmatter(text: str) -> tuple[dict[str, Any], str]:
 def render_page(frontmatter: dict[str, Any], body: str) -> str:
     """Serialise frontmatter and body back into page text.
 
-    Known keys are emitted first in the spec's order, then any extra keys.
-    Values are stringified so timestamps stay quoted strings (YAML 1.1
-    parsers would otherwise coerce them to ``datetime``).
+    Known keys are emitted first in the spec's order, then the provenance
+    keys, then any extra keys.  Values are stringified so timestamps stay
+    quoted strings (YAML 1.1 parsers would otherwise coerce them to
+    ``datetime``); a key with an empty value is left out.
 
     Args:
         frontmatter: Frontmatter mapping; may be empty.
@@ -211,7 +254,7 @@ def render_page(frontmatter: dict[str, Any], body: str) -> str:
     if not frontmatter:
         return text
     ordered: dict[str, Any] = {}
-    for key in FRONTMATTER_KEYS:
+    for key in FRONTMATTER_KEYS + PROVENANCE_KEYS:
         if key in frontmatter and frontmatter[key] not in (None, ""):
             ordered[key] = str(frontmatter[key])
     for key, value in frontmatter.items():
@@ -316,6 +359,7 @@ class MemoryDir:
         title: str = "",
         summary: str = "",
         extra: dict[str, Any] | None = None,
+        expected: str | None = None,
     ) -> Page:
         """Create or replace page *name* with generated frontmatter.
 
@@ -324,14 +368,31 @@ class MemoryDir:
         them in *body* or *extra* are ignored), ``title`` and ``summary``
         are kept unless overridden, and ``updated`` is refreshed. If *body*
         itself starts with a frontmatter block, its remaining values are
-        merged in.
+        merged in, except the :data:`CODE_SET_KEYS`, which only *extra*
+        sets; every other stored key is kept.
+
+        A write whose *extra* names its ``writer`` also settles the page's
+        ``verified`` time, from the page as stored and under the memory's
+        lock: an :data:`AGENT` has verified the page at the time of this
+        write; any other writer, a maintenance job, keeps the stored
+        page's :func:`evidence_time` (none for a page only jobs have
+        written).  A ``verified`` in *extra* is stored as given instead.
 
         Args:
             name: Page name (``.md`` optional).
             body: Markdown body, optionally with its own frontmatter.
             title: Human-readable title; defaults to the name on create.
             summary: One-sentence summary for search listings.
-            extra: Additional frontmatter keys to store (e.g. ``source``).
+            extra: Additional frontmatter keys to store (e.g. ``source``);
+                an empty value removes the key from the page.
+            expected: Write only if the page's bytes are still this text
+                (the :attr:`Page.raw` the caller read; ``""`` for a page
+                that must not exist, an empty file included), compared
+                under the memory's lock: a maintenance job that read a
+                page long before it writes never overwrites what another
+                task stored meanwhile.  A page that is not UTF-8 never
+                compares equal: the text read from it does not tell its
+                bytes.  ``None`` writes whatever is stored.
 
         Returns:
             The page as written.
@@ -341,6 +402,7 @@ class MemoryDir:
                 tombstone directory is a symlink.
             TimeoutError: If another process holds the memory's lock past
                 :data:`MUTATION_LOCK_TIMEOUT`; nothing is written.
+            PageChangedError: If the page is not *expected*; nothing is written.
         """
         path = self.page_path(name)
         tombstone = self._tombstone_dir() / path.stem
@@ -349,19 +411,38 @@ class MemoryDir:
             raise ValueError("Refusing to write an empty page.")
         frontmatter: dict[str, Any] = {}
         with self._mutation_lock():
+            now = now_iso()  # the one time of this write
             try:
-                existing = read_page_text(path)
+                stored: bytes | None = read_bytes_waiting_for_writer(path)
             except FileNotFoundError:
-                existing = ""  # create semantics
+                stored = None  # create semantics
+            if expected is not None and stored != (expected.encode("utf-8") or None):
+                raise PageChangedError(f"Page {path.name} changed since it was read.")
+            existing = (stored or b"").decode("utf-8", errors="replace")
             if existing:
                 frontmatter = split_frontmatter(existing)[0]
             # The stored identity outlives both incoming and extra values.
             identity: dict[str, Any] = {
                 k: frontmatter[k] for k in ("uuid", "created") if k in frontmatter
             }
-            frontmatter.update({k: v for k, v in incoming.items() if v not in (None, "")})
-            if extra:
-                frontmatter.update(extra)
+            # What the writing code sets.  The ``verified`` time is settled
+            # here, from the page as stored (before *incoming* is merged: a
+            # body's ``updated`` is no evidence) and under the lock: a time
+            # read any earlier could undo a verification that another
+            # writer has committed since.
+            stamp = dict(extra or {})
+            if stamp.get("writer") and "verified" not in stamp:
+                stamp["verified"] = (
+                    now if stamp["writer"] == AGENT else evidence_time(frontmatter)[1]
+                )
+            frontmatter.update(
+                {
+                    k: v
+                    for k, v in incoming.items()
+                    if v not in (None, "") and k not in CODE_SET_KEYS
+                }
+            )
+            frontmatter.update(stamp)
             frontmatter.update(identity)
             if title:
                 frontmatter["title"] = title
@@ -369,8 +450,8 @@ class MemoryDir:
                 frontmatter["summary"] = summary
             frontmatter.setdefault("title", path.stem.replace("-", " "))
             frontmatter.setdefault("uuid", str(uuid.uuid4()))
-            frontmatter.setdefault("created", now_iso())
-            frontmatter["updated"] = now_iso()
+            frontmatter.setdefault("created", now)
+            frontmatter["updated"] = now
             raw = render_page(frontmatter, body)
             # Atomic publish (stage + os.replace): the memory directory is
             # shared by parallel sub-agents and other daemon processes, whose
@@ -417,7 +498,7 @@ class MemoryDir:
             raise ValueError(f"{directory} is a symlink; the tombstone directory must not be.")
         return directory
 
-    def delete(self, name: str) -> None:
+    def delete(self, name: str, expected: str | None = None) -> None:
         """Delete page *name*, leaving a tombstone that records when.
 
         The tombstone, ``.tombstones/<name>`` holding the deletion time as
@@ -426,6 +507,8 @@ class MemoryDir:
 
         Args:
             name: Page name (``.md`` optional).
+            expected: Delete only if the page's bytes are still this text
+                (see :meth:`write`); ``None`` deletes whatever is stored.
 
         Raises:
             FileNotFoundError: If the page does not exist.
@@ -434,12 +517,17 @@ class MemoryDir:
                 memory; the page is then kept.
             TimeoutError: If another process holds the memory's lock past
                 :data:`MUTATION_LOCK_TIMEOUT`; the page is then kept.
+            PageChangedError: If the page is not *expected*; it is then kept.
         """
         path = self.page_path(name)
         tombstone = self._tombstone_dir() / path.stem
         with self._mutation_lock():
             if not path.is_file():
                 raise FileNotFoundError(f"Page {path.name} does not exist.")
+            if expected is not None and (
+                read_bytes_waiting_for_writer(path) != expected.encode("utf-8")
+            ):
+                raise PageChangedError(f"Page {path.name} changed since it was read.")
             # Tombstone first, page second: a delete that fails or is
             # interrupted in between leaves the page beside a stale
             # tombstone, which the merge resolves in favour of the page

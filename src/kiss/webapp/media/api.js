@@ -52,6 +52,7 @@
     'saveFile',
     'checkPaths',
     'getReplayImage',
+    'getTaskEvents',
     'getTaskUpdate',
     'getCronJobs',
     'cronAction',

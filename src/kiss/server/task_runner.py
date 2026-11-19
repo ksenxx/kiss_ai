@@ -57,6 +57,7 @@ from kiss.agents.sorcar.sea_apply import (
 )
 from kiss.agents.sorcar.sea_commands import (
     SeaError,
+    _split_slash_command,
     base_prompt,
     base_settings,
     get_command,
@@ -93,6 +94,7 @@ from kiss.server.browser_tab import BrowserTabService
 from kiss.server.json_printer import (
     IdentifiedPrompt,
     JsonPrinter,
+    continued_task_of,
     name_prompts,
     prompt_ids_of,
     stamp_event_ts,
@@ -339,6 +341,65 @@ def _drain_queued_followups(
     if not queued and close_if_empty:
         state.followup_queue_closed = True
     return queued, files
+
+
+def _is_command(text: str) -> bool:
+    """True when *text* starts with a registered ``/xxx`` command.
+
+    Called outside ``STATE_LOCK``: an unknown ``/name`` rescans the SEA
+    registry (:func:`get_command`).
+    """
+    parsed = _split_slash_command(text)
+    return parsed is not None and get_command(parsed[0]) is not None
+
+
+def _first_command_index(tasks: list[str]) -> int:
+    """Return the index of the first :func:`_is_command` in *tasks*, else ``len(tasks)``."""
+    return next((i for i, t in enumerate(tasks) if _is_command(t)), len(tasks))
+
+
+def _retagged(task: str) -> str:
+    """Return queued follow-up *task* as the ``<task>`` message that re-runs it.
+
+    The message is sent to continue the task the follow-up was
+    (:func:`continued_task_of`: the one its sender had loaded).
+    """
+    message = f"<task>{task}</task>"
+    continued = continued_task_of(task)
+    return IdentifiedPrompt(message, continued_task_id=continued) if continued else message
+
+
+def _drain_followup_subtasks(
+    state: AgentState,
+    last: bool,
+    cut: int | None,
+) -> tuple[list[str], list[list[Attachment]]]:
+    """Under ``STATE_LOCK``: take the queued follow-ups the subtask loop can run itself.
+
+    A follow-up that is a ``/xxx`` command must run as a run of its SEA
+    (``TaskRunner._apply_sea``), which a subtask of this run cannot be.
+    So the drain takes only the first *cut* follow-ups (all of them
+    when ``None``), *cut* being :func:`_first_command_index` of an
+    earlier snapshot of the queue, which only grows meanwhile; once
+    nothing else is left to run (*last* and nothing taken), the rest
+    move, re-tagged (:func:`_retagged`), to the tab's
+    leftover messages and the queue is closed: ``_release_run_state``
+    re-submits them in order as the tab's next runs, and a ``<task>``
+    message typed meanwhile follows them there
+    (:func:`_pending_message_reruns`).  Otherwise as
+    :func:`_drain_queued_followups` with *close_if_empty* = *last*.
+    """
+    tasks = state.queued_followup_tasks
+    taken, files = tasks[:cut], state.queued_followup_files[:cut]
+    del tasks[:cut]
+    del state.queued_followup_files[:cut]
+    if last and not taken:
+        state.pending_user_messages.extend(_retagged(task) for task in tasks)
+        state.pending_user_attachments.extend(state.queued_followup_files)
+        tasks.clear()
+        state.queued_followup_files.clear()
+        state.followup_queue_closed = True
+    return taken, files
 
 
 def _pending_message_reruns(state: AgentState) -> list[tuple[str, list[Attachment]]]:
@@ -599,6 +660,24 @@ def _prompt_of(cmd: dict[str, Any]) -> Any:
         if isinstance(i, str) and 0 < len(i) <= _MAX_PROMPT_ID_CHARS
     )
     return IdentifiedPrompt(prompt, ids) if ids and isinstance(prompt, str) else prompt
+
+
+def _continued_task_named(cmd: dict[str, Any]) -> str:
+    """Return the task the page says the sender of *cmd* had loaded, else ``""``.
+
+    The wire field ``continueTaskId`` of a ``run`` or an
+    ``appendUserMessage`` command: the ``task_history.id`` a CHATS
+    click showed in the tab without asking the daemon (the page only
+    scrolled to it), which the task the command starts continues.
+
+    Args:
+        cmd: The command dict.
+
+    Returns:
+        The task id, or ``""`` when the command names none.
+    """
+    named = cmd.get("continueTaskId")
+    return named if isinstance(named, str) else ""
 
 
 def _staged_hook(cmd: dict[str, Any], key: str) -> Any:
@@ -1160,6 +1239,18 @@ class _TaskRunnerMixin:
         # The slash SEA is executed once, as a layer below; whether a
         # bare ``/xxx`` has a default task is read off the loaded layers.
         prior_sea_path = cmd.get("seaPath")
+        # A prompt that is one ``<task>/xxx text</task>`` block and
+        # nothing else (a queued follow-up re-submitted by
+        # ``_release_run_state``) is that command.
+        _wrapped = str(cmd.get("prompt", "")).strip()
+        _task = parse_task_tags(_wrapped)[0]
+        if (
+            _wrapped.startswith("<task>")
+            and _wrapped.endswith("</task>")
+            and _wrapped.count("<task>") == _wrapped.count("</task>") == 1
+            and _is_command(_task)
+        ):
+            cmd["prompt"] = _task
         _slash = slash_command(cmd.get("prompt", ""))
         if _slash is not None:
             cmd["displayPrompt"] = cmd["prompt"]
@@ -1526,11 +1617,15 @@ class _TaskRunnerMixin:
         settings as the user submitted them (work dir, model, worktree
         and auto-commit choices) — not what its SEA pipeline made of
         them (a ``/xxx`` command's ``seaPath``, a script's pinned
-        fields) — and not its client stamps: the run token (``taskId``)
-        and the prompt's id (``promptId``) belong to the submission that
-        has just ended, and the routing key (``_state_key``) to the
-        state that has just been torn down.  Each re-run goes out under
-        the ids of the messages it stands for (``promptIds``).
+        fields) — and not its client stamps: the run token (``taskId``),
+        the prompt's id (``promptId``) and the task the user had loaded
+        (``continueTaskId``; a re-run continues the run it waited for)
+        belong to the submission that has just ended, and the routing
+        key (``_state_key``) to the state that has just been torn down.
+        Each re-run goes out under the ids of the messages it stands
+        for (``promptIds``), and a ``<task>`` message sent to continue
+        a task its sender had loaded as the continuation of that one
+        (its own ``continueTaskId``, :func:`continued_task_of`).
 
         Args:
             cmd: The finished run's ``run`` command as submitted
@@ -1538,11 +1633,15 @@ class _TaskRunnerMixin:
             reruns: ``(prompt, attachments)`` pairs from
                 :meth:`_release_run_state`, oldest first.
         """
-        base = {k: v for k, v in cmd.items() if k not in ("taskId", "_state_key", "promptId")}
+        stamps = ("taskId", "_state_key", "promptId", "continueTaskId")
+        base = {k: v for k, v in cmd.items() if k not in stamps}
         for prompt, files in reruns:
             followup = dict(base)
             followup["prompt"] = str(prompt)
             followup["promptIds"] = prompt_ids_of(prompt)
+            continued = continued_task_of(prompt)
+            if continued:
+                followup["continueTaskId"] = continued
             followup["attachments"] = [
                 {"mimeType": att.mime_type, "data": base64.b64encode(att.data).decode("ascii")}
                 for att in files
@@ -1590,8 +1689,9 @@ class _TaskRunnerMixin:
             first (:func:`_pending_message_reruns`); after them the
             ``<task>`` follow-ups a run that ended before its subtask
             loop (:func:`_end_run_before_loop`) left queued, re-tagged
-            one by one, each with its own files — never joined with a
-            plain prompt, which ``parse_task_tags`` would then drop.
+            one by one (:func:`_retagged`), each with its own files —
+            never joined with a plain prompt, which ``parse_task_tags``
+            would then drop.
         """
         reruns: list[tuple[str, list[Attachment]]] = []
         redispatch = False
@@ -1600,7 +1700,7 @@ class _TaskRunnerMixin:
             reruns.extend(_pending_message_reruns(state))
             queued, files = _drain_queued_followups(state, close_if_empty=False)
             reruns.extend(
-                (f"<task>{task}</task>", attachments)
+                (_retagged(task), attachments)
                 for task, attachments in zip(queued, files, strict=True)
             )
             redispatch = bool(reruns) and not (
@@ -2060,6 +2160,28 @@ class _TaskRunnerMixin:
             return ""
         return self._tab_opened_task_ids.pop(tab_id, "")
 
+    def _take_continued_task(self, cmd: dict[str, Any], tab_id: str, chat_id: str) -> str:
+        """Take the task the run of *cmd* continues: the one the user loaded in *tab_id*.
+
+        That is the task the page names (wire field ``continueTaskId``,
+        :func:`_continued_task_named`: a CHATS click on a task the tab
+        already showed, which asks the daemon for nothing) or else the
+        task the tab was opened at
+        (:meth:`_take_opened_task_pin_locked`).  The pin is consumed
+        either way: the page's click is the later one.
+
+        Args:
+            cmd: The ``run`` command.
+            tab_id: The UI tab the run was launched from.
+            chat_id: The chat the run is on; ``""`` when not known yet.
+
+        Returns:
+            The task id, or ``""`` when the run continues its chat's
+            last task.
+        """
+        opened = locked_call(self._state_lock, self._take_opened_task_pin_locked, tab_id, chat_id)
+        return _continued_task_named(cmd) or opened
+
     def _subscribe_launching_tab_locked(self, task_id: str, chat_id: str, tab_id: str) -> None:
         """Under ``_state_lock``: subscribe the launching *tab_id* to *task_id*'s stream.
 
@@ -2239,6 +2361,7 @@ class _TaskRunnerMixin:
                     model=str(model or ""),
                     work_dir=str(work_dir or ""),
                     start_ms=start_ms or int(time.time() * 1000),
+                    continued_task_id=self._take_continued_task(cmd, tab_id, state.chat_id),
                 )
                 return
 
@@ -2376,14 +2499,9 @@ class _TaskRunnerMixin:
             inherit_worktrees(_inherited_isolated_repos(cmd, parent_task_id))
         self.printer.broadcast_launch_phase("", tab_id=tab_id)
 
-        opened_task_id = locked_call(
-            self._state_lock,
-            self._take_opened_task_pin_locked,
-            tab_id,
-            state.chat_id,
-        )
-        if opened_task_id:
-            agent.resume_from_task_id(opened_task_id)
+        continued_task_id = self._take_continued_task(cmd, tab_id, state.chat_id)
+        if continued_task_id:
+            agent.resume_from_task_id(continued_task_id)
 
         logger.info(
             "Task started: tab_id=%s model=%s prompt=%r",
@@ -2420,6 +2538,11 @@ class _TaskRunnerMixin:
             # The files each subtask runs with: the submission's for
             # its own ``<task>`` blocks, a queued follow-up's own.
             subtask_files: list[list[Attachment] | None] = [attachments] * len(subtasks)
+            # The task each subtask continues when it is not the one
+            # before it: a queued follow-up's, sent after its sender
+            # loaded a task (the run's own load is its first subtask's,
+            # taken above).
+            subtask_parents: list[str] = [""] * len(subtasks)
             # ``load_config()`` fills every key from ``DEFAULTS``, so a
             # literal fallback here would be unreachable code that can
             # only drift away from the one authoritative default.
@@ -2524,6 +2647,8 @@ class _TaskRunnerMixin:
             subtask_index = 0
             while subtask_index < len(subtasks):
                 task_prompt = subtasks[subtask_index]
+                if subtask_parents[subtask_index]:
+                    agent.resume_from_task_id(subtask_parents[subtask_index])
                 # Each subtask's row and failure banner carry that
                 # subtask's OWN usage: ``agent.run`` zeroes the
                 # counters in its ``_reset`` anyway, and zeroing here
@@ -2727,20 +2852,34 @@ class _TaskRunnerMixin:
                 # intermediate one, so its row is persisted below and
                 # the queued tasks then run one-by-one exactly like
                 # the subtasks of a multi-``<task>`` submission.
+                # A queued ``/xxx`` command runs as its SEA's own run
+                # after this one (see ``_drain_followup_subtasks``) —
+                # not in a sub-agent, whose leftovers are never re-run
+                # (``_release_run_state``): there it stays a subtask.
+                queued_snapshot: list[str] = locked_call(
+                    self._state_lock, list, state.queued_followup_tasks
+                )
+                command_index = (
+                    None if parent_task_id else _first_command_index(queued_snapshot)
+                )
                 queued_followups, queued_files = locked_call(
                     self._state_lock,
-                    _drain_queued_followups,
+                    _drain_followup_subtasks,
                     state,
                     subtask_index >= len(subtasks) - 1,
+                    command_index,
                 )
                 if queued_followups:
                     subtask_files.extend(files or None for files in queued_files)
+                    subtask_parents.extend(continued_task_of(t) for t in queued_followups)
                     if append_to_prompt:
                         # Same executed-prompt suffix contract as the
                         # pre-loop application to the submitted
                         # subtasks.
                         queued_followups = [t + append_to_prompt for t in queued_followups]
-                    subtasks.extend(queued_followups)
+                    # The plain text runs: what a follow-up remembers of
+                    # its sender (``IdentifiedPrompt``) is taken above.
+                    subtasks.extend(str(t) for t in queued_followups)
                 if subtask_index < len(subtasks) - 1:
                     self._persist_subtask_row(
                         state,
@@ -3204,6 +3343,7 @@ class _TaskRunnerMixin:
         model: str,
         work_dir: str,
         start_ms: int,
+        continued_task_id: str = "",
     ) -> None:
         """Record and answer a ``/xxx help`` prompt without running an agent.
 
@@ -3232,6 +3372,10 @@ class _TaskRunnerMixin:
             model: The model the run would have used (for the row's extra).
             work_dir: The run's working directory (for the row's extra).
             start_ms: The run's start timestamp (ms since epoch).
+            continued_task_id: The task the user loaded before the
+                prompt (:meth:`_take_continued_task`), which the row
+                continues in the chat's tree; ``""`` continues the
+                chat's last task.
         """
         from kiss.core._version import __version__
 
@@ -3255,6 +3399,7 @@ class _TaskRunnerMixin:
         sub_info = getattr(agent, "_subagent_info", None)
         if sub_info:
             extra["subagent"] = sub_info
+        extra["chat_parent_id"] = continued_task_id
         task_id, state.chat_id = _add_task(prompt, chat_id=state.chat_id, extra=extra)
         if agent is not None:
             agent._chat_id = state.chat_id

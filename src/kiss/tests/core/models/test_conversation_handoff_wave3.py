@@ -5,7 +5,7 @@
 """Both model-switch sites hand the live conversation over through ``hand_off_conversation``.
 
 Responses API items belong to the endpoint that produced them, so a
-switch to another endpoint (Together -> OpenAI) converts the
+switch to another endpoint (OpenRouter -> OpenAI) converts the
 conversation to Chat Completions messages, while a switch on the same
 endpoint keeps it verbatim: an OpenAI model keeps another OpenAI model's
 reasoning items.  The sites are Sorcar's ``set_model`` tool and
@@ -24,6 +24,7 @@ from typing import Any, cast
 
 import pytest
 
+from kiss.core import config as config_module
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.models.model import hand_off_conversation, responses_items_to_chat_messages
 from kiss.core.models.model_info import MODEL_INFO
@@ -37,28 +38,28 @@ from kiss.tests.agents.sorcar.test_change_model import (  # noqa: F401  (autouse
 )
 from kiss.tests.conftest import executor_of
 from kiss.tests.core.models.test_v2_handoff_output_items_wave2 import (
-    _TOGETHER_CALL,
-    _TOGETHER_MESSAGE,
-    _TOGETHER_REASONING,
+    _GPT_OSS_CALL,
+    _GPT_OSS_MESSAGE,
+    _GPT_OSS_REASONING,
     _Endpoint,
     _items,
+    _openrouter_tool_turn,
     _response,
     _text_message,
-    _together_tool_turn,
     reveal_secret,
 )
 
-_TOGETHER_TURN = [
+_GPT_OSS_TURN = [
     {"role": "user", "content": "Play the memory game."},
-    _TOGETHER_REASONING,
-    _TOGETHER_MESSAGE,
-    _TOGETHER_CALL,
+    _GPT_OSS_REASONING,
+    _GPT_OSS_MESSAGE,
+    _GPT_OSS_CALL,
     {"type": "function_call_output", "call_id": "call_t1", "output": "SECRET-2"},
 ]
 
 
 @pytest.fixture
-def together() -> Iterator[_Endpoint]:
+def openrouter() -> Iterator[_Endpoint]:
     """One live Responses endpoint."""
     server = _Endpoint()
     threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -69,45 +70,57 @@ def together() -> Iterator[_Endpoint]:
         server.server_close()
 
 
-def test_same_endpoint_handoff_keeps_reasoning_items(together: _Endpoint) -> None:
+def test_same_endpoint_handoff_keeps_reasoning_items(openrouter: _Endpoint) -> None:
     """A second model on the same endpoint replays the first one's items verbatim."""
-    old = _together_tool_turn(together)
-    new = OpenAICompatibleModel2("openai/gpt-oss-20b", base_url=together.base_url, api_key="k")
+    old = _openrouter_tool_turn(openrouter)
+    new = OpenAICompatibleModel2(
+        "openrouter/openai/gpt-oss-20b", base_url=openrouter.base_url, api_key="k"
+    )
     new.initialize("Play the memory game.")
     hand_off_conversation(old, new)
     assert new.conversation == old.conversation
     assert new.conversation is not old.conversation
     new.add_message_to_conversation("user", "Which secret did you learn?")
-    together.replies = [_response([_text_message("msg_responses-3", "SECRET-2.")])]
+    openrouter.replies = [_response([_text_message("msg_responses-3", "SECRET-2.")])]
     assert new.generate()[0] == "SECRET-2."
 
-    body = together.bodies[-1]
-    assert _items(body, "reasoning") == [_TOGETHER_REASONING]
-    assert _items(body, "function_call") == [_TOGETHER_CALL]
-    assert _TOGETHER_MESSAGE in body["input"]
+    body = openrouter.bodies[-1]
+    assert _items(body, "reasoning") == [_GPT_OSS_REASONING]
+    assert _items(body, "function_call") == [_GPT_OSS_CALL]
+    assert _GPT_OSS_MESSAGE in body["input"]
 
 
-def _together_agent() -> tuple[Any, Any]:
-    """A Sorcar agent's executor on a Together model mid-task, and the ``set_model`` tool."""
+def _openrouter_agent(monkeypatch: pytest.MonkeyPatch) -> tuple[Any, Any]:
+    """A Sorcar agent's executor on an OpenRouter model mid-task, and the ``set_model`` tool.
+
+    The factory takes the key of a registered endpoint from the
+    configuration, so both endpoints of these tests get a dummy one: the
+    tests then run the same with and without the developer's keys, and
+    no request leaves the process.
+    """
+    for key in ("OPENROUTER_API_KEY", "OPENAI_API_KEY"):
+        monkeypatch.setattr(config_module.DEFAULT_CONFIG, key, "k")
     sorcar, tools = _make_agent()
     agent = executor_of(sorcar)
-    agent.model = model_factory("openai/gpt-oss-120b", model_config={"api_key": "k"})
-    agent.model_name = "openai/gpt-oss-120b"
+    agent.model = model_factory("openrouter/openai/gpt-oss-120b", model_config={"api_key": "k"})
+    agent.model_name = "openrouter/openai/gpt-oss-120b"
     agent.model.initialize("")
-    agent.model.conversation = copy.deepcopy(_TOGETHER_TURN)
+    agent.model.conversation = copy.deepcopy(_GPT_OSS_TURN)
     agent.model.usage_info_for_messages = "tokens=42"
     return agent, _find_tool(tools, "set_model")
 
 
-def test_set_model_to_another_endpoint_converts_the_conversation() -> None:
-    """Together -> OpenAI through ``set_model``: no reasoning item and no item id survive."""
-    agent, set_model = _together_agent()
-    assert agent.model.base_url == "https://api.together.xyz/v1"
+def test_set_model_to_another_endpoint_converts_the_conversation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """OpenRouter -> OpenAI through ``set_model``: no reasoning item and no item id survive."""
+    agent, set_model = _openrouter_agent(monkeypatch)
+    assert agent.model.base_url == "https://openrouter.ai/api/v1"
 
     set_model("gpt-4o")
 
     assert agent.model.base_url == "https://api.openai.com/v1"
-    assert agent.model.conversation == responses_items_to_chat_messages(_TOGETHER_TURN)
+    assert agent.model.conversation == responses_items_to_chat_messages(_GPT_OSS_TURN)
     assert [item["role"] for item in agent.model.conversation] == ["user", "assistant", "tool"]
     assert agent.model.conversation[1]["tool_calls"] == [
         {
@@ -120,14 +133,16 @@ def test_set_model_to_another_endpoint_converts_the_conversation() -> None:
     assert agent.model.usage_info_for_messages == "tokens=42"
 
 
-def test_set_model_on_the_same_endpoint_keeps_the_conversation() -> None:
-    """Together -> Together through ``set_model``: the items stay exactly as they were."""
-    agent, set_model = _together_agent()
+def test_set_model_on_the_same_endpoint_keeps_the_conversation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """OpenRouter -> OpenRouter through ``set_model``: the items stay exactly as they were."""
+    agent, set_model = _openrouter_agent(monkeypatch)
 
-    set_model("openai/gpt-oss-20b")
+    set_model("openrouter/openai/gpt-oss-20b")
 
-    assert agent.model.base_url == "https://api.together.xyz/v1"
-    assert agent.model.conversation == _TOGETHER_TURN
+    assert agent.model.base_url == "https://openrouter.ai/api/v1"
+    assert agent.model.conversation == _GPT_OSS_TURN
     assert agent.model.usage_info_for_messages == "tokens=42"
 
 

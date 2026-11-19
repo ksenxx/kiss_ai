@@ -4,7 +4,8 @@
 // add your name here
 
 // The status-bar timer (#status-text) is coloured by state, not by
-// alarm: the theme accent while the tab's task runs, the quiet --dim
+// alarm: --running-fg (the clay of every running indicator, mixed
+// toward the text colour) while the tab's task runs, the quiet --dim
 // once it is ready or done.  A fresh tab starts dim.  The colour
 // follows the running state of the tab on screen: showing a tab (a
 // switch, or a hidden tab finishing and being focused) sets its
@@ -21,14 +22,14 @@ function statusColor(win) {
   return win.document.getElementById('status-text').style.color;
 }
 
-function testFreshTabIsDimAndRunningIsAccent() {
+function testFreshTabIsDimAndRunningIsClay() {
   const {win} = makePage();
   const tabA = win._testApi.getActiveTabId();
   send(win, {type: 'status', running: true, tabId: tabA, startTs: Date.now()});
   assert.strictEqual(
     statusColor(win),
-    'var(--accent)',
-    'a running task colours the timer in the theme accent, not red',
+    'var(--running-fg)',
+    'a running task colours the timer in the running clay, not red',
   );
 
   win._testApi.endLaunch();
@@ -42,12 +43,12 @@ function testFreshTabIsDimAndRunningIsAccent() {
   clickTab(win, tabA);
   assert.strictEqual(
     statusColor(win),
-    'var(--accent)',
-    'switching back to the running tab shows the accent timer again',
+    'var(--running-fg)',
+    'switching back to the running tab shows the clay timer again',
   );
   win.close();
   console.log(
-    '  ok - fresh tab is dim, running tab is accent, survives a switch',
+    '  ok - fresh tab is dim, running tab is clay, survives a switch',
   );
 }
 
@@ -100,7 +101,7 @@ function testHiddenTabFinishingShowsDim() {
   console.log('  ok - a hidden tab that finished shows the dim timer');
 }
 
-testFreshTabIsDimAndRunningIsAccent();
+testFreshTabIsDimAndRunningIsClay();
 testDoneTabIsDimAfterSwitchingAway();
 testHiddenTabFinishingShowsDim();
 console.log('All statusTimerColours tests passed');

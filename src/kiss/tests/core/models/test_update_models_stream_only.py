@@ -26,8 +26,8 @@ class _StreamOnlyChatHandler(BaseHTTPRequestHandler):
 
     POST ``/v1/chat/completions`` with ``"stream": true`` returns a tiny
     SSE response (one content delta plus a final usage chunk). Without
-    streaming it returns the same HTTP 400 / ``invalid_request_error``
-    that Together AI returns for stream-only Qwen variants.
+    streaming it returns the HTTP 400 / ``invalid_request_error`` that a
+    stream-only vendor model returns.
     """
 
     def do_POST(self) -> None:  # noqa: N802 — BaseHTTPRequestHandler API

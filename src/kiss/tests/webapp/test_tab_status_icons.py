@@ -15,8 +15,8 @@ regression in the class wiring (``main.js``) or in the shared
 (``main.css``) both fail here:
 
 * running root tab   -> ``.chat-tab-spinner.status-spinner``: a 12x12
-  ring rotated by ``status-spin`` whose leading edge is ``--green`` (the
-  same ring as the composer's ``#wait-spinner``);
+  ring rotated by ``status-spin`` whose leading edge is ``--brand-clay``,
+  the working colour (the same ring as the composer's ``#wait-spinner``);
 * succeeded root tab -> ``.chat-tab-ok.status-tick``: SVG-masked box
   filled ``--green``;
 * failed root tab    -> ``.chat-tab-fail.status-cross``: SVG-masked box
@@ -61,6 +61,8 @@ def _browser():
 # The harness :root defines --theme-charts-green: #6a9955,
 # --theme-charts-red: #f44747 and --theme-charts-purple:
 # #c586c0, which main.css aliases as --green / --red / --purple.
+# The working colour is main.css's own --brand-clay: #d97757.
+_CLAY = "rgb(217, 119, 87)"
 _GREEN = "rgb(106, 153, 85)"
 _RED = "rgb(244, 71, 71)"
 _PURPLE = "rgb(197, 134, 192)"
@@ -167,8 +169,8 @@ def _assert_mask_icon(icon: dict, shape: str, colour: str, marker: str) -> None:
 
 
 def test_root_tab_spinner_then_green_tick(_browser) -> None:
-    """A running task shows the spinner; once it succeeds the tab shows
-    the green tick, and the tick stays put across a re-render."""
+    """A running task shows the clay spinner; once it succeeds the tab
+    shows the green tick, and the tick stays put across a re-render."""
     context, page = _open_history_page(_browser)
     try:
         tab_id = _root_tab_id(page)
@@ -176,7 +178,7 @@ def test_root_tab_spinner_then_green_tick(_browser) -> None:
         assert _icon(page, tab_id)["icon"] is None, "no icon before any task"
 
         _run_task(page, tab_id, "task-ok", success=True)
-        _assert_spinner(_icon(page, tab_id), _GREEN, "chat-tab-spinner")
+        _assert_spinner(_icon(page, tab_id), _CLAY, "chat-tab-spinner")
 
         _finish_task(page, tab_id, "task-ok")
         tick = _icon(page, tab_id)
@@ -199,14 +201,14 @@ def test_root_tab_failed_task_shows_red_cross(_browser) -> None:
         tab_id = _root_tab_id(page)
         _show_strip(page, tab_id)
         _run_task(page, tab_id, "task-fail", success=False)
-        _assert_spinner(_icon(page, tab_id), _GREEN, "chat-tab-spinner")
+        _assert_spinner(_icon(page, tab_id), _CLAY, "chat-tab-spinner")
         _finish_task(page, tab_id, "task-fail")
         cross = _icon(page, tab_id)
         _assert_mask_icon(cross, "status-cross", _RED, "chat-tab-fail")
         assert "chat-tab-ok" not in cross["icon"].split(), cross
 
         _run_task(page, tab_id, "task-retry", success=True)
-        _assert_spinner(_icon(page, tab_id), _GREEN, "chat-tab-spinner")
+        _assert_spinner(_icon(page, tab_id), _CLAY, "chat-tab-spinner")
         _finish_task(page, tab_id, "task-retry")
         _assert_mask_icon(_icon(page, tab_id), "status-tick", _GREEN, "chat-tab-ok")
     finally:

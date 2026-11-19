@@ -1,11 +1,12 @@
 /*
  * remote-codex.css — layout restyle of the REMOTE webapp (phone
- * drawers, docked desktop panels, pill controls).  Loaded exclusively
- * by the standalone remote page built by ``web_server._build_html()``.
+ * drawers, docked desktop panels, touch-sized controls).  Loaded
+ * exclusively by the standalone remote page built by
+ * ``web_server._build_html()``.
  *
- * Colours: the page uses ONLY VS Code's "Dark Modern" / "Light
- * Modern" theme colours.  web_server.py inlines them as ``--theme-*``
- * variables (Dark Modern on ``:root``, Light Modern on
+ * Colours: the page uses ONLY the palette of Claude Code Desktop's
+ * dark and light looks.  web_server.py inlines them as ``--theme-*``
+ * variables (dark on ``:root``, light on
  * ``body.remote-chat.light-theme``), and the single palette block
  * below maps every semantic name this file and main.css use onto
  * those variables.  main.css derives the same semantic names at
@@ -13,87 +14,87 @@
  * why they are re-derived here on ``body``: a declaration such as
  * ``--fg: var(--theme-editor-foreground)`` resolves on the body, after
  * the light theme has swapped the ``--theme-*`` value, so one block
- * serves both themes.  The fallbacks are the Dark Modern values, for a
- * page that lacks the injected variables.  The theme is toggled by the
+ * serves both themes.  The fallbacks are the dark palette's values, for
+ * a page that lacks the injected variables.  The theme is toggled by the
  * sun/moon item in the "..." menu (see ``applyRemoteTheme`` in main.js)
  * and persisted in localStorage.
  */
 
 body.remote-chat {
   /* main.css :root names, re-derived (see the header comment). */
-  --bg: var(--theme-editor-background, #1f1f1f);
-  --bg2: var(--theme-sideBar-background, #181818);
-  --surface: var(--theme-sideBar-background, #181818);
-  --surface2: var(--theme-input-background, #313131);
-  --fg: var(--theme-editor-foreground, #ccc);
-  --dim: var(--theme-tab-inactiveForeground, #9d9d9d);
-  --accent: var(--theme-textLink-foreground, #4daafc);
-  --border: var(--theme-panel-border, #2b2b2b);
-  --input-bg: var(--theme-input-background, #313131);
-  --green: var(--theme-charts-green, #89d185);
-  --red: var(--theme-charts-red, #f14c4c);
-  --yellow: var(--theme-charts-yellow, #cca700);
-  --purple: var(--theme-charts-purple, #b180d7);
-  --cyan: var(--theme-terminal-ansiCyan, #11a8cd);
-  --error: var(--theme-errorForeground, #f85149);
-  --warning: var(--theme-editorWarning-foreground, #cca700);
+  --bg: var(--theme-editor-background, #0b0b0b);
+  --bg2: var(--theme-sideBar-background, #151515);
+  --surface: var(--theme-sideBar-background, #151515);
+  --surface2: var(--theme-input-background, #1f1f1f);
+  --menu-bg: var(--theme-editorWidget-background, #1f1f1f);
+  --code-bg: var(--theme-textCodeBlock-background, #151515);
+  --code-inline-fg: var(--theme-textPreformat-foreground, #fa8080);
+  --fg-strong: var(--theme-tab-activeForeground, #fff);
+  --fg: var(--theme-editor-foreground, #f0efec);
+  --dim: var(--theme-tab-inactiveForeground, #9c9a92);
+  --faint: var(--theme-input-placeholderForeground, #898781);
+  --icon: var(--theme-icon-foreground, #c3c2b7);
+  --accent: var(--theme-textLink-foreground, #4d9fff);
+  --border: var(--theme-panel-border, #ffffff1a);
+  --border-soft: var(--theme-sideBar-border, #ffffff14);
+  --border-input: var(--theme-input-border, #ffffff26);
+  --border-hover: color-mix(in srgb, var(--fg) 30%, transparent);
+  --ring-focus: var(--theme-focusBorder, #4d9fff);
+  --hover: var(--theme-list-hoverBackground, #ffffff13);
+  --hover-strong: var(--theme-toolbar-hoverBackground, #ffffff1a);
+  --selected: var(--theme-list-inactiveSelectionBackground, #ffffff26);
+  --primary-bg: var(--theme-button-background, #efefef);
+  --primary-fg: var(--theme-button-foreground, #0b0b0b);
+  --primary-hover-bg: var(--theme-button-hoverBackground, #d7d7d7);
+  --green: var(--theme-charts-green, #4cc38a);
+  --red: var(--theme-charts-red, #ff5a5a);
+  --yellow: var(--theme-charts-yellow, #e3c07b);
+  --purple: var(--theme-charts-purple, #b796ff);
+  --cyan: var(--theme-terminal-ansiCyan, #5ac8d8);
+  --error: var(--theme-errorForeground, #ff5a5a);
+  --warning: var(--theme-editorWarning-foreground, #e3c07b);
 
   /* Names used only by this file. */
-  --fg-strong: var(--theme-tab-activeForeground, #fff);
-  --faint: var(--theme-input-placeholderForeground, #989898);
-  --icon: var(--theme-icon-foreground, #ccc);
-  --chip-bg: var(--theme-input-background, #313131);
-  --chip-border: var(--theme-input-border, #3c3c3c);
-  --border-soft: var(--theme-sideBar-border, #2b2b2b);
-  --border-widget: var(--theme-widget-border, #313131);
-  --border-input: var(--theme-input-border, #3c3c3c);
-  --border-hover: color-mix(in srgb, var(--fg) 30%, transparent);
-  --ring: var(--theme-input-border, #3c3c3c);
-  --ring-focus: var(--theme-focusBorder, #0078d4);
-  --hover: var(--theme-list-hoverBackground, #2a2d2e);
-  --hover-strong: var(--theme-toolbar-hoverBackground, #5a5d5e50);
-  --selected: var(--theme-list-inactiveSelectionBackground, #37373d);
-  --menu-bg: var(--theme-editorWidget-background, #202020);
-  --link: var(--theme-textLink-foreground, #4daafc);
-  --link-active: var(--theme-textLink-activeForeground, #4daafc);
-  --tabs-bg: var(--theme-editorGroupHeader-tabsBackground, #2b2b2b);
-  --tab-active-line: var(--theme-tab-activeBorderTop, #0078d4);
-  --send-bg: var(--theme-button-background, #0078d4);
-  --send-fg: var(--theme-button-foreground, #fff);
-  --send-hover-bg: var(--theme-button-hoverBackground, #026ec1);
+  --chip-bg: var(--theme-input-background, #1f1f1f);
+  --chip-border: var(--theme-input-border, #ffffff26);
+  --border-widget: var(--theme-widget-border, #ffffff1a);
+  --link: var(--theme-textLink-foreground, #4d9fff);
+  --link-active: var(--theme-textLink-activeForeground, #6aabf1);
+  --tabs-bg: var(--theme-editorGroupHeader-tabsBackground, #0b0b0b);
+  --tab-active-line: var(--theme-tab-activeBorderTop, #ffffff26);
+  --send-bg: var(--primary-bg);
+  --send-fg: var(--primary-fg);
+  --send-hover-bg: var(--primary-hover-bg);
   --send-disabled-bg: color-mix(in srgb, var(--send-bg) 40%, transparent);
-  --menu-selected-bg: var(--theme-menu-selectionBackground, #0078d4);
 
   /* main.css design tokens whose value depends on the theme: a token
      derived at :root keeps the dark value, so it is re-derived here. */
-  --shadow-color: var(--theme-widget-shadow, #0000005c);
-  --shadow-sm: 0 2px 8px var(--shadow-color);
-  --shadow-md: 0 4px 16px var(--shadow-color);
-  --shadow-lg: 0 8px 24px var(--shadow-color);
-  --shadow-up: 0 -6px 24px var(--shadow-color);
+  --shadow-color: var(--theme-widget-shadow, #00000073);
+  --shadow-sm:
+    0 1px 2px color-mix(in srgb, var(--shadow-color) 40%, transparent),
+    0 2px 8px color-mix(in srgb, var(--shadow-color) 50%, transparent);
+  --shadow-md: 0 4px 24px color-mix(in srgb, var(--shadow-color) 60%, transparent);
+  --shadow-lg: 0 12px 40px var(--shadow-color);
   --attention-ring: var(--shadow-color);
 
   /* main.css's semantic status colours (history row icons, filter
-     chips, the update button, copy / favourite states) and panel chrome
-     tints, re-derived so the light theme's --fg / --accent / --green /
-     --red overrides on body.remote-chat.light-theme flow through.
-     Every main.css rule that uses them re-themes with no override. */
+     chips, the update button, copy / favourite states), panel chrome
+     tints and running text, re-derived so the light theme's --fg /
+     --green / --red overrides on body.remote-chat.light-theme flow
+     through.  Every main.css rule that uses them re-themes with no
+     override. */
   --status-ok: var(--green);
   --status-fail: var(--red);
   --favorite: var(--yellow);
   --panel-tint: color-mix(in srgb, var(--fg) 4%, transparent);
-  --panel-tint-solid: color-mix(in srgb, var(--fg) 4%, var(--bg));
   --panel-line: color-mix(in srgb, var(--fg) 10%, transparent);
-  --accent-tint: color-mix(in srgb, var(--accent) 8%, transparent);
-  --accent-line: color-mix(in srgb, var(--accent) 45%, var(--border));
-  --bubble-user-tint: color-mix(in srgb, var(--accent) 16%, transparent);
-  --bubble-agent-tint: color-mix(in srgb, var(--fg) 7%, var(--bg));
+  --bubble-user-tint: color-mix(in srgb, var(--fg) 7%, transparent);
+  --running-fg: color-mix(in srgb, var(--brand-clay) 70%, var(--fg));
   --scrollbar-thumb: color-mix(in srgb, var(--fg) 20%, transparent);
   --scrollbar-thumb-hover: color-mix(in srgb, var(--fg) 45%, transparent);
 
   /* The settings dialog's outline (main.css #settings-panel): the
-     theme's widget border, so the dialog reads like a native VS Code
-     widget on both themes. */
+     theme's widget border, the hairline of every floating surface. */
   --settings-border: var(--border-widget);
 
   /*
@@ -133,14 +134,12 @@ body.remote-chat {
 }
 
 /* High contrast (the "..." menu's High contrast item, body.high-contrast):
-   web_server.py swaps the --theme-* palette for the Cursor-style
-   high-contrast one; here the translucent tints that would wash out
-   on it become solid lines and full-strength text, as VS Code's
-   high-contrast themes do (borders instead of shading). */
+   web_server.py swaps the --theme-* palette for its full-contrast
+   variant; here the translucent tints that would wash out on it become
+   solid lines and full-strength text (borders instead of shading). */
 body.remote-chat.high-contrast {
   --panel-line: var(--border);
   --border-hover: var(--fg);
-  --accent-line: var(--accent);
   --scrollbar-thumb: var(--theme-scrollbarSlider-background);
   --scrollbar-thumb-hover: var(--fg);
 }
@@ -150,13 +149,13 @@ body.remote-chat.high-contrast .more-menu-item:hover:not(:disabled) {
   color: var(--fg);
 }
 
-/* The tab rows: VS Code's editor-group header colours — a darker
-   band, dim inactive pills, the active pill in the editor background
-   with the accent line on its top edge.  #content-tab-bar is the
-   content pane's row (desktop split layout, below); the group strip
-   (#tab-bar: the chat on screen and its sub-agents) keeps main.css's
-   editor background and smaller pill text; both rows keep its bottom
-   hairline. */
+/* The tab rows, as Claude Code Desktop draws its pane tabs: no band
+   and no outlines, dim labels, and the active tab a quiet filled chip
+   with a hairline (--tab-active-line; the high-contrast palettes make
+   it a solid accent line).  #content-tab-bar is the content pane's row
+   (desktop split layout, below); the group strip (#tab-bar: the chat
+   on screen and its sub-agents) has smaller chip text; both rows keep
+   main.css's bottom hairline. */
 body.remote-chat #content-tab-bar {
   background: var(--tabs-bg);
   padding: var(--space-2) var(--space-2-5) var(--space-1);
@@ -171,15 +170,15 @@ body.remote-chat #tab-list { gap: var(--space-1-5); }
 
 body.remote-chat #content-tab-bar .chat-tab,
 body.remote-chat #tab-bar .chat-tab {
-  border: 1px solid var(--border);
-  border-radius: var(--radius-pill);
-  padding: var(--space-1) var(--space-3);
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  padding: var(--space-1) var(--space-2-5);
   background: transparent;
   color: var(--dim);
   transition: background var(--dur-base), color var(--dur-base);
 }
 
-body.remote-chat #tab-bar .chat-tab { padding: var(--space-0-5) var(--space-2-5); }
+body.remote-chat #tab-bar .chat-tab { padding: var(--space-0-5) var(--space-2); }
 
 body.remote-chat #content-tab-bar .chat-tab:hover,
 body.remote-chat #tab-bar .chat-tab:hover {
@@ -189,16 +188,13 @@ body.remote-chat #tab-bar .chat-tab:hover {
 
 body.remote-chat #content-tab-bar .chat-tab.active,
 body.remote-chat #tab-bar .chat-tab.active {
-  background: var(--bg);
-  border-color: var(--border-input);
-  border-top-color: var(--tab-active-line);
+  background: var(--selected);
+  border-color: var(--tab-active-line);
   color: var(--fg-strong);
 }
 
-body.remote-chat #tab-bar .chat-tab.active { background: var(--bg2); }
-
 body.remote-chat #content-tab-bar .chat-tab-close,
-body.remote-chat #tab-bar .chat-tab-close { border-radius: var(--radius-pill); }
+body.remote-chat #tab-bar .chat-tab-close { border-radius: var(--radius-sm); }
 
 /* The hide button at the right end of the content pane's row: a
    chevron pointing at the edge the pane folds into.  The row's tab
@@ -214,7 +210,7 @@ body.remote-chat #content-pane-hide {
   margin: 0 0 0 var(--space-2);
   padding: 0;
   border: none;
-  border-radius: var(--radius-pill);
+  border-radius: var(--radius-md);
   background: transparent;
   color: var(--dim);
   font-size: var(--fs-md);
@@ -274,17 +270,19 @@ body.remote-chat #input-area {
   padding: var(--space-1) var(--space-3) calc(var(--space-2-5) + env(safe-area-inset-bottom, 0px));
 }
 
+/* The composer, as in Claude Code Desktop: a raised box with a
+   hairline, a 10px corner and a soft shadow.  Focus darkens the
+   hairline instead of adding a coloured glow. */
 body.remote-chat #input-container {
   background: var(--surface2);
-  border: 1px solid transparent;
-  border-radius: var(--radius-3xl);
-  box-shadow: inset 0 0 1px var(--ring);
-  padding: var(--space-2-5) var(--space-3) var(--space-2);
+  border: 1px solid var(--border-input);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-sm);
+  padding: var(--space-2) var(--space-2) var(--space-1-5) var(--space-3);
 }
 
 body.remote-chat #input-container:focus-within {
-  border-color: transparent;
-  box-shadow: inset 0 0 1px var(--ring-focus);
+  border-color: var(--border-hover);
 }
 
 body.remote-chat #task-input { min-height: 2.4em; }
@@ -316,13 +314,13 @@ body.remote-chat #more-btn {
   padding: 0;
   background: transparent;
   border: none;
-  border-radius: var(--radius-round);
+  border-radius: var(--radius-md);
   color: var(--icon);
   transition: background var(--dur-base);
 }
 
 body.remote-chat #voice-btn.active {
-  background: var(--hover-strong);
+  background: var(--selected);
   color: var(--fg-strong);
 }
 
@@ -338,45 +336,53 @@ body.remote-chat #more-btn:hover {
 }
 
 /* The floating surfaces: the "..." menu, the model list and the
-   dialogs (password, sign-in, server reset). */
+   dialogs (password, sign-in, server reset): raised, a hairline and
+   one wide soft shadow.  A menu's 10px corner is concentric with its
+   rows (6px corners inside 4px of padding); a dialog's is 12px. */
 body.remote-chat #more-menu,
 body.remote-chat #model-dropdown,
 body.remote-chat .auth-modal-content,
 body.remote-chat .server-reset-confirm-content {
   background: var(--menu-bg);
   border: 1px solid var(--border-widget);
-  border-radius: var(--radius-2xl);
+  border-radius: var(--radius-xl);
   box-shadow: var(--shadow-lg);
+}
+
+body.remote-chat .auth-modal-content,
+body.remote-chat .server-reset-confirm-content {
+  border-radius: var(--radius-2xl);
 }
 
 body.remote-chat .more-menu-item {
   color: var(--icon);
-  padding: var(--space-2) var(--space-2-5);
-  border-radius: var(--radius-xl);
+  padding: var(--space-1-5) var(--space-2);
+  border-radius: var(--radius-md);
 }
 
 body.remote-chat .more-menu-item:hover:not(:disabled) {
-  background: var(--hover-strong);
+  background: var(--hover);
   color: var(--fg);
 }
 
+/* The model picker: a quiet text button, as under Claude Code
+   Desktop's prompt box (no outline until hovered). */
 body.remote-chat #model-btn {
   background: transparent;
-  border: 1px solid var(--border-input);
-  border-radius: var(--radius-pill);
-  padding: var(--space-1-5) var(--space-3);
-  height: 32px;
-  color: var(--icon);
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  padding: var(--space-1) var(--space-2);
+  height: 28px;
+  color: var(--fg);
 
-  /* Cap the pill (its label truncates via #model-name) so the footer
+  /* Cap the button (its label truncates via #model-name) so the footer
      usually keeps every button on one row even at phone widths. */
   max-width: clamp(72px, 21vw, 220px);
 }
 
 body.remote-chat #model-btn:hover {
   background: var(--hover);
-  border-color: var(--border-hover);
-  color: var(--fg);
+  color: var(--fg-strong);
 }
 
 body.remote-chat #send-btn {
@@ -407,7 +413,7 @@ body.remote-chat #stop-btn {
 body.remote-chat .file-chip {
   background: var(--chip-bg);
   border: 1px solid var(--chip-border);
-  border-radius: var(--radius-2xl);
+  border-radius: var(--radius-md);
   color: var(--fg);
 }
 
@@ -426,33 +432,34 @@ body.remote-chat #tricks-panel {
   border-right: 1px solid var(--border-soft);
 }
 
+/* The settings dialog floats over the page on the raised surface. */
 body.remote-chat #settings-panel {
-  background: var(--surface);
+  background: var(--menu-bg);
 }
 
 body.remote-chat .sidebar-hdr {
   color: var(--faint);
-  font-size: var(--fs-sm);
+  font-size: var(--fs-md);
 }
 
 body.remote-chat .sidebar-item:hover {
   background: var(--hover);
 }
 
-/* The model list's search field: round ends on its bottom rule and
-   its focus outline. */
-body.remote-chat #model-search { border-radius: var(--radius-pill); }
+/* The model list's search field and the flat-list switch beside the
+   History search box share the menu rows' corner. */
+body.remote-chat #model-search { border-radius: var(--radius-md); }
 
-/* The flat-list switch beside the History search box: round like it. */
-body.remote-chat #history-view-toggle { border-radius: var(--radius-pill); }
+body.remote-chat #history-view-toggle { border-radius: var(--radius-md); }
 
+/* Buttons share one 8px corner. */
 body.remote-chat .config-update-btn {
-  border-radius: var(--radius-pill);
+  border-radius: var(--radius-lg);
 }
 
 body.remote-chat .auth-modal-btn,
 body.remote-chat .server-reset-confirm-btn {
-  border-radius: var(--radius-pill);
+  border-radius: var(--radius-lg);
 }
 
 /* Link colours (main.css declares none of its own). */
@@ -464,30 +471,34 @@ body.remote-chat a:hover {
   color: var(--link-active);
 }
 
-/* The delete-confirmation pair: VS Code secondary buttons instead of
-   white ones (the labels already use the theme's status colours). */
-body.remote-chat .sidebar-confirm-yes,
-body.remote-chat .sidebar-confirm-no {
-  background: var(--menu-bg);
-  border-color: var(--border-input);
-}
-
-body.remote-chat .sidebar-confirm-yes:hover:not(:disabled),
-body.remote-chat .sidebar-confirm-no:hover {
-  background: var(--hover);
-}
-
+/* A phone narrows the composer's side inset; the autocomplete popup
+   over it keeps the composer's edges.  The rows of the More menu and
+   of the model list, and the list's search field, are touch targets
+   there: 36px high, as the footer's buttons. */
 @media (width <= 600px) {
   body.remote-chat #input-area {
     padding-left: var(--space-2);
     padding-right: var(--space-2);
   }
+
+  body.remote-chat #autocomplete {
+    margin-left: var(--space-2);
+    margin-right: var(--space-2);
+  }
+
+  body.remote-chat .more-menu-item,
+  body.remote-chat .model-item,
+  body.remote-chat #model-search {
+    min-height: 36px;
+  }
 }
 
-/* The Explorer and Source Control sections of the task-info panel. */
-body.remote-chat .explorer-row:hover,
-body.remote-chat .scm-row:hover,
-body.remote-chat .scm-commit:hover {
+/* The Explorer and Source Control sections of the task-info panel: a
+   row under the pointer takes the hover fill, unless it is selected or
+   has its context menu open (main.css fills those as selected). */
+body.remote-chat .explorer-row:not(.is-selected, .ctx-active):hover,
+body.remote-chat .scm-row:not(.ctx-active):hover,
+body.remote-chat .scm-commit:not(.ctx-active):hover {
   background: var(--hover);
 }
 
@@ -523,13 +534,6 @@ body.remote-chat .running-item-ids {
   color: var(--faint);
 }
 
-body.remote-chat .running-item .ids-copy-btn:hover,
-body.remote-chat .running-item .sidebar-item-collapse:hover,
-body.remote-chat .running-item .sidebar-item-copy:hover,
-body.remote-chat .running-item .sidebar-item-favorite:hover {
-  background: var(--border);
-}
-
 body.remote-chat .running-item-info {
   display: block;
   overflow-wrap: anywhere;
@@ -562,8 +566,7 @@ body.remote-chat .meta-section-resizer::after {
 body.remote-chat .meta-section-resizer:not(.static):hover::after,
 body.remote-chat .meta-section-resizer:not(.static):active::after,
 body.remote-chat .meta-section-resizer:not(.static):focus-visible::after {
-  /* VS Code paints a hovered sash with focusBorder (sash.hoverBorder
-     defaults to it), which is what --ring-focus aliases. */
+  /* A sash under the pointer takes the focus colour. */
   border-top-color: var(--ring-focus);
 }
 
@@ -576,9 +579,13 @@ body.remote-chat #meta-list {
   gap: var(--space-2-5);
 }
 
+/* The rows are set like a chat's summary in the Chats sidebar
+   (.history-chat-header in main.css): its size and line height at
+   the regular weight. */
 body.remote-chat .meta-item {
   display: list-item;
-  font-size: var(--fs-sm);
+  font-size: var(--fs-base);
+  line-height: 1.35;
   color: var(--fg);
   overflow-wrap: anywhere;
 }
@@ -595,9 +602,12 @@ body.remote-chat .meta-item .meta-value {
 /* The Task update section below the task-info list shows the running
    task's task update (getTaskUpdate poll in main.js).  While there is
    nothing to show (no running task) main.js drops the `visible`
-   class and the WHOLE section disappears, header included. */
+   class and the WHOLE section disappears, header included.  The
+   report's text is set like the Task Info rows above it, and so like
+   a chat's summary in the Chats sidebar. */
 body.remote-chat #meta-info-content {
-  font-size: var(--fs-sm);
+  font-size: var(--fs-base);
+  line-height: 1.35;
   color: var(--dim);
   overflow-wrap: anywhere;
 }
@@ -664,12 +674,12 @@ body.remote-chat #meta-close {
   line-height: 1;
   cursor: pointer;
   padding: var(--space-1-5) var(--space-2) 0;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
 }
 
 body.remote-chat #meta-close:hover {
   color: var(--fg);
-  background: var(--hover);
+  background: var(--hover-strong);
 }
 
 body.remote-chat:not(.remote-desktop) #meta-panel > .meta-section:first-of-type > .meta-section-hdr,
@@ -973,11 +983,19 @@ body.remote-chat.remote-desktop.content-pane-open #meta-panel > .meta-section:fi
 
   body.remote-chat.remote-desktop #sidebar-resizer:hover,
   body.remote-chat.remote-desktop #sidebar-resizer:active,
-  body.remote-chat.remote-desktop #sidebar-resizer:focus-visible,
   body.remote-chat.remote-desktop #meta-resizer:hover,
-  body.remote-chat.remote-desktop #meta-resizer:active,
-  body.remote-chat.remote-desktop #meta-resizer:focus-visible {
+  body.remote-chat.remote-desktop #meta-resizer:active {
     background: var(--border-widget);
+  }
+
+  /* Keyboard focus fills a handle with the focus colour, as the sash
+     between two sections takes it (.meta-section-resizer above): a
+     ring around a bar as tall as the panel would be cut at the
+     panel's edges. */
+  body.remote-chat.remote-desktop #sidebar-resizer:focus-visible,
+  body.remote-chat.remote-desktop #meta-resizer:focus-visible {
+    background: var(--ring-focus);
+    outline: none;
   }
 
   /* The split layout's grid areas (see the #app rule above; the
@@ -985,7 +1003,7 @@ body.remote-chat.remote-desktop.content-pane-open #meta-panel > .meta-section:fi
      the handle between its two panes. */
   body.remote-chat.remote-desktop #tab-bar { grid-area: strip; }
 
-  /* The chat header ("machine: working directory") shares its row
+  /* The chat header ("machine > working directory") shares its row
      with the content pane's tab row: the strip fills the row's
      height, so its bottom hairline runs on from the tab row's across
      the handle, and the names sit at the row's vertical centre. */
@@ -1033,9 +1051,13 @@ body.remote-chat.remote-desktop.content-pane-open #meta-panel > .meta-section:fi
   }
 
   body.remote-chat.remote-desktop #pane-resizer:hover,
-  body.remote-chat.remote-desktop #pane-resizer:active,
-  body.remote-chat.remote-desktop #pane-resizer:focus-visible {
+  body.remote-chat.remote-desktop #pane-resizer:active {
     background: var(--border-widget);
+  }
+
+  /* Keyboard focus, as on the two panel handles above. */
+  body.remote-chat.remote-desktop #pane-resizer:focus-visible {
+    background: var(--ring-focus);
     outline: none;
   }
 }

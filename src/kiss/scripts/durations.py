@@ -9,7 +9,9 @@ session, the seconds each test file took (:func:`record_durations`);
 ``uv run impacted-tests --splits N`` balances its splits by those
 figures (:func:`load_durations`) instead of by file size alone.  The
 file is one per machine (:func:`durations_path`), shared by the main
-checkout and its worktrees, so every run feeds the next balance.
+checkout and its worktrees, so every run feeds the next balance.  It
+is in the agents' temp directory, never in a checkout, and starts
+anew after a reboot.
 """
 
 from __future__ import annotations
@@ -17,35 +19,25 @@ from __future__ import annotations
 import json
 import math
 import os
-import subprocess
 from pathlib import Path
 
 from kiss.core.file_lock import exclusive_file_lock
+from kiss.core.kiss_tmp import kiss_tmp_dir
 
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
-
-def durations_path(root: Path = PROJECT_ROOT) -> Path:
+def durations_path() -> Path:
     """Return the file of per-test-file durations the splits are balanced by.
 
-    ``$KISS_TEST_DURATIONS`` when set, else ``tmp/test-durations.json``
-    of the main checkout: a worktree (``git rev-parse --git-common-dir``
-    names the main repository's ``.git``) shares the checkout's file, so
-    a task's splits are balanced by every earlier run on the machine.
-    Outside git, the file is under *root* itself.
+    ``$KISS_TEST_DURATIONS`` when set, else ``test-durations.json`` in
+    the agents' temp directory (:func:`~kiss.core.kiss_tmp.kiss_tmp_dir`,
+    ``<OS temp dir>/kiss-tmp``): the main checkout and every worktree
+    name the same file, so a task's splits are balanced by every earlier
+    run on the machine since its last reboot.
     """
     env = os.environ.get("KISS_TEST_DURATIONS")
     if env:
         return Path(env)
-    try:
-        common = subprocess.run(
-            ["git", "rev-parse", "--git-common-dir"], cwd=root, capture_output=True,
-            text=True, timeout=30, check=False,
-        ).stdout.strip()
-    except (OSError, subprocess.SubprocessError):
-        common = ""
-    main = (root / common).resolve().parent if common else root
-    return main / "tmp" / "test-durations.json"
+    return kiss_tmp_dir() / "test-durations.json"
 
 
 def load_durations(path: Path) -> dict[str, float]:

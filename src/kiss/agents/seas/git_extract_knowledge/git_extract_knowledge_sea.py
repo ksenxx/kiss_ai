@@ -233,7 +233,8 @@ repeated.
   `history`, `conventions`, `overview`).
 - `Read` a page file before `Edit`, also one you just created with `cat >` or `Write`: the
   first `Edit` of an unread file is refused and only shows the region, so the same call is
-  sent twice (95606c2f steps 77-79 on `tmp/<task>/conventions.md`).
+  sent twice (95606c2f steps 77-79 on `<scratch dir>/conventions.md`, in the Scratch dir of
+  Task Settings).
 - After `write_knowledge_page`, a page whose title contains `</title>` or `<parameter` was
   mangled by the tool call: the tool now cuts the title there and recovers the summary; when
   the result still looks wrong, rewrite the page once through the CLI `write-page --title

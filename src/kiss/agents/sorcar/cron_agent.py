@@ -728,6 +728,10 @@ def connector_problem(prompt: str, in_chat: bool = False) -> str | None:
 
 RUN_CONTEXT_HEADING = "# Run context"
 PREVIOUS_TAIL_CHARS = 1_500
+RUN_CONTEXT_END = "itself: do not write a log."
+"""How :func:`run_context` ends.  The block quotes the previous run's result,
+which is text a model wrote: code that reads options from a task text reads
+them after the last occurrence of this sentence."""
 
 
 def run_context(job: dict[str, Any], now: float | None = None) -> str:
@@ -791,7 +795,7 @@ def run_context(job: dict[str, Any], now: float | None = None) -> str:
         )
     lines.append(
         f"- The runner appends your final summary to {_output_dir()}/{job.get('id', '')}.md "
-        "itself: do not write a log."
+        + RUN_CONTEXT_END
     )
     return "\n".join(lines)
 

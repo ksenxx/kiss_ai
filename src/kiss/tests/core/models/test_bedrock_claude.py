@@ -1549,7 +1549,6 @@ def test_bedrock_only_configuration_has_default_and_fast_models(monkeypatch, tmp
         "OPENAI_API_KEY",
         "GEMINI_API_KEY",
         "OPENROUTER_API_KEY",
-        "TOGETHER_API_KEY",
     ):
         monkeypatch.setattr(config_module.DEFAULT_CONFIG, key, "")
     (tmp_path / "bin").mkdir()
@@ -1592,7 +1591,6 @@ def test_no_registered_bedrock_model_means_no_bedrock_default(monkeypatch, tmp_p
         "OPENAI_API_KEY",
         "GEMINI_API_KEY",
         "OPENROUTER_API_KEY",
-        "TOGETHER_API_KEY",
     ):
         monkeypatch.setattr(config_module.DEFAULT_CONFIG, key, "")
     (tmp_path / "bin").mkdir()

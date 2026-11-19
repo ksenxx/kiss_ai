@@ -1,12 +1,16 @@
 """End-to-end tests for the agent-facing memory tools (offline + one live agent run)."""
 
 import os
+import re
+import threading
+import time
 from pathlib import Path
 
 import pytest
 
 from kiss.core.kiss_agent import KISSAgent
-from kiss.core.memoryfield.index import hashed_embedding
+from kiss.core.memoryfield import tools as tools_module
+from kiss.core.memoryfield.index import VectorIndex, hashed_embedding
 from kiss.core.memoryfield.tools import MEMORY_PROTOCOL, PULL_CHAR_LIMIT, MemoryTools
 
 live_api = pytest.mark.live_api
@@ -67,7 +71,10 @@ def test_tools_full_lifecycle(tmp_path: Path) -> None:
     assert search.splitlines()[0].endswith(
         "carbon-fibre-woks  —  Carbon Fibre Woks: Thermal properties of carbon fibre cookware"
     )
-    assert tools.memory_search("carbon fibre woks heat", k=1).count("\n") == 0
+    # Under each hit: the statement of the page that matched, on one line.
+    assert tools.memory_search("carbon fibre woks heat", k=1).splitlines()[1:] == [
+        "       > Carbon fibre woks conduct heat unevenly. Source: https://example.com"
+    ]
 
     pulled = tools.memory_pull("Finnish identity code DVV", k=1)
     assert pulled.startswith("### finnish-id.md  (score ")
@@ -238,9 +245,10 @@ def test_delete_and_refresh_address_domain_memories(tmp_path: Path) -> None:
     tools.memory_write("kiss/daemon-port-copy", "The daemon listens on port 8765.", title="Ports")
     tools.memory_write("finance/mortgage-rate", "The mortgage rate is fixed at 3.1 percent.")
     report = tools.memory_refresh()
-    assert "Index of general refreshed: 0 added" in report
-    assert "Index of kiss refreshed: 2 added" in report
-    assert "Index of finance refreshed: 1 added" in report
+    # Each write indexed its page, so the refresh finds nothing to embed.
+    assert "Index of general refreshed: 0 added, 0 updated, 0 removed, 0 unchanged." in report
+    assert "Index of kiss refreshed: 0 added, 0 updated, 0 removed, 2 unchanged." in report
+    assert "Index of finance refreshed: 0 added, 0 updated, 0 removed, 1 unchanged." in report
     assert "kiss/daemon-port-copy ~ kiss/daemon-ports  (similarity" in report
     only_kiss = tools.memory_refresh(memory="kiss")
     assert only_kiss.startswith(
@@ -256,19 +264,65 @@ def test_delete_and_refresh_address_domain_memories(tmp_path: Path) -> None:
     assert tools.indexes["kiss"].memory.page_names() == ["daemon-ports"]
     # Stale pages and search hits are reported under their qualified names, with summaries.
     stale = tools.memory_refresh(stale_days=0, memory="kiss")
-    assert "Pages not updated in 0 days (re-verify or delete):\n  kiss/daemon-ports  (updated " in (
-        stale
-    )
+    assert (
+        "Pages not verified or updated in 0 days (re-verify or delete):\n"
+        "  kiss/daemon-ports  (verified "
+    ) in stale
     tools.memory_write("kiss/review-round3-notes", "Round notes.", summary="Notes of round 3")
     assert "Warning: the name looks like a per-round/per-session note" in tools.memory_write(
         "kiss/review-round3-notes", "Round notes.", summary="Notes of round 3"
     )
     hit = tools.memory_search("round notes", k=1, memory="kiss")
-    assert hit.endswith("kiss/review-round3-notes  —  review round3 notes: Notes of round 3")
+    assert hit.splitlines()[0].endswith(
+        "kiss/review-round3-notes  —  review round3 notes: Notes of round 3"
+    )
+    assert hit.splitlines()[1:] == ["       > Round notes."]
     # Without domain memories the refresh report keeps its single-memory wording.
     plain = make_tools(tmp_path / "plain")
-    plain.memory_write("only-page", "body")
+    (tmp_path / "plain").mkdir()
+    (tmp_path / "plain" / "only-page.md").write_text("body", encoding="utf-8")
     assert plain.memory_refresh().startswith("Index refreshed: 1 added")
+
+
+def test_memories_are_merged_on_one_score_scale_while_statement_vectors_are_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tools = make_domain_tools(tmp_path / "memory")
+    shelves = "\n".join(f"- shelf {i} holds flour sugar salt pepper rice beans" for i in range(40))
+    tools.memory_write("kitchen", f"{shelves}\n- saffron threads cost a fortune")
+    # The kiss memory was indexed by a process that predates statement vectors.
+    kiss = tools.indexes["kiss"].memory
+    kiss.write("saffron-shop", "- the spice shop sells paprika and saffron powder")
+    VectorIndex(kiss, embed=hashed_embedding, statements=False).sync()
+    monkeypatch.setattr(tools_module, "BACKFILL_SECONDS", 0.0)
+    # kiss can only be ranked by page embedding, so the general memory is too: scored
+    # with its saffron statement, the kitchen page would outrank the shop's page score.
+    by_page = [line.split("  ", 1) for line in tools.memory_search("saffron threads").splitlines()]
+    assert [name for _, name in by_page] == [
+        "kiss/saffron-shop  —  saffron shop",
+        "kitchen  —  kitchen",
+    ]
+    # Once the search may write the missing statement vectors, both are scored with them.
+    monkeypatch.setattr(tools_module, "BACKFILL_SECONDS", 5.0)
+    scored = [line.split("  ", 1) for line in tools.memory_search("saffron threads").splitlines()]
+    assert [name for _, name in scored] == [
+        "kitchen  —  kitchen",
+        "     > - saffron threads cost a fortune",
+        "kiss/saffron-shop  —  saffron shop",
+        "     > - the spice shop sells paprika and saffron powder",
+    ]
+    assert float(scored[0][0]) > float(scored[2][0]) >= float(by_page[0][0]) > float(by_page[1][0])
+    # A memory whose only hit is a page of headings, which has no statement, is not a
+    # memory waiting for its vectors: the others keep their statement scores.
+    tools.memory_write("finance/spice-budget", "# Saffron threads\n## Budget\n")
+    with_headings = [line.strip() for line in tools.memory_search("saffron threads").splitlines()]
+    assert [line.split("  ", 1)[-1] for line in with_headings] == [
+        "finance/spice-budget  —  spice budget",
+        "kitchen  —  kitchen",
+        "> - saffron threads cost a fortune",
+        "kiss/saffron-shop  —  saffron shop",
+        "> - the spice shop sells paprika and saffron powder",
+    ]
 
 
 def test_protocol_lists_the_attached_domain_memories(tmp_path: Path) -> None:
@@ -286,6 +340,130 @@ def test_invalid_domain_names_are_rejected(tmp_path: Path) -> None:
     for bad in ("general", "Kiss", "a/b", "", "-x"):
         with pytest.raises(ValueError, match="Invalid memory name"):
             MemoryTools(tmp_path / "memory", embed=hashed_embedding, domains={bad: "d"})
+    with pytest.raises(ValueError, match="Invalid writer 'robot': use one of agent, "):
+        MemoryTools(tmp_path / "memory", embed=hashed_embedding, writer="robot")
+
+
+PORTS = "The daemon listens on port 8765 and is restarted through its systemd user service."
+
+
+def test_write_indexes_the_page_and_names_the_pages_it_nearly_duplicates(tmp_path: Path) -> None:
+    tools = make_domain_tools(tmp_path / "memory")
+    first = tools.memory_write("kiss/daemon-ports", PORTS, title="Ports")
+    assert re.fullmatch(r"Wrote kiss/daemon-ports\.md \(\d+ bytes\)\.", first)
+    assert tools.indexes["kiss"].count() == 1  # indexed by the write, before any search
+    copy = tools.memory_write("kiss/daemon-port-copy", PORTS, title="Ports")
+    assert copy.endswith(
+        " bytes). Similar pages: kiss/daemon-ports (1.00). If this page replaces or extends "
+        "one of them, write to that name or memory_delete it; pages about different dates "
+        "or different occurrences of the same thing stay separate."
+    )
+    # Only the pages of the memory written to are compared.
+    assert "Similar pages" not in tools.memory_write("daemon-ports", PORTS, title="Ports")
+    assert "Similar pages" not in tools.memory_write("kiss/garage", "A hammer and a saw.")
+    # At most three are named, the closest first; a rewrite does not name its own page.
+    tools.memory_write("kiss/daemon-ports-near", PORTS + " Usually it is.", title="Ports")
+    tools.memory_write("kiss/daemon-ports-b", PORTS, title="Ports")
+    rewrite = tools.memory_write("kiss/daemon-ports", PORTS, title="Ports")
+    listed = re.search(r"Similar pages: (.*?)\. If this page", rewrite)
+    assert listed is not None
+    names = [entry.split(" ")[0] for entry in listed.group(1).split(", ")]
+    assert names == ["kiss/daemon-port-copy", "kiss/daemon-ports-b", "kiss/daemon-ports-near"]
+    assert re.fullmatch(r"kiss/daemon-ports-near \(0\.9\d\)", listed.group(1).split(", ")[2])
+    # A page deleted since the last search is still in the index, and is not named.
+    for name in names[:2]:
+        assert tools.memory_delete(name) == f"Deleted {name}."
+    rewrite = tools.memory_write("kiss/daemon-ports", PORTS, title="Ports")
+    assert re.search(r"Similar pages: kiss/daemon-ports-near \(0\.9\d\)\. If this page", rewrite)
+
+
+def test_write_warns_about_tool_call_markup_in_title_or_summary(tmp_path: Path) -> None:
+    tools = make_tools(tmp_path)
+    warning = " Warning: the title or summary contains tool-call markup (such as </summary>)"
+    assert warning in tools.memory_write("leaked-title", "body one", title="Ports</title>")
+    assert warning in tools.memory_write(
+        "leaked-summary", "body two", summary='Ports</parameter>\n<parameter name="x">'
+    )
+    assert "Warning" not in tools.memory_write(
+        "html-notes", "The <summary> tag opens a <details> box.", title="HTML <details> notes"
+    )
+
+
+class FailingEmbedding:
+    """An embedding service that is down."""
+
+    def __call__(self, text: str) -> list[float]:
+        raise RuntimeError("embedding service unavailable")
+
+
+class HeldEmbedding:
+    """An embedding service that answers only once ``release`` is set."""
+
+    def __init__(self) -> None:
+        self.release = threading.Event()
+        self.worker: threading.Thread | None = None
+
+    def __call__(self, text: str) -> list[float]:
+        self.worker = threading.current_thread()
+        self.release.wait(60)
+        return hashed_embedding(text)
+
+
+def test_a_failed_or_slow_embedding_costs_the_notice_never_the_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    make_tools(tmp_path).memory_write("daemon-ports", PORTS, title="Ports")
+    down = MemoryTools(tmp_path, embed=FailingEmbedding())
+    reply = down.memory_write("daemon-port-copy", PORTS, title="Ports")
+    assert re.fullmatch(r"Wrote daemon-port-copy\.md \(\d+ bytes\)\.", reply)
+    assert down.memory.read("daemon-port-copy").body == PORTS + "\n"
+    assert down.index.count() == 1  # left to the next search
+    assert "daemon-port-copy" in make_tools(tmp_path).memory_search("daemon port")
+
+    held = HeldEmbedding()
+    slow = MemoryTools(tmp_path, embed=held)
+    monkeypatch.setattr(tools_module, "WRITE_INDEX_SECONDS", 0.05)
+    started = time.monotonic()
+    reply = slow.memory_write("daemon-ports-b", PORTS, title="Ports")
+    assert time.monotonic() - started < 30
+    assert re.fullmatch(r"Wrote daemon-ports-b\.md \(\d+ bytes\)\.", reply)
+    assert slow.index.count() == 2
+    # The request left behind is the page's one: it stores the row when it is answered.
+    held.release.set()
+    assert held.worker is not None
+    held.worker.join(60)
+    assert not held.worker.is_alive() and slow.index.count() == 3
+
+
+class DeletesPageDuringSearch:
+    """The hashed embedder; its query request deletes a page once the sync has scanned it."""
+
+    def __init__(self, query: str, page: Path) -> None:
+        self.query = query
+        self.page = page
+        self.scanned = threading.Event()
+
+    def __call__(self, text: str) -> list[float]:
+        if text == self.query:
+            assert self.scanned.wait(60), "the sync never embedded the new page"
+            self.page.unlink()
+        else:
+            self.scanned.set()  # the sync embeds only after its scan of the directory
+        return hashed_embedding(text)
+
+
+def test_search_lists_a_page_deleted_since_the_scan_without_its_statement(tmp_path: Path) -> None:
+    query = "daemon port"
+    embedding = DeletesPageDuringSearch(query, tmp_path / "daemon-ports.md")
+    tools = MemoryTools(tmp_path, embed=embedding)
+    tools.memory_write("daemon-ports", PORTS, title="Ports")
+    (tmp_path / "new-page.md").write_text("The daemon port is in the unit file.", encoding="utf-8")
+    embedding.scanned.clear()
+    lines = tools.memory_search(query).splitlines()
+    assert not (tmp_path / "daemon-ports.md").exists()
+    gone = next(i for i, line in enumerate(lines) if "  daemon-ports  —  Ports" in line)
+    assert not any(line.startswith("       > ") for line in lines[gone + 1 : gone + 2])
+    assert "       > The daemon port is in the unit file." in lines
 
 
 @live_api

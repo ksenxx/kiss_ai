@@ -49,7 +49,7 @@ from kiss.tests.cli_locator_stub import stub_cli_locators  # noqa: F401
 _VENDOR_MODEL = "zzvendor-flagship"
 
 
-_VENDOR_KEY = "TOGETHER_API_KEY"
+_VENDOR_KEY = "OPENROUTER_API_KEY"
 
 
 _ENTRY = {

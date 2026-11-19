@@ -9,8 +9,8 @@
 ``main.css`` resolves every colour and font through ``--theme-*``
 variables; the page ``web_server._build_html`` serves must define each
 of them, or the fonts and colours fall back to the browser's defaults.
-The values are VS Code's default fonts and its "Dark Modern" theme, the
-palette the chat page was designed against.
+The values are the Claude apps' fallback font stacks and Claude Code
+Desktop's dark palette, the look the chat page is designed against.
 """
 
 
@@ -18,34 +18,35 @@ from __future__ import annotations
 
 import pytest
 
-# VS Code's default fonts (all three platforms' stacks in turn) and its
-# "Dark Modern" theme (dark_modern.json plus the colour registry
-# defaults it inherits, e.g. terminal.ansi*).
+# The system UI and monospace stacks the Claude apps fall back to, and
+# Claude Code Desktop's dark palette: a near-black canvas, panels one
+# shade up, raised inputs two shades up, white hairlines at low alpha,
+# one accent blue and a near-white primary button.
 THEME_VARS = {
     "--theme-font-size": "13px",
     "--theme-font-family": (
-        '-apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI", '
-        'system-ui, "Ubuntu", "Droid Sans", sans-serif'
+        'system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, '
+        "sans-serif"
     ),
-    "--theme-editor-font-size": "13px",
     "--theme-editor-font-family": (
-        'Menlo, Monaco, Consolas, "Droid Sans Mono", "Courier New", monospace'
+        "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "
+        '"Liberation Mono", "Courier New", monospace'
     ),
-    "--theme-editor-background": "#1f1f1f",
-    "--theme-editor-foreground": "#cccccc",
-    "--theme-descriptionForeground": "#9d9d9d",
-    "--theme-panel-border": "#2b2b2b",
-    "--theme-sideBar-background": "#181818",
-    "--theme-textLink-foreground": "#4daafc",
-    "--theme-button-background": "#0078d4",
-    "--theme-focusBorder": "#0078d4",
-    "--theme-input-background": "#313131",
-    "--theme-input-border": "#3c3c3c",
-    "--theme-terminal-ansiRed": "#cd3131",
-    "--theme-terminal-ansiGreen": "#0dbc79",
-    "--theme-terminal-ansiYellow": "#e5e510",
-    "--theme-terminal-ansiMagenta": "#bc3fbc",
-    "--theme-terminal-ansiCyan": "#11a8cd",
+    "--theme-editor-background": "#0b0b0b",
+    "--theme-editor-foreground": "#f0efec",
+    "--theme-descriptionForeground": "#9c9a92",
+    "--theme-panel-border": "#ffffff1a",
+    "--theme-sideBar-background": "#151515",
+    "--theme-textLink-foreground": "#4d9fff",
+    "--theme-button-background": "#efefef",
+    "--theme-focusBorder": "#4d9fff",
+    "--theme-input-background": "#1f1f1f",
+    "--theme-input-border": "#ffffff26",
+    "--theme-terminal-ansiRed": "#ff5a5a",
+    "--theme-terminal-ansiGreen": "#4cc38a",
+    "--theme-terminal-ansiYellow": "#e3c07b",
+    "--theme-terminal-ansiMagenta": "#b796ff",
+    "--theme-terminal-ansiCyan": "#5ac8d8",
 }
 
 

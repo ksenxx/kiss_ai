@@ -55,9 +55,9 @@ class TestCatalogAliasesFrozen:
     """Currently-shipping alias sets must not silently disappear."""
 
     def test_kimi_k3_family_has_low_high_max_aliases(self) -> None:
-        """The K3 fix guarantees three routes × three-level ladder = nine aliases."""
+        """The K3 fix guarantees one route × three-level ladder = three aliases."""
         data = _catalog()
-        bases = ("kimi-k3", "moonshotai/Kimi-K3", "openrouter/moonshotai/kimi-k3")
+        bases = ("openrouter/moonshotai/kimi-k3",)
         for base in bases:
             assert base in data, f"Base {base} missing"
             assert data[base].get("thinking") == "high", (
@@ -121,9 +121,7 @@ class TestCatalogAliasesFrozen:
                 continue
             base = name.removesuffix("-xhigh")
             if base in data:
-                if base.startswith("kimi-") or base.startswith("moonshotai/") or (
-                    base.startswith("openrouter/moonshotai/")
-                ):
+                if base.startswith("openrouter/moonshotai/"):
                     pytest.fail(
                         f"Moonshot base {base!r} has an -xhigh alias; "
                         "OpenAI scale mistakenly applied?"
@@ -139,9 +137,7 @@ class TestCatalogAliasesFrozen:
             if not name.endswith("-medium"):
                 continue
             base = name.removesuffix("-medium")
-            if base.startswith("kimi-") or base.startswith("moonshotai/") or (
-                base.startswith("openrouter/moonshotai/")
-            ):
+            if base.startswith("openrouter/moonshotai/"):
                 pytest.fail(
                     f"Moonshot base {base!r} has a bogus -medium alias"
                 )
@@ -180,7 +176,8 @@ class TestAuditGapTripwires:
 
     Each docstring still records the gap letter (A/B/C/D) from the audit
     report so a bisector can jump straight to the corresponding
-    recommended-fix section.
+    recommended-fix section.  Gap C has no lock-in any more: the Together
+    route was removed from the product.
     """
 
     def test_gap_d_openrouter_gpt_oss_has_effort_aliases(self) -> None:
@@ -206,7 +203,7 @@ class TestAuditGapTripwires:
 
 
 class TestNewFamilyCatalogAliasesFrozen:
-    """Shipped alias sets for Grok / GLM-5.2 / gpt-oss must not regress."""
+    """Shipped alias sets for Grok / GLM-5.2 must not regress."""
 
     def test_grok_effort_family_has_low_medium_high_aliases(self) -> None:
         """Gap A lock-in: grok-4.5 / grok-4.3 ship the 3-level Grok ladder."""
@@ -233,7 +230,7 @@ class TestNewFamilyCatalogAliasesFrozen:
     def test_glm_5_2_family_has_high_max_aliases(self) -> None:
         """Gap B lock-in: GLM-5.2 ships the 2-level (high, max) ladder."""
         data = _catalog()
-        for base in ("zai-org/GLM-5.2", "openrouter/z-ai/glm-5.2"):
+        for base in ("openrouter/z-ai/glm-5.2",):
             assert base in data, f"Base {base} missing"
             assert data[base].get("thinking") == "high", (
                 f"Base {base} must be capped at high; "
@@ -250,26 +247,4 @@ class TestNewFamilyCatalogAliasesFrozen:
                 assert f"{base}-{off_scale}" not in data, (
                     f"{base}-{off_scale} must not exist; GLM-5.2's ladder "
                     "is exactly (high, max)"
-                )
-
-    def test_together_gpt_oss_has_low_medium_high_aliases(self) -> None:
-        """Gap C lock-in: Together-route gpt-oss ships the 3-level ladder."""
-        data = _catalog()
-        for base in ("openai/gpt-oss-120b", "openai/gpt-oss-20b"):
-            assert base in data, f"Base {base} missing"
-            assert data[base].get("thinking") == "high", (
-                f"Base {base} must store thinking='high'; "
-                f"got {data[base].get('thinking')!r}"
-            )
-            assert "alias_of" not in data[base]
-            for level in ("low", "medium", "high"):
-                alias = f"{base}-{level}"
-                assert alias in data, f"Missing gpt-oss alias {alias}"
-                assert data[alias].get("thinking") == level
-                assert data[alias].get("alias_of") == base
-                _assert_alias_field_parity(data, base, alias)
-            for off_scale in ("xhigh", "max"):
-                assert f"{base}-{off_scale}" not in data, (
-                    f"{base}-{off_scale} must not exist; gpt-oss rejects "
-                    "xhigh and max"
                 )

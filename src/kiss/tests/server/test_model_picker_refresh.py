@@ -42,10 +42,7 @@ def _clear_all_keys() -> tuple[dict[str, str], config_module.Config]:
         "ANTHROPIC_API_KEY",
         "OPENAI_API_KEY",
         "GEMINI_API_KEY",
-        "TOGETHER_API_KEY",
         "OPENROUTER_API_KEY",
-        "ZAI_API_KEY",
-        "MOONSHOT_API_KEY",
     )
     saved = {n: os.environ.get(n, "") for n in names}
     for n in names:

@@ -17,7 +17,7 @@
 - [Installation](installation.md) — One-line installer, install from a checkout, Docker, pipx/uv, API-key configuration, updating
 - [Client Interfaces](cli.md) — The `kiss-web` daemon, web/mobile app, Python client API, and the `sorcar` terminal command
 - [Python API Reference](api.md) — KISSAgent, RelentlessAgent, SorcarAgent, ChatSorcarAgent, GitWorktreeOps
-- [Supported Models](models.md) — 695-model catalog across 9 provider categories
+- [Supported Models](models.md) — 988-model catalog across 7 provider categories
 - [Messaging & Third-Party Agents](messaging-agents.md) — 32 messaging-channel agents and 10 service agents, plus infrastructure agents, the Govee smart-home CLI, and Muse-auth credential isolation
 - [Slash Commands for SEAs](sea-commands.md) — Every SEA folder `xxx/xxx_sea.py` is a chat command `/xxx` and `/xxx help` prints its `description()`; `~/.kiss/SEAS.md` syntax for adding your own SEA folders, precedence, and the dispatch flow
 - [Sample Tasks](sample-tasks.md) — Ready-to-use example prompts
@@ -82,10 +82,10 @@ print(result.text)
 | Interfaces | Web/mobile app + Python API + `sorcar` CLI | CLI + mobile app | Custom VS Code |
 | AI Discovery | Yes — simply via prompt | No | No |
 | GEPA Prompt Optimization | Yes — simply via prompt | No | No |
-| Multiple models from multiple vendors in the same task | Yes — mix OpenAI, Anthropic, Gemini, Together, Z.AI, Moonshot AI, OpenRouter, Claude Code CLI, and Codex CLI | No — Anthropic Claude models only | No — one model per task |
+| Multiple models from multiple vendors in the same task | Yes — mix OpenAI, Anthropic, Amazon Bedrock, Gemini, OpenRouter, Claude Code CLI, and Codex CLI | No — Anthropic Claude models only | No — one model per task |
 | Primary focus | Quality — rigorous review, end-to-end tests | Speed and developer ergonomics | Speed |
 | Core agents lines of code | ~3000 | Unknown | Unknown |
-| Models in bundled catalog | 695 across 9 provider categories | Claude family only | Subset chosen by Cursor |
+| Models in bundled catalog | 988 across 7 provider categories | Claude family only | Subset chosen by Cursor |
 | Bring your own API key / endpoint | Yes — keys stay on your machine | Anthropic key | Routed through Cursor backend |
 | Open source | Yes — Apache-2.0 | Proprietary | Proprietary |
 | Price | Free framework; pay only your chosen model provider | Subscription / API usage | Subscription |
@@ -290,11 +290,8 @@ Provide at least one model backend. You can use environment variables such as:
 ```bash
 export ANTHROPIC_API_KEY=...
 export OPENAI_API_KEY=...
-export ZAI_API_KEY=...
-export MOONSHOT_API_KEY=...
-export TOGETHER_API_KEY=...
-export OPENROUTER_API_KEY=...
 export GEMINI_API_KEY=...
+export OPENROUTER_API_KEY=...
 ```
 
 You can also set API keys, a custom model endpoint, and custom HTTP headers in the Settings panel of the web app — useful for local or self-hosted models.
@@ -535,8 +532,8 @@ SorcarAgent with chat-session state management.
 - **chat_id** *(property)* — Current chat session ID ("" means new session).
 - **new_chat()** — Reset to a new chat session (retires any pending worktree first).
 - **resume_chat_by_id(chat_id)** — Resume a chat session by stable identifier.
-- **resume_from_task_id(task_id)** — One-shot seed of the next prompt's context from a task's parent chain.
-- **build_chat_prompt(prompt) -> str** — Load chat context and prepend previous tasks/results to the prompt.
+- **resume_from_task_id(task_id)** — One-shot: the next task continues *task_id* in the chat's tree of tasks instead of the chat's last task.
+- **build_chat_prompt(prompt) -> str** — Prepend the tasks and results on the path from the chat's first task to the task being continued (at most 10).
 - **`run(prompt_template='', **kwargs) -> str`** — Run with chat-session context: loads prior context, persists the new task, runs the underlying agent, and saves the result to history. A worktree still pending from an earlier run is retired first (committed to its own branch, kept for review); a run that ends with a worktree unmerged marks its branch preserved so no other process merges it; an unexpected exception becomes a `success: false` result.
 
 ## `kiss.agents.sorcar.git_worktree` — Git worktree operations
@@ -570,30 +567,28 @@ Highlights (all methods take explicit `repo`/`wt_dir` paths):
 
 # Models Supported by KISS Sorcar
 
-> KISS Sorcar ships a catalog of **761 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`).
+> KISS Sorcar ships a catalog of **988 models** across **7 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`).
 
-The machine-readable source of truth is [`src/kiss/core/models/MODEL_INFO.json`](https://raw.githubusercontent.com/ksenxx/kiss_ai/main/src/kiss/core/models/MODEL_INFO.json) in the source repository. Models are grouped by the provider that routes them (i.e., whose API key or CLI serves the model); open-weight `openai/gpt-oss-*` and `google/gemma-*` models are served via Together AI.
+The machine-readable source of truth is [`src/kiss/core/models/MODEL_INFO.json`](https://raw.githubusercontent.com/ksenxx/kiss_ai/main/src/kiss/core/models/MODEL_INFO.json) in the source repository. Models are grouped by the provider that routes them (i.e., whose API key or CLI serves the model).
 
 ## Provider Categories
 
 | Provider category | Catalog entries |
 |---|---:|
-| OpenAI | 111 |
-| Anthropic | 76 |
-| Gemini | 20 |
-| Together AI | 103 |
-| Z.AI | 8 |
-| Moonshot AI | 10 |
-| OpenRouter | 406 |
-| Claude Code CLI (`cc/*`) | 17 |
-| Codex CLI (`codex/*`) | 10 |
+| OpenAI | 99 |
+| Anthropic | 82 |
+| Amazon Bedrock (`bedrock/*`) | 144 |
+| Gemini | 57 |
+| OpenRouter | 514 |
+| Claude Code CLI (`cc/*`) | 79 |
+| Codex CLI (`codex/*`) | 13 |
 
 ## Capability Totals
 
-- **736** generation-capable models
-- **578** function-calling-capable models
-- **7** embedding models
-- **11** decision models
+- **937** generation-capable models
+- **803** function-calling-capable models
+- **6** embedding models
+- **37** decision models
 
 ## Configuring Model Access
 
@@ -602,11 +597,8 @@ Set one or more environment variables:
 ```bash
 export ANTHROPIC_API_KEY=...
 export OPENAI_API_KEY=...
-export ZAI_API_KEY=...
-export MOONSHOT_API_KEY=...
-export TOGETHER_API_KEY=...
-export OPENROUTER_API_KEY=...
 export GEMINI_API_KEY=...
+export OPENROUTER_API_KEY=...
 ```
 
 Claude models can also run through Amazon Bedrock: use the model name `bedrock/<Bedrock model or inference-profile id>` (for example `bedrock/us.anthropic.claude-opus-4-6-v1:0`) and set `AWS_BEARER_TOKEN_BEDROCK`, or `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` (+ `AWS_SESSION_TOKEN` for temporary credentials), plus `AWS_REGION` (default `us-east-1`). Such a model is priced as its `claude-*` catalog entry; add it under Settings → Custom Models (name only) to pick it in the web app.
@@ -616,7 +608,7 @@ Or point at any OpenAI-compatible local/self-hosted endpoint by setting a custom
 ## Model Namespaces
 
 - Plain names (e.g. `claude-sonnet-4-6`, `gpt-4.1`) map to the native provider APIs.
-- `openrouter/...` routes through OpenRouter (406 entries, including `openrouter/~vendor/model-latest` aliases that always track the newest model).
+- `openrouter/...` routes through OpenRouter (514 entries, including `openrouter/~vendor/model-latest` aliases that always track the newest model).
 - `cc/haiku`, `cc/sonnet`, `cc/opus` run on top of the Claude Code CLI.
 - `codex/...` (e.g. `codex/gpt-5.6-sol`) run on top of the Codex CLI.
 

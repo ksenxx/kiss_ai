@@ -7,12 +7,14 @@
 
 Usage::
 
-    uv run python scripts/ui_style_probe.py tmp/probe.txt
+    uv run python scripts/ui_style_probe.py [OUT]
 
 Renders the same scenes as ``ui_theme_screenshots.py`` (welcome,
 transcript, model menu, history, "..." menu, settings) on the chat
 page at desktop and phone width, and the share
-page, and writes one line per distinct control::
+page, and writes to ``OUT`` (default: ``ui-style-probe.txt`` in the
+agents' temp directory, ``<OS temp dir>/kiss-tmp``) one line per
+distinct control::
 
     selector | h x w | fs | pad | radius | border | bg | colour | weight ...
 
@@ -27,6 +29,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 from typing import Any, TextIO
+
+from kiss.core.kiss_tmp import kiss_tmp_dir
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import ui_theme_screenshots as shots  # noqa: E402
@@ -116,8 +120,11 @@ def scenes(page: Page, name: str, out: TextIO) -> str:
 
 
 def main() -> None:
-    """Probe every surface and write the report to the path given on the command line."""
-    out_path = Path(sys.argv[1] if len(sys.argv) > 1 else "tmp/ui-style-probe.txt")
+    """Probe every surface and write the report to the path given on the command line.
+
+    Without one the report is ``ui-style-probe.txt`` in the agents' temp directory.
+    """
+    out_path = Path(sys.argv[1]) if len(sys.argv) > 1 else kiss_tmp_dir() / "ui-style-probe.txt"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     server, base = shots.start_media_server()
     with out_path.open("w") as out, sync_playwright() as p:

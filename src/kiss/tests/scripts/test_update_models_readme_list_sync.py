@@ -15,6 +15,7 @@ that the README's totals are synced without a model list of their own.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import threading
 from pathlib import Path
@@ -67,7 +68,9 @@ def test_sync_catalog_docs_updates_both_files(tmp_path: Path, monkeypatch) -> No
     readme.write_text(
         pristine_readme.replace("ships a catalog of **", "ships a catalog of **1"), encoding="utf-8"
     )
-    models.write_text(pristine_models.replace("| Z.AI | 8 |", "| Z.AI | 999 |"), encoding="utf-8")
+    models.write_text(
+        re.sub(r"\| Gemini \| \d+ \|", "| Gemini | 999 |", pristine_models), encoding="utf-8"
+    )
     assert sync_catalog_docs() is True
     assert readme.read_text(encoding="utf-8") == pristine_readme
     assert models.read_text(encoding="utf-8") == pristine_models
@@ -114,13 +117,15 @@ def test_drifted_lists_and_counts_are_fully_repaired(tmp_path: Path) -> None:
     readme, model_info = _copy_repo_files(tmp_path)
     pristine = readme.read_text(encoding="utf-8")
 
-    drifted = pristine.replace("- `glm-4.7`\n", "")  # model missing from list
+    drifted = pristine.replace("- `openrouter/z-ai/glm-4.7`\n", "")  # model missing from list
     drifted = drifted.replace(
-        "- `kimi-k3`\n", "- `zz-stale-model`\n- `kimi-k3`\n"
+        "- `openrouter/moonshotai/kimi-k3`\n",
+        "- `zz-stale-model`\n- `openrouter/moonshotai/kimi-k3`\n",
     )  # stale + out-of-order entry
-    drifted = drifted.replace("<strong>Z.AI (8)</strong>", "<strong>Z.AI (999)</strong>")
-    drifted = drifted.replace("| Z.AI | 8 |", "| Z.AI | 999 |")
-    assert drifted != pristine
+    drifted = re.sub(r"<strong>OpenRouter \(\d+\)", "<strong>OpenRouter (999)", drifted)
+    drifted = re.sub(r"\| OpenRouter \| \d+ \|", "| OpenRouter | 999 |", drifted)
+    assert "- `zz-stale-model`\n" in drifted and "- `openrouter/z-ai/glm-4.7`\n" not in drifted
+    assert "<strong>OpenRouter (999)</strong>" in drifted and "| OpenRouter | 999 |" in drifted
     readme.write_text(drifted, encoding="utf-8")
 
     assert sync_readme_catalog(readme, model_info) is True
@@ -136,14 +141,14 @@ def test_category_emptied_to_zero_is_synced(tmp_path: Path) -> None:
     """
     readme, model_info = _copy_repo_files(tmp_path)
     data = json.loads(model_info.read_text(encoding="utf-8"))
-    data = {name: entry for name, entry in data.items() if not name.startswith("glm-")}
+    data = {name: entry for name, entry in data.items() if not name.startswith("gemini-")}
     model_info.write_text(json.dumps(data), encoding="utf-8")
 
     assert sync_readme_catalog(readme, model_info) is True
     synced = readme.read_text(encoding="utf-8")
-    assert "| Z.AI | 0 |" in synced
-    assert "<summary><strong>Z.AI (0)</strong></summary>\n\n</details>" in synced
-    assert "- `glm-" not in synced
+    assert "| Gemini | 0 |" in synced
+    assert "<summary><strong>Gemini (0)</strong></summary>\n\n</details>" in synced
+    assert "- `gemini-" not in synced
     # The emptied block must itself be canonical: a second sync is a no-op.
     assert sync_readme_catalog(readme, model_info) is False
 
@@ -153,17 +158,17 @@ def test_empty_details_block_is_populated(tmp_path: Path) -> None:
     readme = tmp_path / "README.md"
     model_info = tmp_path / "MODEL_INFO.json"
     model_info.write_text(
-        json.dumps({"glm-b": {"gen": True}, "glm-a": {"gen": True}}), encoding="utf-8"
+        json.dumps({"gemini-b": {"gen": True}, "gemini-a": {"gen": True}}), encoding="utf-8"
     )
     readme.write_text(
-        "<details>\n<summary><strong>Z.AI (0)</strong></summary>\n\n</details>\n",
+        "<details>\n<summary><strong>Gemini (0)</strong></summary>\n\n</details>\n",
         encoding="utf-8",
     )
 
     assert sync_readme_catalog(readme, model_info) is True
     assert readme.read_text(encoding="utf-8") == (
-        "<details>\n<summary><strong>Z.AI (2)</strong></summary>\n\n"
-        "- `glm-a`\n- `glm-b`\n\n</details>\n"
+        "<details>\n<summary><strong>Gemini (2)</strong></summary>\n\n"
+        "- `gemini-a`\n- `gemini-b`\n\n</details>\n"
     )
 
 
@@ -175,18 +180,18 @@ def test_noncanonical_details_body_is_regenerated(tmp_path: Path) -> None:
     """
     readme = tmp_path / "README.md"
     model_info = tmp_path / "MODEL_INFO.json"
-    model_info.write_text(json.dumps({"glm-new": {"gen": True}}), encoding="utf-8")
+    model_info.write_text(json.dumps({"gemini-new": {"gen": True}}), encoding="utf-8")
     readme.write_text(
-        "<details>\n<summary><strong>Z.AI (3)</strong></summary>\n\n"
-        "- `glm-stale`\n\nsome hand-written note\n- `glm-old`\n\n</details>\n"
+        "<details>\n<summary><strong>Gemini (3)</strong></summary>\n\n"
+        "- `gemini-stale`\n\nsome hand-written note\n- `gemini-old`\n\n</details>\n"
         "<details>\n<summary><strong>Other</strong></summary>\n\nkeep me\n\n</details>\n",
         encoding="utf-8",
     )
 
     assert sync_readme_catalog(readme, model_info) is True
     assert readme.read_text(encoding="utf-8") == (
-        "<details>\n<summary><strong>Z.AI (1)</strong></summary>\n\n"
-        "- `glm-new`\n\n</details>\n"
+        "<details>\n<summary><strong>Gemini (1)</strong></summary>\n\n"
+        "- `gemini-new`\n\n</details>\n"
         "<details>\n<summary><strong>Other</strong></summary>\n\nkeep me\n\n</details>\n"
     )
 
@@ -196,26 +201,26 @@ def test_summary_without_list_block_falls_back_to_count_sync(tmp_path: Path) -> 
     readme = tmp_path / "README.md"
     model_info = tmp_path / "MODEL_INFO.json"
     model_info.write_text(
-        json.dumps({"glm-a": {"gen": True}, "glm-b": {"gen": True}}), encoding="utf-8"
+        json.dumps({"gemini-a": {"gen": True}, "gemini-b": {"gen": True}}), encoding="utf-8"
     )
     readme.write_text(
-        "Intro\n\n<summary><strong>Z.AI (1)</strong></summary>\n\nOutro\n", encoding="utf-8"
+        "Intro\n\n<summary><strong>Gemini (1)</strong></summary>\n\nOutro\n", encoding="utf-8"
     )
 
     assert sync_readme_catalog(readme, model_info) is True
-    assert "<summary><strong>Z.AI (2)</strong></summary>" in readme.read_text(encoding="utf-8")
+    assert "<summary><strong>Gemini (2)</strong></summary>" in readme.read_text(encoding="utf-8")
 
 
 def test_backslash_in_model_name_is_written_literally(tmp_path: Path) -> None:
     """A backslash in a model name must not be eaten by regex replacement escapes."""
     readme = tmp_path / "README.md"
     model_info = tmp_path / "MODEL_INFO.json"
-    model_info.write_text(json.dumps({"glm-4\\5": {"gen": True}}), encoding="utf-8")
+    model_info.write_text(json.dumps({"gemini-4\\5": {"gen": True}}), encoding="utf-8")
     readme.write_text(
-        "<details>\n<summary><strong>Z.AI (1)</strong></summary>\n\n"
-        "- `glm-old`\n\n</details>\n",
+        "<details>\n<summary><strong>Gemini (1)</strong></summary>\n\n"
+        "- `gemini-old`\n\n</details>\n",
         encoding="utf-8",
     )
 
     assert sync_readme_catalog(readme, model_info) is True
-    assert "- `glm-4\\5`\n" in readme.read_text(encoding="utf-8")
+    assert "- `gemini-4\\5`\n" in readme.read_text(encoding="utf-8")

@@ -31,14 +31,28 @@ const CACHE_KEY = 'sorcar-history-page1';
 const CACHED = [session(1, 'old local'), session(2, 'old box task', 'box')];
 const FRESH = [session(3, 'new local'), session(4, 'new box task', 'box')];
 
-function chips(win) {
+/** The distinct texts of the machine chips that match *selector*. */
+function chipTexts(win, selector) {
   return Array.from(
     new Set(
       Array.from(
-        win.document.querySelectorAll('#history-list .sidebar-item-machine'),
+        win.document.querySelectorAll('#history-list ' + selector),
       ).map(el => el.textContent),
     ),
   );
+}
+
+// The labels on the chips of the other machines' rows...
+function chips(win) {
+  return chipTexts(
+    win,
+    '.sidebar-item-machine:not(.sidebar-item-machine-local)',
+  );
+}
+
+// ...and what the rows that ran here call this daemon's machine.
+function localChips(win) {
+  return chipTexts(win, '.sidebar-item-machine-local');
 }
 
 function reply(generation, sessions, extra) {
@@ -90,13 +104,44 @@ function testCachedRowsPaintBeforeTheFirstReply() {
   console.log('  ok - cached rows paint before the first reply');
 }
 
+// A row that ran here cannot name its machine before the daemon has:
+// the daemon's first word names the cached rows, whichever reply
+// carries it (a history reply's own name is the next test's).
+function testTheDaemonsNameReachesTheCachedRows() {
+  const namings = [
+    {type: 'configData', config: {}, machine: 'myhost'},
+    {
+      type: 'machines',
+      machines: [
+        {name: 'myhost', local: true, status: 'reachable'},
+        {name: 'box', label: 'The box', status: 'reachable'},
+      ],
+    },
+  ];
+  for (const naming of namings) {
+    const {win} = openDesktopPage({
+      sessions: CACHED,
+      machineLabels: {box: 'The box'},
+    });
+    assert.deepStrictEqual(localChips(win), ['this machine']);
+    send(win, naming);
+    assert.deepStrictEqual(localChips(win), ['myhost'], naming.type);
+    assert.deepStrictEqual(chips(win), ['The box'], naming.type);
+    win.close();
+  }
+  console.log("  ok - the daemon's name reaches the cached rows");
+}
+
 function testAReplyEqualToTheCacheKeepsTheRows() {
   const {win, posted} = openDesktopPage({sessions: CACHED, machineLabels: {}});
   const before = Array.from(
     win.document.querySelectorAll('#history-list .sidebar-item'),
   );
   assert.strictEqual(before.length, 2);
-  send(win, reply(lastGetHistory(posted).generation, CACHED));
+  send(
+    win,
+    reply(lastGetHistory(posted).generation, CACHED, {localMachine: 'myhost'}),
+  );
   const after = Array.from(
     win.document.querySelectorAll('#history-list .sidebar-item'),
   );
@@ -107,6 +152,8 @@ function testAReplyEqualToTheCacheKeepsTheRows() {
     assert.strictEqual(after[i], row, `row ${i} is the same node`);
     assert.ok(row.isConnected, `row ${i} is still in the document`);
   });
+  // The kept rows learn the daemon's name from the reply.
+  assert.deepStrictEqual(localChips(win), ['myhost']);
   win.close();
   console.log('  ok - a reply equal to the cache keeps the rows');
 }
@@ -216,6 +263,7 @@ function testARelabelDuringTheFlightDoesNotDiscardTheReply() {
 }
 
 testCachedRowsPaintBeforeTheFirstReply();
+testTheDaemonsNameReachesTheCachedRows();
 testAReplyEqualToTheCacheKeepsTheRows();
 testNothingIsPaintedWithoutACacheOrOverAFilteredView();
 testACacheIsNotPaintedOverRowsOrIntoAFilteredView();

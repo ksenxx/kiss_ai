@@ -21,6 +21,7 @@ from typing import Any, cast
 
 import pytest
 
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.sorcar_agent import (
     SorcarAgent,
     _memory_root_for_run,
@@ -29,7 +30,9 @@ from kiss.agents.sorcar.sorcar_agent import (
 )
 from kiss.core import config as config_module
 from kiss.core.memoryfield.index import hashed_embedding
+from kiss.core.memoryfield.pages import MemoryDir
 from kiss.core.memoryfield.tools import MEMORY_PROTOCOL, MemoryTools
+from kiss.tests.agents.sorcar.local_model_server import MODEL, finish_body, serve, tool_call_body
 
 live_api = pytest.mark.live_api
 requires_keys = pytest.mark.skipif(
@@ -394,6 +397,39 @@ class TestRepoMemoryDomains:
             is_parallel=False, verbose=False,
         )
         assert list(seen["tools"].domains) == ["kissy"]
+
+
+def test_a_page_written_during_a_task_names_the_task(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The scripted model writes a page; the page carries the id of the task's history row."""
+    home = _home(monkeypatch, tmp_path)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    work = tmp_path / "work"
+    work.mkdir()
+    write = tool_call_body(
+        "memory_write",
+        {
+            "name": "pool-fix",
+            "content": "Sessions are returned to the pool on timeout now.",
+            "sources": "src/pool.py",
+        },
+        prompt_tokens=500,
+    )
+    agent = ChatSorcarAgent("provenance")
+    with serve([write, finish_body("<p>done</p>")]) as (url, _):
+        agent.run(
+            prompt_template="Record how the pool exhaustion was fixed",
+            model_name=MODEL,
+            work_dir=str(work),
+            model_config={"base_url": url, "api_key": "local"},
+            use_memory=True,
+            verbose=False,
+        )
+    frontmatter = MemoryDir(home / "memories").read("pool-fix").frontmatter
+    assert agent.last_task_id and frontmatter["task"] == agent.last_task_id
+    assert frontmatter["writer"] == "agent" and frontmatter["sources"] == "src/pool.py"
+    assert "2026" <= frontmatter["verified"] <= frontmatter["updated"]
 
 
 def _run_capturing_system_prompt(

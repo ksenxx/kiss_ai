@@ -42,7 +42,7 @@ PRIMARY_MODEL = "claude-fable-5-2-max"
 REVIEW_MODEL = "gpt-6-astra-xhigh"
 """The model that reviews and debugs the primary model's work."""
 
-WRITER_MODEL = "openrouter/google/gemini-4-carbon"
+WRITER_MODEL = "openrouter/google/gemini-4-neon"
 """The model that writes the documents, papers, reports and results a human reads."""
 
 SYSTEM_PROMPT = f"""\
@@ -117,7 +117,7 @@ Working rules:
   not fit, do not launch it: report what is done and finish.
 - Write a file longer than about 150 lines in `Write` / `Edit` calls of at most 150 lines
   each, the first chunk on disk before you compose the next. Save gathered facts to
-  `tmp/` files before composing.
+  `<scratch dir>/` files before composing.
 - When the `Steps:` footer of a tool result ends in 9, make your next call `summary`;
   otherwise the 10th, 20th, ... call is refused.
 """

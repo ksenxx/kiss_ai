@@ -469,9 +469,9 @@ class TestApiKeySave:
     def test_save_key_sets_env_var(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Key is set in os.environ immediately."""
         monkeypatch.setenv("SHELL", "/bin/zsh")
-        monkeypatch.delenv("TOGETHER_API_KEY", raising=False)
-        save_api_key("TOGETHER_API_KEY", "tok-val")
-        assert os.environ["TOGETHER_API_KEY"] == "tok-val"
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+        save_api_key("OPENROUTER_API_KEY", "tok-val")
+        assert os.environ["OPENROUTER_API_KEY"] == "tok-val"
 
     @posix_only("Windows chmod carries no owner-only mode bits")
     def test_store_file_is_owner_only(
@@ -501,8 +501,8 @@ class TestApiKeySave:
         previous_budget = config_module.DEFAULT_CONFIG.max_budget
         config_module.DEFAULT_CONFIG.max_budget = 5.0
         try:
-            save_api_key("ZAI_API_KEY", "z-key")
-            assert config_module.DEFAULT_CONFIG.ZAI_API_KEY == "z-key"
+            save_api_key("ANTHROPIC_API_KEY", "a-key")
+            assert config_module.DEFAULT_CONFIG.ANTHROPIC_API_KEY == "a-key"
             assert config_module.DEFAULT_CONFIG.max_budget == 5.0
         finally:
             config_module.DEFAULT_CONFIG.max_budget = previous_budget
@@ -675,7 +675,7 @@ class TestApiKeyDelete:
             "export KEEP_FIRST=1; export OPENAI_API_KEY='a;b'; # note\n"
             "export OPENAI_API_KEY='x;y'\n"
             "export OPENAI_API_KEY=old && export GEMINI_API_KEY=keep-and\n"
-            "export GEMINI_API_KEY=keep-first OPENAI_API_KEY=old TOGETHER_API_KEY=keep-last\n"
+            "export GEMINI_API_KEY=keep-first OPENAI_API_KEY=old CODEX_ACCESS_TOKEN=keep-last\n"
             'printf "%s\\n" $(printf token; export OPENAI_API_KEY=local)\n'
             "true || export OPENAI_API_KEY=old\n"
             "if true; then export OPENAI_API_KEY=old; fi\n"
@@ -685,7 +685,7 @@ class TestApiKeyDelete:
             "export OPENAI_API_KEY=old &>/dev/null\n"
             "export OPENAI_API_KEY=old 2>&1 GEMINI_API_KEY=keep-duplicated\n"
             "export OPENAI_API_KEY=old<(:) ANTHROPIC_API_KEY=keep-substituted-in\n"
-            "export OPENAI_API_KEY=old>(:) TOGETHER_API_KEY=keep-substituted-out\n"
+            "export OPENAI_API_KEY=old>(:) CODEX_ACCESS_TOKEN=keep-substituted-out\n"
             "export OPENAI_API_KEY=old OPENROUTER_API_KEY=keep-redirected-in < <(:)\n"
             "export OPENAI_API_KEY=old << EOF\n"
             "printf leaked-document\n"
@@ -698,21 +698,21 @@ class TestApiKeyDelete:
             "EOF\n"
             "export OPENAI_API_KEY=old\\>& printf 'retained-background\\n'\n"
             "wait\n"
-            'printf "%s\\n" "$GEMINI_API_KEY" "$ANTHROPIC_API_KEY" "$TOGETHER_API_KEY" '
+            'printf "%s\\n" "$GEMINI_API_KEY" "$ANTHROPIC_API_KEY" "$CODEX_ACCESS_TOKEN" '
             '"$OPENROUTER_API_KEY"\n'
         )
         save_api_key("OPENAI_API_KEY", "")
         assert rc.read_text() == (
             "export ANTHROPIC_API_KEY=keep-me\nexport KEEP_FIRST=1; # note\n"
             "true && export GEMINI_API_KEY=keep-and\n"
-            "export GEMINI_API_KEY=keep-first TOGETHER_API_KEY=keep-last\n"
+            "export GEMINI_API_KEY=keep-first CODEX_ACCESS_TOKEN=keep-last\n"
             'printf "%s\\n" $(printf token; export OPENAI_API_KEY=local)\n'
             "true || true\n"
             "if true; then true; fi\n"
             "export GEMINI_API_KEY=keep-redirected 2> /dev/null\n"
             "export 2>&1 GEMINI_API_KEY=keep-duplicated\n"
             "export ANTHROPIC_API_KEY=keep-substituted-in\n"
-            "export TOGETHER_API_KEY=keep-substituted-out\n"
+            "export CODEX_ACCESS_TOKEN=keep-substituted-out\n"
             "export OPENROUTER_API_KEY=keep-redirected-in < <(:)\n"
             "true << EOF\n"
             "printf leaked-document\n"
@@ -725,7 +725,7 @@ class TestApiKeyDelete:
             "EOF\n"
             "true & printf 'retained-background\\n'\n"
             "wait\n"
-            'printf "%s\\n" "$GEMINI_API_KEY" "$ANTHROPIC_API_KEY" "$TOGETHER_API_KEY" '
+            'printf "%s\\n" "$GEMINI_API_KEY" "$ANTHROPIC_API_KEY" "$CODEX_ACCESS_TOKEN" '
             '"$OPENROUTER_API_KEY"\n'
         )
         bash = _resolve_shell_path("bash")
@@ -1440,24 +1440,24 @@ class TestApiKeyDelete:
     ) -> None:
         """Deleting with no RC file present must not create one."""
         monkeypatch.setenv("SHELL", "/bin/zsh")
-        monkeypatch.setenv("TOGETHER_API_KEY", "from-elsewhere")
+        monkeypatch.setenv("OPENROUTER_API_KEY", "from-elsewhere")
         rc = Path.home() / ".zshrc"
         assert not rc.exists()
-        save_api_key("TOGETHER_API_KEY", "")
+        save_api_key("OPENROUTER_API_KEY", "")
         assert not rc.exists()
-        assert "TOGETHER_API_KEY" not in os.environ
+        assert "OPENROUTER_API_KEY" not in os.environ
 
     def test_delete_no_matching_line_keeps_rc_intact(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """No-match delete leaves the RC byte-identical, env still popped."""
         monkeypatch.setenv("SHELL", "/bin/zsh")
-        monkeypatch.setenv("ZAI_API_KEY", "env-only")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "env-only")
         rc = Path.home() / ".zshrc"
         rc.write_text("# unrelated\nexport OTHER_VAR=1\n")
-        save_api_key("ZAI_API_KEY", "")
+        save_api_key("ANTHROPIC_API_KEY", "")
         assert rc.read_text() == "# unrelated\nexport OTHER_VAR=1\n"
-        assert "ZAI_API_KEY" not in os.environ
+        assert "ANTHROPIC_API_KEY" not in os.environ
 
     def test_multiline_value_refused(
         self, monkeypatch: pytest.MonkeyPatch,
@@ -1470,12 +1470,12 @@ class TestApiKeyDelete:
         quote — so the save never happens.
         """
         monkeypatch.setenv("SHELL", "/bin/zsh")
-        monkeypatch.delenv("MOONSHOT_API_KEY", raising=False)
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
         rc = Path.home() / ".zshrc"
         rc.write_text("# untouched\n")
-        save_api_key("MOONSHOT_API_KEY", "line1\nline2")
+        save_api_key("GEMINI_API_KEY", "line1\nline2")
         assert rc.read_text() == "# untouched\n"
-        assert "MOONSHOT_API_KEY" not in os.environ
+        assert "GEMINI_API_KEY" not in os.environ
 
 
 class TestApplyConfig:
@@ -1915,22 +1915,22 @@ class TestLoadApiKeys:
         shell = _installed_posix_shell()
         other = "zsh" if shell == "bash" else "bash"
         monkeypatch.setenv("SHELL", f"/bin/{shell}")
-        for name in ("OPENAI_API_KEY", "GEMINI_API_KEY", "ANTHROPIC_API_KEY", "TOGETHER_API_KEY"):
+        for name in ("OPENAI_API_KEY", "GEMINI_API_KEY", "ANTHROPIC_API_KEY", "OPENROUTER_API_KEY"):
             monkeypatch.delenv(name, raising=False)
         _shell_rc_path(shell).write_text(
             "export OPENAI_API_KEY=current-key\n"
             'V=current\nexport ANTHROPIC_API_KEY="$V-expanded"\n'
-            'export TOGETHER_API_KEY=""\n'
+            'export OPENROUTER_API_KEY=""\n'
         )
         _shell_rc_path(other).write_text(
             "export OPENAI_API_KEY=obsolete-key\nexport GEMINI_API_KEY=other-only\n"
-            "export ANTHROPIC_API_KEY=obsolete-key\nexport TOGETHER_API_KEY=obsolete-key\n"
+            "export ANTHROPIC_API_KEY=obsolete-key\nexport OPENROUTER_API_KEY=obsolete-key\n"
         )
         load_api_keys()
         assert os.environ.get("OPENAI_API_KEY") == "current-key"
         assert os.environ.get("GEMINI_API_KEY") == "other-only"
         assert os.environ.get("ANTHROPIC_API_KEY") == "current-expanded"
-        assert os.environ.get("TOGETHER_API_KEY") is None
+        assert os.environ.get("OPENROUTER_API_KEY") is None
         assert "obsolete-key" not in api_keys_env_path().read_text()
 
     def test_a_later_rc_assignment_wins_even_when_it_cannot_be_imported(
@@ -2129,10 +2129,7 @@ class TestApiKeyEnvVarsConstant:
             "OPENAI_API_KEY",
             "ANTHROPIC_API_KEY",
             "ANTHROPIC_WORKSPACE_ID",
-            "TOGETHER_API_KEY",
             "OPENROUTER_API_KEY",
-            "ZAI_API_KEY",
-            "MOONSHOT_API_KEY",
             "AWS_BEARER_TOKEN_BEDROCK",
             "AWS_ACCESS_KEY_ID",
             "AWS_SECRET_ACCESS_KEY",
@@ -2371,8 +2368,8 @@ class TestReviewRegressions:
         shell = _installed_posix_shell()
         monkeypatch.setenv("SHELL", f"/bin/{shell}")
         names = (
-            "OPENAI_API_KEY", "GEMINI_API_KEY", "ANTHROPIC_API_KEY", "TOGETHER_API_KEY",
-            "OPENROUTER_API_KEY", "ZAI_API_KEY", "MOONSHOT_API_KEY", "AWS_REGION",
+            "OPENAI_API_KEY", "GEMINI_API_KEY", "ANTHROPIC_API_KEY", "CODEX_ACCESS_TOKEN",
+            "OPENROUTER_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_WORKSPACE_ID", "AWS_REGION",
         )
         for name in names:
             monkeypatch.delenv(name, raising=False)
@@ -2380,12 +2377,12 @@ class TestReviewRegressions:
             "export OPENAI_API_KEY=current || export OPENAI_API_KEY=obsolete\n"
             "false && export GEMINI_API_KEY=never-assigned\n"
             "export ANTHROPIC_API_KEY=pipeline-only | cat\n"
-            "export TOGETHER_API_KEY=replaced\n"
-            "if true; then export TOGETHER_API_KEY=under-then; fi\n"
+            "export CODEX_ACCESS_TOKEN=replaced\n"
+            "if true; then export CODEX_ACCESS_TOKEN=under-then; fi\n"
             "export OPENROUTER_API_KEY=replaced\n"
             "case x in x) export OPENROUTER_API_KEY=in-a-clause;; esac\n"
-            "export ZAI_API_KEY=~/zai-key\n"
-            "export MOONSHOT_API_KEY=a:~/b\n"
+            "export CLAUDE_CODE_OAUTH_TOKEN=~/claude-token\n"
+            "export ANTHROPIC_WORKSPACE_ID=a:~/b\n"
             "export AWS_REGION=exported\n"
             "AWS_REGION=for-one-command >/dev/null printf ''\n"
         )
@@ -2393,10 +2390,10 @@ class TestReviewRegressions:
         assert os.environ.get("OPENAI_API_KEY") == "current"
         assert os.environ.get("GEMINI_API_KEY") is None
         assert os.environ.get("ANTHROPIC_API_KEY") is None
-        assert os.environ.get("TOGETHER_API_KEY") == "under-then"
+        assert os.environ.get("CODEX_ACCESS_TOKEN") == "under-then"
         assert os.environ.get("OPENROUTER_API_KEY") == "in-a-clause"
-        assert os.environ.get("ZAI_API_KEY") == f"{Path.home()}/zai-key"
-        assert os.environ.get("MOONSHOT_API_KEY") == f"a:{Path.home()}/b"
+        assert os.environ.get("CLAUDE_CODE_OAUTH_TOKEN") == f"{Path.home()}/claude-token"
+        assert os.environ.get("ANTHROPIC_WORKSPACE_ID") == f"a:{Path.home()}/b"
         assert os.environ.get("AWS_REGION") == "exported"
         store = api_keys_env_path().read_text()
         assert "OPENAI_API_KEY=current" in store
@@ -2555,7 +2552,7 @@ class TestReviewRegressions:
         the value, and a process substitution is the shell's to expand.
         """
         names = (
-            "OPENAI_API_KEY", "GEMINI_API_KEY", "ANTHROPIC_API_KEY", "TOGETHER_API_KEY",
+            "OPENAI_API_KEY", "GEMINI_API_KEY", "ANTHROPIC_API_KEY", "CODEX_ACCESS_TOKEN",
             "OPENROUTER_API_KEY",
         )
         rc = Path.home() / ".bashrc"
@@ -2563,7 +2560,7 @@ class TestReviewRegressions:
             "export OPENAI_API_KEY=real-key>/dev/null\n"
             "export GEMINI_API_KEY=input-key</dev/null\n"
             "export ANTHROPIC_API_KEY=descriptor-key 2>/dev/null\n"
-            "export TOGETHER_API_KEY='quoted>key'\\<escaped\n"
+            "export CODEX_ACCESS_TOKEN='quoted>key'\\<escaped\n"
             "export OPENROUTER_API_KEY=substituted<(:)\n"
         )
         monkeypatch.setenv("SHELL", "/bin/bash")
@@ -2573,7 +2570,7 @@ class TestReviewRegressions:
             "OPENAI_API_KEY": "real-key",
             "GEMINI_API_KEY": "input-key",
             "ANTHROPIC_API_KEY": "descriptor-key",
-            "TOGETHER_API_KEY": "quoted>key<escaped",
+            "CODEX_ACCESS_TOKEN": "quoted>key<escaped",
             "OPENROUTER_API_KEY": None,
         }
         load_api_keys()

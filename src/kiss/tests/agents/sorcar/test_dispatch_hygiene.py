@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -29,6 +30,7 @@ from kiss.agents.sorcar.useful_tools import (
     _bash_parent_repo_guard,
     rewrite_parent_repo_paths,
 )
+from kiss.core.kiss_tmp import kiss_tmp_dir
 
 
 @pytest.fixture
@@ -69,6 +71,37 @@ class TestRewrite:
         )
         command = f"PYTHONPATH={wt}/src {repo}/.venv/bin/pytest {wt}/tests"
         assert _bash_parent_repo_guard(command, wt) is None
+
+    def test_a_scratch_file_keeps_its_path_when_the_temp_dir_is_in_the_repo(
+        self, worktree,
+    ) -> None:
+        """A file the brief names in the caller's scratch dir is not in the worktree, and the
+        Bash guard lets it through.  A checkout cloned into the scratch dir is still one."""
+        repo, wt = worktree
+        Path(repo, "T").mkdir()
+        session_temp_dir, tempfile.tempdir = tempfile.tempdir, f"{repo}/T"
+        try:
+            scratch = kiss_tmp_dir() / "task-1"
+            text = f"Append to {scratch}/findings/a.jsonl, then edit {repo}/src/a.py."
+            assert rewrite_parent_repo_paths(text, wt) == (
+                f"Append to {scratch}/findings/a.jsonl, then edit {wt}/src/a.py."
+            )
+            assert _bash_parent_repo_guard(f"cat {scratch}/findings/a.jsonl", wt) is None
+            assert "parent-repo path" in str(
+                _bash_parent_repo_guard(f"cat {scratch}/../../../src/a.py", wt)
+            )
+            clone = scratch / "clone"
+            clone_wt = clone / ".kiss-worktrees" / "kiss_wt-y"
+            clone_wt.mkdir(parents=True)
+            assert rewrite_parent_repo_paths(f"cat {clone}/a.py", str(clone_wt)) == (
+                f"cat {clone_wt}/a.py"
+            )
+            refusal = _bash_parent_repo_guard(f"cat {clone}/a.py", str(clone_wt))
+            assert "parent-repo path" in str(refusal)
+            UsefulTools(work_dir=str(clone_wt)).Write(f"{clone}/a.py", "x")
+            assert (clone_wt / "a.py").read_text() == "x" and not (clone / "a.py").exists()
+        finally:
+            tempfile.tempdir = session_temp_dir
 
     def test_no_worktree_means_no_change(self, worktree, tmp_path: Path) -> None:
         repo, _wt = worktree

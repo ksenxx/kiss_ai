@@ -115,7 +115,7 @@ def test_pro_models_are_not_added_as_new_models() -> None:
         "openrouter/openai/o3-pro": _or_entry(),
         "openrouter/openai/gpt-5.5-pro": _or_entry(30.0, 180.0),
     }
-    _, new_models = compute_changes({}, openrouter, {}, {}, {}, openai)
+    _, new_models = compute_changes({}, openrouter, {}, {}, openai)
     names = {m["name"] for m in new_models}
     assert names.isdisjoint(set(openai) | set(openrouter))
 
@@ -134,7 +134,7 @@ def test_normal_o_series_model_is_still_added() -> None:
         "openrouter/openai/o3-mini": _or_entry(1.1, 4.4),
         "openrouter/openai/o4-mini": _or_entry(1.1, 4.4),
     }
-    _, new_models = compute_changes({}, openrouter, {}, {}, {}, openai)
+    _, new_models = compute_changes({}, openrouter, {}, {}, openai)
     names = {m["name"] for m in new_models}
     expected = {"o3-mini", "o4-mini", "openrouter/openai/o3-mini", "openrouter/openai/o4-mini"}
     assert expected <= names

@@ -328,11 +328,33 @@ reaches the digest, so the digest holds only what a hand must fix.
 Only lint fixes: the tree is not ``ruff format``-ed, and running the
 formatter would rewrite every file in it."""
 
-CACHE_FILE = PROJECT_ROOT / "tmp" / "check-cache.json"
+
+def _agents_temp_dir() -> Path:
+    """``<OS temp dir>/kiss-tmp``, as ``kiss.core.kiss_tmp`` names it.
+
+    A command of a sub-agent has the sub-agent's private folder in that
+    directory as its temp directory: the directory is then the one the
+    folder is in, not a second one inside it.
+    """
+    base = Path(tempfile.gettempdir()).resolve()
+    if base.name.startswith("kiss-sub-") and base.parent.name.startswith("kiss-tmp"):
+        base = base.parent.parent
+    return base / "kiss-tmp"
+
+
+CACHE_FILE = (
+    _agents_temp_dir()
+    / f"check-cache-{hashlib.sha256(os.fsencode(PROJECT_ROOT.resolve())).hexdigest()[:12]}.json"
+)
 """Where the last run's verdict is kept, keyed by a fingerprint of the
 sources: a repeat run on an unchanged tree prints the kept digest
 instead of spending two minutes to recompute it (the 2026-10-24 audit
-counted 16 check runs where six were needed)."""
+counted 16 check runs where six were needed).  The file is in the
+agents' temp directory, ``<OS temp dir>/kiss-tmp``, never in the
+checkout (the directory of ``kiss.core.kiss_tmp``, spelled here like
+:data:`WORKTREES_DIR`), and is named for the checkout, by the first 12
+hex digits of the SHA-256 of its resolved path: a worktree and the
+main checkout keep separate verdicts."""
 _SKIP_DIRS = frozenset({"__pycache__", "node_modules", ".git", "tmp", "build", "dist"})
 CHECK_CONFIG_FILES = (
     "pyproject.toml",
@@ -385,9 +407,32 @@ def tree_fingerprint(root: Path = PROJECT_ROOT) -> str:
     return digest.hexdigest()
 
 
+def _own_cache_dir() -> bool:
+    """Whether the directory of :data:`CACHE_FILE` is a real directory of this user's.
+
+    In a temp directory several users share (``/tmp`` on Linux) the name
+    may be another user's directory, or a link someone planted: a verdict
+    read there could be forged, and one written there read.  The check
+    then runs without a cache, as it does in a directory of the user's
+    that others can write to.  (``kiss.core.kiss_tmp`` gives the agents a
+    directory of another name in that case, which a cache is not worth.)
+    Windows gives every user a temp directory.
+    """
+    getuid = getattr(os, "getuid", None)
+    directory = CACHE_FILE.parent
+    if not directory.is_dir() or directory.is_symlink():
+        return False
+    if getuid is None:
+        return True
+    status = directory.lstat()
+    return status.st_uid == getuid() and not status.st_mode & 0o022
+
+
 def cached_verdict(fingerprint: str, full: bool) -> dict[str, Any] | None:
     """Return the cached ``{"exit_code", "log"}`` of the last run on this tree, or ``None``."""
     try:
+        if not _own_cache_dir():
+            return None
         cached = json.loads(CACHE_FILE.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
@@ -411,7 +456,9 @@ def save_verdict(fingerprint: str, full: bool, exit_code: int, log: str) -> None
     """
     verdict = {"fingerprint": fingerprint, "full": full, "exit_code": exit_code, "log": log}
     try:
-        CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        CACHE_FILE.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if not _own_cache_dir():
+            return
         with tempfile.NamedTemporaryFile(
             "w", encoding="utf-8", dir=CACHE_FILE.parent, prefix=f"{CACHE_FILE.name}.",
             delete_on_close=False,  # removed when the block ends, if the rename did not take it

@@ -138,7 +138,7 @@ def test_fetch_compute_apply_writes_cache_prices(
     assert fetched["openrouter/anthropic/claude-fable-5.1"]["cache_write_price_per_1M"] == 12.5
     assert "cache_read_price_per_1M" not in fetched["openrouter/cohere/command-r7b-12-2024"]
 
-    updates, new_models = mod.compute_changes(current, fetched, {}, {}, {}, {})
+    updates, new_models = mod.compute_changes(current, fetched, {}, {}, {})
     by_name = {u["name"]: u["changes"] for u in updates}
     assert set(by_name) == {"openrouter/deepseek/deepseek-v4-flash"}
     assert by_name["openrouter/deepseek/deepseek-v4-flash"] == {
@@ -190,7 +190,7 @@ def test_fetch_compute_apply_writes_cache_prices(
         0.008288
     )
     assert "cache_write_price_per_1M" not in current_again["openrouter/deepseek/deepseek-v4-flash"]
-    updates_again, _ = mod.compute_changes(current_again, fetched, {}, {}, {}, {})
+    updates_again, _ = mod.compute_changes(current_again, fetched, {}, {}, {})
     assert [u for u in updates_again if u["name"].startswith("openrouter/")] == []
 
 
@@ -234,7 +234,7 @@ def test_image_output_price_flows_to_openrouter_and_direct_gemini_entries(
     assert fetched["openrouter/google/gemini-nano-banana-9"]["image_output_price_per_1M"] == 30.0
 
     gemini = {"gemini-nano-banana-9": {"context_length": 65536, "source": "gemini"}}
-    updates, new_models = mod.compute_changes({}, fetched, {}, gemini, {}, {})
+    updates, new_models = mod.compute_changes({}, fetched, gemini, {}, {})
     assert updates == []
     new_by_name = {nm["name"]: nm for nm in new_models}
     routed = new_by_name["openrouter/google/gemini-nano-banana-9"]
@@ -268,7 +268,7 @@ def test_image_output_price_flows_to_openrouter_and_direct_gemini_entries(
     # Idempotent: the written catalog reports the field back and nothing changes.
     current_again = mod.get_current_model_info()
     assert current_again["gemini-nano-banana-9"]["image_output_price_per_1M"] == 30.0
-    updates_again, new_again = mod.compute_changes(current_again, fetched, {}, gemini, {}, {})
+    updates_again, new_again = mod.compute_changes(current_again, fetched, gemini, {}, {})
     assert [u for u in updates_again if "nano-banana" in u["name"]] == []
     assert [nm for nm in new_again if "nano-banana" in nm["name"]] == []
 
@@ -302,7 +302,7 @@ def test_backfill_of_unpriced_gemini_image_model_copies_image_rate(
         fetched = mod.fetch_openrouter()
 
     gemini = {"gemini-nano-banana-9": {"context_length": 65536, "source": "gemini"}}
-    updates, new_models = mod.compute_changes(current, fetched, {}, gemini, {}, {})
+    updates, new_models = mod.compute_changes(current, fetched, gemini, {}, {})
     by_name = {u["name"]: u for u in updates}
     assert by_name["gemini-nano-banana-9"]["source"] == "openrouter-xref"
     assert by_name["gemini-nano-banana-9"]["changes"] == {

@@ -36,7 +36,7 @@ LLM/coding-assistant indexing") and verified live:
   `openrouter/openai/gpt-6-astra`, where the page says `gpt-6-astra-xhigh`
   and `openrouter/openai/gpt-6-astra-xhigh`) (the `/sync`
   row, rewritten in the same window, is identical in both),
-  the `/discover`, `/devtools`, `/install`, `/sync_history_and_memory`,
+  the `/discover`, `/discover_viz`, `/devtools`, `/install`, `/sync_history_and_memory`,
   `/ccxbestrouter`, `/brbestrouter` and `/gepa` rows are missing (the `/write_patent` and
   `/review_patent` rows are there), the `/rsi7d` row still says the SEA
   "applies and evaluates improvements to each SEA" where the page now
@@ -48,11 +48,11 @@ LLM/coding-assistant indexing") and verified live:
   two tables lack the `compaction` row the page now has (the per-run
   switch of context compaction, `sea_settings.SETTING_DOCS`), and the channel table's "scratch
   directory" and "no inheritance" rows lack the page's cron-job sentence and
-  its "or exec bridge" clause; in `cli.md` the `settings(self, settings)`
-  paragraph still has `/write` declaring `{"timeout": 3600}` where the page
-  now says `{"timeout": 3600, "model": "bestrouter"}` and its **Hooks**
+  its "or exec bridge" clause; in `cli.md` the **Hooks**
   bullet lacks the page's `end_run(result)` verdict and
-  `llm_response_hook(reply)` sentence; and the
+  `llm_response_hook(reply)` sentence (the `settings(self, settings)`
+  paragraph matches again: both say `/write` declares
+  `{"timeout": 3600}`, now that the SEA no longer pins a model); and the
   `overview.md`, `sample-tasks.md` and `tips.md` copies predate the
   `/discover` command (the pages now put `/discover` in front of the AI
   discovery and optimization prompts and name it in the overview's feature
@@ -69,9 +69,9 @@ LLM/coding-assistant indexing") and verified live:
   `assets/` holds only a PNG render of the first, `tb2-success-by-model.png`,
   which the root `README.md` embeds); `sea-commands.md`
   documents `src/kiss/agents/sorcar/sea_commands.py` and describes the
-  30 bundled commands `/ask`, `/autorouter`, `/bestrouter`, `/brbestrouter`,
-  `/ccxbestrouter`, `/devtools`, `/discover`,
-  `/forget`, `/gepa`, `/git_extract_knowledge`, `/good_morning`, `/install`, `/machine`, `/merge`,
+  33 bundled commands `/ask`, `/autorouter`, `/bestrouter`, `/brbestrouter`,
+  `/ccxbestrouter`, `/devtools`, `/discover`, `/discover_viz`,
+  `/forget`, `/gepa`, `/git_extract_knowledge`, `/good_morning`, `/install`, `/machine`, `/memory_consolidate`, `/memory_quiz`, `/merge`,
   `/orautorouter`, `/orbestrouter`, `/recommendations`, `/remember`,
   `/review_paper`, `/review_patent`, `/revise_and_review_paper`, `/rsi7d`, `/sh`,
   `/skillopt`, `/sync`, `/sync_history_and_memory`, `/task_update`, `/write`,

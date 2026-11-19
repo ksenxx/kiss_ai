@@ -8,7 +8,7 @@ The composer row below the input textbox (``#input-footer`` in
 ``media/chat.html``) holds the left button group (``#footer-tools``:
 burger menu ``#menu-btn``, new chat ``#new-chat-btn``, inject promptlet
 ``#tricks-btn`` and the "..." overflow menu ``#more-btn``) and the
-right group (``#input-actions``: model pill ``#model-btn``, then
+right group (``#input-actions``: model button ``#model-btn``, then
 send/stop).  Mic, share and attach live inside the "..." menu and are
 not part of the idle row.
 
@@ -16,7 +16,7 @@ Historically ``remote-codex.css`` pulled the remote webapp's 36px
 circular controls together with ``margin-left/right: -8px``, so the
 adjacent touch targets physically overlapped each other (every inner
 edge overlapped by 8-16px) and the burger/attach circles overlapped
-the model pill, and ``#input-footer`` drew a ``border-top`` separator
+the model button, and ``#input-footer`` drew a ``border-top`` separator
 line across the composer.
 
 This test asserts the new layout:
@@ -25,13 +25,15 @@ This test asserts the new layout:
   between their bounding boxes (no overlapping touch targets),
 * the remote controls keep their full 36px touch targets and the
   idle remote footer stays on a single row at typical phone widths
-  (~390px and up; the model pill is capped and truncates instead of
+  (~390px and up; the model button is capped and truncates instead of
   pushing buttons around, and narrower screens wrap without overlap),
 * in the cramped production state — a 320px phone while a task runs,
   when the footer also shows the wait spinner AND the stop button
   next to send — the row may wrap, but no two controls ever overlap
-  and the model pill never collapses below its 72px floor,
-* ``#input-footer`` no longer draws a separator line (zero border-top).
+  and the model button never collapses below its 72px floor,
+* ``#input-footer`` no longer draws a separator line (zero border-top),
+* the new-chat button draws a chat bubble with a "+" inside it, at
+  the bubble's top right.
 
 The test drives the production ``RemoteAccessServer`` + a real
 headless Chromium against the page it actually serves.  With the old
@@ -42,6 +44,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from operator import itemgetter
 from pathlib import Path
 
 import pytest
@@ -108,6 +111,59 @@ _GEOMETRY_JS = """
 """
 
 
+# The new-chat button's icon, in the units of its 24x24 drawing: the
+# box of the bubble's outline (its first path), the boxes of the other
+# strokes, and whether each stroke's two ends lie inside the outline.
+_NEW_CHAT_ICON_JS = """
+() => {
+  const svg = document.querySelector('#new-chat-btn svg');
+  const [bubble, ...strokes] = svg.querySelectorAll('path');
+  const box = (el) => {
+    const b = el.getBBox();
+    return {x: b.x, y: b.y, width: b.width, height: b.height};
+  };
+  const ends = (el) => [el.getPointAtLength(0), el.getPointAtLength(el.getTotalLength())];
+  const drawn = svg.getBoundingClientRect();
+  return {
+    drawn: [drawn.width, drawn.height],
+    bubble: box(bubble),
+    strokes: strokes.map(box),
+    endsInBubble: strokes.flatMap(ends).map((p) => bubble.isPointInFill(p)),
+    outsideBubble: bubble.isPointInFill(new DOMPoint(23, 23)),
+  };
+}
+"""
+
+
+def _assert_new_chat_icon(icon: dict) -> None:
+    """Assert the icon is a chat bubble with a "+" inside it, at the
+    bubble's top right.
+
+    Args:
+        icon: The ``_NEW_CHAT_ICON_JS`` probe result.
+    """
+    assert icon["drawn"] == [16, 16], icon
+    bubble = icon["bubble"]
+    assert bubble["width"] >= 18 and bubble["height"] >= 18, (
+        f"the bubble fills the 24x24 drawing: {icon}"
+    )
+    # The "+": an upright and a level stroke of one length that cross
+    # at their middles.
+    assert len(icon["strokes"]) == 2, icon
+    upright, level = sorted(icon["strokes"], key=itemgetter("width"))
+    assert upright["width"] == 0 and level["height"] == 0, icon
+    assert upright["height"] == level["width"] > 0, icon
+    centre_x = upright["x"]
+    centre_y = level["y"]
+    assert centre_x == level["x"] + level["width"] / 2, icon
+    assert centre_y == upright["y"] + upright["height"] / 2, icon
+    # Inside the bubble, in its top right quarter.
+    assert icon["endsInBubble"] == [True] * 4, icon
+    assert icon["outsideBubble"] is False, icon
+    assert centre_x > bubble["x"] + bubble["width"] / 2, icon
+    assert centre_y < bubble["y"] + bubble["height"] / 2, icon
+
+
 def _assert_buttons_spread_out(geometry: dict, min_gap: float) -> None:
     """Assert every adjacent pair of visible composer controls keeps
     at least *min_gap* px between their bounding boxes and that all
@@ -132,7 +188,7 @@ def _assert_buttons_spread_out(geometry: dict, min_gap: float) -> None:
     )
     send_gap = boxes["send-btn"]["left"] - boxes["model-btn"]["right"]
     assert send_gap >= min_gap, (
-        f"gap model-btn -> send-btn is {send_gap:.2f}px; the model pill "
+        f"gap model-btn -> send-btn is {send_gap:.2f}px; the model button "
         "and the send button must not overlap"
     )
     centers = [
@@ -228,8 +284,9 @@ def _start_live_server(
 def test_remote_composer_buttons_spread_out(tmp_path: Path) -> None:
     """Served page + real Chromium at phone width: the composer
     buttons are spread out with positive gaps (no overlapping touch
-    targets), keep their 36px touch targets, stay on a single row, and
-    the footer draws no separator line."""
+    targets), keep their 36px touch targets, stay on a single row, the
+    footer draws no separator line, and the new-chat button shows a
+    chat bubble with a "+" inside it."""
     ready = threading.Event()
     done = threading.Event()
     state: dict[str, object] = {}
@@ -267,6 +324,7 @@ def test_remote_composer_buttons_spread_out(tmp_path: Path) -> None:
                 page.wait_for_function(_FOOTER_LAID_OUT_JS, timeout=30000)
                 page.wait_for_timeout(300)
                 geometry = page.evaluate(_GEOMETRY_JS, _ALL_IDS)
+                new_chat_icon = page.evaluate(_NEW_CHAT_ICON_JS)
                 # Cramped production state: 320px phone while a task
                 # runs (spinner active, send AND stop visible).
                 page.set_viewport_size({"width": 320, "height": 800})
@@ -288,6 +346,7 @@ def test_remote_composer_buttons_spread_out(tmp_path: Path) -> None:
 
     _assert_buttons_spread_out(geometry, min_gap=1.5)
     _assert_no_separator(geometry)
+    _assert_new_chat_icon(new_chat_icon)
     boxes = geometry["boxes"]
     for bid in (
         "menu-btn",
@@ -299,7 +358,7 @@ def test_remote_composer_buttons_spread_out(tmp_path: Path) -> None:
         assert boxes[bid]["height"] == 36, boxes
 
     _assert_no_overlap(running["boxes"])
-    # The pill may truncate its label but must never collapse below
-    # its 72px floor (which would clip the 16px model icon); allow
-    # only sub-pixel rounding slack.
+    # The model button may truncate its label but must never collapse
+    # below its 72px floor (which would clip the 16px model icon);
+    # allow only sub-pixel rounding slack.
     assert running["boxes"]["model-btn"]["width"] >= 71.5, running["boxes"]

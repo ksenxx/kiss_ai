@@ -3,35 +3,38 @@
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
 
-"""The history panel's and tab strip's colour cues are clearly visible.
+"""The history panel's and tab strip's state cues are clearly visible.
 
-Four tints must read at a glance in a real Chromium:
+Four cues must read at a glance in a real Chromium:
 
 * the collapsible chat panel's header in the task-history panel: a
-  plain row with no fill of its own and a quiet NEUTRAL tint (no hue)
-  under the pointer, so a list of many chats does not become a stack
-  of bands and the accent stays reserved for the chat on screen;
+  plain row with no fill of its own and the quiet NEUTRAL hover fill
+  (no hue) under the pointer, so a list of many chats does not become
+  a stack of bands;
 * the header of the chat whose page is on screen
-  (``.history-chat-group.history-active-chat``): an accent wash and an
-  accent bar down its left edge, hovered or not, folded or not;
+  (``.history-chat-group.history-active-chat``): the neutral selection
+  fill under the strongest text, hovered or not, folded or not, with
+  no accent wash and no accent bar;
 * the task panel whose chat page is on screen
-  (``.running-item.history-active-task``): an accent tint and border;
+  (``.running-item.history-active-task``): the same selection fill and
+  text, with no accent tint and no outline;
 * a sub-agent's tab in the chat tab strip: purple tint, purple text,
   purple spinner while it runs and purple tick once it is done.
 
-The harness ``:root`` maps ``--accent`` / ``--purple`` to ``#3794ff`` /
-``#c586c0`` (see ``test_history_failed_red_cross._build_test_page``);
-the tests compare hues against the page's own computed variables and
-require an alpha well above the 8% at which the tints used to vanish.
+The harness ``:root`` maps ``--purple`` to ``#c586c0`` (see
+``test_history_failed_red_cross._build_test_page``) and leaves the
+neutral fills at main.css's dark fallbacks; the tests compare the
+colours against the page's own computed variables.  A selection must
+clearly outweigh the hover fill, and a purple tint must keep an alpha
+well above the 8% at which the tints used to vanish.
 """
 
 from __future__ import annotations
 
-import re
-
 import pytest
 from playwright.sync_api import sync_playwright
 
+from kiss.tests.conftest import click_row_menu_item
 from kiss.tests.webapp.test_codex_task_panel_style import (
     _alpha_of,
     _chroma_of,
@@ -47,11 +50,16 @@ from kiss.tests.webapp.test_history_failed_red_cross import (
 
 _REMOTE_CSS = _MEDIA_DIR / "remote-codex.css"
 
-# Below this alpha a tint over the sidebar background is barely visible.
-_MIN_ALPHA = 0.2
+# On the harness's dark sidebar a white fill below this alpha reads as a
+# row under the pointer, not as the selected row.
+_MIN_SELECTED_ALPHA = 0.1
 
-# A sub-agent tab is lighter than the history cues: purple text and
-# underline carry most of the signal, the fill only has to be visible.
+# The selected row must stay the strongest fill of the list while the
+# pointer rests on another row.
+_MIN_SELECTED_OVER_HOVER = 1.5
+
+# A sub-agent tab is a quiet cue: its purple text carries most of the
+# signal, the fill only has to be visible.
 _MIN_TAB_ALPHA = 0.15
 
 
@@ -92,7 +100,7 @@ def _style(page, selector: str, prop: str) -> str:
     )
 
 
-def _assert_tint(color: str, hue_of: str, what: str, min_alpha: float = _MIN_ALPHA) -> None:
+def _assert_tint(color: str, hue_of: str, what: str, min_alpha: float) -> None:
     assert _hue_of(color) == pytest.approx(_hue_of(hue_of), abs=2), (
         f"{what} has the wrong hue: {color} vs {hue_of}"
     )
@@ -101,9 +109,10 @@ def _assert_tint(color: str, hue_of: str, what: str, min_alpha: float = _MIN_ALP
 
 def test_chat_panel_header_is_a_quiet_neutral(_browser) -> None:
     """The header of a chat that is not on screen is a plain row (no
-    fill of its own), takes a faint neutral tint of the foreground (no
-    hue) under the pointer, and never borrows the accent that marks the
-    chat on screen (checked by test_active_chat_header_is_a_visible_accent)."""
+    fill of its own) and takes the faint neutral hover fill (--hover,
+    no hue) under the pointer: weaker than the selection fill that
+    marks the chat on screen (checked by
+    test_active_chat_header_carries_the_selection_fill)."""
     context, page = _open_history_page(_browser)
     try:
         _post_history(page, _sample_sessions())
@@ -112,81 +121,137 @@ def test_chat_panel_header_is_a_quiet_neutral(_browser) -> None:
         page.hover(".history-chat-header")
         _settle(page, ".history-chat-header:hover")
         hovered = _style(page, ".history-chat-header:hover", "backgroundColor")
+        assert hovered == _var_color(page, "--hover"), hovered
         assert _chroma_of(hovered) <= 8, f"the hovered header has a hue: {hovered}"
         assert 0.03 <= _alpha_of(hovered) <= 0.1, f"the hover tint is off: {hovered}"
     finally:
         context.close()
 
 
-_HEADER_INSET_JS = r"""(expand) => {
-  const g = document.querySelector('#history-list .history-chat-group');
-  const chevron = g.querySelector('.history-chat-header .history-chat-collapse');
-  if (g.classList.contains('collapsed') === expand) chevron.click();
+_HEADER_LINE_JS = r"""(expand) => {
+  const list = document.getElementById('history-list');
+  const g = list.querySelector('.history-chat-group');
   const h = g.querySelector('.history-chat-header');
+  const menu = h.querySelector(':scope > .sidebar-item-actions');
+  const chevron = menu.querySelector(':scope > .history-chat-collapse');
+  if (g.classList.contains('collapsed') === expand) chevron.click();
+  const lr = list.getBoundingClientRect();
   const gr = g.getBoundingClientRect();
   const hr = h.getBoundingClientRect();
   const hcs = getComputedStyle(h);
-  const title = g.querySelector('.history-chat-title');
-  const tr = title.getBoundingClientRect();
-  const cr = chevron.getBoundingClientRect();
-  const launched = g.querySelector(
-    '.history-chat-header .history-chat-actions > .history-chat-launched');
-  const lr = launched.getBoundingClientRect();
+  const tr = h.querySelector('.history-chat-title').getBoundingClientRect();
+  const more = h.querySelector(':scope > .sidebar-item-more');
+  const mr = more.getBoundingClientRect();
+  const menuBox = menu.getBoundingClientRect();
   const row = g.querySelector('.history-chat-body > .sidebar-item');
   const rr = row ? row.getBoundingClientRect() : null;
   return {
     collapsed: g.classList.contains('collapsed'),
-    top: hr.top - (gr.top + g.clientTop),
-    left: hr.left - (gr.left + g.clientLeft),
-    right: gr.left + g.clientLeft + g.clientWidth - hr.right,
-    bottom: gr.top + g.clientTop + g.clientHeight - hr.bottom,
-    chevronTooltip: chevron.dataset.tooltip,
-    chevronBelowTitle: cr.top >= tr.bottom,
-    chevronLeft: cr.left - tr.left,
-    launchedText: launched.textContent,
-    launchedHeight: lr.height,
-    launchedRightOfChevron: lr.left >= cr.right,
-    launchedInsideHeader: lr.bottom <= hr.bottom && lr.top >= hr.top,
+    top: hr.top - gr.top,
+    bottom: gr.bottom - hr.bottom,
+    left: hr.left - lr.left,
+    right: lr.right - hr.right,
+    paddingAroundTitle: hr.height - tr.height,
     radii: [hcs.borderTopLeftRadius, hcs.borderTopRightRadius,
             hcs.borderBottomRightRadius, hcs.borderBottomLeftRadius],
-    rowLeft: rr ? rr.left - (gr.left + g.clientLeft) : null,
+    borders: [hcs.borderTopWidth, hcs.borderRightWidth,
+              hcs.borderBottomWidth, hcs.borderLeftWidth],
+    moreOnTitleLine: mr.top < tr.bottom && mr.bottom > tr.top,
+    moreAfterTitle: mr.left >= tr.right,
+    moreToFillEdge: hr.right - mr.right,
+    moreOpensMenu: more.popoverTargetElement === menu,
+    menuOpen: menu.matches(':popover-open'),
+    menuBox: [menuBox.width, menuBox.height],
+    chevronTooltip: chevron.dataset.tooltip,
+    launchedText: menu.querySelector(':scope > .history-chat-launched').textContent,
+    rowLeft: rr ? rr.left - gr.left : null,
+    rowRightToFillEdge: rr ? hr.right - rr.right : null,
     rowGapBelowHeader: rr ? rr.top - hr.bottom : null,
   };
 }"""
 
 
 @pytest.mark.parametrize("expand", [False, True])
-def test_chat_panel_header_meets_the_panel_border(_browser, expand: bool) -> None:
-    """The header row spans the panel on every side it borders (no strip
-    of bare sidebar between them), its corners follow the square panel
-    (no rounding), its action strip (the "Show details" chevron, then
-    the chat's "... ago" label) sits under the title at the
-    title's left edge as on a task panel, and the task rows the chevron
-    unfolds are indented behind the nesting guide."""
+def test_chat_panel_header_is_one_inset_line(_browser, expand: bool) -> None:
+    """The header row is one line: the title and, at its right end, the
+    "…" button, which does not make the row taller.  The row's fill
+    (pointer, chat on screen) keeps 8px from the list's left and right
+    edges - the room the list keeps for its scrollbar counted in - and
+    1px from the rows above and below, under an 8px corner.  The
+    row's actions (the "Show details" chevron among them) and the
+    chat's "... ago" label are in the button's menu, closed until the
+    button opens it; the task rows the chevron unfolds are indented
+    behind the nesting guide and their fills end where the header's
+    does."""
     context, page = _open_history_page(_browser)
     try:
         _post_history(page, _sample_sessions())
-        probe = page.evaluate(_HEADER_INSET_JS, expand)
+        probe = page.evaluate(_HEADER_LINE_JS, expand)
         assert probe["collapsed"] is not expand, probe
         assert probe["chevronTooltip"] == ("Hide details" if expand else "Show details"), probe
-        assert probe["top"] == pytest.approx(0, abs=0.5), probe
-        assert probe["left"] == pytest.approx(0, abs=0.5), probe
-        assert probe["right"] == pytest.approx(0, abs=0.5), probe
-        assert probe["radii"] == ["0px"] * 4, probe
-        assert probe["chevronBelowTitle"] is True, probe
-        assert probe["chevronLeft"] == pytest.approx(0, abs=0.5), probe
+        assert probe["top"] == pytest.approx(1, abs=0.5), probe
+        assert probe["left"] == pytest.approx(8, abs=0.5), probe
+        assert probe["right"] == pytest.approx(8, abs=0.5), probe
+        assert probe["radii"] == ["8px"] * 4, probe
+        assert probe["borders"] == ["0px"] * 4, probe
+        # The row is as tall as its title's line and the 6px above and
+        # below it: the 24px button hangs over that padding.
+        assert probe["paddingAroundTitle"] == pytest.approx(12, abs=0.5), probe
+        assert probe["moreOnTitleLine"] is True, probe
+        assert probe["moreAfterTitle"] is True, probe
+        assert probe["moreToFillEdge"] == pytest.approx(4, abs=0.5), probe
+        assert probe["moreOpensMenu"] is True, probe
+        assert probe["menuOpen"] is False and probe["menuBox"] == [0, 0], probe
         assert probe["launchedText"].endswith(" ago"), probe
         assert "last launched" not in probe["launchedText"], probe
-        assert probe["launchedHeight"] > 0, probe
-        assert probe["launchedRightOfChevron"] is True, probe
-        assert probe["launchedInsideHeader"] is True, probe
         if expand:
-            # .history-chat-body: a 12px margin, the 1px guide line and
-            # an 8px padding (--space-3 + 1px + --space-2).
-            assert probe["rowLeft"] == pytest.approx(21, abs=0.5), probe
-            assert probe["rowGapBelowHeader"] == pytest.approx(0, abs=0.5), probe
+            # .history-chat-body: a 20px margin, the 1px guide line and
+            # a 4px padding (--space-4 + --space-1, 1px, --space-1).
+            assert probe["rowLeft"] == pytest.approx(25, abs=0.5), probe
+            assert probe["rowRightToFillEdge"] == pytest.approx(0, abs=0.5), probe
+            assert probe["rowGapBelowHeader"] == pytest.approx(1, abs=0.5), probe
         else:
-            assert probe["bottom"] == pytest.approx(0, abs=0.5), probe
+            assert probe["bottom"] == pytest.approx(1, abs=0.5), probe
+    finally:
+        context.close()
+
+
+# Per chat header: where the title starts and the centre of the status
+# icon (a turning spinner keeps its centre) from the header's left
+# edge, and how far the "…" button ends before its right edge.
+_TITLE_EDGES_JS = r"""() => [...document.querySelectorAll(
+    '#history-list .history-chat-header')].map(h => {
+  const left = el => el.getBoundingClientRect().left - h.getBoundingClientRect().left;
+  const icon = h.querySelector(':scope > .history-chat-status');
+  return {
+    title: left(h.querySelector('.history-chat-title')),
+    more: h.getBoundingClientRect().right
+      - h.querySelector(':scope > .sidebar-item-more').getBoundingClientRect().right,
+    iconCentre: icon ? left(icon) + icon.getBoundingClientRect().width / 2 : null,
+  };
+})"""
+
+
+def test_chat_titles_share_one_edge_with_or_without_a_status_icon(_browser) -> None:
+    """The header's first column is the status icon's slot, reserved
+    whether or not the chat shows one: the titles of a failed, a
+    running, an asking and a settled chat start on one edge (and their
+    "…" buttons end on one), so a title stays put when an icon comes or
+    goes; each icon, the narrow "?" included, is centred in the 12px
+    slot that ends 6px before the title."""
+    context, page = _open_history_page(_browser)
+    try:
+        sessions = _sample_sessions()
+        asking = {**sessions[1], "id": "chat-ask", "task_id": 1004, "awaiting_answer": True}
+        _post_history(page, [*sessions, asking])
+        rows = page.evaluate(_TITLE_EDGES_JS)
+        without_icon = [row for row in rows if row["iconCentre"] is None]
+        assert len(rows) == 4 and len(without_icon) == 1, rows
+        for row in rows:
+            assert row["title"] == pytest.approx(rows[0]["title"], abs=0.5), rows
+            assert row["more"] == pytest.approx(rows[0]["more"], abs=0.5), rows
+            if row["iconCentre"] is not None:
+                assert row["title"] - row["iconCentre"] == pytest.approx(12, abs=0.5), rows
     finally:
         context.close()
 
@@ -197,6 +262,7 @@ _PANEL_EDGES_JS = r"""() => {
   const sb = document.getElementById('sidebar');
   const sr = sb.getBoundingClientRect();
   const inner = sr.left + sb.clientLeft;
+  const list = document.getElementById('history-list');
   const search = document.querySelector('.history-search-row')
     .getBoundingClientRect();
   const sep = document.querySelector('#history-list > .history-day-sep')
@@ -204,26 +270,32 @@ _PANEL_EDGES_JS = r"""() => {
   const groups = [...document.querySelectorAll(
     '#history-list > .history-chat-group')];
   const rects = groups.map(g => g.getBoundingClientRect());
+  const headers = groups.map(g => g.querySelector('.history-chat-header'));
   const leftBoundary = inner;
   const rightBoundary = inner + sb.clientWidth;
   // Rects alone miss clipping by an ancestor: probe what is painted
-  // 1px inside each boundary, halfway down every header (looking
-  // through the transparent drag handle on the docked panel's edge).
-  const painted = groups.map(g => {
-    const hr = g.querySelector('.history-chat-header').getBoundingClientRect();
+  // 1px inside each end of every header's fill, halfway down the
+  // header.
+  const painted = headers.map(h => {
+    const hr = h.getBoundingClientRect();
     const y = (hr.top + hr.bottom) / 2;
-    return [leftBoundary + 1, rightBoundary - 1].map(x => {
-      const el = document.elementsFromPoint(x, y)
-        .find(e => e.id !== 'sidebar-resizer');
-      return !!el && el.closest('.history-chat-group') === g;
+    return [hr.left + 1, hr.right - 1].map(x => {
+      const el = document.elementFromPoint(x, y);
+      return !!el && el.closest('.history-chat-header') === h;
     });
   });
   return {
     painted,
     leftBoundary,
     rightBoundary,
+    // The room the list keeps for its scrollbar.
+    gutter: list.offsetWidth - list.clientWidth,
     lefts: rects.map(r => r.left),
     rights: rects.map(r => r.right),
+    fills: headers.map(h => {
+      const hr = h.getBoundingClientRect();
+      return [hr.left - leftBoundary, rightBoundary - hr.right];
+    }),
     gaps: rects.slice(1).map((r, i) => r.top - rects[i].bottom),
     sectionHeight: document.querySelector(
       '#history-list > .history-day-sep[data-day]:not([data-day="running"])'
@@ -260,9 +332,15 @@ def _assert_seamless_panels(page, what: str) -> None:
     )
     e = page.evaluate(_PANEL_EDGES_JS)
     assert e["leftBoundary"] < e["insetL"], (what, e)
+    # The panels span the list: from the panel's left edge to the room
+    # the list keeps for its scrollbar on a page driven by a mouse.
+    assert e["gutter"] == 6, (what, e)
     for left, right in zip(e["lefts"], e["rights"], strict=True):
         assert left == pytest.approx(e["leftBoundary"], abs=0.5), (what, e)
-        assert right == pytest.approx(e["rightBoundary"], abs=0.5), (what, e)
+        assert right == pytest.approx(e["rightBoundary"] - e["gutter"], abs=0.5), (what, e)
+    # A header's fill keeps the same 8px from both of the panel's
+    # edges, that room counted in, and none of it is clipped away.
+    assert e["fills"] == [[pytest.approx(8, abs=0.5)] * 2] * 3, (what, e)
     assert e["painted"] == [[True, True]] * 3, (what, e)
     assert e["sections"][0] == "Running", (what, e)
     assert len(e["sections"]) == 2 and e["sectionHeight"] > 0, (what, e)
@@ -270,8 +348,9 @@ def _assert_seamless_panels(page, what: str) -> None:
         pytest.approx(e["sectionHeight"], abs=0.5), pytest.approx(0, abs=0.5),
     ], (what, e)
     assert e["radii"] == ["0px"] * 3, (what, e)
-    # One shared hairline within a section; the separator replaces it between sections.
-    assert e["borderTops"] == ["0px", "0px", "1px"], (what, e)
+    # A flat list: no line between chat panels, within a section or after
+    # a section's separator.
+    assert e["borderTops"] == ["0px"] * 3, (what, e)
     assert e["borderSides"] == [["0px", "0px"]] * 3, (what, e)
     # The day separator keeps the panel's usual inset.
     assert e["sepL"] == pytest.approx(e["insetL"], abs=0.5), (what, e)
@@ -279,8 +358,9 @@ def _assert_seamless_panels(page, what: str) -> None:
 
 
 def test_legacy_list_rows_stay_inset(_browser) -> None:
-    """The chat panels span the history drawer edge to edge with no gap
-    between them; the legacy flat list keeps its rows inset."""
+    """The chat panels span the history drawer with no gap between
+    them; the legacy flat list's rows keep the chat headers' inset,
+    their fills 8px from both of the panel's edges."""
     context, page = _open_history_page(_browser)
     try:
         _use_remote_surface(page)
@@ -290,11 +370,11 @@ def test_legacy_list_rows_stay_inset(_browser) -> None:
         e = page.evaluate(
             "() => { const r = document.querySelector("
             "'#history-list > .running-item').getBoundingClientRect();"
-            " const s = document.querySelector('.history-search-row')"
-            ".getBoundingClientRect();"
-            " return [r.left - s.left, s.right - r.right]; }"
+            " const sb = document.getElementById('sidebar');"
+            " const inner = sb.getBoundingClientRect().left + sb.clientLeft;"
+            " return [r.left - inner, inner + sb.clientWidth - r.right]; }"
         )
-        assert e == [pytest.approx(0, abs=0.5)] * 2, e
+        assert e == [pytest.approx(8, abs=0.5)] * 2, e
     finally:
         context.close()
 
@@ -317,25 +397,38 @@ _ACTIVE_ROW = ".running-item.history-active-task"
 
 
 def _settle(page, selector: str) -> None:
-    """Wait for *selector*'s 0.15s colour transition (``.sidebar-item``
-    transitions everything) to reach its final value rather than a
-    mid-transition ``oklab(...)`` blend."""
+    """Wait for *selector*'s colour transition (a history row and a chat
+    header fade their fill in) to end, so that the computed colours are
+    the final ones rather than a blend on the way there."""
     page.wait_for_function(
-        "(sel) => { const cs = getComputedStyle(document.querySelector(sel));"
-        " return !cs.backgroundColor.startsWith('oklab')"
-        " && !cs.borderTopColor.startsWith('oklab'); }",
+        "(sel) => { const el = document.querySelector(sel);"
+        " return !!el && !el.getAnimations().some(a => a instanceof CSSTransition); }",
         arg=selector,
         timeout=5000,
     )
 
 
-def _assert_active_row_accent(page, what: str) -> None:
-    accent = _var_color(page, "--accent")
-    _settle(page, _ACTIVE_ROW)
-    _assert_tint(_style(page, _ACTIVE_ROW, "backgroundColor"), accent, what)
-    border = _style(page, _ACTIVE_ROW, "borderTopColor")
-    _assert_tint(border, accent, what + "'s border")
-    assert _alpha_of(border) >= 0.5, border
+def _assert_selected(page, selector: str, what: str) -> None:
+    """*selector* carries the selection cue: the page's neutral
+    ``--selected`` fill, clearly stronger than the hover fill, under the
+    strongest text, with no accent tint, no outline and no accent bar."""
+    _settle(page, selector)
+    fill = _style(page, selector, "backgroundColor")
+    assert fill == _var_color(page, "--selected"), f"{what} is not the selection fill: {fill}"
+    assert _chroma_of(fill) <= 8, f"{what} has a hue: {fill}"
+    assert _alpha_of(fill) >= _MIN_SELECTED_ALPHA, f"{what} is barely visible: {fill}"
+    hover = _var_color(page, "--hover")
+    assert _alpha_of(fill) >= _MIN_SELECTED_OVER_HOVER * _alpha_of(hover), (
+        f"{what} does not outweigh a row under the pointer: {fill} vs {hover}"
+    )
+    assert _style(page, selector, "color") == _var_color(page, "--fg-strong"), (
+        f"{what} must take the strongest text"
+    )
+    border = _style(page, selector, "borderTopColor")
+    width = _style(page, selector, "borderTopWidth")
+    assert width == "0px" or _alpha_of(border) == 0, f"{what} is outlined: {width} {border}"
+    shadow = _style(page, selector, "boxShadow")
+    assert shadow == "none", f"{what} carries a bar: {shadow}"
 
 
 _ACTIVE_HEADER = ".history-chat-group.history-active-chat > .history-chat-header"
@@ -358,34 +451,10 @@ def _show_active_task(page) -> None:
 
 
 def _fold_active_chat(page) -> None:
-    """The user folds the chat on screen through its chevron: the task
-    row hides, the header stays."""
-    page.click(_ACTIVE_HEADER + " .history-chat-collapse")
+    """The user folds the chat on screen through the chevron line of
+    its "…" menu: the task row hides, the header stays."""
+    click_row_menu_item(page.locator(_ACTIVE_HEADER), ".history-chat-collapse")
     page.wait_for_selector(_ACTIVE_ROW, state="hidden")
-
-
-def _assert_active_header_accent(page, what: str) -> None:
-    """The active chat's header carries the accent wash and the accent
-    bar (an inset box-shadow) down its left edge."""
-    accent = _var_color(page, "--accent")
-    _settle(page, _ACTIVE_HEADER)
-    _assert_tint(_style(page, _ACTIVE_HEADER, "backgroundColor"), accent, what, 0.1)
-    shadow = _style(page, _ACTIVE_HEADER, "boxShadow")
-    assert "inset" in shadow, f"{what} has no accent bar: {shadow}"
-    _assert_tint(_shadow_color(shadow), accent, what + "'s bar", 0.5)
-
-
-def _shadow_color(shadow: str) -> str:
-    """The colour of a computed ``box-shadow`` as ``rgba(r, g, b, a)``.
-    Chromium serialises a ``color-mix`` shadow colour as
-    ``color(srgb r g b / a)`` with 0..1 channels."""
-    rgba = re.search(r"rgba?\([^)]*\)", shadow)
-    if rgba:
-        return rgba.group(0)
-    srgb = re.search(r"color\(srgb ([\d.]+) ([\d.]+) ([\d.]+)(?: / ([\d.]+))?\)", shadow)
-    assert srgb, f"unrecognised shadow colour: {shadow}"
-    r, g, b = (round(float(srgb.group(i)) * 255) for i in (1, 2, 3))
-    return f"rgba({r}, {g}, {b}, {srgb.group(4) or '1'})"
 
 
 def _use_remote_surface(page) -> None:
@@ -399,38 +468,38 @@ def _use_remote_surface(page) -> None:
     )
 
 
-def test_active_task_panel_is_a_visible_accent(_browser) -> None:
-    """The task panel of the task the visible tab shows is painted in a
-    clearly visible accent tint with an accent border, hovered or not;
-    the other panels are not tinted."""
+def test_active_task_panel_carries_the_selection_fill(_browser) -> None:
+    """The task panel of the task the visible tab shows is painted in
+    the clearly visible neutral selection fill under the strongest
+    text, hovered or not; the other panels have no fill."""
     context, page = _open_history_page(_browser)
     try:
         _show_active_task(page)
         _use_remote_surface(page)
-        _assert_active_row_accent(page, "the active task panel")
+        _assert_selected(page, _ACTIVE_ROW, "the active task panel")
         others = page.evaluate(
             "() => [...document.querySelectorAll('.running-item:not(.history-active-task)')]"
             ".map(el => getComputedStyle(el).backgroundColor)"
         )
         assert len(others) == 2, others
         for bg in others:
-            assert _alpha_of(bg) < _MIN_ALPHA, f"an inactive panel is tinted: {bg}"
+            assert _alpha_of(bg) == 0, f"an inactive panel is filled: {bg}"
         # The generic .sidebar-item:hover rule must not take the cue away.
         page.hover(_ACTIVE_ROW)
-        _assert_active_row_accent(page, "the hovered active task panel")
+        _assert_selected(page, _ACTIVE_ROW + ":hover", "the hovered active task panel")
     finally:
         context.close()
 
 
-def test_active_chat_header_is_a_visible_accent(_browser) -> None:
-    """The header of the chat the visible tab shows is painted in an
-    accent wash with an accent bar, unfolded or folded by the user,
-    hovered or not; the other headers keep no fill."""
+def test_active_chat_header_carries_the_selection_fill(_browser) -> None:
+    """The header of the chat the visible tab shows is painted in the
+    neutral selection fill under the strongest text, unfolded or folded
+    by the user, hovered or not; the other headers keep no fill."""
     context, page = _open_history_page(_browser)
     try:
         _show_active_task(page)
         _use_remote_surface(page)
-        _assert_active_header_accent(page, "the active chat header")
+        _assert_selected(page, _ACTIVE_HEADER, "the active chat header")
         others = page.evaluate(
             "(sel) => [...document.querySelectorAll(sel)]"
             ".map(el => getComputedStyle(el).backgroundColor)",
@@ -438,11 +507,11 @@ def test_active_chat_header_is_a_visible_accent(_browser) -> None:
         )
         assert len(others) == 2, others
         for bg in others:
-            assert _alpha_of(bg) == 0, f"another chat's header is tinted: {bg}"
+            assert _alpha_of(bg) == 0, f"another chat's header is filled: {bg}"
         page.hover(_ACTIVE_HEADER)
-        _assert_active_header_accent(page, "the hovered active chat header")
+        _assert_selected(page, _ACTIVE_HEADER + ":hover", "the hovered active chat header")
         _fold_active_chat(page)
-        _assert_active_header_accent(page, "the folded active chat header")
+        _assert_selected(page, _ACTIVE_HEADER, "the folded active chat header")
     finally:
         context.close()
 
@@ -483,8 +552,8 @@ def _assert_purple_tabs(page) -> None:
     page.click(_DONE_TAB)
     page.wait_for_selector(_DONE_TAB + ".active", state="attached")
     # A tab keeps its node when it becomes active, so on the remote page
-    # its pill fades to the new look (``transition`` in remote-codex.css):
-    # the colours are read once that has run.
+    # its chip fades to the active colours (``transition`` in
+    # remote-codex.css): the colours are read once that has run.
     page.wait_for_function(
         "() => !document.getAnimations().some(a => a instanceof CSSTransition)"
     )
@@ -505,20 +574,19 @@ def _assert_purple_tabs(page) -> None:
 
 
 def test_subagent_tab_is_purple(_browser) -> None:
-    """The tab strip is neutral pills (``remote-codex.css`` under
+    """The tab strip is quiet neutral chips (``remote-codex.css`` under
     ``body.remote-chat``); a sub-agent's tab reads purple whether idle
     or active, and so do its spinner (running) and tick (done)."""
     context, page = _open_history_page(_browser)
     try:
         _open_subagent_tabs(page)
         _use_remote_surface(page)
-        # An ordinary tab is a neutral pill on the remote page ...
+        # An ordinary tab is a neutral chip on the remote page ...
         plain = page.evaluate(
             "() => getComputedStyle(document.querySelector("
             "'.chat-tab:not(.subagent-tab)')).backgroundColor"
         )
-        purple_hue = _hue_of(_var_color(page, "--purple"))
-        assert _alpha_of(plain) == 0 or abs(_hue_of(plain) - purple_hue) > 10, plain
+        assert _alpha_of(plain) == 0 or _chroma_of(plain) <= 8, plain
         # ... and a sub-agent's tab is still purple.
         _assert_purple_tabs(page)
     finally:

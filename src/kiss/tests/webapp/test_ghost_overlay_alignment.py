@@ -10,11 +10,11 @@ invisibly and appends the suggestion in grey (``updateGhost`` in
 ``media/main.js``).  The suggestion follows the typed text only while
 the overlay lays its text out exactly like the textarea.
 
-Regression: the overlay inherited the page's ``letter-spacing:
--0.08px`` (``body`` in ``media/main.css``) while browsers reset a
-textarea's to ``normal``, so the overlay's copy of a long line was
-narrower than the typed line and the suggestion was drawn over its
-last letters.
+Regression: the overlay inherited the ``letter-spacing: -0.08px``
+that ``body`` carried in ``media/main.css`` at the time (the page sets
+none any more) while browsers reset a textarea's to ``normal``, so the
+overlay's copy of a long line was narrower than the typed line and the
+suggestion was drawn over its last letters.
 
 The production RemoteAccessServer serves the page to a real headless
 Chromium.  The test types into the composer, paints a suggestion
@@ -180,3 +180,81 @@ def test_ghost_suggestion_starts_where_the_typed_text_ends(tmp_path: Path) -> No
         assert measured["clearLeft"] is not None, measured
         assert measured["textRight"] <= measured["clearLeft"], measured
         assert measured["hitAtLineEnd"] == "task-input", measured
+
+
+_LONG_DRAFT_JS = """
+(suggestion) => {
+  const overlay = document.getElementById('kiss-server-loading');
+  if (overlay) overlay.style.display = 'none';
+  document.getElementById('app').style.display = '';
+  const inp = document.getElementById('task-input');
+  inp.focus();
+  const text = Array.from({length: 200}, (_, i) => 'line ' + i).join('\\n');
+  inp.value = text;
+  inp.setSelectionRange(text.length, text.length);
+  inp.dispatchEvent(new Event('input', {bubbles: true}));
+  const data = {type: 'ghost', suggestion, query: text};
+  const tabId = window._testApi.getActiveTabId();
+  if (tabId) data.tabId = tabId;
+  window.dispatchEvent(new MessageEvent('message', {data}));
+  inp.scrollTop = inp.scrollHeight;
+  inp.dispatchEvent(new Event('scroll'));
+  const ghost = document.querySelector('#ghost-overlay .ghost-text');
+  const box = inp.getBoundingClientRect();
+  const area = document.getElementById('input-area').getBoundingClientRect();
+  const g = ghost.getClientRects()[0];
+  return {
+    viewport: window.innerHeight,
+    inputBottom: box.bottom,
+    inputTop: box.top,
+    areaBottom: area.bottom,
+    scrollable: inp.scrollHeight > inp.clientHeight + 1,
+    overflowY: getComputedStyle(inp).overflowY,
+    scrollTop: inp.scrollTop,
+    ghostTop: g.top,
+  };
+}
+"""
+
+
+@pytest.mark.timeout(180)
+def test_long_draft_scrolls_inside_the_composer(tmp_path: Path) -> None:
+    """A draft taller than the window scrolls inside the textarea.
+
+    The composer used to grow with every line, pushing the box (and
+    its buttons) past the bottom of the window.  Now it stops at a
+    share of the window and scrolls; the ghost overlay scrolls with
+    it so a suggestion still sits after the last typed line.
+    """
+    ready = threading.Event()
+    done = threading.Event()
+    state: dict[str, object] = {}
+    thread = threading.Thread(
+        target=_start_live_server, args=(tmp_path, ready, done, state), daemon=True,
+    )
+    thread.start()
+    try:
+        assert ready.wait(30), "RemoteAccessServer failed to start"
+        with sync_playwright() as p:
+            browser = p.chromium.launch(args=["--ignore-certificate-errors"])
+            try:
+                page = browser.new_page(
+                    ignore_https_errors=True, viewport={"width": 1000, "height": 700},
+                )
+                goto_retrying_network_change(
+                    page, f"https://127.0.0.1:{state['port']}/", wait_until="load",
+                )
+                page.wait_for_selector("#task-input", state="attached")
+                measured: dict[str, Any] = page.evaluate(_LONG_DRAFT_JS, _SUGGESTION)
+            finally:
+                browser.close()
+    finally:
+        done.set()
+        thread.join(timeout=30)
+    assert measured["scrollable"], measured
+    assert measured["overflowY"] == "auto", measured
+    assert measured["scrollTop"] > 0, measured
+    assert measured["areaBottom"] <= measured["viewport"] + 0.5, measured
+    assert measured["inputBottom"] - measured["inputTop"] <= measured["viewport"] / 2 + 1, measured
+    # The suggestion follows the last line, which is scrolled into view.
+    assert measured["inputTop"] <= measured["ghostTop"] < measured["inputBottom"], measured

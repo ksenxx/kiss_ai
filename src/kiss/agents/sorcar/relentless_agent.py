@@ -476,8 +476,8 @@ WORK_DIR_LINE = "- Work dir: {work_dir}\n"
 CONTAINER_WORK_DIR_LINE = (
     "- Work dir: {work_dir}, inside the container that your shell and file tools "
     "run in (every Bash call is a fresh shell started there). This machine's "
-    "files, git repository and ./tmp are not visible in the container, so the "
-    "rules above about git worktrees and ./tmp/PROGRESS.md do not apply, and the "
+    "files and git repository are not visible in the container, so the "
+    "rules above about git worktrees and PROGRESS.md do not apply, and the "
     "user, IP address, OS and machine lines of Task Settings describe this "
     "machine, not the container.\n"
 )

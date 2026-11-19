@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Any
 from unittest import IsolatedAsyncioTestCase
 
+from playwright.sync_api import sync_playwright
 from websockets.asyncio.client import connect
 
 import kiss.agents.sorcar.persistence as th
@@ -168,12 +169,12 @@ class TestShareChatOverLocal(_LocalServerTestCase):
         self.assertIn(self.BODY, page)
         self.assertIn("<title>My chat</title>", page)
         # Self-contained: the chat page stylesheet, the highlight.js
-        # theme, the VS Code palette and the collapse script are all
+        # theme, the dark palette and the collapse script are all
         # inlined, so the page needs no server and no other file.
         self.assertIn(".ev.task-panel, .ev.user-msg {", page)  # main.css
         self.assertIn(".collapse-preview", page)  # main.css
         self.assertIn(".hljs", page)  # highlight theme
-        self.assertIn("--theme-editor-background: #1f1f1f", page)
+        self.assertIn("--theme-editor-background: #0b0b0b", page)
         self.assertIn("renderShareTabBar", page)  # share.js
         # share.js's click delegation — a marker that appears in the
         # script only, never in this test's transcript body.
@@ -208,14 +209,36 @@ class TestShareChatOverLocal(_LocalServerTestCase):
         self.assertIn('aria-label="Switch to light mode"', page)
         self.assertIn('<style id="hljs-style-dark">', page)
         self.assertIn('<style id="hljs-style-light" media="not all">', page)
-        # Light Modern variable overrides keyed off the toggled class.
+        # The light palette's overrides, keyed off the toggled class.
         self.assertIn("html.light-theme,\n    body.remote-chat.light-theme {", page)
-        self.assertIn("--theme-editor-background: #ffffff", page)
+        self.assertIn("--theme-editor-background: #fafafa", page)
         # share.js's toggle logic (markers that appear in the script
         # only, never in this test's transcript body).
         self.assertIn("kissShareTheme", page)
         self.assertIn("Switch to dark mode", page)
         self.assertIn("#share-theme-btn {", page)  # _SHARE_PAGE_CSS
+
+    def test_transcript_starts_below_the_theme_toggle(self) -> None:
+        """Rendered in a browser, the written page starts its transcript
+        below the floating theme toggle: the first task's bubble runs to
+        the column's right edge, where the toggle would sit on it."""
+        event = self._share(chatId="chat-toggle", html=self.BODY)
+        self.assertTrue(event["ok"], event)
+        with sync_playwright() as p:
+            browser = p.chromium.launch()
+            try:
+                page = browser.new_page(viewport={"width": 900, "height": 700})
+                page.goto(Path(event["path"]).as_uri(), wait_until="load")
+                toggle, bubble = page.evaluate(
+                    """() => ['#share-theme-btn', '.task-panel'].map(selector => {
+                      const box = document.querySelector(selector).getBoundingClientRect();
+                      return {left: box.left, top: box.top, right: box.right, bottom: box.bottom};
+                    })"""
+                )
+            finally:
+                browser.close()
+        self.assertGreater(bubble["right"], toggle["left"], (toggle, bubble))
+        self.assertGreaterEqual(bubble["top"], toggle["bottom"], (toggle, bubble))
 
     def test_share_page_carries_the_subagent_tab_strip(self) -> None:
         # The page must ship everything the sub-agent tabs need with

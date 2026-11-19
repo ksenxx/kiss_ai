@@ -30,7 +30,8 @@ OpenRouter-route gpt-oss alias materialization — were all closed by
 commit ``854402ab``.  The tests in :class:`TestAuditGapTripwires`
 started life as strict expected-failure tripwires; when the fix landed
 each unexpectedly passed and was promoted to a plain positive
-assertion, retained here as regressions.
+assertion, retained here as regressions.  Gap C has no test any more:
+the Together route was removed from the product.
 
 The negative gate assertions monkey-patch
 ``kiss.core.models.model_info.model`` to a sentinel that records every
@@ -126,22 +127,16 @@ class TestThinkingScaleDispatch:
             assert mod._thinking_scale_for(name) == OPENAI_LEVELS, name
 
     def test_moonshot_family_uses_moonshot_ladder(self) -> None:
-        """Every Moonshot spelling (K2, K3, v1, Together, OpenRouter, ~mirror).
+        """Every Moonshot spelling (K2, K3, OpenRouter, ~mirror).
 
         The scale is chosen from the prefix alone (K3-only probing is
-        enforced separately in ``detect_thinking_level``); the K2 and v1
-        entries here document that the scale dispatch is family-wide
+        enforced separately in ``detect_thinking_level``); the K2
+        entry here documents that the scale dispatch is family-wide
         even though probing is K3-only.
         """
         import kiss.scripts.update_models as mod
 
         for name in (
-            "kimi-k3",
-            "kimi-k2-0905-preview",
-            "kimi-k2-thinking",
-            "moonshot-v1-128k",
-            "moonshotai/Kimi-K3",
-            "moonshotai/Kimi-K2-Thinking",
             "openrouter/moonshotai/kimi-k3",
             "openrouter/moonshotai/kimi-k2-thinking",
             "openrouter/~moonshotai/kimi-k3",
@@ -157,7 +152,7 @@ class TestThinkingScaleDispatch:
         the default to Moonshot's shorter ladder and silently emits
         wrong ``-max`` aliases everywhere.
 
-        NB: ``bare`` ``glm-5.2`` (no ``zai-org/`` or ``openrouter/z-ai/``
+        NB: ``bare`` ``glm-5.2`` (no ``openrouter/z-ai/``
         prefix) intentionally falls back to the OpenAI ladder because
         :func:`_is_glm_5_2_family` requires the vendor route prefix — a
         rogue custom entry named ``glm-5.2`` under a different provider
@@ -204,8 +199,7 @@ class TestThinkingScaleDispatch:
         """z-ai ``GLM-5.2`` uses the 2-level ``('high','max')`` ladder."""
         import kiss.scripts.update_models as mod
 
-        for name in ("zai-org/GLM-5.2", "openrouter/z-ai/glm-5.2"):
-            assert mod._thinking_scale_for(name) == ("high", "max"), name
+        assert mod._thinking_scale_for("openrouter/z-ai/glm-5.2") == ("high", "max")
 
     def test_all_levels_covers_every_scale(self) -> None:
         """``_ALL_THINKING_LEVELS`` must be the union of every vendor scale."""
@@ -319,10 +313,11 @@ class TestDetectThinkingLevelGateHolds:
     ) -> None:
         """Kimi K2.x uses ``thinking.type``, v1 has no thinking.
 
-        Both share the ``kimi-``/``moonshotai/`` prefix with K3 but must
-        stay behind the K3-only guard ``_is_kimi_k3_family`` — probing
-        them through a gateway that silently drops ``reasoning_effort``
-        would fabricate a phantom level in the catalog.
+        The OpenRouter spellings share the ``openrouter/moonshotai/``
+        prefix with K3 but must stay behind the K3-only guard
+        ``_is_kimi_k3_family`` — probing them through a gateway that
+        silently drops ``reasoning_effort`` would fabricate a phantom
+        level in the catalog.
         """
         import kiss.scripts.update_models as mod
 
@@ -473,7 +468,7 @@ class TestDetectThinkingLevelGateHolds:
     @pytest.mark.parametrize(
         "name",
         [
-            # Together's own Llama/Mistral/Meta/Nvidia families — no effort surface.
+            # Llama/Mistral/Meta/Nvidia families — no effort surface.
             "meta-llama/Llama-3-70b-chat-hf",
             "meta-llama/Llama-3.1-405B-Instruct",
             "meta-llama/Llama-3.3-70B-Instruct-Turbo",
@@ -500,7 +495,7 @@ class TestDetectThinkingLevelGateHolds:
     def test_generic_non_reasoning_families_are_gated_out(
         self, gate_probe: _RecordingModelStub, name: str
     ) -> None:
-        """The long-tail of Together/OpenRouter-hosted non-reasoning models."""
+        """The long-tail of non-reasoning models."""
         import kiss.scripts.update_models as mod
 
         assert mod.detect_thinking_level(name) is None, name
@@ -542,7 +537,8 @@ class TestDetectThinkingLevelGateHolds:
 # ---------------------------------------------------------------------------
 # Audit-gap lock-ins.  Each of the four gaps (A/B/C/D) identified in
 # ``reports/reasoning_effort_alias_audit.html`` §2 was fixed in a follow-up
-# to the audit and is now pinned by a positive assertion.  These tests
+# to the audit and is now pinned by a positive assertion (except C, whose
+# Together route was removed from the product).  These tests
 # started life as strict expected-failure tripwires (see git history at
 # the audit-landing commit) — the moment the gap fix landed each
 # tripwire started passing, which under strict mode forced the fixer
@@ -612,22 +608,20 @@ class TestAuditGapTripwires:
         import kiss.scripts.update_models as mod
 
         monkeypatch.setattr(mod, "_probe_attachments", lambda name: {})
-        mod.detect_thinking_level("zai-org/GLM-5.2")
         mod.detect_thinking_level("openrouter/z-ai/glm-5.2")
         recorded = [c["model_name"] for c in gate_probe.calls]
-        assert "zai-org/GLM-5.2" in recorded
         assert "openrouter/z-ai/glm-5.2" in recorded
 
     def test_gap_b_glm_5_2_uses_two_level_scale(self) -> None:
-        """Post-fix: ``_thinking_scale_for`` on GLM-5.2 keys returns the
+        """Post-fix: ``_thinking_scale_for`` on the GLM-5.2 key returns the
         2-level ``('high', 'max')`` scale — never the OpenAI ladder."""
         import kiss.scripts.update_models as mod
 
-        for name in ("zai-org/GLM-5.2", "openrouter/z-ai/glm-5.2"):
-            scale = mod._thinking_scale_for(name)
-            assert scale == ("high", "max"), (
-                f"{name!r} must use ('high', 'max'); got {scale!r}"
-            )
+        name = "openrouter/z-ai/glm-5.2"
+        scale = mod._thinking_scale_for(name)
+        assert scale == ("high", "max"), (
+            f"{name!r} must use ('high', 'max'); got {scale!r}"
+        )
 
     def test_gap_b_only_5_2_admitted_other_glms_still_gated_out(
         self, gate_probe: _RecordingModelStub, monkeypatch: pytest.MonkeyPatch
@@ -637,9 +631,9 @@ class TestAuditGapTripwires:
 
         monkeypatch.setattr(mod, "_probe_attachments", lambda name: {})
         # First: confirm 5.2 gets in.
-        mod.detect_thinking_level("zai-org/GLM-5.2")
+        mod.detect_thinking_level("openrouter/z-ai/glm-5.2")
         recorded_before = [c["model_name"] for c in gate_probe.calls]
-        assert "zai-org/GLM-5.2" in recorded_before
+        assert "openrouter/z-ai/glm-5.2" in recorded_before
 
         # Then: confirm every other GLM still gated out.
         gate_probe.calls.clear()
@@ -659,23 +653,6 @@ class TestAuditGapTripwires:
         assert gate_probe.calls == [], (
             "Non-5.2 GLMs must not reach the probe after gap B fix"
         )
-
-    def test_gap_c_together_gpt_oss_admitted_to_probe(
-        self, gate_probe: _RecordingModelStub, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Post-fix: ``detect_thinking_level`` for the Together route
-        of gpt-oss (``openai/gpt-oss-*``) must reach the probe."""
-        import kiss.scripts.update_models as mod
-
-        monkeypatch.setattr(mod, "_probe_attachments", lambda name: {})
-        for name in (
-            "openai/gpt-oss-120b",
-            "openai/gpt-oss-20b",
-        ):
-            mod.detect_thinking_level(name)
-        recorded = [c["model_name"] for c in gate_probe.calls]
-        assert "openai/gpt-oss-120b" in recorded
-        assert "openai/gpt-oss-20b" in recorded
 
 
 
@@ -823,12 +800,13 @@ class TestProbeFallbackBehavior:
 
     # --- GLM-5.2 (2-level: high, max) --------------------------------------
 
-    @pytest.mark.parametrize("name", ["zai-org/GLM-5.2", "openrouter/z-ai/glm-5.2"])
     def test_glm_5_2_accepts_max_stops_immediately(
-        self, monkeypatch: pytest.MonkeyPatch, name: str
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Top level 'max' accepted → returns 'max' after one attempt."""
-        level, attempts = _probe_with_stub(monkeypatch, name, accepted_levels=("max",))
+        level, attempts = _probe_with_stub(
+            monkeypatch, "openrouter/z-ai/glm-5.2", accepted_levels=("max",)
+        )
         assert level == "max"
         assert attempts == ["max"], (
             f"The probe must try GLM-5.2's top level 'max' first; attempted {attempts}"
@@ -837,7 +815,7 @@ class TestProbeFallbackBehavior:
     def test_glm_5_2_falls_back_to_high(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """'max' rejected, 'high' accepted → returns 'high'."""
         level, attempts = _probe_with_stub(
-            monkeypatch, "zai-org/GLM-5.2", accepted_levels=("high",)
+            monkeypatch, "openrouter/z-ai/glm-5.2", accepted_levels=("high",)
         )
         assert level == "high"
         assert attempts == ["max", "high"]
@@ -857,25 +835,12 @@ class TestProbeFallbackBehavior:
 
     # --- gpt-oss (OpenAI ladder; vendor rejects xhigh, tops at high) -------
 
-    def test_together_gpt_oss_rejects_xhigh_falls_back_to_high(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """The audit's expectation: xhigh fails, high succeeds → 'high'."""
-        level, attempts = _probe_with_stub(
-            monkeypatch, "openai/gpt-oss-120b", accepted_levels=("low", "medium", "high")
-        )
-        assert level == "high"
-        assert attempts == ["xhigh", "high"], (
-            "gpt-oss probes the OpenAI ladder; xhigh must fail and high "
-            f"succeed on the next rung; attempted {attempts}"
-        )
-
-    def test_together_gpt_oss_accepts_only_low(
+    def test_openrouter_gpt_oss_accepts_only_low(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Only 'low' accepted → full descending walk down the OpenAI ladder."""
         level, attempts = _probe_with_stub(
-            monkeypatch, "openai/gpt-oss-120b", accepted_levels=("low",)
+            monkeypatch, "openrouter/openai/gpt-oss-120b", accepted_levels=("low",)
         )
         assert level == "low"
         assert attempts == ["xhigh", "high", "medium", "low"]

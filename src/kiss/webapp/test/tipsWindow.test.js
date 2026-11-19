@@ -208,25 +208,41 @@ test('tips panel is styled from the shared design tokens, never a fixed palette'
   // root, so the panel follows both remote themes.  Each of these
   // must be read through var().
   for (const token of [
-    '--bg2',
+    '--menu-bg',
+    '--surface2',
+    '--code-bg',
     '--fg',
     '--dim',
+    '--icon',
     '--border',
-    '--panel-line',
+    '--border-input',
+    '--hover',
     '--accent',
     '--scrim',
-    '--radius-xl',
+    '--radius-2xl',
     '--shadow-lg',
     '--z-dialog',
     '--dur-slow',
-    '--theme-button-background',
-    '--theme-button-foreground',
-    '--theme-button-secondaryBackground',
-    '--theme-textCodeBlock-background',
-    '--theme-focusBorder',
+    '--primary-bg',
+    '--primary-fg',
+    '--primary-hover-bg',
+    '--ring-focus',
+    '--font-ui',
     '--font-mono',
   ]) {
     assert.ok(css.includes('var(' + token), `token ${token} must be read`);
+  }
+  // The accent is kept for links, the checkbox and nothing else: the
+  // header icon, the progress bar and the Next button are neutral.
+  for (const cls of ['.tips-icon', '.tips-progress-bar', '.tips-next']) {
+    const decls = [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)]
+      .filter(rule => rule[1].includes(cls))
+      .map(rule => rule[2]);
+    assert.ok(decls.length > 0, `${cls} must be styled`);
+    assert.ok(
+      !decls.join(';').includes('--accent'),
+      `${cls} must not use the accent`,
+    );
   }
   // Every literal colour is a fallback inside var(...).  A colour that
   // stands alone would bypass the theme.

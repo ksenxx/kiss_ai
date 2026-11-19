@@ -13,8 +13,8 @@ never received ``-low`` / ``-high`` / ``-max`` catalog aliases.
 
 The fixed script must:
 
-* select the Moonshot scale for ``kimi-*`` / ``moonshot-*`` /
-  ``moonshotai/*`` / ``openrouter/moonshotai/*`` names,
+* select the Moonshot scale for ``openrouter/moonshotai/*`` /
+  ``openrouter/~moonshotai/*`` names (only OpenRouter routes Moonshot's models),
 * probe those models over the wire in descending scale order
   (``max`` → ``high`` → ``low``),
 * materialize ``-low`` / ``-high`` / ``-max`` aliases (never ``-medium``
@@ -22,8 +22,8 @@ The fixed script must:
 
 These tests run end-to-end through ``apply_updates_to_file`` / ``main`` /
 ``detect_thinking_level``, writing real JSON files in ``tmp_path`` and —
-for the wire test — speaking real HTTP to an in-process Moonshot
-endpoint emulator.  No mocks or fakes wrap the code under test; only
+for the wire test — speaking real HTTP to an in-process emulator of
+OpenRouter's Kimi K3 route.  No mocks or fakes wrap the code under test; only
 module path constants and network-fetch entry points are redirected.
 """
 
@@ -48,6 +48,11 @@ from kiss.tests.core.test_update_models_moonshot_thinking import (
 __all__ = ["MOONSHOT_LEVELS", "_MoonshotHandler", "moonshot_wire"]
 
 OPENAI_LEVELS = ("low", "medium", "high", "xhigh")
+KIMI_K3 = "openrouter/moonshotai/kimi-k3"
+# The catalog flags the OpenRouter K3 entries for the Responses API and the
+# wire emulator speaks Chat Completions only, so the wire probes pin that
+# transport, as ``test_model_capabilities`` does when the Responses route is refused.
+CHAT_ONLY = {"use_responses_api": False}
 
 
 def _redirect_model_info(monkeypatch: pytest.MonkeyPatch, target: Path) -> None:
@@ -92,7 +97,7 @@ def _new_model(name: str, thinking: str | None) -> dict:
         "context_length": 500_000,
         "input_price_per_1M": 3.0,
         "output_price_per_1M": 15.0,
-        "source": "moonshot",
+        "source": "openrouter",
         "fc": True,
         "emb": False,
         "gen": True,
@@ -108,10 +113,7 @@ class TestThinkingScaleSelection:
         import kiss.scripts.update_models as mod
 
         for name in (
-            "kimi-k3",
-            "kimi-k2-0905-preview",
-            "moonshot-v1-128k",
-            "moonshotai/Kimi-K3",
+            "openrouter/moonshotai/kimi-k2-0905",
             "openrouter/moonshotai/kimi-k3",
             "openrouter/~moonshotai/kimi-k3",
         ):
@@ -143,16 +145,16 @@ def test_new_kimi_k3_with_max_emits_low_high_max_aliases(
     _redirect_model_info(monkeypatch, target)
     import kiss.scripts.update_models as mod
 
-    mod.apply_updates_to_file([], [_new_model("kimi-k3", "max")], [], {}, dry_run=False)
+    mod.apply_updates_to_file([], [_new_model(KIMI_K3, "max")], [], {}, dry_run=False)
 
     data = _read(target)
-    assert set(data) == {"kimi-k3", "kimi-k3-low", "kimi-k3-high", "kimi-k3-max"}
-    assert data["kimi-k3"]["thinking"] == "high", "Base must be capped at high"
-    assert "alias_of" not in data["kimi-k3"]
+    assert set(data) == {KIMI_K3, f"{KIMI_K3}-low", f"{KIMI_K3}-high", f"{KIMI_K3}-max"}
+    assert data[KIMI_K3]["thinking"] == "high", "Base must be capped at high"
+    assert "alias_of" not in data[KIMI_K3]
     for level in MOONSHOT_LEVELS:
-        alias = data[f"kimi-k3-{level}"]
+        alias = data[f"{KIMI_K3}-{level}"]
         assert alias["thinking"] == level
-        assert alias["alias_of"] == "kimi-k3"
+        assert alias["alias_of"] == KIMI_K3
         for field in (
             "context_length",
             "input_price_per_1M",
@@ -162,11 +164,11 @@ def test_new_kimi_k3_with_max_emits_low_high_max_aliases(
             "gen",
             "comment",
         ):
-            assert alias[field] == data["kimi-k3"][field], (
+            assert alias[field] == data[KIMI_K3][field], (
                 f"-{level} alias must inherit {field}"
             )
-    assert "kimi-k3-medium" not in data, "medium is not on the Moonshot scale"
-    assert "kimi-k3-xhigh" not in data, "xhigh is not on the Moonshot scale"
+    assert f"{KIMI_K3}-medium" not in data, "medium is not on the Moonshot scale"
+    assert f"{KIMI_K3}-xhigh" not in data, "xhigh is not on the Moonshot scale"
 
 
 def test_new_kimi_with_high_emits_low_high_aliases_only(
@@ -178,14 +180,15 @@ def test_new_kimi_with_high_emits_low_high_aliases_only(
     _redirect_model_info(monkeypatch, target)
     import kiss.scripts.update_models as mod
 
-    mod.apply_updates_to_file([], [_new_model("kimi-k2-thinking", "high")], [], {}, dry_run=False)
+    base = "openrouter/moonshotai/kimi-k2-thinking"
+    mod.apply_updates_to_file([], [_new_model(base, "high")], [], {}, dry_run=False)
 
     data = _read(target)
-    assert set(data) == {"kimi-k2-thinking", "kimi-k2-thinking-low", "kimi-k2-thinking-high"}
-    assert data["kimi-k2-thinking"]["thinking"] == "high"
+    assert set(data) == {base, f"{base}-low", f"{base}-high"}
+    assert data[base]["thinking"] == "high"
     for level in ("low", "high"):
-        assert data[f"kimi-k2-thinking-{level}"]["thinking"] == level
-        assert data[f"kimi-k2-thinking-{level}"]["alias_of"] == "kimi-k2-thinking"
+        assert data[f"{base}-{level}"]["thinking"] == level
+        assert data[f"{base}-{level}"]["alias_of"] == base
 
 
 def test_kimi_with_off_scale_level_writes_plainly(
@@ -197,41 +200,11 @@ def test_kimi_with_off_scale_level_writes_plainly(
     _redirect_model_info(monkeypatch, target)
     import kiss.scripts.update_models as mod
 
-    mod.apply_updates_to_file([], [_new_model("kimi-k3", "medium")], [], {}, dry_run=False)
+    mod.apply_updates_to_file([], [_new_model(KIMI_K3, "medium")], [], {}, dry_run=False)
 
     data = _read(target)
-    assert set(data) == {"kimi-k3"}
-    assert "kimi-k3-medium" not in data
-
-
-def test_openrouter_and_together_kimi_expand_on_moonshot_scale(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Provider-routed Kimi K3 rows must expand on the same scale."""
-    target = tmp_path / "MODEL_INFO.json"
-    _redirect_model_info(monkeypatch, target)
-    import kiss.scripts.update_models as mod
-
-    mod.apply_updates_to_file(
-        [],
-        [
-            _new_model("openrouter/moonshotai/kimi-k3", "max"),
-            _new_model("moonshotai/Kimi-K3", "max"),
-        ],
-        [],
-        {},
-        dry_run=False,
-    )
-
-    data = _read(target)
-    for base in ("openrouter/moonshotai/kimi-k3", "moonshotai/Kimi-K3"):
-        assert data[base]["thinking"] == "high"
-        for level in MOONSHOT_LEVELS:
-            assert data[f"{base}-{level}"]["thinking"] == level
-            assert data[f"{base}-{level}"]["alias_of"] == base
-        assert f"{base}-medium" not in data
-        assert f"{base}-xhigh" not in data
+    assert set(data) == {KIMI_K3}
+    assert f"{KIMI_K3}-medium" not in data
 
 
 def test_retest_downgrade_from_max_drops_only_max_alias(
@@ -240,20 +213,20 @@ def test_retest_downgrade_from_max_drops_only_max_alias(
 ) -> None:
     """A retest max→high must drop ``-max`` but keep ``-low``/``-high``."""
     target = tmp_path / "MODEL_INFO.json"
-    initial = {"kimi-k3": _entry(thinking="high")}
+    initial = {KIMI_K3: _entry(thinking="high")}
     initial.update(
-        {f"kimi-k3-{lvl}": _entry(thinking=lvl, alias_of="kimi-k3") for lvl in MOONSHOT_LEVELS}
+        {f"{KIMI_K3}-{lvl}": _entry(thinking=lvl, alias_of=KIMI_K3) for lvl in MOONSHOT_LEVELS}
     )
     target.write_text(json.dumps(initial, indent=2) + "\n")
     _redirect_model_info(monkeypatch, target)
     import kiss.scripts.update_models as mod
 
-    updates = [{"name": "kimi-k3", "changes": {"thinking": "high"}, "source": "retest"}]
+    updates = [{"name": KIMI_K3, "changes": {"thinking": "high"}, "source": "retest"}]
     mod.apply_updates_to_file(updates, [], [], dict(initial), dry_run=False)
 
     data = _read(target)
-    assert set(data) == {"kimi-k3", "kimi-k3-low", "kimi-k3-high"}
-    assert data["kimi-k3"]["thinking"] == "high"
+    assert set(data) == {KIMI_K3, f"{KIMI_K3}-low", f"{KIMI_K3}-high"}
+    assert data[KIMI_K3]["thinking"] == "high"
 
 
 def test_retest_thinking_none_removes_all_moonshot_aliases(
@@ -262,20 +235,20 @@ def test_retest_thinking_none_removes_all_moonshot_aliases(
 ) -> None:
     """A retest reporting no thinking support must remove ``-max`` too."""
     target = tmp_path / "MODEL_INFO.json"
-    initial = {"kimi-k3": _entry(thinking="high")}
+    initial = {KIMI_K3: _entry(thinking="high")}
     initial.update(
-        {f"kimi-k3-{lvl}": _entry(thinking=lvl, alias_of="kimi-k3") for lvl in MOONSHOT_LEVELS}
+        {f"{KIMI_K3}-{lvl}": _entry(thinking=lvl, alias_of=KIMI_K3) for lvl in MOONSHOT_LEVELS}
     )
     target.write_text(json.dumps(initial, indent=2) + "\n")
     _redirect_model_info(monkeypatch, target)
     import kiss.scripts.update_models as mod
 
-    updates = [{"name": "kimi-k3", "changes": {"thinking": None}, "source": "retest"}]
+    updates = [{"name": KIMI_K3, "changes": {"thinking": None}, "source": "retest"}]
     mod.apply_updates_to_file(updates, [], [], dict(initial), dry_run=False)
 
     data = _read(target)
-    assert set(data) == {"kimi-k3"}
-    assert "thinking" not in data["kimi-k3"]
+    assert set(data) == {KIMI_K3}
+    assert "thinking" not in data[KIMI_K3]
 
 
 def test_routine_update_trusts_existing_max_sibling(
@@ -284,9 +257,9 @@ def test_routine_update_trusts_existing_max_sibling(
 ) -> None:
     """A pricing-only update must keep ``-max`` and sync fields everywhere."""
     target = tmp_path / "MODEL_INFO.json"
-    initial = {"kimi-k3": _entry(thinking="high")}
+    initial = {KIMI_K3: _entry(thinking="high")}
     initial.update(
-        {f"kimi-k3-{lvl}": _entry(thinking=lvl, alias_of="kimi-k3") for lvl in MOONSHOT_LEVELS}
+        {f"{KIMI_K3}-{lvl}": _entry(thinking=lvl, alias_of=KIMI_K3) for lvl in MOONSHOT_LEVELS}
     )
     target.write_text(json.dumps(initial, indent=2) + "\n")
     _redirect_model_info(monkeypatch, target)
@@ -294,7 +267,7 @@ def test_routine_update_trusts_existing_max_sibling(
 
     updates = [
         {
-            "name": "kimi-k3",
+            "name": KIMI_K3,
             "changes": {"input_price_per_1M": 2.5, "context_length": 400_000},
             "source": "openrouter",
         }
@@ -302,13 +275,13 @@ def test_routine_update_trusts_existing_max_sibling(
     mod.apply_updates_to_file(updates, [], [], dict(initial), dry_run=False)
 
     data = _read(target)
-    assert set(data) == {"kimi-k3"} | {f"kimi-k3-{lvl}" for lvl in MOONSHOT_LEVELS}, (
+    assert set(data) == {KIMI_K3} | {f"{KIMI_K3}-{lvl}" for lvl in MOONSHOT_LEVELS}, (
         "A routine update is no evidence of lost max support"
     )
     for name in data:
         assert data[name]["input_price_per_1M"] == 2.5
         assert data[name]["context_length"] == 400_000
-    assert data["kimi-k3-max"]["thinking"] == "max"
+    assert data[f"{KIMI_K3}-max"]["thinking"] == "max"
 
 
 def test_deprecating_kimi_base_removes_max_alias(
@@ -317,15 +290,15 @@ def test_deprecating_kimi_base_removes_max_alias(
 ) -> None:
     """Deprecation must sweep the ``-max`` alias with its base."""
     target = tmp_path / "MODEL_INFO.json"
-    initial = {"kimi-k3": _entry(thinking="high")}
+    initial = {KIMI_K3: _entry(thinking="high")}
     initial.update(
-        {f"kimi-k3-{lvl}": _entry(thinking=lvl, alias_of="kimi-k3") for lvl in MOONSHOT_LEVELS}
+        {f"{KIMI_K3}-{lvl}": _entry(thinking=lvl, alias_of=KIMI_K3) for lvl in MOONSHOT_LEVELS}
     )
     target.write_text(json.dumps(initial, indent=2) + "\n")
     _redirect_model_info(monkeypatch, target)
     import kiss.scripts.update_models as mod
 
-    deprecated = [{"name": "kimi-k3", "reason": "removed upstream"}]
+    deprecated = [{"name": KIMI_K3, "reason": "removed upstream"}]
     mod.apply_updates_to_file([], [], deprecated, dict(initial), dry_run=False)
 
     assert _read(target) == {}
@@ -340,7 +313,7 @@ def test_moonshot_alias_generation_is_idempotent(
     _redirect_model_info(monkeypatch, target)
     import kiss.scripts.update_models as mod
 
-    mod.apply_updates_to_file([], [_new_model("kimi-k3", "max")], [], {}, dry_run=False)
+    mod.apply_updates_to_file([], [_new_model(KIMI_K3, "max")], [], {}, dry_run=False)
     first = _read(target)
     assert not mod._has_thinking_normalization_changes(first), (
         "Freshly written catalog must already be normalized"
@@ -348,8 +321,8 @@ def test_moonshot_alias_generation_is_idempotent(
     mod.apply_updates_to_file([], [], [], {}, dry_run=False)
     second = _read(target)
     assert second == first
-    assert "kimi-k3-max-max" not in second
-    assert "kimi-k3-high-high" not in second
+    assert f"{KIMI_K3}-max-max" not in second
+    assert f"{KIMI_K3}-high-high" not in second
 
 
 def test_normalization_expands_base_with_max_sibling(
@@ -359,8 +332,8 @@ def test_normalization_expands_base_with_max_sibling(
     """base(high) + marked ``-max`` sibling must regenerate ``-low``/``-high``."""
     target = tmp_path / "MODEL_INFO.json"
     initial = {
-        "kimi-k3": _entry(thinking="high"),
-        "kimi-k3-max": _entry(thinking="max", alias_of="kimi-k3"),
+        KIMI_K3: _entry(thinking="high"),
+        f"{KIMI_K3}-max": _entry(thinking="max", alias_of=KIMI_K3),
     }
     target.write_text(json.dumps(initial, indent=2) + "\n")
     _redirect_model_info(monkeypatch, target)
@@ -369,10 +342,10 @@ def test_normalization_expands_base_with_max_sibling(
     mod.apply_updates_to_file([], [], [], {}, dry_run=False)
 
     data = _read(target)
-    assert set(data) == {"kimi-k3"} | {f"kimi-k3-{lvl}" for lvl in MOONSHOT_LEVELS}
+    assert set(data) == {KIMI_K3} | {f"{KIMI_K3}-{lvl}" for lvl in MOONSHOT_LEVELS}
     for level in MOONSHOT_LEVELS:
-        assert data[f"kimi-k3-{level}"]["thinking"] == level
-        assert data[f"kimi-k3-{level}"]["alias_of"] == "kimi-k3"
+        assert data[f"{KIMI_K3}-{level}"]["thinking"] == level
+        assert data[f"{KIMI_K3}-{level}"]["alias_of"] == KIMI_K3
 
 
 def test_find_deprecated_models_skips_marked_moonshot_aliases() -> None:
@@ -410,14 +383,14 @@ class TestDetectThinkingLevelMoonshot:
     def test_kimi_k3_detects_max_over_the_wire(self, moonshot_wire: str) -> None:
         """Against a faithful K3 endpoint the detected level must be max.
 
-        Before the fix ``detect_thinking_level("kimi-k3")`` returned None
+        Before the fix ``detect_thinking_level`` returned None for Kimi K3
         without a single HTTP request (OpenAI-only gate), and even without
         the gate it would have reported ``high`` because ``max`` was not
         in the probe ladder.
         """
         import kiss.scripts.update_models as mod
 
-        level = mod.detect_thinking_level("kimi-k3")
+        level = mod.detect_thinking_level(KIMI_K3, CHAT_ONLY)
 
         assert level == "max"
         assert _MoonshotHandler.captured_efforts == ["max"], (
@@ -430,7 +403,7 @@ class TestDetectThinkingLevelMoonshot:
 
         _MoonshotHandler.accepted_efforts = ("low", "high")
 
-        level = mod.detect_thinking_level("kimi-k3")
+        level = mod.detect_thinking_level(KIMI_K3, CHAT_ONLY)
 
         assert level == "high"
         assert _MoonshotHandler.captured_efforts == ["max", "high"], (
@@ -443,7 +416,7 @@ class TestDetectThinkingLevelMoonshot:
 
         _MoonshotHandler.accepted_efforts = ()
 
-        level = mod.detect_thinking_level("kimi-k3")
+        level = mod.detect_thinking_level(KIMI_K3, CHAT_ONLY)
 
         assert level is None
         assert _MoonshotHandler.captured_efforts == ["max", "high", "low"], (
@@ -505,7 +478,6 @@ def test_main_discovers_new_kimi_and_writes_moonshot_aliases(
         }
     }
     monkeypatch.setattr(mod, "fetch_openrouter", lambda verbose=False: dict(openrouter))
-    monkeypatch.setattr(mod, "fetch_together", lambda verbose=False: {})
     monkeypatch.setattr(mod, "fetch_anthropic", lambda verbose=False: {})
     monkeypatch.setattr(mod, "fetch_gemini", lambda verbose=False: {})
     monkeypatch.setattr(mod, "fetch_openai", lambda verbose=False: {})
@@ -543,9 +515,9 @@ def test_main_test_existing_promotes_stored_max_from_sibling(
     be emitted (the on-disk state already encodes max support).
     """
     target = tmp_path / "MODEL_INFO.json"
-    initial = {"kimi-k3": _entry(thinking="high")}
+    initial = {KIMI_K3: _entry(thinking="high")}
     initial.update(
-        {f"kimi-k3-{lvl}": _entry(thinking=lvl, alias_of="kimi-k3") for lvl in MOONSHOT_LEVELS}
+        {f"{KIMI_K3}-{lvl}": _entry(thinking=lvl, alias_of=KIMI_K3) for lvl in MOONSHOT_LEVELS}
     )
     target.write_text(json.dumps(initial, indent=2) + "\n")
 
@@ -554,7 +526,6 @@ def test_main_test_existing_promotes_stored_max_from_sibling(
     monkeypatch.setattr(mod, "MODEL_INFO_PATH", target)
     monkeypatch.setattr(mod, "README_PATH", tmp_path / "README.md")
     monkeypatch.setattr(mod, "fetch_openrouter", lambda verbose=False: {})
-    monkeypatch.setattr(mod, "fetch_together", lambda verbose=False: {})
     monkeypatch.setattr(mod, "fetch_anthropic", lambda verbose=False: {})
     monkeypatch.setattr(mod, "fetch_gemini", lambda verbose=False: {})
     monkeypatch.setattr(mod, "fetch_openai", lambda verbose=False: {})
@@ -575,19 +546,19 @@ def test_main_test_existing_promotes_stored_max_from_sibling(
     mod.main()
 
     output = capsys.readouterr().out
-    assert calls == ["kimi-k3"], f"Only the base must be probed, got {calls}"
+    assert calls == [KIMI_K3], f"Only the base must be probed, got {calls}"
     assert "thinking changed" not in output
     data = _read(target)
     assert set(data) == set(initial)
     for level in MOONSHOT_LEVELS:
-        assert data[f"kimi-k3-{level}"]["thinking"] == level
+        assert data[f"{KIMI_K3}-{level}"]["thinking"] == level
 
 
 def test_bundled_catalog_ships_kimi_k3_level_aliases() -> None:
     """The shipped MODEL_INFO.json must expose the K3 per-level aliases.
 
-    This pins the user-visible outcome: ``kimi-k3-low`` / ``kimi-k3-high``
-    / ``kimi-k3-max`` are selectable model names in the bundled catalog,
+    This pins the user-visible outcome: ``openrouter/moonshotai/kimi-k3-low``
+    / ``-high`` / ``-max`` are selectable model names in the bundled catalog,
     and no OpenAI-only levels leak onto the Moonshot rows.
     """
     import kiss.scripts.update_models as mod
@@ -596,15 +567,14 @@ def test_bundled_catalog_ships_kimi_k3_level_aliases() -> None:
         (Path(mod.PROJECT_ROOT) / "src" / "kiss" / "core" / "models" / "MODEL_INFO.json")
         .read_text(encoding="utf-8")
     )
-    for base in ("kimi-k3", "openrouter/moonshotai/kimi-k3"):
-        assert data[base]["thinking"] == "high", base
-        for level in MOONSHOT_LEVELS:
-            name = f"{base}-{level}"
-            assert name in data, f"{name} missing from bundled catalog"
-            assert data[name]["thinking"] == level
-            assert data[name]["alias_of"] == base
-        assert f"{base}-medium" not in data
-        assert f"{base}-xhigh" not in data
+    assert data[KIMI_K3]["thinking"] == "high"
+    for level in MOONSHOT_LEVELS:
+        name = f"{KIMI_K3}-{level}"
+        assert name in data, f"{name} missing from bundled catalog"
+        assert data[name]["thinking"] == level
+        assert data[name]["alias_of"] == KIMI_K3
+    assert f"{KIMI_K3}-medium" not in data
+    assert f"{KIMI_K3}-xhigh" not in data
     assert not mod._has_thinking_normalization_changes(data), (
         "Bundled catalog must be fully normalized"
     )

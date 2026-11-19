@@ -14,8 +14,10 @@ What a shell command changes is read from its simple commands
 shell reads them: a program such as ``rm`` or ``cp`` counts in command
 position only (``cat install.sh`` and ``git commit -m "rm stale"`` run
 nothing of the kind), a here-document is input to the program that
-reads it, and a file under a ``tmp`` directory is the run's scratch
-(a saved probe output, a copied log), not a change of the work.
+reads it, and a file in a temp directory (the scratch dir of the run, a
+folder of ``kiss-tmp`` in the system's temp directory; a ``tmp``
+directory) is the run's scratch (a saved probe output, a copied log),
+not a change of the work.
 """
 
 from __future__ import annotations
@@ -25,16 +27,18 @@ import posixpath
 import re
 from typing import Any
 
-from kiss.agents.sorcar.fanout_guard import SUBAGENT_DIR_PREFIX, parse_tasks_json
+from kiss.agents.sorcar.fanout_guard import parse_tasks_json
 from kiss.agents.sorcar.shell_scan import (
     SHELLS,
     UV_VALUED_OPTIONS,
     SimpleCommand,
     Word,
+    bash_path,
     command_text,
     shell_script_index,
     simple_commands,
 )
+from kiss.core.kiss_tmp import KISS_TMP_NAME
 
 #: Programs that change the files their operands name, with the operands
 #: they change: ``last`` (the destination of a copy), ``all`` (every path
@@ -64,8 +68,8 @@ _CHMOD_MODE = re.compile(r"-[rwxXstugoa,+=0-7]")
 _PYTHON = re.compile(r"python[0-9.]*$")
 #: ``sed``'s in-place option, among its options in any position (``--i``:
 #: any prefix of ``--in-place``, its only long option in ``i``).  An
-#: in-place edit of scratch files only (``sed -i s/a/b/ tmp/x/f``) changes
-#: nothing of the work, like a copy into ``tmp/``.
+#: in-place edit of scratch files only (``sed -i s/a/b/ /tmp/kiss-tmp/x/f``)
+#: changes nothing of the work, like a copy into the scratch dir.
 _SED_INPLACE = re.compile(r"-[a-zA-Z]*i|--i")
 #: The build tools whose bare call builds; a call naming only check targets
 #: (``make test``, ``make -k check V=1``) builds nothing.
@@ -75,10 +79,13 @@ _CHECK_TARGET = re.compile(r"(?:test|check)\b")
 _FIX_OPTION = re.compile(r"--fix\b")
 #: ``find``'s actions that run a command on each file found.
 _FIND_EXEC = frozenset({"-exec", "-execdir", "-ok", "-okdir"})
-#: A path under a ``tmp`` directory: the scratch directory of the run (``tmp/x``,
-#: ``./tmp/x``, ``/home/u/repo/tmp/x``) or the system's (``/tmp/x``); or one in a
-#: sub-agent's private folder, wherever the system keeps its temp directory.
-_SCRATCH = re.compile(rf"(?:^|/)(?:tmp(?:/|$)|{SUBAGENT_DIR_PREFIX}[^/]*/)")
+#: A path in a temp directory.  The agents' is a directory whose name starts with
+#: ``kiss-tmp`` (:func:`~kiss.core.kiss_tmp.kiss_tmp_dir`: ``kiss-tmp``, or
+#: ``kiss-tmp-<uid>``), wherever the system keeps its own: the scratch dir of the
+#: run is a folder of it (``/var/folders/x/T/kiss-tmp/<id>/f``, in a container
+#: ``/tmp/kiss-tmp/<id>/f``), and so is a sub-agent's private folder.  A ``tmp``
+#: directory is a temp directory too (``/tmp/x``, ``tmp/x``).
+_SCRATCH = re.compile(rf"(?:^|/)(?:tmp(?:/|$)|{KISS_TMP_NAME}[^/]*/)")
 
 _PIP = re.compile(r"(?:install|uninstall)\b")
 _NODE = re.compile(r"(?:install|i|ci|add|remove|uninstall|update|build)\b")
@@ -112,12 +119,17 @@ _OUTER_TOOLS = frozenset(tool for tool, _ in _LAUNCHERS | frozenset(_NESTED_TOOL
 
 
 def is_scratch_path(path: str) -> bool:
-    """Whether the shell word *path* names a file under a ``tmp`` directory.
+    """Whether the shell word *path* names a file in a temp directory (:data:`_SCRATCH`).
+
+    The agents' own, a directory whose name starts with ``kiss-tmp`` (the
+    scratch dir of the run is a folder of it, on any system and in a
+    container), or a ``tmp`` directory.  The name of the file itself
+    makes it none: ``kiss-tmp-notes.md`` is a file of the work.
 
     Args:
         path: A path operand after quote removal; a known variable is already
-            substituted (``$S/log`` after ``S=tmp/x`` in the same command).
-            ``tmp/../a.py`` names ``a.py``: the path is normalised first.
+            substituted (``$S/log`` after ``S=/tmp/kiss-tmp/x`` in the same command).
+            ``kiss-tmp/../a.py`` names ``a.py``: the path is normalised first.
     """
     return bool(_SCRATCH.search(posixpath.normpath(path)))
 
@@ -127,14 +139,18 @@ def _in_scratch(cwd: str | None, path: str) -> bool:
 
     Args:
         cwd: The absolute directory the command runs in, as the scanner
-            followed the ``cd`` before it; ``None`` when only the shell
-            knows it, and *path* is judged as written.
+            followed the ``cd`` before it (after ``cd /tmp/kiss-tmp/x``,
+            a ``cd`` into the scratch dir, ``f`` is a scratch file);
+            ``None`` when only the shell knows it, and *path* is judged
+            as written.
         path: A path operand after quote removal.  One the shell still
             expands (``$OUT``, ``~/x``) may name any file: judged as written.
     """
     if cwd is None or path.startswith("~") or "$" in path or "`" in path:
         return is_scratch_path(path)
-    return is_scratch_path(posixpath.join(cwd, path))
+    # ``C:/repo/b.py`` is absolute in Git Bash: joined as written it would
+    # land in *cwd*.
+    return is_scratch_path(posixpath.join(cwd, bash_path(path)))
 
 
 def shell_commands(args: Any) -> list[str]:
@@ -336,7 +352,8 @@ def _program_changes(argv: list[str], cwd: str | None) -> list[str]:
     too.  A nested shell's command string is read as commands.  A
     program whose named files are all scratch files in *cwd* (the
     directory it runs in, ``None`` when unknown) changes nothing of the
-    work: ``cd /w/tmp/x && cp a b`` as ``cp tmp/x/a tmp/x/b``.
+    work: ``cd /tmp/kiss-tmp/x && cp a b`` as ``cp /tmp/kiss-tmp/x/a
+    /tmp/kiss-tmp/x/b``.
     """
     if not argv:
         return []
@@ -417,8 +434,8 @@ def _changes(command: SimpleCommand) -> list[str]:
     """The files one simple *command* changes: its redirection targets, then the program's.
 
     A redirection into a device (``/dev/null``) or a scratch file (in
-    the directory the command runs in: ``cd /w/tmp/x && cat > f``) is a
-    check's output, not a change.
+    the directory the command runs in: ``cd /tmp/kiss-tmp/x && cat > f``)
+    is a check's output, not a change.
     """
     argv = command.argv()
     text = command_text(argv)
@@ -444,7 +461,7 @@ def file_changes(args: dict[str, Any]) -> list[str]:
         For each simple command that changes files, as the shell reads
         the call's text (:func:`~kiss.agents.sorcar.shell_scan.simple_commands`,
         read as it was meant to run: a variable assigned after ``&&``
-        is known to the whole command, ``cd d && T=tmp/x && a; cp b $T/``):
+        is known to the whole command, ``cd d && T=/tmp/kiss-tmp/x && a; cp b $T/``):
         the targets of its output redirections, the name of a program
         that changes files and the operands it changes
         (:func:`_program_changes`); empty when the call changes nothing

@@ -236,19 +236,19 @@ class TestGetConfigIncludesApiKeys:
     ) -> None:
         """After saving an API key, getConfig returns the updated value."""
         monkeypatch.setenv("SHELL", "/bin/zsh")
-        monkeypatch.delenv("TOGETHER_API_KEY", raising=False)
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
 
         server, recorder = _make_server_with_recorder(monkeypatch)
         server._handle_command({
             "type": "saveConfig",
             "config": {"max_budget": 100},
-            "apiKeys": {"TOGETHER_API_KEY": "tog-key-saved"},
+            "apiKeys": {"OPENROUTER_API_KEY": "or-key-saved"},
         })
         recorder.events.clear()
         server._handle_command({"type": "getConfig"})
         cfg_events = [e for e in recorder.events if e["type"] == "configData"]
         assert len(cfg_events) == 1
-        assert cfg_events[0]["apiKeys"]["TOGETHER_API_KEY"] == "tog-key-saved"
+        assert cfg_events[0]["apiKeys"]["OPENROUTER_API_KEY"] == "or-key-saved"
 
 
 

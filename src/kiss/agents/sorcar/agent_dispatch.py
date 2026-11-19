@@ -2284,9 +2284,11 @@ def run_agents_parallel(
         raise
     entries = [_collect_job(job) for job in started]
     report = str(yaml.safe_dump(entries, sort_keys=False))
-    if len(report) > DEFAULT_CONFIG.tool_output_max_chars:
-        shown = spill_report(
-            parent_work_dir, "agents", report, getattr(parent_agent, "_private_dir", None))
+    # A caller whose tools run in a sandbox could not read a file of this
+    # machine: it gets the report whole.
+    if len(report) > DEFAULT_CONFIG.tool_output_max_chars and not sandbox_of(parent_agent):
+        host_scratch_dir = getattr(parent_agent, "_host_scratch_dir", None)
+        shown = spill_report(host_scratch_dir() if host_scratch_dir else None, "agents", report)
         if shown is not None:
             return digest_agent_results(entries, shown)
     return report

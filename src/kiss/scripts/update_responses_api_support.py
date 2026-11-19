@@ -6,8 +6,8 @@
 """Live-verify OpenAI v2 (Responses API) support and flag it in MODEL_INFO.json.
 
 For every generation-capable, non-alias catalog model that the ``model()``
-factory routes to an OpenAI-compatible vendor (OpenAI, OpenRouter, Together,
-Z.AI, Moonshot), this script probes the vendor's ``/v1/responses`` endpoint
+factory routes to an OpenAI-compatible vendor (OpenAI, OpenRouter), this
+script probes the vendor's ``/v1/responses`` endpoint
 **through the framework's own v2 adapter** (``OpenAICompatibleModel2``):
 
 1. A plain streaming generation probe ("Reply with the single word: ok").

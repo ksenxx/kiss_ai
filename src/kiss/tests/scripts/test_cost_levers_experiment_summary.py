@@ -74,6 +74,21 @@ def test_a_session_removes_its_temporary_home_and_restores_the_process(tmp_path:
     assert _process_state() == before
 
 
+def test_the_results_go_to_the_agents_temp_directory_by_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The default ``--out`` is in ``<temp dir>/kiss-tmp``, not in ``tmp/`` of the caller."""
+    temp, cwd = tmp_path / "temp", tmp_path / "cwd"
+    temp.mkdir()
+    cwd.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(temp))
+    monkeypatch.chdir(cwd)
+    assert main(["--repeats", "0"]) == 0
+    out = temp.resolve() / "kiss-tmp" / "experiments" / "results.json"
+    assert json.loads(out.read_text()) == {"model": "claude-haiku-4-5", "runs": [], "summary": []}
+    assert list(cwd.iterdir()) == []
+
+
 def test_a_run_that_fails_is_not_a_measurement() -> None:
     """A run that did not finish its task ends the experiment: its near-zero usage read as savings.
 

@@ -4,14 +4,10 @@
 # add your name here
 """A model's family is its vendor whatever the route serves it (audit C2, F4).
 
-``kimi-k3`` (Moonshot's own API) and ``moonshotai/Kimi-K3`` (Together) or
-``openrouter/moonshotai/kimi-k3`` are one model; so are ``glm-4.7``
-(Z.ai's API), ``zai-org/GLM-4.7`` (Together) and ``openrouter/z-ai/glm-4.7``.
-The prefix table knew the routed spellings only, so the direct names fell
-to the ``name.split("-")[0]`` rule (``kimi``, ``glm``) and a provider twin
-passed as a second opinion or a fail-over of "another family".  No code is
-patched: the credentials are set through the configuration the routing
-reads.
+``gpt-6-astra`` (OpenAI's own API) and ``openrouter/openai/gpt-6-astra`` are
+one model, so the provider twin is neither a second opinion nor a fail-over
+of "another family".  No code is patched: the credentials are set through
+the configuration the routing reads.
 
 Two configurations of one model are one worker exactly when its provider
 is asked for the same reasoning: the last test sends real turns to local
@@ -53,17 +49,6 @@ from kiss.tests.core.models.anthropic_sse_harness import (
 from kiss.tests.core.models.gemini_sse_harness import GeminiScript, chunk, serve, text_part
 from kiss.tests.core.models.openai_sse_harness import Reply, Request, ScriptedOpenAIServer
 
-TWINS: tuple[tuple[str, str], ...] = (
-    ("kimi-k3", "moonshotai/Kimi-K3"),
-    ("kimi-k3", "openrouter/moonshotai/kimi-k3"),
-    ("kimi-k2.5", "openrouter/~moonshotai/kimi-latest"),
-    ("kimi-k3", "moonshot-v1-8k"),
-    ("glm-4.7", "openrouter/z-ai/glm-4.7"),
-    ("glm-4.7", "zai-org/GLM-4.7"),
-    ("glm-5", "openrouter/~z-ai/glm-latest"),
-)
-"""The same vendor's models under the direct and the routed spellings."""
-
 
 def _configure_only(monkeypatch: pytest.MonkeyPatch, *api_key_names: str) -> None:
     """Blank every HTTP provider credential, then set the named ones."""
@@ -76,41 +61,32 @@ def _configure_only(monkeypatch: pytest.MonkeyPatch, *api_key_names: str) -> Non
         monkeypatch.setattr(config_module.DEFAULT_CONFIG, api_key_name, "configured-for-test")
 
 
-@pytest.mark.parametrize(("direct", "routed"), TWINS)
-def test_direct_and_routed_spellings_are_one_family(direct: str, routed: str) -> None:
-    """The direct name and its Together / OpenRouter twin share a family."""
-    assert same_family(direct, routed), (family_of(direct), family_of(routed))
-
-
 @pytest.mark.parametrize(
     ("model_name", "family"),
-    [("kimi-k3", "moonshot"), ("moonshotai/Kimi-K3", "moonshot"), ("glm-4.7", "z-ai")],
+    [
+        ("openrouter/moonshotai/kimi-k3", "moonshot"),
+        ("openrouter/~moonshotai/kimi-latest", "moonshot"),
+        ("openrouter/z-ai/glm-4.7", "z-ai"),
+    ],
 )
 def test_family_names(model_name: str, family: str) -> None:
-    """The family is named after the vendor, as the routed spellings already were."""
+    """The family is the vendor's name under OpenRouter's spellings, the ``~`` alias included."""
     assert family_of(model_name) == family
 
 
-def test_other_families_stay_distinct() -> None:
-    """The new prefixes do not fold other vendors together."""
-    assert not same_family("kimi-k3", "deepseek-ai/DeepSeek-V4-Pro")
-    assert not same_family("glm-4.7", "kimi-k3")
-    assert not same_family("glm-4.7", "Qwen/Qwen3-235B-A22B-Instruct")
-
-
 def test_a_provider_twin_is_no_second_opinion(monkeypatch: pytest.MonkeyPatch) -> None:
-    """With Moonshot and Together configured, Kimi's Together twin is not another family."""
-    _configure_only(monkeypatch, "MOONSHOT_API_KEY", "TOGETHER_API_KEY")
-    chosen = other_family_model("kimi-k3")
-    assert chosen is not None and chosen != "moonshotai/Kimi-K3", chosen
-    assert not same_family(chosen, "kimi-k3"), chosen
+    """With OpenAI and OpenRouter configured, GPT's OpenRouter twin is not another family."""
+    _configure_only(monkeypatch, "OPENAI_API_KEY", "OPENROUTER_API_KEY")
+    chosen = other_family_model("gpt-6-astra")
+    assert chosen is not None and chosen != "openrouter/openai/gpt-6-astra", chosen
+    assert not same_family(chosen, "gpt-6-astra"), chosen
 
 
 @pytest.mark.parametrize(
     ("model_name", "own_key", "twin"),
     [
-        ("kimi-k3", "MOONSHOT_API_KEY", "openrouter/moonshotai/kimi-k3"),
-        ("glm-4.7", "ZAI_API_KEY", "openrouter/z-ai/glm-4.7"),
+        ("gpt-6-astra", "OPENAI_API_KEY", "openrouter/openai/gpt-6-astra"),
+        ("gemini-3.1-pro-preview", "GEMINI_API_KEY", "openrouter/google/gemini-3.1-pro-preview"),
     ],
 )
 def test_fail_over_prefers_a_configured_other_family_to_the_twin(
@@ -127,30 +103,23 @@ def test_fail_over_prefers_a_configured_other_family_to_the_twin(
 
 
 _BEDROCK = "AWS_BEARER_TOKEN_BEDROCK"
-_NATIVE = f"ZAI_API_KEY MOONSHOT_API_KEY {_BEDROCK}"
 
 
 @pytest.mark.parametrize(
     ("model", "keys", "clis", "expected"),
     [
-        ("gpt-6-astra", "OPENAI_API_KEY MOONSHOT_API_KEY", "", "kimi-k3"),
-        ("gpt-6-astra", "OPENAI_API_KEY ZAI_API_KEY", "", "glm-4.7"),
         ("gpt-6-astra", f"OPENAI_API_KEY {_BEDROCK}", "", ""),
-        ("gpt-6-astra", "OPENAI_API_KEY MOONSHOT_API_KEY", "claude", "cc/opus"),
-        ("gpt-6-astra", "OPENAI_API_KEY ZAI_API_KEY", "claude", "cc/opus"),
         ("gpt-6-astra", f"OPENAI_API_KEY {_BEDROCK}", "claude", "cc/opus"),
-        ("claude-opus-5-5", "ANTHROPIC_API_KEY MOONSHOT_API_KEY", "codex", "codex/default"),
-        ("claude-opus-5-5", "ANTHROPIC_API_KEY ZAI_API_KEY", "codex", "codex/default"),
         ("gemini-3.1-pro-preview", f"GEMINI_API_KEY {_BEDROCK}", "codex", "codex/default"),
-        ("gpt-6-astra", f"OPENAI_API_KEY {_NATIVE}", "claude codex", "cc/opus"),
+        ("gpt-6-astra", f"OPENAI_API_KEY {_BEDROCK}", "claude codex", "cc/opus"),
     ],
 )
 def test_a_native_route_is_a_second_opinion_only_where_there_was_none(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, model: str, keys: str, clis: str, expected: str
 ) -> None:
-    """Moonshot, Z.AI and Bedrock answer only an installation without another family (audit C5, F1).
+    """Bedrock answers only an installation without another family (audit C5, F1).
 
-    Without a CLI, OpenAI plus one of them was told no other family is
+    Without a CLI, OpenAI plus Bedrock was told no other family is
     configured (``""``: the strongest Bedrock model registered); with one,
     the CLI model stays the answer.  ``PATH`` holds only the named CLIs,
     as executables the selection looks up and never runs.

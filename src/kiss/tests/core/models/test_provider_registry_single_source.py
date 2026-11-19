@@ -68,10 +68,6 @@ class TestShippedCatalogRoutesCompletely:
         assert get_model_provider("claude-opus-4-7") == "Anthropic"
         assert get_model_provider("gemini-3-pro-preview") == "Gemini"
         assert get_model_provider("gpt-5.6") == "OpenAI"
-        assert get_model_provider("glm-4.6") == "Z.AI"
-        assert get_model_provider("kimi-k2-0905-preview") == "Moonshot"
-        assert get_model_provider("meta-llama/Llama-3.3-70B-Instruct-Turbo") == "Together"
-        assert get_model_provider("openai/gpt-oss-20b") == "Together"
         assert get_model_provider("cc/opus") == "Claude Code CLI"
         assert get_model_provider("codex/gpt-5-codex") == "Codex CLI"
 

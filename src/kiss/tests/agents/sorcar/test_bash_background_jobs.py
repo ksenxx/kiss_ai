@@ -5,8 +5,9 @@
 """E2E tests for ``Bash(background=True)`` and the ``bash_job`` primitive.
 
 A background job is started detached (own session, stdin from
-``/dev/null``, stdout and stderr into ``<work_dir>/tmp/bash_jobs/<id>.log``)
-and ``Bash`` returns at once with a job id.  ``bash_job`` then reports the
+``/dev/null``, stdout and stderr into ``bash_jobs/<id>.log`` of the
+agent's scratch dir, never of its work dir) and ``Bash`` returns at once
+with a job id.  ``bash_job`` then reports the
 job's status and log tail (``tail``), blocks until it exits (``wait``), or
 kills its whole process group (``kill``).  Every test drives the real
 tool objects against real shell processes; nothing is mocked.
@@ -29,7 +30,8 @@ from typing import Any
 import pytest
 
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-from kiss.agents.sorcar.useful_tools import UsefulTools
+from kiss.agents.sorcar.useful_tools import JOB_LOG_DIR, UsefulTools
+from kiss.core.kiss_tmp import kiss_tmp_dir
 from kiss.core.processes import exited_unreaped, kill_process_tree, pid_alive
 from kiss.core.tool_interrupt import (
     ToolCallInterrupted,
@@ -74,17 +76,21 @@ def _wait_for_text(path: Path, text: str, timeout: float = 10) -> None:
 
 
 class TestStart:
-    def test_returns_at_once_with_job_id_and_log_under_work_dir(self, tmp_path: Path) -> None:
-        tools = UsefulTools(work_dir=str(tmp_path))
+    def test_returns_at_once_with_job_id_and_log_in_the_scratch_dir(self, tmp_path: Path) -> None:
+        work, scratch = tmp_path / "work", tmp_path / "scratch"
+        work.mkdir()
+        tools = UsefulTools(work_dir=str(work), scratch_dir=str(scratch))
         started = time.monotonic()
         job_id, pid, log_path = _start(tools, "echo begin; sleep 20; echo never")
         assert time.monotonic() - started < 5
-        assert log_path == tmp_path / "tmp" / "bash_jobs" / f"{job_id}.log"
+        assert log_path == scratch / JOB_LOG_DIR / f"{job_id}.log"  # shown by its absolute path
         assert pid_alive(pid)
         _wait_for_text(log_path, "begin")
-        # The job runs in the agent's work_dir with a cleaned environment.
+        # The job runs in the agent's work_dir with a cleaned environment
+        # and leaves nothing there: no ``tmp`` folder, no log.
         tools.bash_job(job_id, action="kill")
         _wait_pid_dead(pid)
+        assert os.listdir(work) == []
 
     def test_job_runs_in_work_dir_and_survives_the_call(self, tmp_path: Path) -> None:
         tools = UsefulTools(work_dir=str(tmp_path))
@@ -114,21 +120,37 @@ class TestStart:
         report = tools.bash_job(job_id, action="wait", timeout_seconds=20)
         assert "exited with code 0" in report and "late" in report
 
-    def test_without_work_dir_logs_under_cwd(
+    def test_without_a_scratch_dir_logs_in_the_agents_temp_dir(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        # Tools built without a scratch dir (and without a work dir) keep the
+        # log in the agents' temp directory itself, not where the job runs.
         monkeypatch.chdir(tmp_path)
         tools = UsefulTools()
-        job_id, _pid, log_path = _start(tools, "echo hi")
-        assert log_path == tmp_path / "tmp" / "bash_jobs" / f"{job_id}.log"
+        job_id, _pid, log_path = _start(tools, "pwd")
+        assert log_path == kiss_tmp_dir() / JOB_LOG_DIR / f"{job_id}.log"
         assert "exited with code 0" in tools.bash_job(job_id, action="wait", timeout_seconds=20)
+        assert log_path.read_text().strip() == str(tmp_path.resolve())
+        assert os.listdir(tmp_path) == []
 
-    def test_unwritable_log_dir_is_an_error(self, tmp_path: Path) -> None:
-        (tmp_path / "tmp").write_text("a file where the tmp dir should be")
-        tools = UsefulTools(work_dir=str(tmp_path))
-        result = tools.Bash("echo hi", "bg", background=True)
+    @pytest.mark.parametrize("blocker", ["bash_jobs is a file", "the scratch dir is read-only"])
+    def test_unwritable_log_dir_is_an_error(self, tmp_path: Path, blocker: str) -> None:
+        scratch = tmp_path / "scratch"
+        scratch.mkdir()
+        if blocker == "bash_jobs is a file":
+            (scratch / JOB_LOG_DIR).write_text("a file where the log dir should be")
+        else:
+            if os.geteuid() == 0:
+                pytest.skip("root writes into a read-only directory")
+            scratch.chmod(0o500)
+        tools = UsefulTools(work_dir=str(tmp_path), scratch_dir=str(scratch))
+        try:
+            result = tools.Bash("echo hi", "bg", background=True)
+        finally:
+            scratch.chmod(0o700)
         assert result.startswith("Error: could not start background job"), result
         assert tools._jobs == {}
+        assert sorted(os.listdir(tmp_path)) == ["scratch"]
 
     def test_worktree_guard_runs_before_the_job_starts(self, tmp_path: Path) -> None:
         # A command that names the parent checkout of a worktree is refused
@@ -435,10 +457,14 @@ class TestRegistration:
         assert names.index("Bash") + 1 == names.index("bash_job")
         bash = tools[names.index("Bash")]
         assert "background" in bash.__code__.co_varnames  # part of the model's schema
-        job_id, _pid, _log = _start(bash.__self__, "echo via-agent")  # type: ignore[attr-defined]
+        job_id, _pid, log = _start(bash.__self__, "echo via-agent")  # type: ignore[attr-defined]
         report = tools[names.index("bash_job")](job_id, action="wait", timeout_seconds=20)
         assert "exited with code 0" in report and "via-agent" in report
-        assert os.path.isdir(tmp_path / "tmp" / "bash_jobs")
+        # The agent's tools log in the agent's scratch dir (the agents' temp
+        # directory itself for a run with no task id), not in its work dir.
+        assert Path(agent._host_scratch_dir()) == kiss_tmp_dir()
+        assert log == kiss_tmp_dir() / JOB_LOG_DIR / f"{job_id}.log" and log.is_file()
+        assert os.listdir(tmp_path) == []
 
     def test_jobs_survive_a_rebuilt_tool_list(self, tmp_path: Path) -> None:
         # The server reuses one agent per chat tab, and every prompt

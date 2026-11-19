@@ -29,6 +29,7 @@ from kiss.agents.seas import agents_md
 from kiss.agents.seas.rsi7d import rsi7d_sea as sea
 from kiss.agents.sorcar import cron_agent, sea_commands
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
+from kiss.core.kiss_tmp import kiss_tmp_dir
 from kiss.server import agent_state
 from kiss.tests.agents.seas.conftest import (
     fake_checkout,
@@ -81,8 +82,9 @@ def checkout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 @pytest.fixture(autouse=True)
-def _fresh_permission_state() -> Any:
-    """Every test starts without grants and without a stored AGENTS.md."""
+def _fresh_permission_state(own_temp_dir: Path) -> Any:
+    """Every test starts without grants, without a stored AGENTS.md and without a backup of it
+    (the backup is kept in the temp directory, which is the test's own)."""
     sea._granted.clear()
     agents_md.agents_md_path().unlink(missing_ok=True)
     yield
@@ -374,7 +376,8 @@ def test_patch_sorcar_edits_granted_prompt_code_and_agents_md_targets(checkout: 
         assert sea.patch_sorcar("AGENTS.md", "", "") == (
             "Error: give `old` (the bullet to remove), `new` (the bullet to add) or both"
         )
-        backup = checkout / "tmp" / "rsi7d" / "AGENTS.md.before"
+        # In the task's scratch dir (kiss-tmp itself for an agent without a task id).
+        backup = kiss_tmp_dir() / "rsi7d" / "AGENTS.md.before"
         md = agents_md.agents_md_path()
         assert sea.patch_sorcar("AGENTS.md", "", "Always answer in French") == (
             f"Remembered in {md}: Always answer in French"
@@ -391,6 +394,7 @@ def test_patch_sorcar_edits_granted_prompt_code_and_agents_md_targets(checkout: 
         )
         assert agents_md.read_instructions() == []
         assert backup.read_text(encoding="utf-8").rstrip().endswith("- Always answer in French")
+        assert not (checkout / "tmp").exists()  # the backup is not kept in the work tree
     # Ungranted SYSTEM_LITE.md stays refused even after the other grants.
     assert sea.patch_sorcar("SYSTEM_LITE.md", "", "x").startswith("Error: no permission")
 

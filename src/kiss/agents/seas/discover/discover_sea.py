@@ -140,8 +140,8 @@ procedure DISCOVER(task):
         and commit them there, call create_worktree on it, and work in the worktree it
         returns (in the lab when it makes none)
     else: work in the task's git repo, else `git init` one around the artifact
-    in the repo you work in, git-ignore data, large outputs and <scratch dir> (or
-        `git clean -fd` deletes them)
+    in the repo you work in, git-ignore data and large outputs (or `git clean -fd`
+        deletes them)
 
     heldout := the task's held-out part, else the part one split command holds out
     eval    := the exact dev evaluation command

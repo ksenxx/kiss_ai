@@ -2013,3 +2013,66 @@ class TestRemoteTabs(RemoteTabsHarness):
             raise AssertionError(f"incomplete replay: {sorted(bindings)}")
         finally:
             writer.close()
+
+    async def test_a_page_that_loads_in_pieces_gets_the_machines_transcript_in_pieces(self) -> None:
+        """A bound tab's transcript reaches a page that loads in pieces as the machine's pieces.
+
+        Such a page's ``ready`` says so (``lazy``): the replay asked of
+        the machine is then the finished task's Trajectory stub and its
+        result, and the page's ``getTaskEvents`` for the stub, stamped
+        with the tab's machine, is answered by the machine's daemon,
+        which alone holds the events.  A page whose ``ready`` does not
+        say so gets the whole transcript.
+        """
+        tab = "tab-lazy"
+        await self._submit(tab, "Say hello", "box")
+        await self._run_until_idle(tab)
+        ready = {"type": "ready", "tabId": tab, "restoredTabs": []}
+        # The events of this run that open a panel: all are the Trajectory panel's.
+        folded = ("system_prompt", "prompt", "tool_call")
+
+        reader, writer = await open_local_connection(self.server)
+        self.addCleanup(writer.close)
+        writer.write(json.dumps({**ready, "lazy": True}).encode() + b"\n")
+        await writer.drain()
+        seen, replays = await self._surface_frames(reader, writer, tab, "task_events")
+        self.assertEqual(seen["tabMachine"]["machine"], "box")
+        self.assertEqual(replays, 1, "one replay for the surface showing the tab")
+        task_id = str(seen["task_events"]["task_id"])
+        first = seen["task_events"]["events"]
+        stubs = [ev["lazy"] for ev in first if ev["type"] == "trajectory"]
+        self.assertEqual([stub["taskId"] for stub in stubs], [task_id])
+        self.assertEqual([ev["type"] for ev in first if ev["type"] in folded], [])
+        self.assertIn(SUMMARY, json.dumps([ev for ev in first if ev["type"] == "result"]))
+        # The Trajectory panel is opened: the fetch carries the stub's
+        # handle and names the tab's machine, box answers.
+        fetch = {"type": "getTaskEvents", **stubs[0], "tabId": tab, "token": "lazy-1"}
+        writer.write(json.dumps({**fetch, "machine": "box"}).encode() + b"\n")
+        await writer.drain()
+        piece = (await _frames_to(reader, "taskEventsPiece"))[-1]
+        self.assertEqual(
+            {k: piece.get(k) for k in ("taskId", "seg", "token", "machine")},
+            {"taskId": task_id, "seg": -1, "token": "lazy-1", "machine": "box"},
+        )
+        panels = [ev for ev in piece["events"] if ev["type"] in folded]
+        self.assertIn("finish", [ev.get("name") for ev in panels])
+        # Asked of this daemon (no machine named), the task has no events: they are box's alone.
+        writer.write(json.dumps({**fetch, "token": "lazy-2"}).encode() + b"\n")
+        await writer.drain()
+        here = (await _frames_to(reader, "taskEventsPiece"))[-1]
+        self.assertEqual((here["token"], here["events"], here.get("machine")), ("lazy-2", [], None))
+
+        # A page that does not load in pieces is replayed the whole
+        # transcript: the panels the other page fetched, and no stub.
+        reader, writer = await open_local_connection(self.server)
+        self.addCleanup(writer.close)
+        writer.write(json.dumps(ready).encode() + b"\n")
+        await writer.drain()
+        seen, replays = await self._surface_frames(reader, writer, tab, "task_events")
+        self.assertEqual(replays, 1)
+        whole = seen["task_events"]["events"]
+        self.assertEqual([ev for ev in whole if ev["type"] in folded], panels)
+        self.assertEqual(
+            [ev["type"] for ev in whole if ev["type"] in ("trajectory", "lazy_steps", "lazy_gap")],
+            [],
+        )

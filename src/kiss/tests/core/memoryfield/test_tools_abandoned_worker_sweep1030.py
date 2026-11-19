@@ -4,7 +4,7 @@
 # add your name here
 """What a stopped memory search leaves running, and how a panel Stop lands.
 
-* ``MemoryTools._search`` abandons its sync-and-search workers when the
+* ``MemoryTools.search`` abandons its sync-and-search workers when the
   task thread is stopped.  The worker used to run the WHOLE index build
   (``VectorIndex.sync`` had no stop check between embedding batches), and
   interpreter exit joins ``ThreadPoolExecutor`` threads, so a stopped
@@ -76,7 +76,8 @@ def test_a_stopped_search_starts_no_further_embedding_batch(
 ) -> None:
     monkeypatch.setattr(threading, "excepthook", ignore_thread_interrupt)
     embedding = SlowBatchEmbedding()
-    tools = _tools(tmp_path / "memory", embedding, EMBED_BATCH_INPUTS + 10)
+    # Each page sends two inputs (its own text and its one statement): one full batch and 20.
+    tools = _tools(tmp_path / "memory", embedding, EMBED_BATCH_INPUTS // 2 + 10)
     outcome: list[object] = []
     task = threading.Thread(target=_search_into, args=(tools, outcome), daemon=True)
     task.start()
@@ -90,7 +91,7 @@ def test_a_stopped_search_starts_no_further_embedding_batch(
     assert embedding.batches == [EMBED_BATCH_INPUTS]
     # The batch in flight was kept; the next search embeds only the rest.
     assert "page-" in tools.memory_search("note about the build")
-    assert embedding.batches == [EMBED_BATCH_INPUTS, 10]
+    assert embedding.batches == [EMBED_BATCH_INPUTS, 20]
 
 
 def _tool_call_into(tools: MemoryTools, box: dict[str, object]) -> None:

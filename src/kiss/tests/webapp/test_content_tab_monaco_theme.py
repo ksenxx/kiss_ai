@@ -8,8 +8,9 @@
 """End-to-end tests: a content tab's Monaco editor uses the page palette.
 
 The remote webapp has a light/dark toggle (``#theme-btn``, persisted in
-``localStorage``) and colours itself with VS Code's Dark/Light Modern
-palette (the ``--theme-*`` variables web_server.py injects).  The
+``localStorage``) and colours itself with the dark / light palette of
+Claude Code Desktop (the ``--theme-*`` variables web_server.py
+injects).  The
 Monaco editor of a file content tab must use the custom ``kiss-dark`` /
 ``kiss-light`` theme built from that palette, so its background,
 selection and line-number colours are exactly the page's: both when the
@@ -105,7 +106,8 @@ def _wait_visible_editor_style(
 def _assert_editor_matches_palette(page, background: str, selection: str) -> None:
     """The visible editor's colours are the page palette's: background,
     focused and unfocused selection, and line numbers.  *background* and
-    *selection* pin the Modern values so the palette itself is checked."""
+    *selection* pin the palette's own values so the palette itself is
+    checked."""
     assert _palette(page, "--theme-editor-background") == background
     assert _palette(page, "--theme-editor-selectionBackground") == selection
     assert _visible_editor_style(
@@ -141,12 +143,14 @@ def _toggle_theme(page) -> None:
 
 
 class TestContentTabMonacoTheme:
-    """Browser E2E: the editor's colours are the page's Modern palette."""
+    """Browser E2E: the editor's colours are the page's palette."""
 
     def test_toggle_recolours_open_editors(self, browser, harness) -> None:
-        """Light page (the default) -> kiss-light editors in Light Modern
-        colours; toggling to dark recolours every open editor to kiss-dark
-        in Dark Modern colours, and toggling back restores kiss-light."""
+        """Light page (the default) -> kiss-light editors in the light
+        palette's colours (canvas #fafafa, selection #cde2fb); toggling to
+        dark recolours every open editor to kiss-dark in the dark
+        palette's (canvas #0b0b0b, selection #1d3d63), and toggling back
+        restores kiss-light."""
         context, page, _sent = _open_page(browser, harness)
         try:
             page.evaluate("() => localStorage.removeItem('kissRemoteTheme')")
@@ -166,17 +170,17 @@ class TestContentTabMonacoTheme:
             )
             assert _editor_themes(page) == ["vs", "vs"]
             _assert_editor_matches_palette(
-                page, "rgb(255, 255, 255)", "rgb(173, 214, 255)",
+                page, "rgb(250, 250, 250)", "rgb(205, 226, 251)",
             )
             _toggle_theme(page)
             assert _editor_themes(page) == ["vs-dark", "vs-dark"]
             _assert_editor_matches_palette(
-                page, "rgb(31, 31, 31)", "rgb(38, 79, 120)",
+                page, "rgb(11, 11, 11)", "rgb(29, 61, 99)",
             )
             _toggle_theme(page)
             assert _editor_themes(page) == ["vs", "vs"]
             _assert_editor_matches_palette(
-                page, "rgb(255, 255, 255)", "rgb(173, 214, 255)",
+                page, "rgb(250, 250, 250)", "rgb(205, 226, 251)",
             )
         finally:
             context.close()
@@ -185,7 +189,7 @@ class TestContentTabMonacoTheme:
         self, browser, harness,
     ) -> None:
         """A page reloaded with the dark theme saved creates its editor
-        in the Dark Modern colours from the start."""
+        in the dark palette's colours from the start."""
         context, page, _sent = _open_page(browser, harness)
         try:
             page.evaluate("() => localStorage.setItem('kissRemoteTheme', 'dark')")
@@ -197,7 +201,7 @@ class TestContentTabMonacoTheme:
             _open_editor(page, str(_fresh_file(harness, "theme_c.py")), "lnk-t3")
             assert _editor_themes(page) == ["vs-dark"]
             _assert_editor_matches_palette(
-                page, "rgb(31, 31, 31)", "rgb(38, 79, 120)",
+                page, "rgb(11, 11, 11)", "rgb(29, 61, 99)",
             )
         finally:
             context.close()

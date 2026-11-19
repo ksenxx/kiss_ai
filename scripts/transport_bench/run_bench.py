@@ -31,8 +31,11 @@ Unix socket was removed and cannot be re-run on this tree.
 
 Usage (from the repo root)::
 
-    uv run python scripts/transport_bench/run_bench.py --rounds 3 \
-        --out tmp/transport_bench/results.json
+    uv run python scripts/transport_bench/run_bench.py --rounds 3
+
+The raw results, and the logs of the two child processes next to them,
+go to ``transport_bench/results.json`` in the agents' temp directory
+(``<OS temp dir>/kiss-tmp``) unless ``--out`` names another file.
 """
 
 from __future__ import annotations
@@ -57,6 +60,7 @@ from typing import Any
 from websockets.asyncio.client import connect as ws_connect
 
 from kiss.agents.sorcar import local_endpoint
+from kiss.core.kiss_tmp import kiss_tmp_dir
 
 HERE = Path(__file__).resolve().parent
 MAX_BYTES = 64 * 1024 * 1024
@@ -592,7 +596,10 @@ def main() -> None:
         help="real-task workloads as chunks:gap_us:viewers",
     )
     ap.add_argument("--port", type=int, default=0)
-    ap.add_argument("--out", default="tmp/transport_bench/results.json")
+    ap.add_argument(
+        "--out", default=str(kiss_tmp_dir() / "transport_bench" / "results.json"),
+        help="raw results file (default: %(default)s)",
+    )
     ns = ap.parse_args()
     results = asyncio.run(run_all(ns))
     out = Path(ns.out)

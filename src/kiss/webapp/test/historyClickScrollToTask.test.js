@@ -850,10 +850,242 @@ function testChatOnItsWayIsAskedAgainAfterAnOutage() {
   console.log('PASS a chat on its way is asked again after an outage');
 }
 
+/** Submit *text* from the composer; the posted `submit` message. */
+function submitPrompt(win, posted, text) {
+  const before = ofType(posted, 'submit').length;
+  win.document.getElementById('task-input').value = text;
+  win.document.getElementById('send-btn').click();
+  const sent = ofType(posted, 'submit');
+  assert.strictEqual(sent.length, before + 1, 'one submit is posted');
+  return sent[sent.length - 1];
+}
+
+// The tasks of a chat form a tree: a task run after the user loaded one
+// continues that one.  A click that only scrolls the open tab asks the
+// daemon for nothing, so the tab's next task names the clicked task
+// itself (`continueTaskId`), until the daemon knows what the tab shows:
+// a run started in it (`clear`), a replay replaced its transcript
+// (`task_events`), or a later click asked for one.  A click made while
+// the tab's task runs counts the same way once the run is over.
+function testNextTaskContinuesTheTaskScrolledTo() {
+  const {win, posted, tabId} = setupTabWithNeighbour();
+
+  clickTask(win, 41, 'Task A');
+  assert.strictEqual(
+    submitPrompt(win, posted, 'continue task A').continueTaskId,
+    '41',
+    'the task sent after the click must name the task scrolled to',
+  );
+  // The run is on, then over: the click went with it.
+  send(win, {type: 'clear', tabId, chat_id: 'chat-1'});
+  send(win, {type: 'status', running: false, tabId});
+  assert.strictEqual(
+    submitPrompt(win, posted, 'continue the last task').continueTaskId,
+    undefined,
+    'a task sent with no click before it continues the chat last task',
+  );
+  win.close();
+
+  // A replay nobody asked for (a reconnect's) replaces the transcript.
+  const second = setupTabWithNeighbour();
+  clickTask(second.win, 41, 'Task A');
+  send(second.win, {
+    type: 'task_events',
+    tabId: second.tabId,
+    chat_id: 'chat-1',
+    task_id: '42',
+    task: 'Task B',
+    events: [{type: 'system_output', text: 'output of task B\n'}],
+  });
+  assert.strictEqual(
+    shownTask(second.win),
+    'Task B',
+    'the replayed tab is off the clicked task',
+  );
+  assert.strictEqual(
+    submitPrompt(second.win, second.posted, 'after a replay').continueTaskId,
+    undefined,
+    'a replayed tab continues what the daemon pinned, not the old click',
+  );
+  second.win.close();
+
+  // A later click the daemon is asked about is the one that counts.
+  const third = setupTabWithNeighbour();
+  clickTask(third.win, 41, 'Task A');
+  clickTask(third.win, 40, 'Task Z');
+  assert.strictEqual(resumeMessages(third.posted).pop().taskId, 40);
+  assert.strictEqual(
+    submitPrompt(third.win, third.posted, 'after a load').continueTaskId,
+    undefined,
+    'the task the daemon was asked for is the one it continues',
+  );
+  third.win.close();
+
+  // While the tab's task runs the tab stays on it: a click reads the
+  // thread back to the clicked task, and what is typed is for the run.
+  // The task sent once the run is over continues the clicked one.
+  const fourth = setupTabWithNeighbour();
+  send(fourth.win, {type: 'status', running: true, tabId: fourth.tabId});
+  clickTask(fourth.win, 41, 'Task A');
+  assert.strictEqual(shownTask(fourth.win), 'Task A');
+  assert.strictEqual(resumeMessages(fourth.posted).length, 0);
+  send(fourth.win, {type: 'status', running: false, tabId: fourth.tabId});
+  assert.strictEqual(
+    submitPrompt(fourth.win, fourth.posted, 'after the run').continueTaskId,
+    '41',
+    'a click made during a run names the task once the run is over',
+  );
+  fourth.win.close();
+
+  // A click on the running task itself picks nothing: the tab follows
+  // its run, whose last task the next one continues.
+  const fifth = setupTabWithNeighbour();
+  send(fifth.win, {type: 'status', running: true, tabId: fifth.tabId});
+  clickTask(fifth.win, 42, 'Task B');
+  send(fifth.win, {type: 'status', running: false, tabId: fifth.tabId});
+  assert.strictEqual(
+    submitPrompt(fifth.win, fifth.posted, 'after its run').continueTaskId,
+    undefined,
+    'a click on the running task leaves the next task on the chat last one',
+  );
+  fifth.win.close();
+  console.log('PASS the next task continues the task a click scrolled to');
+}
+
+/** Send *text* from the composer of a running tab; the posted `appendUserMessage`. */
+function appendPrompt(win, posted, text) {
+  const before = ofType(posted, 'appendUserMessage').length;
+  win.document.getElementById('task-input').value = text;
+  win.document.getElementById('send-btn').click();
+  const sent = ofType(posted, 'appendUserMessage');
+  assert.strictEqual(sent.length, before + 1, 'one follow-up is posted');
+  return sent[sent.length - 1];
+}
+
+// A `<task>` message sent while the tab's task runs is a task of its
+// own, queued behind the run: the click goes with it, so neither the
+// next queued task nor the task sent once the run is over names the
+// clicked task again.  A plain message is a word for the running task
+// and leaves the click where it is.  A message the daemon turns away
+// brings the click back with its text.
+function testQueuedTaskContinuesTheTaskScrolledTo() {
+  const {win, posted, tabId} = setupTabWithNeighbour();
+  send(win, {type: 'status', running: true, tabId});
+  clickTask(win, 41, 'Task A');
+  assert.strictEqual(
+    appendPrompt(win, posted, 'a word for the run').continueTaskId,
+    undefined,
+    'a plain message is for the running task and names no task',
+  );
+  assert.strictEqual(
+    appendPrompt(win, posted, '<task> </task> no task <task>').continueTaskId,
+    undefined,
+    'an empty block and an unclosed one start no task',
+  );
+  assert.strictEqual(
+    appendPrompt(win, posted, '<task></task><task>continue task A</task>')
+      .continueTaskId,
+    '41',
+    'a task queued after the click must name the task scrolled to',
+  );
+  assert.strictEqual(
+    appendPrompt(win, posted, '<task>and then this</task>').continueTaskId,
+    undefined,
+    'the click went with the first task queued after it',
+  );
+  send(win, {type: 'status', running: false, tabId});
+  assert.strictEqual(
+    submitPrompt(win, posted, 'after the run').continueTaskId,
+    undefined,
+    'the task sent once the run is over continues the chat last task',
+  );
+  win.close();
+
+  // Turned away by the daemon (the run had just ended), the message is
+  // back in the composer and the click with it.
+  const second = setupTabWithNeighbour();
+  send(second.win, {type: 'status', running: true, tabId: second.tabId});
+  clickTask(second.win, 41, 'Task A');
+  const refused = appendPrompt(
+    second.win,
+    second.posted,
+    '<task>continue task A</task>',
+  );
+  assert.strictEqual(refused.continueTaskId, '41');
+  send(second.win, {
+    type: 'error',
+    code: 'prompt_refused',
+    text: 'No task is running in this tab.',
+    tabId: second.tabId,
+    promptIds: [refused.promptId],
+  });
+  send(second.win, {type: 'status', running: false, tabId: second.tabId});
+  const composer = second.win.document.getElementById('task-input');
+  assert.strictEqual(
+    composer.value,
+    '<task>continue task A</task>',
+    'the refused message is back in the composer',
+  );
+  assert.strictEqual(
+    submitPrompt(second.win, second.posted, composer.value).continueTaskId,
+    '41',
+    'the click came back with the refused message',
+  );
+  second.win.close();
+
+  // A later click is the one that counts: the refused message's stays
+  // behind.
+  const third = setupTabWithNeighbour();
+  send(third.win, {type: 'status', running: true, tabId: third.tabId});
+  clickTask(third.win, 41, 'Task A');
+  const late = appendPrompt(third.win, third.posted, '<task>for task A</task>');
+  send(third.win, {type: 'status', running: false, tabId: third.tabId});
+  clickTask(third.win, 42, 'Task B');
+  send(third.win, {
+    type: 'error',
+    code: 'prompt_refused',
+    text: 'No task is running in this tab.',
+    tabId: third.tabId,
+    promptIds: [late.promptId],
+  });
+  const sent = submitPrompt(third.win, third.posted, 'for task B');
+  assert.strictEqual(
+    sent.continueTaskId,
+    '42',
+    'the task clicked last is the one the next task continues',
+  );
+  third.win.close();
+
+  // A later click that leaves no task to continue (the tab's own,
+  // running task) still wins over the refused message's.
+  const fourth = setupTabWithNeighbour();
+  send(fourth.win, {type: 'status', running: true, tabId: fourth.tabId});
+  clickTask(fourth.win, 41, 'Task A');
+  const stale = appendPrompt(fourth.win, fourth.posted, '<task>for task A</task>');
+  clickTask(fourth.win, 42, 'Task B');
+  send(fourth.win, {
+    type: 'error',
+    code: 'prompt_refused',
+    text: 'No task is running in this tab.',
+    tabId: fourth.tabId,
+    promptIds: [stale.promptId],
+  });
+  send(fourth.win, {type: 'status', running: false, tabId: fourth.tabId});
+  assert.strictEqual(
+    submitPrompt(fourth.win, fourth.posted, 'after the run').continueTaskId,
+    undefined,
+    'a click after the refused message is sent leaves its task behind',
+  );
+  fourth.win.close();
+  console.log('PASS a task queued on a run continues the task scrolled to');
+}
+
 testClickScrollsToSplicedNeighbour();
 testClickScrollsBackToOwnTask();
 testClickLoadsTaskNotInTranscript();
 testClickRowWithoutTaskIdJustSwitches();
+testNextTaskContinuesTheTaskScrolledTo();
+testQueuedTaskContinuesTheTaskScrolledTo();
 testClickOwnTaskWithoutRegionReclaimsPanel();
 testClickOnOlderTaskOfRunningChatReadsBackToIt();
 testLaterClickEndsTheReadBack();

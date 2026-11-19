@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Cost audit 2026-11-03: the four defects the gpt-6-astra review found, each fixed.
+"""Cost audit 2026-11-03: three defects the gpt-6-astra review found, each fixed.
 
 1. A generated thinking alias (``gpt-6-astra-high``) of a ``MY_MODELS.json``
    model with its own endpoint is billed at that entry's prices (mirrored
@@ -12,10 +12,7 @@
    (``openai/gpt-6-astra`` for a gateway using that id) keeps its identity
    in the :func:`model` factory and its own prices in
    :func:`_lookup_model_info`, instead of the bundled ``gpt-6-astra``'s.
-3. Together reports the cached prompt tokens of some models flat on
-   ``usage.cached_tokens``: the OpenAI-compatible extractor reads it when
-   the nested count is absent.
-4. A Claude Code turn whose messages were served at different speeds
+3. A Claude Code turn whose messages were served at different speeds
    (fast mode fell back to standard) prices each message at its own
    modifiers, not the whole turn at the priced one.
 """
@@ -27,7 +24,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from openai.types.completion_usage import CompletionUsage
 
 from kiss.core.models import model_info
 from kiss.core.models.claude_code_model import ClaudeCodeModel
@@ -150,73 +146,7 @@ def test_unregistered_or_endpointless_prefixed_names_still_strip(
     assert model("openai/gpt-6-astra").model_name == "gpt-6-astra"
 
 
-# --- 3. Together's flat usage.cached_tokens --------------------------------------
-
-
-class _Response:
-    def __init__(self, usage: Any) -> None:
-        self.usage = usage
-
-
-def _oai() -> OpenAICompatibleModel:
-    built = model("gpt-6-astra", model_config={"base_url": ENDPOINT, "api_key": "k"})
-    assert isinstance(built, OpenAICompatibleModel)
-    return built
-
-
-def _usage(**fields: Any) -> CompletionUsage:
-    """A usage object as the SDK parses it from the wire (extra fields kept)."""
-    return CompletionUsage.model_validate(fields)
-
-
-def test_flat_cached_tokens_are_read_when_the_nested_count_is_absent() -> None:
-    # https://docs.together.ai/docs/inference/openai-compatibility: some
-    # non-reasoning models return ``cached_tokens`` flat on ``usage``; the
-    # SDK keeps the extra field.
-    usage = _usage(prompt_tokens=1000, completion_tokens=100, total_tokens=1100, cached_tokens=900)
-    assert usage.model_extra == {"cached_tokens": 900}
-    assert _oai().extract_input_output_token_counts_from_response(_Response(usage)) == (
-        100,
-        100,
-        900,
-        0,
-    )
-    # The cost follows: 100 uncached + 900 cached input tokens, not 1000 uncached.
-    assert calculate_cost("gpt-6-astra", 100, 100, 900) < calculate_cost("gpt-6-astra", 1000, 100)
-
-
-def test_nested_cached_tokens_win_and_the_flat_count_is_never_added() -> None:
-    usage = _usage(
-        prompt_tokens=1000,
-        completion_tokens=100,
-        total_tokens=1100,
-        prompt_tokens_details={"cached_tokens": 600},
-        cached_tokens=900,
-    )
-    assert _oai().extract_input_output_token_counts_from_response(_Response(usage)) == (
-        400,
-        100,
-        600,
-        0,
-    )
-    # Neither shape: no cache read; a junk flat value is ignored.
-    plain = _usage(prompt_tokens=1000, completion_tokens=100, total_tokens=1100)
-    assert _oai().extract_input_output_token_counts_from_response(_Response(plain)) == (
-        1000,
-        100,
-        0,
-        0,
-    )
-    junk = _usage(prompt_tokens=1000, completion_tokens=100, total_tokens=1100, cached_tokens="900")
-    assert _oai().extract_input_output_token_counts_from_response(_Response(junk)) == (
-        1000,
-        100,
-        0,
-        0,
-    )
-
-
-# --- 4. Claude Code: each message at the speed it was served at -------------------
+# --- 3. Claude Code: each message at the speed it was served at -------------------
 
 _OPUS = "claude-opus-5-5"
 

@@ -103,9 +103,9 @@ class _ParkingPrinter(MemoryPrinter):
 
 
 def _replay_parked_before_finalize(
-    server: AgentServer, chat_id: str, tab_id: str,
+    server: AgentServer, chat_id: str, tab_id: str, lazy: bool = False,
 ) -> None:
-    """Replay *chat_id* into *tab_id*, parking before the finalize step.
+    """Replay *chat_id* into *tab_id* (*lazy*: in pieces), parking before the finalize step.
 
     The park point holds the replaying thread AFTER it broadcast the
     tab's ``task_events`` (and released the printer's
@@ -126,7 +126,7 @@ def _replay_parked_before_finalize(
 
     sys.settrace(hook)
     try:
-        server._replay_session(chat_id, tab_id)
+        server._replay_session(chat_id, tab_id, lazy=lazy)
     finally:
         sys.settrace(None)
 
@@ -410,6 +410,47 @@ class TestReattachStatusEndRace(TestCase):
             "the attached viewer never received the terminal status "
             f"through the end fan-out: {self._statuses(viewer)}",
         )
+
+    def test_page_loading_in_pieces_is_resnapshot_in_pieces(self) -> None:
+        """A lazy replay (``lazy=True``) of a chat with rows and a live run.
+
+        The run's row is read without its events, and when the run
+        ends inside the replay→finalize window the re-snapshot is sent
+        as the page loads transcripts: as a lazy piece, which ends in
+        the transcript's step count (``lazy_steps``).
+        """
+        from uuid import uuid4
+
+        from kiss.agents.sorcar.persistence import _add_task
+
+        launcher, viewer = "lazy-launcher", "lazy-viewer"
+        chat_id = f"chat-lazy-{uuid4().hex}"
+        _add_task("earlier finished task", chat_id)
+        self._start_parked_run(launcher, chat_id)
+        # While the run lives: attached and running, like any viewer.
+        self.server._replay_session(chat_id, "lazy-first-viewer", lazy=True)
+        self.assertEqual(self._statuses("lazy-first-viewer"), [True])
+        replayer = threading.Thread(
+            target=_replay_parked_before_finalize,
+            args=(self.server, chat_id, viewer, True),
+            daemon=True,
+        )
+        replayer.start()
+        self.assertTrue(self.printer.events_parked.wait(timeout=30))
+        (self.tmp / "release").write_text("1", encoding="utf-8")
+        self.assertTrue(self._wait(lambda: False in self._statuses(launcher), 30.0))
+        self.printer.release_events.set()
+        replayer.join(timeout=30)
+        self.assertFalse(replayer.is_alive())
+        batches = [
+            [inner.get("type") for inner in ev.get("events", [])]
+            for ev in list(self.printer.emitted)
+            if ev.get("type") == "task_events" and ev.get("tabId") == viewer
+        ]
+        self.assertGreaterEqual(len(batches), 2, batches)
+        self.assertNotIn("result", batches[0])
+        self.assertIn("result", batches[-1])
+        self.assertEqual(batches[-1][-1], "lazy_steps")
 
     def test_replaying_unknown_idle_chat_reports_idle(self) -> None:
         """No history row and no live task: nothing to attach, so the

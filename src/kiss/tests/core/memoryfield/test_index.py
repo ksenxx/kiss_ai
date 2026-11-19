@@ -138,8 +138,9 @@ def test_embedding_ignores_volatile_frontmatter(tmp_path: Path) -> None:
     """Rewriting identical content must reproduce the exact same vector.
 
     ``MemoryDir.write`` generates a fresh ``uuid`` and timestamps for every
-    new page, so this only holds because ``embedding_input`` embeds nothing
-    but the title, the summary and the body.
+    new page, and the second write here carries provenance, so this only
+    holds because ``embedding_input`` embeds nothing but the title, the
+    summary and the body.
     """
     memory = MemoryDir(tmp_path)
     index = VectorIndex(memory, embed=hashed_embedding)
@@ -150,7 +151,21 @@ def test_embedding_ignores_volatile_frontmatter(tmp_path: Path) -> None:
 
     memory.delete("woks")
     assert index.sync().removed == 1
-    memory.write("woks", "Carbon fibre woks conduct heat.", title="Woks", summary="wok care")
+    provenance = {
+        "task": "t-9",
+        "writer": "agent",
+        "verified": "2026-11-18T00:00:00+00:00",
+        "sources": "src/woks.py",
+        "review_after": "2027-01-01",
+    }
+    memory.write(
+        "woks",
+        "Carbon fibre woks conduct heat.",
+        title="Woks",
+        summary="wok care",
+        extra=provenance,
+    )
+    assert provenance.items() <= memory.read("woks").frontmatter.items()
     assert index.sync().added == 1
     with closing(sqlite3.connect(index.path)) as conn:
         second = conn.execute("SELECT embedding FROM pages WHERE filename='woks.md'").fetchone()[0]
@@ -447,9 +462,11 @@ def test_concurrent_sync_does_not_overwrite_fresher_rows(tmp_path: Path) -> None
     memory.write("a", "alpha v1")
     memory.write("c", "gamma new")
     path_a = memory.page_path("a")
+    raced: list[str] = []  # two of A's inputs hold the text: page c and its statement
 
     def embed_and_race(text: str) -> list[float]:
-        if "gamma new" in text:  # page a's v1 row is already built and verified
+        if "gamma new" in text and not raced:  # page a's v1 row is already built and verified
+            raced.append(text)
             path_a.write_text(path_a.read_text().replace("alpha v1", "alpha v2"))
             assert VectorIndex(memory, embed=hashed_embedding, model_code="cas").sync() == (
                 SyncReport(added=1, updated=1, removed=0, unchanged=1)
@@ -546,9 +563,11 @@ def test_concurrent_sync_cas_survives_byte_identical_recreation(tmp_path: Path) 
     v0_bytes = path_a.read_bytes()
     path_a.unlink()
     memory.write("b", "beta v1")
+    recreated: list[str] = []  # two of A's inputs hold the text: page b and its statement
 
     def embed_and_recreate(text: str) -> list[float]:
-        if "beta v1" in text:
+        if "beta v1" in text and not recreated:
+            recreated.append(text)
             assert VectorIndex(memory, embed=hashed_embedding, model_code="cas").sync().removed == 1
             path_a.write_bytes(v0_bytes)
             assert VectorIndex(memory, embed=hashed_embedding, model_code="cas").sync().added == 1

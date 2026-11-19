@@ -31,6 +31,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -51,6 +52,7 @@ from kiss.agents.sorcar.edit_guards import (
 from kiss.agents.sorcar.shell_scan import simple_commands
 from kiss.agents.sorcar.useful_tools import (
     BATCHING_HINT,
+    JOB_LOG_DIR,
     UV_REWRITTEN_NOTE,
     UsefulTools,
     _is_read_only,
@@ -59,6 +61,7 @@ from kiss.agents.sorcar.useful_tools import (
     uv_in_worktree,
 )
 from kiss.core.config import DEFAULT_CONFIG
+from kiss.core.kiss_tmp import kiss_tmp_dir
 from kiss.core.tool_interrupt import (
     ToolCallInterrupted,
     end_tool_call,
@@ -143,17 +146,23 @@ def test_heredoc_into_an_unshown_file_names_read_and_write(
 
 
 def test_scratch_file_is_written_unread_as_write_allows(tools: UsefulTools, tmp_path: Path) -> None:
-    scratch = tmp_path / "tmp" / "notes.md"
-    scratch.parent.mkdir()
+    """A scratch file is one of the agents' temp directory, not of a ``tmp`` of the work dir."""
+    scratch = Path(tempfile.mkdtemp(dir=kiss_tmp_dir())) / "notes.md"
     scratch.write_text("old\n")
-    assert tools.Bash("cat > tmp/notes.md <<'EOF'\nnew\nEOF", "rewrite").startswith("Applied as")
+    assert tools.Bash(f"cat > '{scratch}' <<'EOF'\nnew\nEOF", "rewrite").startswith("Applied as")
     assert scratch.read_text() == "new\n"
     # an append to a scratch file that is not text cannot be read back
-    binary = tmp_path / "tmp" / "blob.bin"
+    binary = scratch.with_name("blob.bin")
     binary.write_bytes(b"\xff\xfe\x00")
-    out = tools.Bash("cat >> tmp/blob.bin <<'EOF'\nmore\nEOF", "append")
+    out = tools.Bash(f"cat >> '{binary}' <<'EOF'\nmore\nEOF", "append")
     assert out.startswith(f"Error: cannot append to {binary}: ")
     assert binary.read_bytes() == b"\xff\xfe\x00"
+    # a ``tmp`` folder of the work dir holds files like any other: unread, not rewritten
+    plain = tmp_path / "tmp" / "notes.md"
+    plain.parent.mkdir()
+    plain.write_text("old\n")
+    out = tools.Bash("cat > tmp/notes.md <<'EOF'\nnew\nEOF", "rewrite")
+    assert out.startswith(HEREDOC_VERDICT.format(path=plain)) and plain.read_text() == "old\n"
 
 
 def test_home_target_resolves_and_new_files_still_run(
@@ -599,7 +608,10 @@ def test_foreground_command_outliving_the_grace_becomes_a_job(
 ) -> None:
     monkeypatch.setattr(DEFAULT_CONFIG, "bash_detach_seconds", 1)
     pieces: list[str] = []
-    tools = UsefulTools(stream_callback=pieces.append, work_dir=str(tmp_path))
+    scratch = tmp_path / "scratch"
+    tools = UsefulTools(
+        stream_callback=pieces.append, work_dir=str(tmp_path), scratch_dir=str(scratch),
+    )
     before = time.monotonic()
     out = tools.Bash("echo early; sleep 3; echo late", "long", timeout_seconds=10)
     assert time.monotonic() - before < 2.5, out
@@ -615,7 +627,8 @@ def test_foreground_command_outliving_the_grace_becomes_a_job(
     out = tools.Bash("echo bad; exit 3", "bad", timeout_seconds=10)
     assert out == "Error (exit code 3):\nbad\n"
     assert list(tools._jobs) == [job]
-    assert [p.stem for p in (tmp_path / "tmp" / "bash_jobs").glob("*.log")] == [job]
+    assert [p.stem for p in (scratch / JOB_LOG_DIR).glob("*.log")] == [job]
+    assert os.listdir(tmp_path) == ["scratch"]  # the work dir got no ``tmp`` folder
     notes = tmp_path / "notes.md"
     notes.write_text("old\n")
     assert tools.Bash("cat notes.md", "view", timeout_seconds=10).startswith("old\n")
@@ -634,8 +647,10 @@ def test_grace_falls_back_to_the_foreground_when_no_job_can_start(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(DEFAULT_CONFIG, "bash_detach_seconds", 1)
-    (tmp_path / "tmp").write_text("not a directory\n")
-    tools = UsefulTools(work_dir=str(tmp_path))
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    (scratch / JOB_LOG_DIR).write_text("not a directory\n")
+    tools = UsefulTools(work_dir=str(tmp_path), scratch_dir=str(scratch))
     before = time.monotonic()
     assert tools.Bash("sleep 1.5; echo late", "long", timeout_seconds=10) == "late\n"
     assert time.monotonic() - before >= 1.4

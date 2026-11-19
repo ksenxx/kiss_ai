@@ -121,10 +121,11 @@ function testRowsCarryTheirMachineAndChip() {
       copy: !!r.querySelector('.sidebar-item-copy'),
     };
   });
+  // A row that ran here names this daemon's machine, as the reply did.
   assert.deepStrictEqual(seen['local one'], {
     machine: '',
-    chip: null,
-    tag: null,
+    chip: 'myhost',
+    tag: 'SPAN',
     favourite: true,
     copy: true,
   });
@@ -203,6 +204,8 @@ function testAMachinesReplyRelabelsTheChipsAndTheFilter() {
     'On machine box-host',
   ]);
   assert.deepStrictEqual(chips['lab task'], ['lab', 'lab', 'On machine lab']);
+  // The reply named this daemon's machine too.
+  assert.deepStrictEqual(chips['local one'], ['', 'myhost', 'On this machine']);
   assert.deepStrictEqual(options(win), [
     ['', 'All'],
     ['__local__', 'myhost (this machine)'],
@@ -260,10 +263,11 @@ function testTheHistoryReplysLabelsNameTheFilterAndTheChips() {
   ]);
   const chips = {};
   historyRows(win).forEach(r => {
-    const chip = r.querySelector('.sidebar-item-machine');
-    if (chip) chips[r.dataset.machine] = chip.textContent;
+    chips[r.dataset.machine] = r.querySelector(
+      '.sidebar-item-machine',
+    ).textContent;
   });
-  assert.deepStrictEqual(chips, {box: 'box-host', lab: 'lab'});
+  assert.deepStrictEqual(chips, {'': 'myhost', box: 'box-host', lab: 'lab'});
   selectFilter(win, 'hf-machine', 'box');
   assert.strictEqual(
     lastGetHistory(posted).machine,
@@ -436,6 +440,7 @@ function testClickingARemoteRowResumesTheChatHere() {
   // machine (the daemon binds the tab to it) and the task (the tab's
   // title until the replay arrives).  The row has no persisted events
   // and is not running: a remote row is resumed by chat id regardless.
+  // The transcript is asked for in pieces (`lazy`).
   const first = ofType(posted, 'resumeSession');
   assert.strictEqual(first.length, 1, 'one resume per click');
   const tabId = first[0].tabId;
@@ -447,21 +452,28 @@ function testClickingARemoteRowResumesTheChatHere() {
     tabId,
     machine: 'box',
     title: 'box task',
+    lazy: true,
   });
   assert.ok(
     posted.some(m => m && m.type === 'openTab' && m.tabId === tabId),
     'the fresh tab is announced to the daemon',
   );
-  // The machine's replay binds the tab to the chat; a second click on
-  // the chat (here on its chip, which is part of the row) reveals that
-  // tab and, the clicked task not being in the transcript (the replay
-  // showed an earlier task of the chat), replays it at the task, still
-  // naming the machine: without it the daemon would unbind the tab and
-  // look the chat up here.
+  // The machine's replay binds the tab to the chat.  The machine's name
+  // is a line of the row's "…" menu, and nothing clicked in a menu
+  // opens the row under it.
   replay(win, tabId, 'chat-2', 'task-0', 'earlier box task', 'box');
   posted.length = 0;
   remoteRow
-    .querySelector('.sidebar-item-machine')
+    .querySelector('.sidebar-item-actions > .sidebar-item-machine')
+    .dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  assert.deepStrictEqual(ofType(posted, 'resumeSession'), []);
+  // A second click on the chat (here on its text) reveals that tab
+  // and, the clicked task not being in the transcript (the replay
+  // showed an earlier task of the chat), replays it at the task, still
+  // naming the machine: without it the daemon would unbind the tab and
+  // look the chat up here.
+  remoteRow
+    .querySelector('.sidebar-item-text')
     .dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
   const again = ofType(posted, 'resumeSession');
   assert.strictEqual(again.length, 1);
@@ -473,6 +485,7 @@ function testClickingARemoteRowResumesTheChatHere() {
     machine: 'box',
     // The tab keeps its title across the replay (the replay sets it).
     title: 'earlier box task',
+    lazy: true,
   });
   assert.ok(
     !posted.some(m => m && m.type === 'openTab'),
@@ -502,11 +515,12 @@ function testClickingARemoteRowResumesTheChatHere() {
 function testChatHeaderOfARemoteChatResumesItHere() {
   const {win, posted} = makePage();
   // Chat "chat-r" exists only on box; chat "chat-m" has a local task
-  // and a newer remote copy of the chat (a database copied over).
+  // and a newer remote copy of the chat (a database copied over),
+  // whose row reaches the chat's header first.
   const fixture = [
     session(1, 'remote chat task', 'box', {id: 'chat-r'}),
-    session(2, 'mixed chat, local task', '', {id: 'chat-m'}),
     session(3, 'mixed chat, remote task', 'lab', {id: 'chat-m'}),
+    session(2, 'mixed chat, local task', '', {id: 'chat-m'}),
   ];
   send(win, historyReply(posted, fixture, MACHINES));
   const opened = recordOpened(win);
@@ -515,17 +529,22 @@ function testChatHeaderOfARemoteChatResumesItHere() {
   const remoteGroup = groupWithTitle('remote chat task');
   const mixedGroup = groupWithTitle('mixed chat, local task');
   assert.ok(remoteGroup && mixedGroup, 'both chat groups are rendered');
-  // Only the remote-only chat's header names its machine.
-  const remoteChip = remoteGroup.querySelector(
-    '.history-chat-header .history-chat-machine',
+  // A header's menu names the machine the header opens the chat on:
+  // the remote-only chat's box, and this one for the chat with a task
+  // here, whatever its newer remote copy.
+  const headerChips = group =>
+    Array.from(
+      group.querySelectorAll('.history-chat-header .history-chat-machine'),
+    ).map(chip => [chip.tagName, chip.textContent]);
+  assert.deepStrictEqual(
+    headerChips(remoteGroup),
+    [['SPAN', 'box']],
+    'a remote-only chat header names its machine: a label, not a link',
   );
-  assert.ok(remoteChip, 'a remote-only chat header carries the machine chip');
-  assert.strictEqual(remoteChip.textContent, 'box');
-  assert.strictEqual(remoteChip.tagName, 'SPAN', 'a label, not a link');
-  assert.strictEqual(
-    mixedGroup.querySelector('.history-chat-header .history-chat-machine'),
-    null,
-    'a chat with a local task carries no chip on its header',
+  assert.deepStrictEqual(
+    headerChips(mixedGroup),
+    [['SPAN', 'myhost']],
+    'the header of a chat with a local task names this machine, once',
   );
 
   posted.length = 0;

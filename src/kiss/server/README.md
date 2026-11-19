@@ -709,11 +709,13 @@ in the caller's current directory (the caller's worktree once it has
 called `create_worktree`) and decides on its own whether to call
 `create_worktree` before editing; the Task Settings block of its
 system prompt names a scratch directory of its own, a private folder
-outside the work tree (`<system temp dir>/kiss-sub-…`,
+inside the agents' temp directory (`<OS temp dir>/kiss-tmp/kiss-sub-…`
+on the host, `/tmp/kiss-tmp/kiss-sub-…` in a container,
 `SorcarAgent._scratch_dir`; see [Setting semantics](#setting-semantics)),
-so siblings in one work directory do not share a scratch file; only a
-sub-agent whose container cannot hold such a folder gets the work
-tree's scratch directory instead.  `run_parallel` children are
+so siblings in one work directory do not share a scratch file; a
+sub-agent whose container cannot create that folder gets the
+container's `/tmp/kiss-tmp/<task-id>` (`/tmp/kiss-tmp` with no task
+id) instead.  `run_parallel` children are
 `run_agent` sub-tasks started by the same code
 (`agent_dispatch.plan_run_agent`), so this is their table too (the
 precedence rule above decides between the
@@ -752,8 +754,9 @@ nothing configured differs) unless (i) the call is a fan-out of two or more task
 over disjoint named pieces of work (`undivided_work` /
 `named_pieces`: every task names a slash path, a directory ending in
 `/`, a dotted module or file name, a URL or a backticked command, and
-no piece is named by two tasks; pieces under `tmp/` or under a
-sub-agent's private `kiss-sub-…` folder (`is_scratch_piece`) and, in a
+no piece is named by two tasks; scratch pieces (`tmp/…`, `/tmp/…`, or
+under `kiss-tmp` or a sub-agent's private `kiss-sub-…` folder,
+`is_scratch_piece`) and, in a
 fan-out of three or more, pieces every task names (shared
 instructions) do not count; a directory a task also names a more specific piece under
 is context for that piece, not a claim on the directory, so `src/x/`
@@ -781,9 +784,8 @@ strongest configured model of another family instead
 (`second_opinion_model`, `model_families.other_family_model`, chosen
 among `SECOND_OPINION_MODELS` — `gpt-6-astra`, `claude-opus-5-5`,
 `gemini-3.1-pro-preview`, their `openrouter/...` twins,
-`openrouter/deepseek/deepseek-v4-pro`, `moonshotai/Kimi-K3`,
-`deepseek-ai/DeepSeek-V4-Pro`, `cc/opus`, `codex/default`, `glm-4.7`,
-`kimi-k3` and, last, the strongest `bedrock/` model the catalog
+`openrouter/deepseek/deepseek-v4-pro`, `cc/opus`, `codex/default`
+and, last, the strongest `bedrock/` model the catalog
 registers (the bare `BEDROCK_PREFIX` entry, resolved by
 `registered_bedrock_model(cheapest=False)` at lookup time) — by the
 first of another family whose provider has a credential; same-model
@@ -1301,9 +1303,11 @@ from the caller, their budget included (each then gets the explicit
 `timeout` (argument > the SEA's setting > 3600) and returns a YAML
 list with one entry per task: the child's result text or, for a child
 still running at that point, its `agent_job` notice; no child is
-stopped by the timeout.  A list longer than the daemon's
-`tool_output_max_chars` is written to `tmp/tool-out/<tag>-agents.txt`
-under the caller's work dir and the call returns its digest instead
+stopped by the timeout.  On the host, a list longer than the daemon's
+`tool_output_max_chars` is written to `tool-out/<tag>-agents.txt`
+in the caller's scratch dir (`useful_tools.spill_report`; a caller
+whose tools run in a container or behind an exec bridge gets the
+whole list) and the call returns its digest instead
 (`agent_dispatch.digest_agent_results`: one `[i/N] ok|FAILED: <first
 200 characters of the summary>` line per child, `running (job <id>)`
 for one not finished, `FAILED: <the error>` for one whose dispatch
@@ -1590,7 +1594,10 @@ removed: ...` for `add_to_system_prompt`, `add_to_prompt` and
   without saying so, and the same script run by hand a plain one.
   Sent as `cronJob` and persisted as the history row's
   `is_cron` flag, which the CHATS list hides unless its Cron chip is
-  on.  The unattended verdict is decided on the text as submitted
+  on.  The run's end event carries it too, as `cron` (true as well
+  for a prompt job recognised by its preamble): the web app plays no
+  victory sound for a `task_done` marked `cron`, as for a sub-agent's
+  (`subagent`).  The unattended verdict is decided on the text as submitted
   (plus `appendToPrompt`), before the SEA a `/xxx` prompt turns into
   can replace the text (the scheduled `/recommendations now` does),
   and stamped on the
@@ -1624,7 +1631,30 @@ removed: ...` for `add_to_system_prompt`, `add_to_prompt` and
   queue and acknowledges any Stop at once (`_end_run_before_loop`)
   and hands the `<task>` follow-ups it never drained to that
   re-dispatch, one re-tagged re-run each, instead of dropping them;
-  a loop that a failure or a Stop cut short drops them).
+  a loop that a failure or a Stop cut short drops them).  A queued
+  `<task>` follow-up that is a registered `/xxx` command is not run as
+  a subtask of the current run, where its text would reach the model
+  verbatim and its SEA would never be invoked: after each subtask the
+  loop takes only the follow-ups queued before the first such command
+  (`_drain_followup_subtasks`, `_first_command_index`), and once
+  nothing else is left to run it moves the command and every follow-up
+  queued after it, re-tagged and with their files, to the tab's
+  leftover prompts and closes the queue.  The re-dispatch above then
+  submits them in order, the command as a run of its own, and
+  `_apply_sea` turns a prompt that is exactly one
+  `<task>/xxx ...</task>` block naming a registered command into that
+  command, so it goes through the slash-command pipeline (a prompt
+  with text outside the block is left as typed, and a `<task>` block
+  inside a command's own text stays that text).  A sub-agent's
+  leftovers are never re-dispatched, so there a queued command still
+  runs as a plain subtask.  A `<task>` message sent after a CHATS click
+  carries the clicked task as `continueTaskId`: its first block
+  continues that task and each later block the one before it, as a
+  follow-up of the subtask loop or as a re-dispatched run
+  (`IdentifiedPrompt.continued_task_id`, `continued_task_of`,
+  `task_runner._retagged`).  A plain steering message names no task:
+  it is for the running task, and the page keeps the click for the
+  next `<task>` message or run.
 
 ### Setting semantics
 
@@ -1670,7 +1700,18 @@ removed: ...` for `add_to_system_prompt`, `add_to_prompt` and
   per-run operational instructions after the prompt
   (`RelentlessAgent.perform_task`): the work directory (the
   container's own working directory when the tools run in an attached
-  container that does not mount the host's), the
+  container that does not mount the host's), then, when the tools run
+  in a container that has a CPU or a memory limit, a `Container
+  limits` line (`relentless_agent.container_limits_line`, from
+  `DockerManager.resource_limits`: the `NanoCpus` of the container's
+  `HostConfig`, else its `CpuQuota` over its `CpuPeriod`, the kernel's
+  100 ms when no period is set, and its `Memory`, shown in GiB; an
+  exec bridge reports no limits, `ExecBridge.resource_limits`) that
+  tells the model to size `make -j`, worker pools and library thread
+  counts (`OMP_NUM_THREADS`, `torch.set_num_threads`) to those limits:
+  inside the container `nproc` and `/proc` show the host's cores and
+  memory, and a build sized for them (`make -j80` in a 1-CPU, 2 GiB
+  container) thrashes and runs out of memory, the
   process id, the task settings (model, budget, start time in local
   and UTC, parallel mode, the `Interpreter` the work dir's Python
   runs on (`project_interpreter.project_interpreter`: the `.venv` of
@@ -1680,13 +1721,18 @@ removed: ...` for `add_to_system_prompt`, `add_to_prompt` and
   container; every pytest run prints the same line first, from the
   root `conftest.py`, so a fixer, a reviewer and the full run can be
   seen to share one Python), the `Scratch dir` the prompt sends temporary
-  files to — `./tmp/<task-id>/` under a chat, `./tmp/` without one
-  (`/tmp/kiss-scratch/` in place of `./tmp/` when the tools run in an
-  attached container that does not mount the work dir, whose `./tmp/`
-  would be inside the caller's directory),
-  and for a sub-agent a private folder `<system temp dir>/kiss-sub-…`
+  files to — inside the agents' temp directory `<OS temp dir>/kiss-tmp/`
+  (`kiss_tmp.kiss_tmp_dir`, `0700`, private to the user, `kiss-tmp-<uid>`
+  when `kiss-tmp` is taken in a shared `/tmp`, emptied on the first
+  use after a reboot (on Windows after a shutdown or restart, not after
+  a crash), and the same directory for a command of a sub-agent, whose
+  temp directory is a private folder in it):
+  `<kiss-tmp>/<task-id>/` under a chat, `<kiss-tmp>/`
+  with no task id (`/tmp/kiss-tmp/<task-id>/` and `/tmp/kiss-tmp/` when
+  the tools run in a container),
+  and for a sub-agent a private folder `<kiss-tmp>/kiss-sub-…`
   (`SorcarAgent._private_dir`; when its commands run in a container,
-  the container's `/tmp/kiss-sub-…`, `DockerManager.make_private_dir`)
+  the container's `/tmp/kiss-tmp/kiss-sub-<8 hex>/`, `DockerManager.make_private_dir`)
   that is also the `TMPDIR`, `TMP` and `TEMP` of its
   commands (on a Windows host the `TMPDIR` only,
   `useful_tools._clean_env`: Git Bash keeps one mount table for all
@@ -1708,10 +1754,10 @@ removed: ...` for `add_to_system_prompt`, `add_to_prompt` and
   not repeated, so what was forked during it lived on; Windows, which
   has no such process table, is skipped; in a container its twin
   `docker_manager.remove_private_dir_script`) and the folder is deleted, so a
-  sub-agent leaves no process, no temp file and nothing under the
-  work tree's `tmp/`; only a sub-agent whose container cannot hold
-  the folder (a read-only one) has none of this and scratches in the
-  work tree as any other task does —
+  sub-agent leaves no process and no temp file behind; only a
+  sub-agent whose container cannot create the folder (a read-only `/tmp`)
+  has none of this and gets `/tmp/kiss-tmp/<task-id>/` (`/tmp/kiss-tmp/`
+  with no task id) instead —
   chat and task ids, ...), and the user's standing instructions
   from `$KISS_HOME/AGENTS.md` (the file the
   bundled `/remember` and `/forget` SEAs maintain) when that file
@@ -1833,9 +1879,9 @@ removed: ...` for `add_to_system_prompt`, `add_to_prompt` and
   away under it, by a link, a reload or a closed tab, fails at once
   with `the page went away (it navigated, reloaded or closed) before
   the script finished` instead of at its deadline), `screenshot` (the PNG is
-  decoded into `tmp/chrome-shot-<ns>.png` under the work dir — a
-  sub-agent's into its private `kiss-sub-…` folder, which goes with
-  the sub-agent — and its path returned; the extension takes its
+  decoded into `<scratch dir>/chrome-shot-<ns>.png` — `<kiss-tmp>/chrome-shot-<ns>.png`
+  with no scratch dir, and in a sub-agent's private `kiss-sub-…`
+  folder, which goes with the sub-agent — and its path returned; the extension takes its
   captures a second apart,
   since Chrome refuses a third `captureVisibleTab` within one second),
   `snapshot` (an interactive-element listing whose
@@ -1863,8 +1909,11 @@ removed: ...` for `add_to_system_prompt`, `add_to_prompt` and
   <input type=text> is read-only and was left unchanged` (the `readonly`
   of a slider or a colour well is no lock)), each waiting `timeout`
   seconds for the extension's answer (`ChromeBridge.call`; the frame
-  carries a `timeout_ms` a tenth short of that, at most
-  `_REPLY_MARGIN_SECS` (1 s) short, so the extension's own deadline
+  carries a `timeout_ms` a tenth short of that, at least
+  `_REPLY_MARGIN_MIN_SECS` (0.3 s: Chrome on macOS fires the timer of
+  an extension's service worker up to 0.15 s late) and at most
+  `_REPLY_MARGIN_SECS` (1 s) short, never more than half of it, so the
+  extension's own deadline
   normally answers first with an ordinary error, `command exceeded its
   Ns deadline`, and keeps the connection — `COMMAND_DEADLINE_MS`, 30 s,
   applies only to a frame without `timeout_ms`; a command the
@@ -1948,14 +1997,14 @@ removed: ...` for `add_to_system_prompt`, `add_to_prompt` and
   mode: with the mode off, an extension that reloads (by itself or by
   that button) or a Chrome that starts shows it switched off until
   the mode is on again.  No worker can tell the mode, so the Settings
-  label says to leave it on and both errors of the tool name it.  Next
+  help says to leave it on and both errors of the tool name it.  Next
   to them `bridge-config.json` (mode 600) names the live port and
   token; the extension re-reads it on every reconnect attempt, so a
   restarted daemon on a new port is found without touching Chrome,
   and `stop` removes the file only while it still holds this server's
   token.  The `chrome_bridge` key of `config.json` (default `false`;
-  the settings panel's "Drive my Chrome" checkbox, whose label gives
-  the install steps and names the folder to load: the
+  the settings panel's "Drive my Chrome" checkbox, whose "?" button
+  pops up the install steps and names the folder to load: the
   `chrome_extension_dir` of the `configData` reply, so the folder of
   the daemon the sheet is for, wherever its `$KISS_HOME` is) makes the
   daemon own the bridge: `chrome_bridge.start_if_enabled()` runs at daemon
@@ -2171,7 +2220,8 @@ removed: ...` for `add_to_system_prompt`, `add_to_prompt` and
 - **Worktrees are not a setting.**  A run starts in the user's
   checkout.  When `work_dir` is inside a git repository the agent
   calls the `create_worktree` tool before its first edit of a path
-  inside the repository that is not git-ignored (tracked or not),
+  inside the repository that is neither git-ignored nor a scratch file
+  (`_guard_worktree`, `_is_scratch_path`; tracked or not),
   which moves the run into a fresh worktree on its own branch (the
   checkout's uncommitted, staged and untracked files are mirrored
   into it, `GitWorktreeOps.copy_dirty_state`, from `git status
@@ -2836,19 +2886,19 @@ SEA's own `tool_call_hook` need not restate:
   daemon's `tool_output_default_chars` (8,000, `KISS_TOOL_OUTPUT_DEFAULT_CHARS`)
   and a request is capped at `tool_output_max_chars` (50,000,
   `KISS_TOOL_OUTPUT_MAX_CHARS`).  Output over the budget is written in
-  full to `tmp/tool-out/<tag>-<n>-bash.txt` under the work dir and
+  full to `<scratch dir>/tool-out/<tag>-<n>-bash.txt` (`<kiss-tmp>/tool-out/…`
+  with no scratch dir, `useful_tools._tools_dir`) and
   the marker names the file (`UsefulTools._new_spill` names it and
   `_Capture` writes the output to it as it arrives, keeping only the
   first and last million characters in memory; the tag is per
-  tools instance, so a parent and its reviewer never overwrite each
+  tools instance, so two tool instances never overwrite each
   other's spills; the path is shown in POSIX form on every OS,
   `useful_tools.SPILL_DIR`, since the model pastes it into `Bash`,
   which is bash on Windows too, and the file holds the output
   verbatim, written with `newline=""`; a sub-agent's spills — and
   its `run_commands_parallel` and `run_parallel` reports below — go
-  to `tool-out/` of its private folder instead, shown by their
-  absolute path, `useful_tools._tools_dir`, so nothing of them is left
-  in the work tree).  Only the output is cut to the budget: the
+  to `tool-out/` of its private `kiss-sub-…` folder, so nothing of
+  any spill is left in the work tree).  Only the output is cut to the budget: the
   `Error (exit code N):` line of a host result, the `[exit code: N]`
   line of a container or bridged one and the `Job <id>: <status>` line
   of a `bash_job` report stand whole whatever the budget
@@ -2856,7 +2906,7 @@ SEA's own `tool_call_hook` need not restate:
   cut with the output a small budget dropped the status and a failed
   command read as one that passed.  A host `run_commands_parallel`
   report longer than the ceiling (`tool_output_max_chars`) is written
-  whole to `tmp/tool-out/<tag>-parallel.txt` (`useful_tools.spill_report`,
+  whole to `<scratch dir>/tool-out/<tag>-parallel.txt` (`useful_tools.spill_report`,
   the tag six random hex digits) and the result is its digest
   (`digest_parallel_report`): the tally line, one `[i/N] exit 0 in
   1.2s: <command>` line per command (the command cut to 160
@@ -2864,9 +2914,11 @@ SEA's own `tool_call_hook` need not restate:
   `DIGEST_TAIL_CHARS` (1,200) characters of its output under a `###
   [i/N] ...` header naming the section of the file that has all of it;
   the container and bridged `run_commands_parallel` pass no `spill`
-  and return the whole report.  A `run_parallel` result over the same
-  ceiling goes to `tmp/tool-out/<tag>-agents.txt` the same way
-  (`agent_dispatch.digest_agent_results`: `N sub-tasks; the whole
+  and return the whole report.  A host `run_parallel` result over the same
+  ceiling goes to `<scratch dir>/tool-out/<tag>-agents.txt` in the caller's
+  scratch dir the same way (a caller whose tools run in a container or
+  behind an exec bridge gets the whole result;
+  `agent_dispatch.digest_agent_results`: `N sub-tasks; the whole
   result is in <path>, this is its digest:` and one `[i/N] ok|FAILED:
   <first 200 characters of the summary as text>` line per child, or
   `[i/N] running (job <id>)` for one still running and `[i/N] FAILED:
@@ -2925,9 +2977,11 @@ SEA's own `tool_call_hook` need not restate:
   the output cap of the container `Bash` touches them.
 - **Read before modify.**  `Edit` and `Write` of an existing file the
   model has not been shown in this session are refused — except of a
-  scratch file (`useful_tools._is_scratch_path`, under a `tmp`
-  directory inside the work dir, under `$KISS_HOME/cron/work` or in a
-  sub-agent's private folder, `<system temp dir>/kiss-sub-…`),
+  scratch file (`useful_tools._is_scratch_path`: in the agents' temp
+  directory `<OS temp dir>/kiss-tmp/` when the work dir does not itself
+  lie there, sub-agents' private `kiss-sub-…` folders included, or under
+  `$KISS_HOME/cron/work`; a `tmp/` folder of the work dir is an ordinary
+  folder),
   which `Write` overwrites and `Edit` edits unread, a note of an
   earlier session say, the `Edit` result showing the region changed —
   and a refused `Edit` returns the numbered
@@ -3204,8 +3258,8 @@ SEA's own `tool_call_hook` need not restate:
   refusal, then `Then made Bash(command=...), whose result follows:`
   and the rest's result, or `Bash(...) was not made: the Write did not
   go through.` (`tool_verdict.followup_result`).  On the host the
-  file must have been shown (or be a scratch file under `tmp/`, which
-  `Write` overwrites unread): a copy into a file not shown is refused
+  file must have been shown (or be a scratch file, `_is_scratch_path`,
+  which `Write` overwrites unread): a copy into a file not shown is refused
   with the `Read` to make before the same command, or the `Write`; a
   mechanical edit of a file not shown is refused with the exact `Edit`
   call and the region around its first `old_string`, after which the
@@ -3355,10 +3409,11 @@ SEA's own `tool_call_hook` need not restate:
   at `/dev/*`, and one fed to an interpreter (`python3 - <<EOF >
   out.json` writes the program's output, not the text) run.  On the
   host the three guards exempt scratch
-  files (`useful_tools._is_scratch_path`: under a `tmp` directory
-  inside the work dir, anywhere under `$KISS_HOME/cron/work` or in
-  a sub-agent's private folder, `<system temp dir>/kiss-sub-…`; a
-  checkout that itself sits under `/tmp` is not scratch), as `Write`
+  files (`useful_tools._is_scratch_path`: in the agents' temp directory
+  `<OS temp dir>/kiss-tmp/` — sub-agents' private `kiss-sub-…` folders
+  included — when the work dir does not itself lie there, or anywhere
+  under `$KISS_HOME/cron/work`; a `tmp/` folder of the work dir is not
+  scratch), as `Write`
   overwrites one unread: a multi-line `sed -i` whose file operands all
   resolve to scratch or missing files, a python heredoc every written
   path of which (`edit_guards.python_written_paths`: `open(p, "w")`,
@@ -3629,9 +3684,10 @@ SEA's own `tool_call_hook` need not restate:
   bash_job(job_id, 'wait', until=...).`), and forwards both arguments
   otherwise.
 - **Background jobs.**  `Bash(command, background=True)` starts the
-  command detached (`nohup ... > tmp/bash_jobs/<id>.log 2>&1 &`; a
-  sub-agent's log is `bash_jobs/<id>.log` of its private folder,
-  named by its absolute path, `useful_tools._tools_dir`) and
+  command detached (`nohup ... > <scratch dir>/bash_jobs/<id>.log 2>&1 &`,
+  `<kiss-tmp>/bash_jobs/<id>.log` with no scratch dir, and in
+  `bash_jobs/<id>.log` of a sub-agent's private `kiss-sub-…` folder,
+  named in POSIX form by its absolute path, `useful_tools._tools_dir`) and
   returns a job id; `Bash(..., background=True, machine="<name>")`
   runs it over `ssh` on a machine registered with `/machine add` (an
   SSH one, not a URL one), its output streaming into the same local
@@ -3701,9 +3757,9 @@ SEA's own `tool_call_hook` need not restate:
   with the exec token removed from its environment (so the deadline
   sweep of a timed-out foreground command leaves it alone), and its
   state is `/tmp/kiss-jobs/<id>.log` (a sub-agent's job keeps its
-  files in `kiss-jobs/` of the sub-agent's private folder instead,
-  `ContainerJobs._new_job_dir`, so they are deleted with the folder
-  when the sub-agent ends), `<id>.pid` (the session leader,
+  files in `kiss-jobs/` of the sub-agent's private `/tmp/kiss-tmp/kiss-sub-…`
+  folder instead, `ContainerJobs._new_job_dir`, so they are deleted
+  with the folder when the sub-agent ends), `<id>.pid` (the session leader,
   whose process group is the job), `<id>.exit` (written when the
   command ends; the shell opens it before it writes the exit code, so
   only a non-empty marker is a finished job; a started job whose
@@ -3757,10 +3813,10 @@ SEA's own `tool_call_hook` need not restate:
   job started by an earlier session of the task can still be followed.
   `machine=` has no container form.
 - **`commit_and_merge`** removes each worktree with its git-ignored
-  files: `tmp/` is git-ignored, so the worktree's `tmp/PROGRESS.md`
-  (the progress log the system prompt asks for) and the task's
-  scratch files are in no commit, and nothing
-  copies them into the main checkout.  A merge the main
+  files (build output, caches): they are in no commit and nothing
+  copies them into the main checkout (the task's scratch files and
+  `<scratch dir>/PROGRESS.md` already live outside the worktree, in
+  `<OS temp dir>/kiss-tmp/`).  A merge the main
   checkout's uncommitted changes block (`git stash push` failed)
   returns the blocking files from `git status --porcelain` and leaves
   the committed worktree branch in place.
@@ -4432,11 +4488,24 @@ SEA's hooks, so a hook author knows what the model reads:
 
 ## Continuing chat sessions
 
-Pass `chat_id` to continue an existing daemon chat session.  The agent
-receives the chat's retained top-level context as a prefix, not
-necessarily every prior row: sub-agent rows are excluded, a history
-longer than ten entries keeps the first two and the latest eight, and
-with the default history digest older entries are shortened and only the
+Pass `chat_id` to continue an existing daemon chat session.  The tasks
+of a chat form a tree rooted at its first task: each row records the
+task it continues (`task_history.chat_parent_id`, written by
+`persistence._add_task`).  A new task continues the task the user
+loaded before running it — a CHATS click (`resumeSession` with
+`taskId`, or the `continueTaskId` field the page adds to `run` and to
+a `<task>` `appendUserMessage` when the click only scrolled the open
+tab, `TaskRunner._take_continued_task`) — and otherwise the chat's
+last top-level task (`persistence._next_task_parent`).  A `run()`
+call with `chat_id` therefore continues the chat's last task.  The
+agent receives the task/result pairs on the path from the root to
+that parent as a prefix (`ChatSorcarAgent.build_chat_prompt`,
+`persistence._load_task_lineage`), so tasks on other branches are left
+out, and so are sub-agent rows unless the user loaded one.  A row that records no parent (one from
+before the column) or names a deleted one continues the task that
+dispatched it when it is a sub-agent's, else the top-level task just
+before it in its chat.  A path longer than ten entries keeps the first
+two and the latest eight, and with the default history digest older entries are shortened and only the
 newest two task/result pairs stay whole while the prefix fits in 6,000
 characters (an oversized history drops older entries first, then digests
 the newest ones too, then hard-truncates).
@@ -4644,8 +4713,8 @@ message, and the images or PDFs nested in those results — which a
 tool message cannot carry — in one user message that follows them:
 the media parts first, then the text `[attachments from previous
 tool result(s)]` (`TOOL_RESULT_ATTACHMENT_NOTE`), then whatever else
-that user message held); and a hop between two Responses endpoints (Together's
-`openai/gpt-oss-120b` back to an OpenAI model) strips from each
+that user message held); and a hop between two Responses endpoints (an
+`openrouter/...` model back to an OpenAI model) strips from each
 request, not from the conversation, what the other vendor issued —
 a `reasoning` item without the endpoint's own id prefix is dropped
 and any other such item loses its `id` — as the vendor's
@@ -5350,8 +5419,8 @@ which the daemon then never answered.
   (`_publish`; an unchanged list is not re-broadcast to the clients,
   except after a Stop interrupted a broadcast before every subscriber
   had it, when the next rescan broadcasts whatever it finds,
-  `_forget_broadcast`).  Of the 32 bundled SEA folders (the
-  `base/` folder of the base classes is never a command), 30 register
+  `_forget_broadcast`).  Of the 35 bundled SEA folders (the
+  `base/` folder of the base classes is never a command), 33 register
   a command and two (`coding`, `sorcar`) are hidden: `/ask` (answers a question about the current task
   in two or three sentences from one `task_context` call over its
   status, spend, progress log and digested persisted events — the log
@@ -5405,8 +5474,8 @@ which the daemon then never answered.
   `autorouter_sea.ROUTER_MODEL`, `claude-opus-5-5-medium`, with
   `auto_classify` off and `use_web_tools` and `use_memory` on; the
   candidates of each tier are the ordered `(model, note)` pairs of
-  `autorouter_sea.TIERS` (small: `zai-org/GLM-5.3-Flash`,
-  `gpt-6-luna-xhigh`, `deepseek-ai/DeepSeek-V4.1-Flash`,
+  `autorouter_sea.TIERS` (small: `openrouter/z-ai/glm-5.3-flash`,
+  `gpt-6-luna-xhigh`, `openrouter/deepseek/deepseek-v4.1-flash`,
   `openrouter/xiaomi/mimo-v2.6-flash`, `openrouter/qwen/qwen3.8-flash`,
   `claude-haiku-5-5-max`; medium: `openrouter/meta/muse-wonder`,
   `gemini-4-argon`, `openrouter/~z-ai/glm-latest`,
@@ -5735,7 +5804,8 @@ which the daemon then never answered.
   write through on a path that may not have been set.  A simple
   command changes the targets of its output redirections, its own and
   its groups', other than `/dev/*` and scratch files — a path under
-  any `tmp` directory, `is_scratch_path`, resolved in the directory the
+  any `tmp` or `kiss-tmp*` (`kiss-tmp`, `kiss-tmp-<uid>`) directory,
+  `is_scratch_path`, resolved in the directory the
   command runs in when the scanner knows it, so `cd /w/tmp/x && cat >
   f` is scratch and `tmp/../a.py` is not, a word the shell still
   expands, `$OUT`, `~/x`, judged as written — and what its program
@@ -5875,7 +5945,68 @@ which the daemon then never answered.
   with a task that ends in "Do not change this repository" and how to
   `git apply` the returned `best.patch`; the second's
   `improve_sea_with_discover` tool dispatches the `/discover` child
-  itself, as an agent job of the rsi7d task in its own chat), `/forget`
+  itself, as an agent job of the rsi7d task in its own chat),
+  `/discover_viz` (a `WorkerSea` that turns the persisted trajectory of
+  a `/discover` run into one self-contained HTML animation of its
+  Pareto frontier: the evaluated points appear one by one, each under
+  its parent, a tooltip shows a point's `pareto.md` fields, and every
+  round takes two frames, how its idea was picked and whether the
+  point entered the frontier or was discarded, and a finished run a
+  last one for the point it reports.  `/discover_viz <task id>` takes a task id
+  or its first six or more characters, the bare command the newest
+  `/discover` run (`trajectory.find_task`, over
+  `persistence.tasks_matching`, which lists the newest history rows by
+  id prefix and by the `sea` column, `discover_sea` here; a reference
+  that matches no task or more than one is answered with the newest 20
+  runs to choose from).  The four files a run keeps in its scratch
+  directory (`pareto.md`, `explored-ideas.md`, `ideas.md`, `split.md`)
+  differ in layout from run to run, so no code parses them; the model
+  reads them and two tools, which `tools()` adds, keep it to what the
+  run recorded.  `discover_trajectory(task, evidence_file)` writes the
+  evidence (`trajectory.evidence`): in trajectory order every `Write`
+  and `Edit` of one of the four files (the content written, the
+  replacements made; a call that failed is marked `NOT APPLIED`), every
+  shell command that names one or draws `random.random()` (the command
+  and its output), every `Read` of the first two (its output) and
+  every `decide` call (state, questions and answer), then the copies
+  still on disk (looked for where the run wrote or read them and in
+  `<OS temp dir>/kiss-tmp/<task id>/`, each also in the main checkout
+  once the run's worktree is gone) and the run's final result; a task none of whose calls
+  wrote, read or named `pareto.md` or `explored-ideas.md` ran no loop
+  and is refused, with its `/discover` sub-tasks listed when it has
+  any, else the newest runs.  The model
+  writes the run as a JSON story (`story.Story`: one round per
+  evaluated point in the order evaluated, the baseline first, each
+  with its parents, operator, draw, score, status, the `pareto.md`
+  fields for the tooltip and the points it pushed off the frontier,
+  then how the run finished), and
+  `render_discover_viz(story_file, html_file)` reads the trajectory
+  again and refuses the story, writing nothing and listing at most 25
+  errors (`MAX_ERRORS`), when it is malformed (`story.parse`, unknown
+  keys included), when its frontier bookkeeping is one the loop cannot
+  produce (`story.replay`: a parent not evaluated in an earlier round
+  or never on the frontier, a `DOMINATED` change of a point that is
+  not on the frontier, an `OVERFIT` one of a point that is neither on
+  it nor a `TIE`, a promotion other than the baseline put back or
+  a `TIE` point, a frontier left empty after a round, a best point
+  off the frontier) or when it quotes a value the run
+  did not record (`story.quote_errors`: every tooltip detail, score
+  and draw must stand in the evidence as written, Markdown emphasis
+  and line breaks aside, and every decimal number of the sentences the
+  model worded must stand there or in the loop's own instructions,
+  none of them as a piece of a longer number).  Otherwise it writes
+  the page (`animation.render` fills `animation.html`, which has no
+  dependency: play, pause, step, a slider, a speed setting, a switch
+  that hides the discarded ideas, and `#frame=N` to open on a step),
+  by default `reports/discover-viz-<first 8 characters of the task
+  id>.html` in the work dir; the agent then opens it, requires
+  `window.discoverViz.selfCheck()` to return `ok: true`, looks at a
+  screenshot and shows the page in the Browser tab.  Its
+  `system_prompt()` returns its own prompt, `prompt()` ends every task
+  with `ADD_TO_PROMPT`, which a bare command runs on alone, and
+  `settings()` adds `{"tool_profile": "shell+edit+browser",
+  "use_web_tools": True}` to the worker defaults, so the run is on the
+  caller's model), `/forget`
   (removes a standing instruction from `$KISS_HOME/AGENTS.md`),
   `/gepa` (runs GEPA, the reflective text optimizer, as the loop of
   the official implementation: `gepa_sea.GEPA_INSTRUCTIONS`,
@@ -6392,7 +6523,81 @@ which the daemon then never answered.
   and `run_agent(machine=...)`
   can run a sub-task on it; with the `https://` form the password may be left out only for a
   daemon that has no remote password set and is reached on a loopback
-  port), `/merge`
+  port), `/memory_consolidate` (`seas/memory_consolidate/`, a
+  `WorkerSea` with `tool_profile: "none"` locked, a $10 budget and a
+  3,600 s timeout, whose only tools are `finish` and
+  `consolidate_memory`, which takes no argument and reads its options
+  from the user's own words of the task text (`seas/memory_jobs.py`,
+  shared with `/memory_quiz`; `own_words` leaves out the run context
+  of a scheduled run, which quotes the previous report), so neither
+  the model nor an earlier report can make it write: it takes the
+  near-duplicate families of every memory, connected groups of pages
+  at cosine 0.9 or more from `kiss.core.memoryfield.consolidate.families`,
+  that fit in one page together (`FIT_BYTES`, 8,192 less 700 bytes),
+  hold no page a merge wrote and none that is not UTF-8, hold no two
+  pages of an undone merge and
+  are not recorded as left alone with the same text, and examines up
+  to 10 (`--limit N`), the most similar first, with up to four model
+  calls each (`examine` stops at the first check that fails), every
+  one a prompt of its own charged to the task as a side call: the
+  task's model writes the replacing page or answers
+  `SEPARATE`, then the judge, `--judge <model>` or else
+  `other_family_model` or else the task's model, writes up to 5
+  questions per page (20 in all) from the originals without seeing the
+  merged page, says for each whether the merged page gives the
+  answer, and last reads the originals beside the merged page and
+  lists every fact it no longer finds (the questions only sample the
+  facts); a family passes only when the merged page fits in a page,
+  every verdict is `SUPPORTED` and that list is empty; without `--apply` in the task text the
+  run is a dry run that reports each family with its proposed page and
+  writes nothing; with it, `consolidate.commit` copies the members into
+  `<memory>/.archive/<time>-<page>/` with a `merge.json` record, writes
+  the merged page under the newest member's name with `writer:
+  consolidation` and deletes the other members, each through
+  `MemoryDir.write` / `MemoryDir.delete` with `expected=` the text the
+  job read, so a page another task changed meanwhile is neither
+  overwritten nor deleted, and a family left as it is for a lasting
+  reason (separate records, too large, a verdict `DIFFERENT` or `ABSENT`, a fact found missing) goes to
+  `.archive/left-alone.json` until one of its pages changes (a reply
+  that could not be used is no such reason: that family is examined
+  again by another run); `--list`
+  prints the recorded merges, `--restore <merge>` writes the archived
+  pages back with a fresh `updated` time, with or without `--apply`
+  (the replaced page only while the merged page is still what the
+  merge wrote, by the SHA-256 in `merge.json`), and `--memory <name>`
+  narrows the run to one memory; one run at a time holds
+  `<memory root>.consolidate.lock`, and no model call starts once 10%
+  or less of the task's budget is left), `/memory_quiz`
+  (`seas/memory_quiz/`, the same kind of `WorkerSea`, settings and
+  option handling, with `quiz_memory` as its tool: it questions your
+  own top-level tasks of the last 2 days (`--days N`) that ran on this
+  machine with no SEA and no cron job and succeeded with a result of
+  at least 2,000 characters (`persistence.reported_user_tasks`), skips
+  those already in its log and takes at most 20 (`--limit N`), or the
+  one task `--task <id prefix>` names; for each the task's model writes
+  up to 5 questions about durable knowledge in the report, each with
+  the report sentence that states the answer (`grounded` drops a
+  question whose sentence the report does not hold, `confirmed` one
+  the judge finds `NOT_STATED` in the report; a question left without
+  a verdict leaves the whole task for another run),
+  memory is
+  searched with `MemoryTools.search` over the memories a new task in
+  that work dir gets, and the judge reads the first 5 results: a hit
+  when they give the answer, a retrieval gap when the pages the task
+  or its sub-tasks wrote (`persistence.task_tree_ids`) or the next 10
+  results give it, a construction gap when nothing does; a task that
+  is done is appended to `<memory root>/.quiz/log.jsonl`, one line per
+  question with its outcome or a single `no questions` line for a
+  report with nothing durable to ask about
+  (a task whose questions could not be written or judged is not
+  logged and is asked again; one run at a time holds
+  `<memory root>.quiz.lock`),
+  and nothing else is written unless the task text holds `--write`,
+  when the facts of a task's construction gaps go into one new page
+  `quiz-<first 12 characters of the task id>` (`writer: quiz`, no
+  `verified` time, `review_after` 21 days ahead, each fact with the
+  passage of the report it came from), written with `expected=""` so an existing page of
+  that name is never overwritten), `/merge`
   (resolves git merge conflicts and stages the resolved files; commits
   only when asked), `/recommendations` (a `WorkerSea` whose tools are
   `finish`, `recent_tasks`, `connected_apps`, read-only memory and
@@ -6457,21 +6662,27 @@ which the daemon then never answered.
   narrows the claim, a missing control for the central claim cutting
   that claim to what the evidence tests rather than being confessed
   and left standing), `/rsi7d` (7-day self-improvement
-  of the indexed SEAs from their recorded runs, each SEA's improvement
-  run through a `/discover` child on a lab copy of its script and test
-  file with a replay of a past run as the dev evaluation, the best point
-  coming back as a patch through the gated editors: its
-  `improve_sea_with_discover(name, task, max_budget, replay_task_id,
-  replay_budget, ...)` tool snapshots the SEA folder to
-  `tmp/rsi7d/snapshots/<name>` and the test file, when it exists, to
-  `tmp/rsi7d/snapshots/test_<name>_sea.py.before` (a restore deletes a
-  test file that did not exist then), dispatches the child (round limit
+  of the indexed SEAs from their recorded runs, keeping its replays,
+  snapshots, discover worktrees and `AGENTS.md.before` backup under
+  `<scratch dir>/rsi7d/`: each SEA's improvement runs through a
+  `/discover` child in a detached worktree at
+  `<scratch dir>/rsi7d/discover/<name>` with a replay of a past run in
+  `<scratch dir>/rsi7d/replays/<sea>-<task id prefix>` as the dev
+  evaluation; its `improve_sea_with_discover(name, task, max_budget,
+  replay_task_id, replay_budget, ...)` tool snapshots the SEA folder to
+  `<scratch dir>/rsi7d/snapshots/<name>` and the test file, when it
+  exists, to `<scratch dir>/rsi7d/snapshots/test_<name>_sea.py.before`
+  (`revert_sea_code` restores that copy, deleting a test file that did
+  not exist then), dispatches the child (round limit
   `DISCOVER_ROUNDS`, 2, and `DISCOVER_TIMEOUT_SECONDS`, 4 h, by
   default; each of its replays times out after `REPLAY_TIMEOUT_SECONDS`,
-  1 h), applies the child's `best.patch` to the script and test file
-  only (a patch touching any other path is refused) through the same
-  compile/load/`sea lint` gate as `patch_sea_code`, and restores the
-  snapshot when the child returned no patch or the gate refused it;
+  1 h), copies the script and test file the winning child left in the
+  worktree into the checkout (refusing any change outside those two
+  paths) through the same compile/load/`sea lint` gate as
+  `patch_sea_code`, and removes the worktree while keeping its
+  evaluated commits under `refs/discover/<child task id>/`;
+  `patch_sorcar` backs up `$KISS_HOME/AGENTS.md` to
+  `<scratch dir>/rsi7d/AGENTS.md.before` before its first change;
   `replay_findings(<child task id>)` measures the child's replays; the
   task text starts with the scope: `/rsi7d all`, `/rsi7d <name> [<name>
   ...]` for those SEAs only, or `/rsi7d --seas-dir <folder> [<name>
@@ -6635,7 +6846,7 @@ which the daemon then never answered.
   (`coding/coding_test_context.py`,
   `git_extract_knowledge/git_knowledge_index.py`,
   `git_extract_knowledge/git_knowledge_store.py`, `rsi7d/sea_tuning.py`,
-  `sync/git_sync.py`, the shared `agents_md.py`) are helpers, not
+  `sync/git_sync.py`, the shared `agents_md.py` and `memory_jobs.py`) are helpers, not
   commands: only `<name>/<name>_sea.py` folders are registered.  Syntax,
   precedence and the dispatch flow are
   documented in

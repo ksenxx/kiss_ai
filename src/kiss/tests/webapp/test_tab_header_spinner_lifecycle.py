@@ -23,7 +23,7 @@ strip is checked twice:
 * on the bare harness page (``main.css`` only);
 * on the remote webapp proper, the same page booted with
   ``<body class="remote-chat">`` and ``remote-codex.css`` restyling the
-  tabs as pills -- the spinner must survive that cascade.
+  tabs as chips -- the spinner must survive that cascade.
 
 The daemon ends a task with a terminal event (``task_done`` /
 ``task_error`` / ``task_stopped``, see ``task_runner.py``) FOLLOWED by
@@ -358,7 +358,7 @@ def test_sidebar_status_only_end_drops_spinner(_browser) -> None:
 
 @pytest.mark.parametrize("how", _ENDS)
 def test_remote_webapp_tab_spinner_until_task_ends(_browser, how: str) -> None:
-    """Remote webapp: the pill-styled tab header spins while the task
+    """Remote webapp: the chip-styled tab header spins while the task
     runs and stops when it ends; the tab bar itself stays displayed."""
     context, page = _open_remote_page(_browser)
     try:
@@ -378,7 +378,7 @@ def test_remote_webapp_tab_spinner_until_task_ends(_browser, how: str) -> None:
 @pytest.mark.parametrize("how", _ENDS)
 def test_remote_webapp_background_tab_spinner(_browser, how: str) -> None:
     """Remote webapp: a background chat keeps the running flag for its
-    own task only, its pill spins once it is shown, and the flag and
+    own task only, its chip spins once it is shown, and the flag and
     spinner drop when that task ends."""
     context, page = _open_remote_page(_browser)
     try:

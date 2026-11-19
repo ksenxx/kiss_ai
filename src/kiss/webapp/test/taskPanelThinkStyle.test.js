@@ -3,13 +3,13 @@
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
 
-// The task panel that opens every task of the chat thread paints the
-// user bubble's accent wash under a 1px accent hairline.  Everything
-// about that panel but the hairline is pinned through computed style
-// in transcriptPanelAlignment.test.js; the `border` shorthand with a
-// var() colour is the one declaration jsdom's cssstyle cannot read
-// back (it reports `medium none`), so this test reads it from the
-// stylesheet text.
+// The task panel that opens every task of the chat thread is the user
+// bubble: a neutral wash with no outline.  Everything about that panel
+// but the missing outline is pinned through computed style in
+// transcriptPanelAlignment.test.js; a `border` shorthand with a var()
+// colour is the one declaration jsdom's cssstyle cannot read back (it
+// reports `medium none`, as for no border at all), so this test reads
+// the stylesheet text.
 
 'use strict';
 
@@ -23,9 +23,9 @@ const CSS = fs.readFileSync(
   'utf8',
 );
 
-assert.match(
+assert.doesNotMatch(
   lastCssRule(CSS, '.ev.task-panel'),
-  /(?:^|[;\s])border:\s*1px solid var\(--accent-line\)\s*(?:;|$)/,
-  'BUG: .ev.task-panel border must be the accent hairline',
+  /(?:^|[;\s])(?:border|outline)(?:-(?:top|right|bottom|left|width|style|color))?\s*:/,
+  'BUG: .ev.task-panel must draw no outline round the user bubble',
 );
-console.log('  ok - .ev.task-panel draws the accent hairline');
+console.log('  ok - .ev.task-panel draws no outline');

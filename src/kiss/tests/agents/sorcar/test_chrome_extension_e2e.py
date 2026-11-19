@@ -18,9 +18,10 @@ is none (silent, sending garbage, a wrong proof, or a command ahead of
 its proof), a refusal of the installed extension's own worker, the
 frame of an older KISS, a count of the sockets the
 extension opened, and a deadline shorter than a bridge's own wait (a
-bridge sends nine tenths of its caller's timeout and drops a connection
-whose reply is later than the timeout, so the reply to a deadline of
-milliseconds never comes back through one).
+bridge sends its caller's timeout less a reply margin, a tenth of it
+and 0.3 s at least, and drops a connection whose reply is later than
+the timeout, so the reply to a deadline of milliseconds never comes
+back through one).
 
 The waits are the extension's own constants: its keepalive (25 s), its
 handshake deadline (10 s), its load wait (15 s) and its retry (3 s).
@@ -948,8 +949,9 @@ def test_a_focus_command_past_its_deadline_is_refused_at_every_step(chrome: _Chr
     """Deadlines from a fraction of a millisecond up: each step of a screenshot and of an
 
     activation is the one a deadline passes in, the reply is the refusal, the tabs work on.
-    Sent by a peer: a bridge waits a tenth longer than the deadline it sends, drops a
-    connection whose reply is not in by then, and so never shows a reply this late.
+    Sent by a peer: a bridge waits longer than the deadline it sends (a tenth, 0.3 s at
+    least), drops a connection whose reply is not in by then, and so never shows a reply
+    this late.
     """
     with chrome.peer() as peer:
         link = peer.login()
@@ -977,9 +979,9 @@ def test_a_command_waiting_behind_another_fails_at_its_own_deadline(chrome: _Chr
     ahead = _in_thread(chrome.evaluate, tab, slow)
     time.sleep(0.3)  # the slow script is running
     began = time.monotonic()
-    # Of the caller's second the bridge gives the extension nine tenths.
+    # Of the caller's second the bridge gives the extension 0.7 s; the rest is for its reply.
     refusal = _fails(chrome, tab, "document.title = 'ran late'", 1.0)
-    assert "command exceeded its 0.9s deadline" in refusal
+    assert "command exceeded its 0.7s deadline" in refusal
     assert time.monotonic() - began < 1.6  # before the script ahead of it was done
     assert ahead.result(10) == "slow"
     # Its turn has come by now, and it did not run.
@@ -1171,7 +1173,7 @@ def test_a_script_whose_page_goes_away_fails_without_waiting_for_its_deadline(
     # The wait ends with the command as well: scripts that outlive their deadline in a page
     # that stays leave it nothing to carry, no listener for its leaving either.
     for _ in range(3):
-        with pytest.raises(ChromeBridgeError, match="command exceeded its 0.9s deadline"):
+        with pytest.raises(ChromeBridgeError, match="command exceeded its 0.7s deadline"):
             chrome.evaluate(tab, script, 1)
     _until(lambda: chrome.browser.page_listeners(url, "pagehide") == 0)
     # A script that still waits for its page to be read never started in it: when the page
@@ -1429,16 +1431,18 @@ def test_a_handle_names_its_element_or_nothing(chrome: _Chrome) -> None:
 
 
 # A bridge of a copy of the package, in a home of its own: it installs
-# the extension, says where and what the Settings label of its own page
-# reads, waits for a line on stdin (Chromium is up), then drives it.
+# the extension, says where and what the help of the Settings box of its
+# own page reads, waits for a line on stdin (Chromium is up), then drives it.
 _INSTALL = """
 import html, json, re, sys
 from kiss.agents.sorcar.chrome_bridge import ChromeBridge, install_extension
 from kiss.server import web_server
 bridge = ChromeBridge(write_config=True)
 bridge.start()
-label = re.search(r'id="cfg-chrome-bridge">(.*?)</label>', web_server._build_html(), re.S)
-text = html.unescape(re.sub("<[^>]+>", "", label[1]))  # as a page with no daemon yet shows it
+steps = re.search(
+    r'id="cfg-chrome-bridge-help-text"[^>]*>(.*?)</p>', web_server._build_html(), re.S
+)
+text = html.unescape(re.sub("<[^>]+>", "", steps[1]))  # as a page with no daemon yet shows it
 print(json.dumps([str(install_extension()), " ".join(text.split())]), flush=True)
 sys.stdin.readline()
 connected = bridge.wait_for_extension(30)
@@ -1462,7 +1466,7 @@ def test_an_install_is_the_same_extension_under_the_products_own_name(
     chromium: str,
     tmp_path: Path,
 ) -> None:
-    """Unbranded or branded: the folder and the name the Settings label gives, the same worker.
+    """Unbranded or branded: the folder and the name the Settings help gives, the same worker.
 
     The product runs from a copy of the package carrying *brand*, in a
     home of its own: the checkout's brand and ``$KISS_HOME`` play no part.
@@ -1482,15 +1486,15 @@ def test_an_install_is_the_same_extension_under_the_products_own_name(
     )
     try:
         assert bridge.stdout is not None and bridge.stdin is not None
-        installed, label = json.loads(bridge.stdout.readline())
-        assert label == (
-            "Drive my Chrome: tick this box and close Settings. Then, in Chrome on the computer "
+        installed, steps = json.loads(bridge.stdout.readline())
+        assert steps == (
+            "Tick this box and close Settings. Then, in Chrome on the computer "
             f"that runs {product}, open chrome://extensions, turn on Developer mode, click "
             f'"Load unpacked" and select the folder ~/{folder}/chrome_extension. '
             f'It is listed there as "{product} Bridge". '
             "Leave Developer mode on: without it Chrome switches the extension off."
         )
-        # The label's folder and name are the install's own.
+        # The help's folder and name are the install's own.
         assert Path(installed) == home / folder / "chrome_extension"
         manifest = json.loads((Path(installed) / "manifest.json").read_text())
         worker = Path(installed) / manifest["background"]["service_worker"]

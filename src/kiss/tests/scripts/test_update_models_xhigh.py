@@ -12,8 +12,8 @@ populated end-to-end by update_models.py:
 2. ``detect_thinking_level`` short-circuits to ``None`` for backends that
    don't accept ``reasoning_effort`` (codex/*, cc/*) and for
    variants known to reject it (OpenAI's ``-pro``, ``-chat-latest``,
-   ``-image``) and for unrelated prefixes (Together, OpenRouter
-   non-OpenAI), so we never waste an API call on them.
+   ``-image``) and for unrelated prefixes (OpenRouter non-OpenAI),
+   so we never waste an API call on them.
 3. ``get_current_model_info`` surfaces the ``thinking`` level for every
    model in ``MODEL_INFO`` and matches each model's ``thinking`` field.
 """
@@ -169,9 +169,9 @@ def test_thinking_probe_skipped_for_image_variants():
     assert _probe("gpt-image-1") is None
 
 
-def test_thinking_probe_skipped_for_together_models():
-    """Together / non-OpenAI OpenRouter models are not OpenAI Chat Completions."""
-    assert _probe("meta-llama/Llama-3.3-70B-Instruct-Turbo") is None
+def test_thinking_probe_skipped_for_non_openai_openrouter_models():
+    """Non-OpenAI OpenRouter models are not OpenAI Chat Completions."""
+    assert _probe("openrouter/meta-llama/llama-3.3-70b-instruct") is None
     assert _probe("openrouter/anthropic/claude-sonnet-4.5") is None
     assert _probe("openrouter/google/gemini-2.5-pro") is None
 

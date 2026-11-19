@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import tempfile
 import time
 from pathlib import Path
 from types import ModuleType
@@ -37,6 +38,7 @@ from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import USER_PROMPT_HEADING
 from kiss.agents.sorcar.sea_settings import resolve_settings
 from kiss.core.brand import HOME_DIR, render_brand
+from kiss.core.kiss_tmp import kiss_tmp_dir
 from kiss.core.tool_verdict import ALLOW
 from kiss.core.utils import rmtree_force
 from kiss.tests.agents.seas.conftest import (
@@ -1104,7 +1106,7 @@ def test_agent_run_with_an_unusable_seas_dir_lists_mines_and_edits_nothing(
 
 
 def test_prepare_replay_clone_checks_out_the_state_before_the_tasks_auto_commit(
-    checkout: Path, tmp_path: Path
+    checkout: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A file-modifying task is replayed from the first parent of its auto-commit.
 
@@ -1113,11 +1115,14 @@ def test_prepare_replay_clone_checks_out_the_state_before_the_tasks_auto_commit(
     of the commit message (whitespace-insensitively, the whole prompt,
     made after the task started), repository and worktree paths in the
     task are rewritten to the clone in one pass although the clone lives
-    inside the repository, and the replay runs in the same sub-directory
-    of the clone.  A second preparation replaces the clone.
+    inside the repository (the temp dir is a folder of it here), and the
+    replay runs in the same sub-directory of the clone.  A second
+    preparation replaces the clone.
     """
-    repo = tmp_path  # the clone under tmp/rsi7d/replays is inside the repository
+    repo = tmp_path
     seed_repo(repo)
+    (repo / "os-tmp").mkdir()  # the clone, in kiss-tmp there, is inside the repository
+    monkeypatch.setattr(tempfile, "tempdir", str(repo / "os-tmp"))
     worktree = repo / ".kiss-worktrees" / "kiss_wt-gone"
     commit(repo, "seed paper", {"docs/paper.tex": "v1\n"})
     task = f"Update the paper at {worktree}/docs/paper.tex  with the results\nin {repo}/results.md"
@@ -1135,7 +1140,8 @@ def test_prepare_replay_clone_checks_out_the_state_before_the_tasks_auto_commit(
     prepared = sea.prepare_replay_clone(task_id)
     assert isinstance(prepared, dict), prepared
     clone = Path(prepared["clone"])
-    assert clone == tmp_path / sea.REPLAY_DIR / f"demo-{task_id[:8]}"
+    assert clone == kiss_tmp_dir() / "rsi7d" / sea.REPLAY_DIR / f"demo-{task_id[:8]}"
+    assert clone.is_relative_to(repo.resolve())
     assert prepared["commit"] == broader  # the earlier and the two broader commits do not match
     assert prepared["commit_source"] == f"first parent of the task's auto-commit {auto[:12]}"
     assert git(clone, "rev-parse", "HEAD") == broader
@@ -1294,8 +1300,8 @@ def test_prepare_replay_clone_reports_a_failed_git_command(
         "Describe the seed", [], work_dir=str(repo), sea="demo_sea",
         startTs=int(time.time() * 1000) + 10_000,
     )
-    replays = tmp_path / sea.REPLAY_DIR
-    replays.mkdir(parents=True)
+    replays = kiss_tmp_dir() / "rsi7d" / sea.REPLAY_DIR
+    replays.mkdir(parents=True, exist_ok=True)  # the session's temp dir is shared
     replays.chmod(0o555)  # git cannot create the clone directory
     try:
         result = sea.prepare_replay_clone(task_id)

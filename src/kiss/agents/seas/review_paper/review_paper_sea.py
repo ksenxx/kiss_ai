@@ -86,7 +86,8 @@ what to fix. Write short, natural sentences.
 
 ## The task text
 
-The task supplies the paper (PDF, .tex, .md or .txt; download a URL to `./tmp/` first).
+The task supplies the paper (PDF, .tex, .md or .txt; download a URL to `<scratch dir>/`,
+the Scratch dir of Task Settings, first).
 Pass absolute paths to `read_paper` and `check_review`: they run in the daemon process,
 not in the task's working directory. Use model names literally; never invent one.
 
@@ -163,13 +164,13 @@ candor move a paper within it, never above it.
    conversion, no claims to check), stop and report that.
 2. Read it all, appendix included, with `read_paper`, a few pages per call; open the
    linked artifact (README, listings, data) when there is one. Write
-   `./tmp/PAPER-NOTES.md`: the one-sentence statement of item 1, the claims, each
+   `<scratch dir>/PAPER-NOTES.md`: the one-sentence statement of item 1, the claims, each
    number the abstract and introduction rely on and its source, the baselines and
    whether each was rerun, the controls, runs and denominators behind the central
    claim (item 2), the artifact checks (item 5), suspected AI slop, open questions,
    and the word limit L (700, the `check_review` default, when the task names none).
 3. Search the related work before judging novelty. Write 6 to 9 queries in
-   `./tmp/information-<paper stem>.md`: three perspectives (the paper's benchmarks and
+   `<scratch dir>/information-<paper stem>.md`: three perspectives (the paper's benchmarks and
    baselines; other work on the problem; the technique in other settings) at three
    levels (the paper's phrasing; the problem in general terms; the technique in general
    terms). Run each with the web tools or `curl` through the APIs, which return compact
@@ -184,11 +185,11 @@ candor move a paper within it, never above it.
    proceedings, and the paper's citations. Log each candidate with URL, date and a
    one-line verdict; keep at least 20 distinct sources, recent and highly cited first.
    For the 5 to 8 closest, note what to look for (overlapping claim, shared baseline,
-   number to compare), download the PDF to `./tmp/` (`curl -L
+   number to compare), download the PDF to the scratch dir (`curl -L
    https://arxiv.org/pdf/<id> -o <path>`), read it with `read_paper`, and summarize it
    against the reviewed paper; the abstract suffices for the rest. Verify all cited
    arXiv ids in one Bash call. Cite no paper you could not open.
-4. Score the seven dimensions in `./tmp/PAPER-NOTES.md`, 1 to 10 each with the page,
+4. Score the seven dimensions in `<scratch dir>/PAPER-NOTES.md`, 1 to 10 each with the page,
    table or prior work that justifies it. The Summary's judgment and the venue's rating
    follow from these seven, never the reverse. Caps: no controlled comparison for the
    central claim, or an unvalidated automated judgment behind the headline number,

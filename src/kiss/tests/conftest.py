@@ -276,6 +276,10 @@ def _make_session_tmp_root() -> tuple[str | None, int | None]:
     return root, lock_fd
 
 
+_START_TMP_DIR = tempfile.gettempdir()
+"""The temp directory as the session started, before ``_make_session_tmp_root``
+re-points ``tempfile``: what must outlive the session's own root is kept under
+it (:func:`_session_durations_path`)."""
 _session_tmp_root, _session_tmp_lock_fd = _make_session_tmp_root()
 _test_kiss_home = tempfile.mkdtemp(prefix="kiss_test_")
 atexit.register(_remove_test_kiss_home, _test_kiss_home, os.getpid(), _session_tmp_root)
@@ -957,6 +961,24 @@ def _navigate_retrying_network_change(page, navigate: Callable[[], object], labe
         page.remove_listener("requestfailed", note_failed_navigation)
 
 
+def click_row_menu_item(row, control: str) -> None:
+    """Click the line *control* of the "…" menu of a Chats-panel *row*.
+
+    A chat panel's header and a task panel show one line: their buttons
+    (fold, favourite, rename, copy, delete) are the lines of a menu that
+    the row's "…" button opens (``makeSidebarRowMenu`` in
+    ``media/main.js``), so a button is clicked the way a user reaches it.
+
+    Args:
+        row: A ``playwright.sync_api.Locator`` of one
+            ``.history-chat-header`` or one ``.running-item``.
+        control: A CSS selector of the menu's button to click, e.g.
+            ``".history-chat-collapse"``.
+    """
+    row.locator(":scope > .sidebar-item-more").click()
+    row.locator(":scope > .sidebar-item-actions").locator(control).click()
+
+
 def pytest_addoption(parser):
     parser.addoption(
         "--model",
@@ -1090,20 +1112,8 @@ def has_gemini_api_key() -> bool:
     return bool(os.environ.get("GEMINI_API_KEY"))
 
 
-def has_together_api_key() -> bool:
-    return bool(os.environ.get("TOGETHER_API_KEY"))
-
-
 def has_openrouter_api_key() -> bool:
     return bool(os.environ.get("OPENROUTER_API_KEY"))
-
-
-def has_zai_api_key() -> bool:
-    return bool(os.environ.get("ZAI_API_KEY"))
-
-
-def has_moonshot_api_key() -> bool:
-    return bool(os.environ.get("MOONSHOT_API_KEY"))
 
 
 def get_required_api_key_for_model(model_name: str) -> str | None:
@@ -1159,18 +1169,8 @@ requires_anthropic_api_key = pytest.mark.skipif(
 requires_gemini_api_key = pytest.mark.skipif(
     not has_gemini_api_key(), reason="GEMINI_API_KEY environment variable not set"
 )
-requires_together_api_key = pytest.mark.skipif(
-    not has_together_api_key(), reason="TOGETHER_API_KEY environment variable not set"
-)
 requires_openrouter_api_key = pytest.mark.skipif(
     not has_openrouter_api_key(), reason="OPENROUTER_API_KEY environment variable not set"
-)
-requires_zai_api_key = pytest.mark.skipif(
-    not has_zai_api_key(), reason="ZAI_API_KEY environment variable not set"
-)
-requires_moonshot_api_key = pytest.mark.skipif(
-    not has_moonshot_api_key(),
-    reason="MOONSHOT_API_KEY environment variable not set",
 )
 
 
@@ -1483,18 +1483,43 @@ def pytest_runtest_logreport(report: pytest.TestReport) -> None:
     _test_file_seconds[path] = _test_file_seconds.get(path, 0.0) + report.duration
 
 
+def _session_durations_path() -> Path:
+    """Return the file this session's durations go to, outside the session's own temp root.
+
+    ``$KISS_TEST_DURATIONS`` as the session started, else the machine's
+    file (:func:`~kiss.scripts.durations.durations_path`).  That one is
+    in the agents' temp directory, a folder of the temp directory, and
+    the session re-pointed ``tempfile`` at a root of its own that goes
+    at exit with all that is in it (``_make_session_tmp_root``): the
+    path is taken with ``tempfile`` pointed back, for that one call, at
+    the directory the session started in.
+    """
+    from kiss.scripts.durations import durations_path
+
+    if _DURATIONS_FILE:
+        return Path(_DURATIONS_FILE)
+    session_root = tempfile.tempdir
+    tempfile.tempdir = _START_TMP_DIR
+    try:
+        return durations_path()
+    finally:
+        tempfile.tempdir = session_root
+
+
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     """Record the session's per-file durations for ``impacted-tests --splits`` to balance by.
 
-    Merged under its lock into :func:`~kiss.scripts.durations.durations_path`
-    (``$KISS_TEST_DURATIONS`` as the session started, else
-    ``tmp/test-durations.json`` of the main checkout) with what earlier
-    sessions recorded, so every split run feeds the next balance.  A
-    session that ran no test (collection only) records nothing; a file
-    the recorder cannot write is no failure of the tests.
+    Merged under its lock into the session's durations file
+    (:func:`_session_durations_path`: ``$KISS_TEST_DURATIONS`` as the
+    session started, else ``test-durations.json`` in the agents' temp
+    directory of the machine) with what earlier sessions recorded, so
+    every split run feeds the next balance.  A session that ran no test
+    (collection only) records nothing and makes no directory; a file the
+    recorder cannot write is no failure of the tests.
     """
-    from kiss.scripts.durations import durations_path, record_durations
+    from kiss.scripts.durations import record_durations
 
-    path = Path(_DURATIONS_FILE) if _DURATIONS_FILE else durations_path()
+    if not _test_file_seconds:
+        return
     with contextlib.suppress(OSError):
-        record_durations(path, _test_file_seconds)
+        record_durations(_session_durations_path(), _test_file_seconds)

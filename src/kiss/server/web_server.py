@@ -401,6 +401,14 @@ class _DrainWatch:
     takes at once (nearly every one) costs one ``call_later`` and its
     cancel, with no extra turn of the event loop.
 
+    The deadline is counted in looks, a tick each, not read off the
+    clock.  A look that runs late (a long step of the daemon's own
+    event loop, a suspended machine) tells nothing of the peer in the
+    meantime: the daemon read nothing either, and a pong the peer sent
+    at once is still in the socket.  Charging the peer that time
+    dropped a live client whose queued frames the daemon had just
+    served in one long step, having resumed reading within it.
+
     Args:
         transport: The peer's connection transport.
         timeout: Seconds the unsent bytes may stay put before the
@@ -427,7 +435,7 @@ class _DrainWatch:
         self.reply = reply
         self.tick = min(1.0, timeout / 4)
         self.unsent = -1
-        self.shrank_at = loop.time()
+        self.idle_looks = 0
         self.expired = False
         self.handle = loop.call_later(self.tick, self.look)
 
@@ -438,11 +446,13 @@ class _DrainWatch:
         now_unsent = _unsent_bytes(self.transport)
         unread = self.reply and not (self.transport.is_closing() or self.transport.is_reading())
         if now_unsent < self.unsent or unread:
-            self.shrank_at = self.loop.time()
-        elif self.loop.time() - self.shrank_at >= self.timeout:
-            self.expired = True
-            self.transport.abort()
-            return
+            self.idle_looks = 0
+        else:
+            self.idle_looks += 1
+            if self.idle_looks * self.tick >= self.timeout:
+                self.expired = True
+                self.transport.abort()
+                return
         self.unsent = now_unsent
         self.handle = self.loop.call_later(self.tick, self.look)
 
@@ -3425,6 +3435,9 @@ class WebPrinter(JsonPrinter):
         # The peers (of any set above) that join the parts of a big
         # frame; see ``add_client`` and ``_timed_send``.
         self._parts_clients: set[ServerConnection] = set()
+        # The connections of the chat pages, and whether each loads
+        # transcripts in pieces (:meth:`note_page`).
+        self._pages: dict[str, bool] = {}
         # Which local connection addressed which tab ids (keyed by
         # connection id); see ``register_local_tab``.
         self._local_tab_sets: dict[str, set[str]] = {}
@@ -4365,6 +4378,39 @@ class WebPrinter(JsonPrinter):
         """
         with self._ws_lock:
             self._conn_endpoints.pop(conn_id, None)
+            self._pages.pop(conn_id, None)
+
+    def note_page(self, conn_id: str, lazy: bool) -> None:
+        """Record how the chat page on *conn_id* loads transcripts.
+
+        A page says so with its ``ready``, and stays that page for as
+        long as it is connected.
+
+        Args:
+            conn_id: The connection the ``ready`` came on.
+            lazy: The page loads transcripts in pieces (the ``ready``'s
+                ``lazy``).
+        """
+        with self._ws_lock:
+            self._pages[conn_id] = lazy
+
+    def others_load_lazily(self, conn_id: str) -> bool:
+        """Whether every chat page connected but *conn_id*'s loads transcripts in pieces.
+
+        A replay that is broadcast is one frame for every page showing
+        the tab, so it can only leave out what each of them knows to
+        ask for (:mod:`kiss.server.lazy_replay`): a page of an older
+        version would show a task without its panels.  Only pages
+        count (the connections that sent a ``ready``): a
+        ``daemon_client`` run reads the replays it asked for and no
+        other, and a daemon relaying a tab to its own pages settles
+        what they are sent itself (``ServerApi._settle_lazy`` there).
+
+        Args:
+            conn_id: The connection that asks for the replay.
+        """
+        with self._ws_lock:
+            return all(lazy for other, lazy in self._pages.items() if other != conn_id)
 
     def _discard_pending_send(
         self, client: ServerConnection, charge: int, fut: ConcurrentFuture[None],
@@ -4451,313 +4497,326 @@ def _media_fingerprint(path: Path) -> tuple[int, int, int, int]:
 
 
 _FONT_VARS_CSS = (
-    # VS Code's workbench font (src/vs/base/browser/fonts.ts
-    # DEFAULT_FONT_FAMILY) is chosen per platform; the browser cannot
-    # know which VS Code build the user runs, so the stack lists the
-    # macOS, Windows and Linux choices in turn.  Same for the editor
-    # font (src/vs/editor/common/config/fontInfo.ts
-    # EDITOR_FONT_DEFAULTS).  Both sizes are 13px: the workbench size
-    # VS Code gives its webviews and the base of Cursor's UI type scale
-    # (Cursor 3.23 workbench.glass.main.css: 13px / 18px line height),
-    # which main.css builds on; the editor size matches it because an
-    # earlier request made the chat text match the task panel, which
-    # sizes itself with --theme-editor-font-size.
+    # The type of the Claude apps (claude.ai's design system, which
+    # Claude Code Desktop is built on).  Their own faces, Anthropic Sans
+    # and Anthropic Mono, are proprietary web fonts, so these are the
+    # fallback chains those apps declare after them: the platform system
+    # font for the UI and the platform monospace for code.  13px is the
+    # size of the app's sidebar and composer and the base of main.css's
+    # type scale (the transcript's prose is one step up, 14px).
     "      --theme-font-size: 13px;\n"
-    "      --theme-font-family: -apple-system, BlinkMacSystemFont, "
-    '"Segoe WPC", "Segoe UI", system-ui, "Ubuntu", "Droid Sans", '
-    "sans-serif;\n"
-    "      --theme-editor-font-size: 13px;\n"
-    '      --theme-editor-font-family: Menlo, Monaco, Consolas, '
-    '"Droid Sans Mono", "Courier New", monospace;\n'
+    "      --theme-font-family: system-ui, -apple-system, "
+    '"Segoe UI", Roboto, Helvetica, Arial, sans-serif;\n'
+    "      --theme-editor-font-family: ui-monospace, SFMono-Regular, "
+    'Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", '
+    "monospace;\n"
 )
-"""VS Code's default fonts as ``--theme-*`` variables."""
+"""The Claude apps' fallback font stacks as ``--theme-*`` variables."""
 
-_DARK_MODERN_CSS = (
-    # extensions/theme-defaults/themes/dark_modern.json, plus the
-    # colour-registry defaults it inherits (list.*, terminal.ansi*,
-    # widget.shadow, toolbar.hoverBackground, editorWarning.foreground,
-    # charts.*: platform/theme/common/colors/chartsColors.ts).
-    "      --theme-foreground: #cccccc;\n"
-    "      --theme-descriptionForeground: #9d9d9d;\n"
-    "      --theme-errorForeground: #f85149;\n"
-    "      --theme-icon-foreground: #cccccc;\n"
-    "      --theme-focusBorder: #0078d4;\n"
-    "      --theme-editor-background: #1f1f1f;\n"
-    "      --theme-editor-foreground: #cccccc;\n"
-    "      --theme-editor-selectionBackground: #264f78;\n"
-    "      --theme-editor-inactiveSelectionBackground: #3a3d41;\n"
-    "      --theme-editor-selectionHighlightBackground: #add6ff26;\n"
-    "      --theme-editorLineNumber-foreground: #6e7681;\n"
-    "      --theme-editorLineNumber-activeForeground: #cccccc;\n"
-    "      --theme-editorWidget-background: #202020;\n"
-    "      --theme-editorWarning-foreground: #cca700;\n"
-    "      --theme-sideBar-background: #181818;\n"
-    "      --theme-sideBar-border: #2b2b2b;\n"
-    "      --theme-panel-border: #2b2b2b;\n"
-    "      --theme-widget-border: #313131;\n"
-    "      --theme-widget-shadow: #0000005c;\n"
-    "      --theme-editorGroupHeader-tabsBackground: #2b2b2b;\n"
+_DARK_THEME_CSS = (
+    # Claude Code Desktop's dark look: a near-black canvas (#0b0b0b)
+    # with panels one shade up (#151515) and raised surfaces - composer,
+    # menus, dialogs - two shades up (#1f1f1f); hairlines and hover
+    # fills are white at low alpha instead of fixed greys, so they read
+    # the same on every surface; text in three steps (#f0efec, #9c9a92,
+    # #898781); ONE accent blue (#4d9fff) for links, focus and
+    # selection; a near-white primary button; inline code in the
+    # app's soft red (textPreformat-foreground).  The values are the
+    # tokens of claude.ai's design system and of the app's replica on
+    # claude.com/product/claude-code, checked against screen recordings
+    # of the app.  The variable names are the ones the page's
+    # stylesheets and Monaco already read.
+    "      --theme-foreground: #f0efec;\n"
+    "      --theme-descriptionForeground: #9c9a92;\n"
+    "      --theme-errorForeground: #ff5a5a;\n"
+    "      --theme-icon-foreground: #c3c2b7;\n"
+    "      --theme-focusBorder: #4d9fff;\n"
+    "      --theme-editor-background: #0b0b0b;\n"
+    "      --theme-editor-foreground: #f0efec;\n"
+    "      --theme-editor-selectionBackground: #1d3d63;\n"
+    "      --theme-editor-inactiveSelectionBackground: #2a2a2a;\n"
+    "      --theme-editor-selectionHighlightBackground: #4d9fff26;\n"
+    "      --theme-editorLineNumber-foreground: #727272;\n"
+    "      --theme-editorLineNumber-activeForeground: #f0efec;\n"
+    "      --theme-editorWidget-background: #1f1f1f;\n"
+    "      --theme-editorWarning-foreground: #e3c07b;\n"
+    "      --theme-sideBar-background: #151515;\n"
+    "      --theme-sideBar-border: #ffffff14;\n"
+    "      --theme-panel-border: #ffffff1a;\n"
+    "      --theme-widget-border: #ffffff1a;\n"
+    "      --theme-widget-shadow: #00000073;\n"
+    "      --theme-editorGroupHeader-tabsBackground: #0b0b0b;\n"
     "      --theme-tab-activeForeground: #ffffff;\n"
-    "      --theme-tab-inactiveForeground: #9d9d9d;\n"
-    "      --theme-tab-activeBorderTop: #0078d4;\n"
-    "      --theme-list-hoverBackground: #2a2d2e;\n"
-    "      --theme-list-inactiveSelectionBackground: #37373d;\n"
-    "      --theme-input-background: #313131;\n"
-    "      --theme-input-foreground: #cccccc;\n"
-    "      --theme-input-border: #3c3c3c;\n"
-    "      --theme-input-placeholderForeground: #989898;\n"
-    "      --theme-button-background: #0078d4;\n"
-    "      --theme-button-foreground: #ffffff;\n"
-    "      --theme-button-hoverBackground: #026ec1;\n"
-    "      --theme-button-secondaryBackground: #00000000;\n"
-    "      --theme-button-secondaryForeground: #cccccc;\n"
-    "      --theme-button-secondaryHoverBackground: #2b2b2b;\n"
-    "      --theme-textLink-foreground: #4daafc;\n"
-    "      --theme-textLink-activeForeground: #4daafc;\n"
-    "      --theme-textCodeBlock-background: #2b2b2b;\n"
-    "      --theme-textPreformat-foreground: #d0d0d0;\n"
+    "      --theme-tab-inactiveForeground: #9c9a92;\n"
+    "      --theme-tab-activeBorderTop: #ffffff26;\n"
+    "      --theme-list-hoverBackground: #ffffff13;\n"
+    "      --theme-list-inactiveSelectionBackground: #ffffff26;\n"
+    "      --theme-input-background: #1f1f1f;\n"
+    "      --theme-input-foreground: #f0efec;\n"
+    "      --theme-input-border: #ffffff26;\n"
+    "      --theme-input-placeholderForeground: #898781;\n"
+    "      --theme-button-background: #efefef;\n"
+    "      --theme-button-foreground: #0b0b0b;\n"
+    "      --theme-button-hoverBackground: #d7d7d7;\n"
+    "      --theme-button-secondaryBackground: #ffffff26;\n"
+    "      --theme-button-secondaryForeground: #f0efec;\n"
+    "      --theme-button-secondaryHoverBackground: #ffffff36;\n"
+    "      --theme-textLink-foreground: #4d9fff;\n"
+    "      --theme-textLink-activeForeground: #6aabf1;\n"
+    "      --theme-textCodeBlock-background: #151515;\n"
+    "      --theme-textPreformat-foreground: #fa8080;\n"
     "      --theme-menu-background: #1f1f1f;\n"
-    "      --theme-menu-selectionBackground: #0078d4;\n"
-    "      --theme-toolbar-hoverBackground: #5a5d5e50;\n"
-    "      --theme-scrollbarSlider-background: #79797966;\n"
-    "      --theme-terminal-foreground: #cccccc;\n"
-    "      --theme-terminal-ansiBlack: #000000;\n"
-    "      --theme-terminal-ansiRed: #cd3131;\n"
-    "      --theme-terminal-ansiGreen: #0dbc79;\n"
-    "      --theme-terminal-ansiYellow: #e5e510;\n"
-    "      --theme-terminal-ansiBlue: #2472c8;\n"
-    "      --theme-terminal-ansiMagenta: #bc3fbc;\n"
-    "      --theme-terminal-ansiCyan: #11a8cd;\n"
-    "      --theme-terminal-ansiWhite: #e5e5e5;\n"
-    "      --theme-terminal-ansiBrightBlack: #666666;\n"
-    "      --theme-terminal-ansiBrightRed: #f14c4c;\n"
-    "      --theme-terminal-ansiBrightGreen: #23d18b;\n"
-    "      --theme-terminal-ansiBrightYellow: #f5f543;\n"
-    "      --theme-terminal-ansiBrightBlue: #3b8eea;\n"
-    "      --theme-terminal-ansiBrightMagenta: #d670d6;\n"
-    "      --theme-terminal-ansiBrightCyan: #29b8db;\n"
-    "      --theme-terminal-ansiBrightWhite: #e5e5e5;\n"
-    "      --theme-charts-green: #89d185;\n"
-    "      --theme-charts-red: #f14c4c;\n"
-    "      --theme-charts-yellow: #cca700;\n"
-    "      --theme-charts-purple: #b180d7;\n"
+    "      --theme-menu-selectionBackground: #ffffff26;\n"
+    "      --theme-toolbar-hoverBackground: #ffffff1a;\n"
+    "      --theme-scrollbarSlider-background: #ffffff33;\n"
+    "      --theme-terminal-foreground: #c3c2b7;\n"
+    "      --theme-terminal-ansiBlack: #1f1f1f;\n"
+    "      --theme-terminal-ansiRed: #ff5a5a;\n"
+    "      --theme-terminal-ansiGreen: #4cc38a;\n"
+    "      --theme-terminal-ansiYellow: #e3c07b;\n"
+    "      --theme-terminal-ansiBlue: #4d9fff;\n"
+    "      --theme-terminal-ansiMagenta: #b796ff;\n"
+    "      --theme-terminal-ansiCyan: #5ac8d8;\n"
+    "      --theme-terminal-ansiWhite: #c3c2b7;\n"
+    "      --theme-terminal-ansiBrightBlack: #727272;\n"
+    "      --theme-terminal-ansiBrightRed: #ff8d77;\n"
+    "      --theme-terminal-ansiBrightGreen: #6fd6a3;\n"
+    "      --theme-terminal-ansiBrightYellow: #f0d28f;\n"
+    "      --theme-terminal-ansiBrightBlue: #7ab8ff;\n"
+    "      --theme-terminal-ansiBrightMagenta: #c8a6ff;\n"
+    "      --theme-terminal-ansiBrightCyan: #86dbe8;\n"
+    "      --theme-terminal-ansiBrightWhite: #ffffff;\n"
+    "      --theme-charts-green: #4cc38a;\n"
+    "      --theme-charts-red: #ff5a5a;\n"
+    "      --theme-charts-yellow: #e3c07b;\n"
+    "      --theme-charts-purple: #b796ff;\n"
 )
-"""VS Code's "Dark Modern" theme as ``--theme-*`` variables."""
+"""Claude Code Desktop's dark palette as ``--theme-*`` variables."""
 
-_LIGHT_MODERN_CSS = (
-    # extensions/theme-defaults/themes/light_modern.json and the
-    # colour-registry light defaults, one line per Dark Modern line.
-    "      --theme-foreground: #3b3b3b;\n"
-    "      --theme-descriptionForeground: #3b3b3b;\n"
-    "      --theme-errorForeground: #f85149;\n"
-    "      --theme-icon-foreground: #3b3b3b;\n"
-    "      --theme-focusBorder: #005fb8;\n"
-    "      --theme-editor-background: #ffffff;\n"
-    "      --theme-editor-foreground: #3b3b3b;\n"
-    "      --theme-editor-selectionBackground: #add6ff;\n"
-    "      --theme-editor-inactiveSelectionBackground: #e5ebf1;\n"
-    "      --theme-editor-selectionHighlightBackground: #add6ff80;\n"
-    "      --theme-editorLineNumber-foreground: #6e7681;\n"
-    "      --theme-editorLineNumber-activeForeground: #171184;\n"
-    "      --theme-editorWidget-background: #f8f8f8;\n"
-    "      --theme-editorWarning-foreground: #bf8803;\n"
-    "      --theme-sideBar-background: #f8f8f8;\n"
-    "      --theme-sideBar-border: #e5e5e5;\n"
-    "      --theme-panel-border: #e5e5e5;\n"
-    "      --theme-widget-border: #e5e5e5;\n"
-    "      --theme-widget-shadow: #00000029;\n"
-    "      --theme-editorGroupHeader-tabsBackground: #e5e5e5;\n"
-    "      --theme-tab-activeForeground: #3b3b3b;\n"
-    "      --theme-tab-inactiveForeground: #616161;\n"
-    "      --theme-tab-activeBorderTop: #005fb8;\n"
-    "      --theme-list-hoverBackground: #f2f2f2;\n"
-    "      --theme-list-inactiveSelectionBackground: #e4e6f1;\n"
+_LIGHT_THEME_CSS = (
+    # Claude Code Desktop's light look, one line per dark line: an
+    # off-white canvas (#fafafa) with panels a shade down (#f5f5f3) and
+    # white raised surfaces; hairlines and hover fills are near-black
+    # (#0b0b0b) at low alpha; text #0b0b0b / #5e5d59 / #6e6d67, the two
+    # secondary steps dark enough for the tinted side panels and the
+    # sunken tool card (6.04:1 and 4.75:1 on #f5f5f3, 5.78:1 and 4.55:1
+    # on the card); the accent blue is #1f6fe5 and the primary button
+    # near-black.
+    "      --theme-foreground: #0b0b0b;\n"
+    "      --theme-descriptionForeground: #5e5d59;\n"
+    "      --theme-errorForeground: #c83839;\n"
+    "      --theme-icon-foreground: #52514e;\n"
+    "      --theme-focusBorder: #1f6fe5;\n"
+    "      --theme-editor-background: #fafafa;\n"
+    "      --theme-editor-foreground: #0b0b0b;\n"
+    "      --theme-editor-selectionBackground: #cde2fb;\n"
+    "      --theme-editor-inactiveSelectionBackground: #e8e8e6;\n"
+    "      --theme-editor-selectionHighlightBackground: #1f6fe526;\n"
+    "      --theme-editorLineNumber-foreground: #9a9a9a;\n"
+    "      --theme-editorLineNumber-activeForeground: #0b0b0b;\n"
+    "      --theme-editorWidget-background: #ffffff;\n"
+    "      --theme-editorWarning-foreground: #9a6700;\n"
+    "      --theme-sideBar-background: #f5f5f3;\n"
+    "      --theme-sideBar-border: #0b0b0b14;\n"
+    "      --theme-panel-border: #0b0b0b1a;\n"
+    "      --theme-widget-border: #0b0b0b1a;\n"
+    "      --theme-widget-shadow: #00000026;\n"
+    "      --theme-editorGroupHeader-tabsBackground: #fafafa;\n"
+    "      --theme-tab-activeForeground: #0b0b0b;\n"
+    "      --theme-tab-inactiveForeground: #5e5d59;\n"
+    "      --theme-tab-activeBorderTop: #0b0b0b26;\n"
+    "      --theme-list-hoverBackground: #0b0b0b0d;\n"
+    "      --theme-list-inactiveSelectionBackground: #0b0b0b14;\n"
     "      --theme-input-background: #ffffff;\n"
-    "      --theme-input-foreground: #3b3b3b;\n"
-    "      --theme-input-border: #cecece;\n"
-    "      --theme-input-placeholderForeground: #767676;\n"
-    "      --theme-button-background: #005fb8;\n"
+    "      --theme-input-foreground: #0b0b0b;\n"
+    "      --theme-input-border: #0b0b0b26;\n"
+    "      --theme-input-placeholderForeground: #6e6d67;\n"
+    "      --theme-button-background: #191919;\n"
     "      --theme-button-foreground: #ffffff;\n"
-    "      --theme-button-hoverBackground: #0258a8;\n"
-    "      --theme-button-secondaryBackground: #e5e5e5;\n"
-    "      --theme-button-secondaryForeground: #3b3b3b;\n"
-    "      --theme-button-secondaryHoverBackground: #cccccc;\n"
-    "      --theme-textLink-foreground: #005fb8;\n"
-    "      --theme-textLink-activeForeground: #005fb8;\n"
-    "      --theme-textCodeBlock-background: #f8f8f8;\n"
-    "      --theme-textPreformat-foreground: #3b3b3b;\n"
+    "      --theme-button-hoverBackground: #3c3c3c;\n"
+    "      --theme-button-secondaryBackground: #0b0b0b0d;\n"
+    "      --theme-button-secondaryForeground: #0b0b0b;\n"
+    "      --theme-button-secondaryHoverBackground: #0b0b0b14;\n"
+    "      --theme-textLink-foreground: #1f6fe5;\n"
+    "      --theme-textLink-activeForeground: #1757ac;\n"
+    "      --theme-textCodeBlock-background: #f4f4f2;\n"
+    "      --theme-textPreformat-foreground: #a42528;\n"
     "      --theme-menu-background: #ffffff;\n"
-    "      --theme-menu-selectionBackground: #005fb8;\n"
-    "      --theme-toolbar-hoverBackground: #b8b8b850;\n"
-    "      --theme-scrollbarSlider-background: #64646466;\n"
-    "      --theme-terminal-foreground: #3b3b3b;\n"
-    "      --theme-terminal-ansiBlack: #000000;\n"
-    "      --theme-terminal-ansiRed: #cd3131;\n"
-    "      --theme-terminal-ansiGreen: #107c10;\n"
-    "      --theme-terminal-ansiYellow: #949800;\n"
-    "      --theme-terminal-ansiBlue: #0451a5;\n"
-    "      --theme-terminal-ansiMagenta: #bc05bc;\n"
-    "      --theme-terminal-ansiCyan: #0598bc;\n"
-    "      --theme-terminal-ansiWhite: #555555;\n"
-    "      --theme-terminal-ansiBrightBlack: #666666;\n"
-    "      --theme-terminal-ansiBrightRed: #f14c4c;\n"
-    "      --theme-terminal-ansiBrightGreen: #14ce14;\n"
-    "      --theme-terminal-ansiBrightYellow: #b5ba00;\n"
-    "      --theme-terminal-ansiBrightBlue: #3b8eea;\n"
-    "      --theme-terminal-ansiBrightMagenta: #d670d6;\n"
-    "      --theme-terminal-ansiBrightCyan: #29b8db;\n"
-    "      --theme-terminal-ansiBrightWhite: #a5a5a5;\n"
-    "      --theme-charts-green: #388a34;\n"
-    "      --theme-charts-red: #e51400;\n"
-    "      --theme-charts-yellow: #bf8803;\n"
-    "      --theme-charts-purple: #652d90;\n"
+    "      --theme-menu-selectionBackground: #0b0b0b14;\n"
+    "      --theme-toolbar-hoverBackground: #0b0b0b0f;\n"
+    "      --theme-scrollbarSlider-background: #0b0b0b33;\n"
+    "      --theme-terminal-foreground: #3d3d3a;\n"
+    "      --theme-terminal-ansiBlack: #0b0b0b;\n"
+    "      --theme-terminal-ansiRed: #c83839;\n"
+    "      --theme-terminal-ansiGreen: #2d8a4e;\n"
+    "      --theme-terminal-ansiYellow: #9a6700;\n"
+    "      --theme-terminal-ansiBlue: #1f6fe5;\n"
+    "      --theme-terminal-ansiMagenta: #8e6bd9;\n"
+    "      --theme-terminal-ansiCyan: #0f7b8a;\n"
+    "      --theme-terminal-ansiWhite: #73726c;\n"
+    "      --theme-terminal-ansiBrightBlack: #52514e;\n"
+    "      --theme-terminal-ansiBrightRed: #e5484d;\n"
+    "      --theme-terminal-ansiBrightGreen: #3aa35f;\n"
+    "      --theme-terminal-ansiBrightYellow: #b07d00;\n"
+    "      --theme-terminal-ansiBrightBlue: #4d8ff0;\n"
+    "      --theme-terminal-ansiBrightMagenta: #9775fa;\n"
+    "      --theme-terminal-ansiBrightCyan: #1794a6;\n"
+    "      --theme-terminal-ansiBrightWhite: #9a9a9a;\n"
+    "      --theme-charts-green: #2d8a4e;\n"
+    "      --theme-charts-red: #e5484d;\n"
+    "      --theme-charts-yellow: #9a6700;\n"
+    "      --theme-charts-purple: #8e6bd9;\n"
 )
-"""VS Code's "Light Modern" theme as ``--theme-*`` variables."""
+"""Claude Code Desktop's light palette as ``--theme-*`` variables."""
 
 _DARK_HIGH_CONTRAST_CSS = (
-    # Cursor's "Cursor Dark High Contrast" workbench colours (the theme
-    # Cursor ships on VS Code's hc-black base): a near-black canvas,
-    # near-white text, solid light borders instead of shading, slate
-    # buttons and the Nord status hues.
-    "      --theme-foreground: #f0f0f0;\n"
-    "      --theme-descriptionForeground: #f0f0f099;\n"
-    "      --theme-errorForeground: #ff0000;\n"
-    "      --theme-icon-foreground: #f0f0f0;\n"
-    "      --theme-focusBorder: #f0f0f0;\n"
-    "      --theme-editor-background: #0a0a0a;\n"
-    "      --theme-editor-foreground: #f0f0f0;\n"
-    "      --theme-editor-selectionBackground: #434c5e;\n"
-    "      --theme-editor-inactiveSelectionBackground: #40404099;\n"
-    "      --theme-editor-selectionHighlightBackground: #88c0d04d;\n"
-    "      --theme-editorLineNumber-foreground: #f0f0f099;\n"
-    "      --theme-editorLineNumber-activeForeground: #f0f0f0;\n"
-    "      --theme-editorWidget-background: #1a1a1a;\n"
-    "      --theme-editorWarning-foreground: #ebcb8b;\n"
-    "      --theme-sideBar-background: #0a0a0a;\n"
-    "      --theme-sideBar-border: #f0f0f066;\n"
-    "      --theme-panel-border: #f0f0f066;\n"
-    "      --theme-widget-border: #f0f0f0;\n"
+    # The dark palette at full contrast, one line per line of
+    # _DARK_THEME_CSS: a black canvas with white text, solid white
+    # borders in place of the low-alpha hairlines, no shadows (the
+    # borders separate the surfaces) and the brighter step of each of
+    # the dark palette's hues.  Every text colour reaches a contrast of
+    # at least 7:1 on the canvas (WCAG AAA); the primary button stays
+    # the dark look's white fill with black text.
+    "      --theme-foreground: #ffffff;\n"
+    "      --theme-descriptionForeground: #ffffffcc;\n"
+    "      --theme-errorForeground: #ff8080;\n"
+    "      --theme-icon-foreground: #ffffff;\n"
+    "      --theme-focusBorder: #7ab8ff;\n"
+    "      --theme-editor-background: #000000;\n"
+    "      --theme-editor-foreground: #ffffff;\n"
+    "      --theme-editor-selectionBackground: #1757ac;\n"
+    "      --theme-editor-inactiveSelectionBackground: #ffffff33;\n"
+    "      --theme-editor-selectionHighlightBackground: #7ab8ff4d;\n"
+    "      --theme-editorLineNumber-foreground: #ffffffb3;\n"
+    "      --theme-editorLineNumber-activeForeground: #ffffff;\n"
+    "      --theme-editorWidget-background: #0b0b0b;\n"
+    "      --theme-editorWarning-foreground: #f0d28f;\n"
+    "      --theme-sideBar-background: #000000;\n"
+    "      --theme-sideBar-border: #ffffff8c;\n"
+    "      --theme-panel-border: #ffffff8c;\n"
+    "      --theme-widget-border: #ffffff;\n"
     "      --theme-widget-shadow: #00000000;\n"
-    "      --theme-editorGroupHeader-tabsBackground: #0a0a0a;\n"
+    "      --theme-editorGroupHeader-tabsBackground: #000000;\n"
     "      --theme-tab-activeForeground: #ffffff;\n"
-    "      --theme-tab-inactiveForeground: #f0f0f0bd;\n"
-    "      --theme-tab-activeBorderTop: #88c0d0;\n"
-    "      --theme-list-hoverBackground: #2a2a2a;\n"
-    "      --theme-list-inactiveSelectionBackground: #2a2a2a;\n"
+    "      --theme-tab-inactiveForeground: #ffffffcc;\n"
+    "      --theme-tab-activeBorderTop: #ffffff;\n"
+    "      --theme-list-hoverBackground: #ffffff26;\n"
+    "      --theme-list-inactiveSelectionBackground: #ffffff40;\n"
     "      --theme-input-background: #000000;\n"
-    "      --theme-input-foreground: #f0f0f0;\n"
-    "      --theme-input-border: #f0f0f0;\n"
-    "      --theme-input-placeholderForeground: #f0f0f099;\n"
-    "      --theme-button-background: #434c5e;\n"
-    "      --theme-button-foreground: #eceff4;\n"
-    "      --theme-button-hoverBackground: #4c566a;\n"
+    "      --theme-input-foreground: #ffffff;\n"
+    "      --theme-input-border: #ffffff;\n"
+    "      --theme-input-placeholderForeground: #ffffffb3;\n"
+    "      --theme-button-background: #ffffff;\n"
+    "      --theme-button-foreground: #000000;\n"
+    "      --theme-button-hoverBackground: #d7d7d7;\n"
     "      --theme-button-secondaryBackground: #000000;\n"
-    "      --theme-button-secondaryForeground: #f0f0f0;\n"
-    "      --theme-button-secondaryHoverBackground: #2a2a2a;\n"
-    "      --theme-textLink-foreground: #88c0d0;\n"
-    "      --theme-textLink-activeForeground: #f0f0f0;\n"
-    "      --theme-textCodeBlock-background: #1a1a1a;\n"
-    "      --theme-textPreformat-foreground: #f0f0f0;\n"
-    "      --theme-menu-background: #0a0a0a;\n"
-    "      --theme-menu-selectionBackground: #434c5e;\n"
-    "      --theme-toolbar-hoverBackground: #2a2a2a;\n"
-    "      --theme-scrollbarSlider-background: #f0f0f066;\n"
-    "      --theme-terminal-foreground: #f0f0f0;\n"
-    "      --theme-terminal-ansiBlack: #2a2a2a;\n"
-    "      --theme-terminal-ansiRed: #bf616a;\n"
-    "      --theme-terminal-ansiGreen: #a3be8c;\n"
-    "      --theme-terminal-ansiYellow: #ebcb8b;\n"
-    "      --theme-terminal-ansiBlue: #81a1c1;\n"
-    "      --theme-terminal-ansiMagenta: #b48ead;\n"
-    "      --theme-terminal-ansiCyan: #88c0d0;\n"
-    "      --theme-terminal-ansiWhite: #f0f0f0;\n"
-    "      --theme-terminal-ansiBrightBlack: #f0f0f099;\n"
-    "      --theme-terminal-ansiBrightRed: #d08770;\n"
-    "      --theme-terminal-ansiBrightGreen: #a3be8c;\n"
-    "      --theme-terminal-ansiBrightYellow: #ebcb8b;\n"
-    "      --theme-terminal-ansiBrightBlue: #81a1c1;\n"
-    "      --theme-terminal-ansiBrightMagenta: #b48ead;\n"
-    "      --theme-terminal-ansiBrightCyan: #8fbcbb;\n"
+    "      --theme-button-secondaryForeground: #ffffff;\n"
+    "      --theme-button-secondaryHoverBackground: #ffffff26;\n"
+    "      --theme-textLink-foreground: #7ab8ff;\n"
+    "      --theme-textLink-activeForeground: #a8d1ff;\n"
+    "      --theme-textCodeBlock-background: #0b0b0b;\n"
+    "      --theme-textPreformat-foreground: #ffffff;\n"
+    "      --theme-menu-background: #0b0b0b;\n"
+    "      --theme-menu-selectionBackground: #ffffff40;\n"
+    "      --theme-toolbar-hoverBackground: #ffffff33;\n"
+    "      --theme-scrollbarSlider-background: #ffffff80;\n"
+    "      --theme-terminal-foreground: #ffffff;\n"
+    "      --theme-terminal-ansiBlack: #3d3d3a;\n"
+    "      --theme-terminal-ansiRed: #ff8080;\n"
+    "      --theme-terminal-ansiGreen: #6fd6a3;\n"
+    "      --theme-terminal-ansiYellow: #f0d28f;\n"
+    "      --theme-terminal-ansiBlue: #7ab8ff;\n"
+    "      --theme-terminal-ansiMagenta: #c8a6ff;\n"
+    "      --theme-terminal-ansiCyan: #86dbe8;\n"
+    "      --theme-terminal-ansiWhite: #ffffff;\n"
+    "      --theme-terminal-ansiBrightBlack: #b3b3b3;\n"
+    "      --theme-terminal-ansiBrightRed: #ffa59e;\n"
+    "      --theme-terminal-ansiBrightGreen: #6fd6a3;\n"
+    "      --theme-terminal-ansiBrightYellow: #f0d28f;\n"
+    "      --theme-terminal-ansiBrightBlue: #a8d1ff;\n"
+    "      --theme-terminal-ansiBrightMagenta: #c8a6ff;\n"
+    "      --theme-terminal-ansiBrightCyan: #86dbe8;\n"
     "      --theme-terminal-ansiBrightWhite: #ffffff;\n"
-    "      --theme-charts-green: #a3be8c;\n"
-    "      --theme-charts-red: #ff5c5c;\n"
-    "      --theme-charts-yellow: #ebcb8b;\n"
-    "      --theme-charts-purple: #b48ead;\n"
+    "      --theme-charts-green: #6fd6a3;\n"
+    "      --theme-charts-red: #ff8080;\n"
+    "      --theme-charts-yellow: #f0d28f;\n"
+    "      --theme-charts-purple: #c8a6ff;\n"
 )
-"""Cursor's "Dark High Contrast" theme as ``--theme-*`` variables."""
+"""The dark palette at full contrast as ``--theme-*`` variables."""
 
 _LIGHT_HIGH_CONTRAST_CSS = (
-    # Cursor ships no light high-contrast theme, so this is Cursor
-    # Light's hues (its #0064b0 link blue, #007041 green, #be1744 red,
-    # #a46700 amber) on a pure white canvas with black text and solid
-    # dark borders, following VS Code's Light High Contrast conventions
-    # (#0f4a85 focus and contrast border).
+    # The light palette at full contrast, one line per line of
+    # _LIGHT_THEME_CSS: a white canvas with black text, solid black
+    # borders, no shadows and the darker step of each of the light
+    # palette's hues, each at a contrast of at least 7:1 on the canvas
+    # (WCAG AAA); the primary button stays the light look's black fill
+    # with white text.
     "      --theme-foreground: #000000;\n"
-    "      --theme-descriptionForeground: #000000bd;\n"
-    "      --theme-errorForeground: #b5200d;\n"
+    "      --theme-descriptionForeground: #000000cc;\n"
+    "      --theme-errorForeground: #a8201f;\n"
     "      --theme-icon-foreground: #000000;\n"
-    "      --theme-focusBorder: #0f4a85;\n"
+    "      --theme-focusBorder: #144c96;\n"
     "      --theme-editor-background: #ffffff;\n"
     "      --theme-editor-foreground: #000000;\n"
-    "      --theme-editor-selectionBackground: #0f4a8540;\n"
-    "      --theme-editor-inactiveSelectionBackground: #0f4a8520;\n"
-    "      --theme-editor-selectionHighlightBackground: #0f4a8530;\n"
-    "      --theme-editorLineNumber-foreground: #000000bd;\n"
+    "      --theme-editor-selectionBackground: #144c9640;\n"
+    "      --theme-editor-inactiveSelectionBackground: #00000026;\n"
+    "      --theme-editor-selectionHighlightBackground: #144c9633;\n"
+    "      --theme-editorLineNumber-foreground: #000000b3;\n"
     "      --theme-editorLineNumber-activeForeground: #000000;\n"
     "      --theme-editorWidget-background: #ffffff;\n"
-    "      --theme-editorWarning-foreground: #a46700;\n"
+    "      --theme-editorWarning-foreground: #6b4a00;\n"
     "      --theme-sideBar-background: #ffffff;\n"
-    "      --theme-sideBar-border: #0f4a85;\n"
-    "      --theme-panel-border: #0f4a85;\n"
-    "      --theme-widget-border: #0f4a85;\n"
+    "      --theme-sideBar-border: #0000008c;\n"
+    "      --theme-panel-border: #0000008c;\n"
+    "      --theme-widget-border: #000000;\n"
     "      --theme-widget-shadow: #00000000;\n"
     "      --theme-editorGroupHeader-tabsBackground: #ffffff;\n"
     "      --theme-tab-activeForeground: #000000;\n"
-    "      --theme-tab-inactiveForeground: #000000bd;\n"
-    "      --theme-tab-activeBorderTop: #0f4a85;\n"
-    "      --theme-list-hoverBackground: #0f4a851a;\n"
-    "      --theme-list-inactiveSelectionBackground: #0f4a8526;\n"
+    "      --theme-tab-inactiveForeground: #000000cc;\n"
+    "      --theme-tab-activeBorderTop: #000000;\n"
+    "      --theme-list-hoverBackground: #0000001a;\n"
+    "      --theme-list-inactiveSelectionBackground: #00000026;\n"
     "      --theme-input-background: #ffffff;\n"
     "      --theme-input-foreground: #000000;\n"
-    "      --theme-input-border: #0f4a85;\n"
-    "      --theme-input-placeholderForeground: #000000bd;\n"
-    "      --theme-button-background: #0f4a85;\n"
+    "      --theme-input-border: #000000;\n"
+    "      --theme-input-placeholderForeground: #000000b3;\n"
+    "      --theme-button-background: #000000;\n"
     "      --theme-button-foreground: #ffffff;\n"
-    "      --theme-button-hoverBackground: #0064b0;\n"
+    "      --theme-button-hoverBackground: #3c3c3c;\n"
     "      --theme-button-secondaryBackground: #ffffff;\n"
     "      --theme-button-secondaryForeground: #000000;\n"
-    "      --theme-button-secondaryHoverBackground: #0f4a851a;\n"
-    "      --theme-textLink-foreground: #0064b0;\n"
-    "      --theme-textLink-activeForeground: #0f4a85;\n"
+    "      --theme-button-secondaryHoverBackground: #0000001a;\n"
+    "      --theme-textLink-foreground: #144c96;\n"
+    "      --theme-textLink-activeForeground: #0b3a7a;\n"
     "      --theme-textCodeBlock-background: #ffffff;\n"
     "      --theme-textPreformat-foreground: #000000;\n"
     "      --theme-menu-background: #ffffff;\n"
-    "      --theme-menu-selectionBackground: #0f4a85;\n"
-    "      --theme-toolbar-hoverBackground: #0f4a8526;\n"
-    "      --theme-scrollbarSlider-background: #0f4a8580;\n"
+    "      --theme-menu-selectionBackground: #00000026;\n"
+    "      --theme-toolbar-hoverBackground: #00000026;\n"
+    "      --theme-scrollbarSlider-background: #00000080;\n"
     "      --theme-terminal-foreground: #000000;\n"
     "      --theme-terminal-ansiBlack: #000000;\n"
-    "      --theme-terminal-ansiRed: #be1744;\n"
-    "      --theme-terminal-ansiGreen: #007041;\n"
-    "      --theme-terminal-ansiYellow: #8b5700;\n"
-    "      --theme-terminal-ansiBlue: #0064b0;\n"
-    "      --theme-terminal-ansiMagenta: #92156a;\n"
-    "      --theme-terminal-ansiCyan: #176c74;\n"
-    "      --theme-terminal-ansiWhite: #555555;\n"
+    "      --theme-terminal-ansiRed: #a8201f;\n"
+    "      --theme-terminal-ansiGreen: #17603a;\n"
+    "      --theme-terminal-ansiYellow: #6b4a00;\n"
+    "      --theme-terminal-ansiBlue: #144c96;\n"
+    "      --theme-terminal-ansiMagenta: #5a3da8;\n"
+    "      --theme-terminal-ansiCyan: #0b5f6b;\n"
+    "      --theme-terminal-ansiWhite: #4d4d4d;\n"
     "      --theme-terminal-ansiBrightBlack: #4d4d4d;\n"
-    "      --theme-terminal-ansiBrightRed: #be1744;\n"
-    "      --theme-terminal-ansiBrightGreen: #007041;\n"
-    "      --theme-terminal-ansiBrightYellow: #8b5700;\n"
-    "      --theme-terminal-ansiBrightBlue: #0064b0;\n"
-    "      --theme-terminal-ansiBrightMagenta: #92156a;\n"
-    "      --theme-terminal-ansiBrightCyan: #176c74;\n"
+    "      --theme-terminal-ansiBrightRed: #a8201f;\n"
+    "      --theme-terminal-ansiBrightGreen: #17603a;\n"
+    "      --theme-terminal-ansiBrightYellow: #6b4a00;\n"
+    "      --theme-terminal-ansiBrightBlue: #144c96;\n"
+    "      --theme-terminal-ansiBrightMagenta: #5a3da8;\n"
+    "      --theme-terminal-ansiBrightCyan: #0b5f6b;\n"
     "      --theme-terminal-ansiBrightWhite: #000000;\n"
-    "      --theme-charts-green: #007041;\n"
-    "      --theme-charts-red: #be1744;\n"
-    "      --theme-charts-yellow: #a46700;\n"
-    "      --theme-charts-purple: #5e2cbc;\n"
+    "      --theme-charts-green: #17603a;\n"
+    "      --theme-charts-red: #a8201f;\n"
+    "      --theme-charts-yellow: #6b4a00;\n"
+    "      --theme-charts-purple: #5a3da8;\n"
 )
-"""A light high-contrast palette in Cursor Light's hues as ``--theme-*`` variables."""
+"""The light palette at full contrast as ``--theme-*`` variables."""
 
 _HIGH_CONTRAST_VARS_CSS = (
     "body.remote-chat.high-contrast {\n" + _DARK_HIGH_CONTRAST_CSS + "    }\n"
@@ -4772,22 +4831,22 @@ The chat page inlines this block after :data:`_SHARE_PAGE_LIGHT_VARS_CSS`;
 """
 
 _THEME_VARS_CSS = (
-    ":root {\n" + _FONT_VARS_CSS + _DARK_MODERN_CSS + "    }\n"
+    ":root {\n" + _FONT_VARS_CSS + _DARK_THEME_CSS + "    }\n"
 )
 """The theme variables main.css derives its palette from.
 
 The chat page (:func:`_build_html`) and the shared chat pages
 (:func:`_build_share_page`) both inline this block — one copy, so the
-two pages can never disagree on the palette.  Dark Modern is the
-default theme; the light theme swaps in
+two pages can never disagree on the palette.  The dark palette is the
+``:root`` default; the light theme swaps in
 :data:`_SHARE_PAGE_LIGHT_VARS_CSS`.
 """
 
 _SHARE_PAGE_LIGHT_VARS_CSS = (
     "html.light-theme,\n"
-    "    body.remote-chat.light-theme {\n" + _LIGHT_MODERN_CSS + "    }\n"
+    "    body.remote-chat.light-theme {\n" + _LIGHT_THEME_CSS + "    }\n"
 )
-"""Light Modern overrides for the light/dark theme toggles.
+"""Light palette overrides for the light/dark theme toggles.
 
 Both pages inline this block after :data:`_THEME_VARS_CSS`.
 ``share.js`` toggles the ``light-theme`` class on ``<html>``, the
@@ -4803,7 +4862,9 @@ _SHARE_PAGE_CSS = """\
    fixed-height app shell that main.css lays out. */
 html, body { height: auto; overflow: auto; }
 #app { height: auto; display: block; }
-#output { overflow: visible; }
+/* The transcript starts below the floating theme toggle (further
+   down), which would otherwise sit on the first task's bubble. */
+#output { overflow: visible; padding-top: var(--space-10); }
 /* Chrome that only works inside the live chat page. */
 .panel-copy-btn, .panel-stop-btn { display: none !important; }
 /* The sub-agent tab strip (created and driven by share.js, styled by
@@ -4837,7 +4898,7 @@ html, body { height: auto; overflow: auto; }
   color: var(--fg);
   cursor: pointer;
 }
-#share-theme-btn:hover { border-color: var(--accent); color: var(--accent); }
+#share-theme-btn:hover { border-color: var(--border-hover); color: var(--fg-strong); }
 /* One .share-task section per task of the chat, oldest first. */
 .share-task + .share-task {
   margin-top: var(--space-3);
@@ -5018,8 +5079,8 @@ def _page_subs(version: str, commit: str) -> dict[str, str]:
         f'<link href="{_media_url("remote-codex.css")}" rel="stylesheet">\n'
         "  <style>\n"
         "    html, body { height: 100%; margin: 0; padding: 0; overflow: hidden; }\n"
-        "    body { background: var(--theme-editor-background, #1f1f1f);\n"
-        "            color: var(--theme-editor-foreground, #cccccc); }\n"
+        "    body { background: var(--theme-editor-background, #0b0b0b);\n"
+        "            color: var(--theme-editor-foreground, #f0efec); }\n"
         "    " + _THEME_VARS_CSS
         + "    " + _SHARE_PAGE_LIGHT_VARS_CSS
         + "    " + _HIGH_CONTRAST_VARS_CSS + "  </style>"
@@ -5041,7 +5102,7 @@ def _page_subs(version: str, commit: str) -> dict[str, str]:
         'placeholder="Enter password">\n'
         '        <div id="auth-modal-error" role="alert" '
         'style="min-height:1.2em; margin-top:6px; '
-        'color: var(--theme-errorForeground, #f14c4c);"></div>\n'
+        'color: var(--theme-errorForeground, #ff5a5a);"></div>\n'
         '        <div class="auth-modal-actions">\n'
         '          <button id="auth-modal-cancel" '
         'class="auth-modal-btn auth-modal-cancel"\n'
@@ -5066,10 +5127,10 @@ def _page_subs(version: str, commit: str) -> dict[str, str]:
         "ICON_PNG_HREF": _media_url("kiss-icon.png"),
         "WELCOME_LOGO_SRC": _media_url("welcome-logo.png"),
         "WELCOME_LOGO_DARK_SRC": _media_url("welcome-logo-dark.png"),
-        # Light Modern is the remote page's default theme: the body is
-        # rendered with ``light-theme`` (and the light highlight sheet)
-        # so the first paint is already light; main.js drops the class
-        # again for a client whose saved choice is dark.
+        # The light palette is the remote page's default theme: the body
+        # is rendered with ``light-theme`` (and the light highlight
+        # sheet) so the first paint is already light; main.js drops the
+        # class again for a client whose saved choice is dark.
         "HLJS_CSS_HREF": _media_url("highlight-light.css"),
         "HEAD_STYLE": head_style,
         "BODY_CLASS_ATTR": ' class="remote-chat light-theme"',
@@ -5160,8 +5221,9 @@ def _build_manifest() -> str:
             "start_url": "/",
             "scope": "/",
             "display": "standalone",
-            "background_color": "#ffffff",
-            "theme_color": "#ffffff",
+            # The light palette's canvas, the page's first paint.
+            "background_color": "#fafafa",
+            "theme_color": "#fafafa",
             "icons": [
                 {"src": _media_url("kiss-icon.png"), "sizes": "512x512", "type": "image/png"},
                 {"src": _media_url("kiss-icon.svg"), "sizes": "any", "type": "image/svg+xml"},
@@ -5491,16 +5553,20 @@ def _error_page(status: int, heading: str, advice: str, details: str) -> Respons
         "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\">"
         "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
         f"<title>{html.escape(heading)}</title>"
-        "<style>body{font-family:system-ui,sans-serif;margin:0;padding:48px 20px;"
-        "max-width:36em;line-height:1.5;color:#222;background:#fff}"
-        "h1{font-size:1.4em;margin:0 0 .5em}details{margin-top:2em;color:#555}"
-        "summary{cursor:pointer}a{color:#0a58ca}</style></head><body>"
+        # The light palette: its canvas, text, secondary text and link.
+        "<style>body{font-family:system-ui,-apple-system,\"Segoe UI\",Roboto,"
+        "Helvetica,Arial,sans-serif;margin:0;padding:48px 20px;"
+        "max-width:36em;line-height:1.5;color:#0b0b0b;background:#fafafa}"
+        "h1{font-size:1.4em;font-weight:600;margin:0 0 .5em}"
+        "details{margin-top:2em;color:#5e5d59}summary{cursor:pointer}"
+        "a{color:#1f6fe5;text-decoration:none}a:hover{text-decoration:underline}"
+        "</style></head><body>"
         f"<h1>{html.escape(heading)}</h1>"
         f"<p>{html.escape(advice)}</p>"
         f"<p><a href=\"/\">Go to the {html.escape(PRODUCT_NAME)} start page</a></p>"
         "<details><summary>For the server administrator</summary>"
         f"<p>{html.escape(details)}</p></details>"
-        f"<p style=\"color:#888;font-size:.85em\">HTTP {status}</p>"
+        f"<p style=\"color:#898781;font-size:.85em\">HTTP {status}</p>"
         "</body></html>"
     )
     return _http_response(
@@ -8223,6 +8289,53 @@ class RemoteAccessServer:
                 reply["b64"] = image["b64"]
         await self._reply_direct(endpoint, reply, "getReplayImage")
 
+    async def _handle_get_task_events(
+        self, cmd: dict[str, Any], endpoint: Any,
+    ) -> None:
+        """Serve a piece of a lazily loaded transcript.
+
+        A lazy replay leaves out the panels the page shows folded
+        (:mod:`kiss.server.lazy_replay`); ``media/main.js`` sends
+        ``getTaskEvents`` with the handle of the panel the reader
+        opens: its ``taskId``, for the panels a ``summary`` call
+        folded its ``seg`` (none for a finished task's Trajectory
+        panel) and, when the handle has one, its ``upto`` (the
+        transcript as it was when the handle was made).  The reply
+        goes to the requesting *endpoint* only, with the shape::
+
+            {"type": "taskEventsPiece", "taskId": ..., "seg": ...,
+             "token": <echo>, "events": [...]}
+
+        or, when the transcript cannot be read, the same without
+        ``events`` and with an ``error`` (the page then lets the
+        reader try again; with no answer the panel would show as
+        loading for good).
+
+        Args:
+            cmd: The parsed ``getTaskEvents`` command (``taskId``,
+                optional ``seg``, ``upto`` and ``token``).
+            endpoint: The requesting connection.
+        """
+        task_id = self._cmd_str(cmd, "taskId")
+        seg = cmd.get("seg")
+        if isinstance(seg, bool) or not isinstance(seg, int):
+            seg = -1
+        upto = cmd.get("upto")
+        if isinstance(upto, bool) or not isinstance(upto, int):
+            upto = None
+        reply: dict[str, Any] = {
+            "type": "taskEventsPiece", "taskId": task_id, "seg": seg,
+            "token": self._cmd_str(cmd, "token"),
+        }
+        try:
+            reply["events"] = await asyncio.to_thread(
+                self._agent_server.task_events_piece, task_id, seg, upto,
+            )
+        except Exception as exc:
+            logger.warning("getTaskEvents: load failed", exc_info=True)
+            reply["error"] = f"Failed to load the events: {exc}"
+        await self._reply_direct(endpoint, reply, "getTaskEvents")
+
     async def _reply_direct(
         self, endpoint: Any, reply: dict[str, Any], what: str,
     ) -> None:
@@ -9539,6 +9652,10 @@ class RemoteAccessServer:
                 }
                 if not adopted and rt_id != tab_id:
                     resume["deferred"] = True
+                # Only the page that sent this ``ready`` said how it
+                # loads transcripts (``lazy``: in pieces).
+                if target == conn_id and cmd.get("lazy") is True:
+                    resume["lazy"] = True
                 # A tab pinned to a specific historical task replays THAT
                 # task; without the taskId the replay would silently
                 # switch every client's tab to the chat's latest task.
@@ -9720,6 +9837,10 @@ class RemoteAccessServer:
             # ``false`` turns it off for the run; the global Compaction
             # setting is read by the agent itself.
             "compaction": cmd.get("compaction"),
+            # The task a CHATS click showed in the tab without asking
+            # the daemon (the page only scrolled to it): the new task
+            # continues it (``TaskRunner._take_continued_task``).
+            "continueTaskId": cmd.get("continueTaskId"),
             "_notice": notice,
         }
         await self._run_cmd(run_cmd)

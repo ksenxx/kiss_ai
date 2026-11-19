@@ -41,7 +41,8 @@
     <div id="content-tab-bar"><div id="content-tab-list"></div><button type="button" id="content-pane-hide" aria-label="Hide editor" aria-controls="content-tab-area" title="Hide editor"><svg viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg></button></div>
 
     <!-- The chat header, centred over the transcript on every chat
-         surface: "machine: working directory".  The machine drop-down
+         surface: "machine > working directory", on one line at every
+         width.  The machine drop-down
          lists this daemon's machine (configData.machine) and the
          reachable registered machines (the MACHINES subpanel); main.js
          sends the pick as `machine` with every submit, so it can be
@@ -50,13 +51,17 @@
          directory drop-down lists every directory selected so far
          (configData.recent_work_dirs) and ends with "Choose ...",
          which opens a folder picker; a pick becomes the global working
-         directory every surface's next task runs in.  Each select sits
-         in a .chat-header-select span whose ::after draws the down
-         chevron (main.css) that marks it as a drop-down. -->
+         directory every surface's next task runs in.  Each select lies,
+         transparent, over a .chat-header-select-label that shows its
+         selected entry (renderChatHeaderLabel in main.js): a native
+         select is as wide as its longest option, the label only as wide
+         as the name it shows, so the down chevron that the
+         .chat-header-select span's ::after draws (main.css) follows the
+         name directly. -->
     <div id="chat-header">
-      <span id="chat-machine-wrap" class="chat-header-select"><select id="chat-machine" title="The machine this chat's next task runs on" aria-label="Machine"></select></span>
-      <span id="chat-header-sep" aria-hidden="true" hidden>:</span>
-      <span id="chat-workdir-wrap" class="chat-header-select"><select id="chat-workdir" title="The working directory the next task runs in" aria-label="Working directory"></select></span>
+      <span id="chat-machine-wrap" class="chat-header-select"><span class="chat-header-select-label" aria-hidden="true"></span><select id="chat-machine" title="The machine this chat's next task runs on" aria-label="Machine"></select></span>
+      <span id="chat-header-sep" aria-hidden="true" hidden>&gt;</span>
+      <span id="chat-workdir-wrap" class="chat-header-select"><span class="chat-header-select-label" aria-hidden="true"></span><select id="chat-workdir" title="The working directory the next task runs in" aria-label="Working directory"></select></span>
     </div>
 
     <div id="tab-status-bar">
@@ -105,8 +110,10 @@
             <button id="meta-drawer-btn" type="button" data-tooltip="Task info" aria-label="Task info" aria-controls="meta-panel" aria-expanded="false">
               <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><line x1="15" y1="4" x2="15" y2="20"/></svg>
             </button>
+            <!-- New chat: a chat bubble with a "+" inside it, at its top
+                 right. -->
             <button id="new-chat-btn" data-tooltip="New chat" aria-label="New chat">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 15a3 3 0 0 1-3 3H6.5L2 22V5a3 3 0 0 1 3-3h14a3 3 0 0 1 3 3z"/><path d="M15.5 5.5v6"/><path d="M12.5 8.5h6"/></svg>
             </button>
             <button id="tricks-btn" class="toggle-btn" data-tooltip="Inject promptlet" aria-label="Inject promptlet">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m18 2 4 4"/><path d="m17 7 3-3"/><path d="M19 9 8.7 19.3c-1 1-2.5 1-3.4 0l-.6-.6c-1-1-1-2.5 0-3.4L15 5"/><path d="m9 11 4 4"/><path d="m6 18-2 2"/><path d="m14 4 6 6"/></svg>
@@ -177,7 +184,6 @@
           <div id="input-actions">
             <div id="model-picker">
               <button id="model-btn" data-tooltip="Select model" aria-label="Select model">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l3 7h7l-5.5 4 2 7L12 16l-6.5 4 2-7L2 9h7z"/></svg>
                 <!-- The &lrm; marks pin the LTR character order inside
                      the pill's RTL (leading-truncation) line, exactly
                      like refreshModelLabel's U+200E wrapping. -->
@@ -283,8 +289,8 @@
                history of a project is listed, not only the rows
                already loaded. -->
           <div class="history-filter-sea history-filter-workdir" role="group" aria-label="Filter tasks by working directory">
-            <label for="hf-workdir" class="history-filter-date-lbl">WORKDIR</label>
-            <select id="hf-workdir" class="history-filter-sea-select" title="Show only tasks that ran in this working directory" aria-label="WORKDIR">
+            <label for="hf-workdir" class="history-filter-date-lbl">Workdir</label>
+            <select id="hf-workdir" class="history-filter-sea-select" title="Show only tasks that ran in this working directory" aria-label="Workdir">
               <option value="">All</option>
             </select>
           </div>
@@ -594,19 +600,33 @@
           <!-- chrome_bridge: ticked, the daemon starts the bridge that the
                extension connects to at boot and right after the save
                (the sheet saves when it closes), which is also what
-               installs the extension folder the label names
-               (chrome_bridge.start_if_enabled).  The folder shown is the
-               product's usual one (data-default) until the configData of
-               the daemon the sheet is for names its own (main.js
-               populateConfigForm).  The text is one element, so that it
-               stays one item of the label's flex row. -->
-          <label class="config-label config-checkbox" title="Ticked: the bridge that the &quot;{{PRODUCT_NAME}} Bridge&quot; extension connects to runs from daemon start. Clear: an agent's first use of your Chrome starts it.">
-            <input type="checkbox" id="cfg-chrome-bridge">
-            <span class="config-checkbox-text">Drive my Chrome: tick this box and close Settings. Then, in Chrome on the computer that runs {{PRODUCT_NAME}}, open chrome://extensions, turn on Developer mode, click "Load unpacked" and select the folder <span id="cfg-chrome-extension-dir" data-default="~/{{HOME_DIR}}/chrome_extension">~/{{HOME_DIR}}/chrome_extension</span>. It is listed there as "{{PRODUCT_NAME}} Bridge". Leave Developer mode on: without it Chrome switches the extension off.</span>
-          </label>
+               installs the extension folder the help names
+               (chrome_bridge.start_if_enabled).  The "?" beside the box
+               shows that help, the steps that install the extension, as
+               a popover: the browser opens it, centres it and closes it
+               (Escape, a press outside, its Close button); main.js only
+               keeps Escape from closing the sheet under it and closes
+               it with the sheet (openPopoverIn).  The folder shown is
+               the product's usual one (data-default) until the
+               configData of the daemon the sheet is for names its own
+               (main.js populateConfigForm). -->
+          <div class="config-help-row">
+            <label class="config-label config-checkbox" title="Ticked: the bridge that the &quot;{{PRODUCT_NAME}} Bridge&quot; extension connects to runs from daemon start. Clear: an agent's first use of your Chrome starts it.">
+              <input type="checkbox" id="cfg-chrome-bridge">
+              Drive my Chrome
+            </label>
+            <button type="button" id="cfg-chrome-bridge-help-btn" class="config-help-btn" popovertarget="cfg-chrome-bridge-help" title="How to set up Drive my Chrome" aria-label="How to set up Drive my Chrome">?</button>
+          </div>
+          <div id="cfg-chrome-bridge-help" class="config-help auth-modal-content" popover role="dialog" aria-labelledby="cfg-chrome-bridge-help-title" aria-describedby="cfg-chrome-bridge-help-text">
+            <div id="cfg-chrome-bridge-help-title" class="auth-modal-title">Drive my Chrome</div>
+            <p id="cfg-chrome-bridge-help-text" class="config-help-text">Tick this box and close Settings. Then, in Chrome on the computer that runs {{PRODUCT_NAME}}, open chrome://extensions, turn on Developer mode, click "Load unpacked" and select the folder <span id="cfg-chrome-extension-dir" data-default="~/{{HOME_DIR}}/chrome_extension">~/{{HOME_DIR}}/chrome_extension</span>. It is listed there as "{{PRODUCT_NAME}} Bridge". Leave Developer mode on: without it Chrome switches the extension off.</p>
+            <div class="auth-modal-actions">
+              <button type="button" class="auth-modal-btn auth-modal-ok" popovertarget="cfg-chrome-bridge-help" popovertargetaction="hide">Close</button>
+            </div>
+          </div>
           <label class="config-label config-checkbox">
             <input type="checkbox" id="cfg-victory-sound" checked>
-            Play a victory sound when a task finishes (on this machine or on a registered one)
+            Play a sound when a task finishes
           </label>
           <label class="config-label">Auto submit spoken task
             <select id="cfg-voice-auto-submit">
@@ -656,20 +676,11 @@
           <label class="config-label">OpenAI API Key
             <input type="password" autocomplete="off" id="cfg-key-OPENAI_API_KEY" placeholder="Enter OpenAI API key">
           </label>
-          <label class="config-label">Z.AI API Key
-            <input type="password" autocomplete="off" id="cfg-key-ZAI_API_KEY" placeholder="Enter Z.AI (Zhipu/GLM) API key">
-          </label>
-          <label class="config-label">Moonshot API Key
-            <input type="password" autocomplete="off" id="cfg-key-MOONSHOT_API_KEY" placeholder="Enter Moonshot AI (Kimi) API key">
+          <label class="config-label">Gemini API Key
+            <input type="password" autocomplete="off" id="cfg-key-GEMINI_API_KEY" placeholder="Enter Gemini API key">
           </label>
           <label class="config-label">OpenRouter API Key
             <input type="password" autocomplete="off" id="cfg-key-OPENROUTER_API_KEY" placeholder="Enter OpenRouter API key">
-          </label>
-          <label class="config-label">Together API Key
-            <input type="password" autocomplete="off" id="cfg-key-TOGETHER_API_KEY" placeholder="Enter Together API key">
-          </label>
-          <label class="config-label">Gemini API Key (NOT RECOMMENDED)
-            <input type="password" autocomplete="off" id="cfg-key-GEMINI_API_KEY" placeholder="Enter Gemini API key">
           </label>
             </div>
           </div>

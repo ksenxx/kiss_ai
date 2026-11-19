@@ -212,12 +212,13 @@ def test_stop_at_the_timeout_acquire_leaves_the_guard_free() -> None:
 
 # (innermost frame, its caller) of a thread waiting on its child's pipes: the
 # readiness wait of ``_read_some`` and of ``communicate`` on POSIX, then the
-# poll and the reader-thread join that stand for them on Windows.
+# poll and the reader-thread join that stand for them on Windows, where
+# ``Thread.join`` is :func:`kiss.core.thread_join.bounded_join`.
 _PIPE_WAITS = {
     ("select", "_pipe_readable"),
     ("select", "_communicate"),
     ("_windows_pipe_readable", "_pipe_readable"),
-    ("join", "_communicate"),
+    ("bounded_join", "_communicate"),
 }
 
 

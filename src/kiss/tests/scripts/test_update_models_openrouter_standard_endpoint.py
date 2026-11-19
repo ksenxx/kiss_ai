@@ -221,7 +221,7 @@ def _refresh(
     with _openrouter(monkeypatch, listing, endpoints) as lookups:
         fetched = mod.fetch_openrouter()
         replaced = mod.prefer_standard_endpoint_prices(fetched) if guard else []
-    updates, new_models = mod.compute_changes(current, fetched, {}, {}, {}, {})
+    updates, new_models = mod.compute_changes(current, fetched, {}, {}, {})
     return replaced, fetched, list(lookups), {u["name"]: u["changes"] for u in updates}, new_models
 
 
@@ -489,7 +489,7 @@ def _run_main(
     )
     monkeypatch.setattr(mod, "MODEL_INFO_PATH", catalog)
     monkeypatch.setattr(mod, "README_PATH", tmp_path / "README.md")
-    for fetcher in ("fetch_together", "fetch_anthropic", "fetch_gemini", "fetch_openai"):
+    for fetcher in ("fetch_anthropic", "fetch_gemini", "fetch_openai"):
         monkeypatch.setattr(mod, fetcher, lambda verbose=False: {})
     monkeypatch.setattr(mod, "fetch_bedrock", lambda verbose=False: {})
     monkeypatch.setattr(mod, "fetch_codex_supported_slugs", lambda verbose=False: set())

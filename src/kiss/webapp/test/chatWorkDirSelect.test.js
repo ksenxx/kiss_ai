@@ -4,7 +4,7 @@
 // add your name here
 
 // End-to-end (JSDOM) tests for the working directory drop-down of the
-// chat header ("machine: directory" at the top of the chat pane): it
+// chat header ("machine > directory" at the top of the chat pane): it
 // lists the directory the next task runs in (selected), every other
 // directory selected so far (configData.recent_work_dirs, most recent
 // first) and a final "Choose ..." entry that opens a folder picker.
@@ -46,7 +46,7 @@ const {
   MEDIA,
 } = require('./simplify2_harness');
 const {showSection} = require('./ui_antipattern_harness');
-const {cssRule} = require('./designTokens');
+const {cssRule, installTokenisedCss} = require('./designTokens');
 
 const NOW = Date.now() / 1000;
 const RECENTS = [
@@ -110,11 +110,17 @@ function testRefusedAdoptionIsTakenBack() {
     "the Explorer browses the daemon's directory again",
   );
   const sub = submitPrompt(win, posted, 'list the files');
-  assert.strictEqual(sub.workDir, undefined, 'the next task runs where the daemon says');
+  assert.strictEqual(
+    sub.workDir,
+    undefined,
+    'the next task runs where the daemon says',
+  );
 
   // An accepted pick: the daemon's answer agrees and changes nothing.
   pick(win, '/home/u/newest');
-  const check2 = msgs(posted, 'listDir').filter(m => String(m.token).startsWith('workdir:'));
+  const check2 = msgs(posted, 'listDir').filter(m =>
+    String(m.token).startsWith('workdir:'),
+  );
   send(win, {
     type: 'dirListing',
     token: check2[check2.length - 1].token,
@@ -157,18 +163,21 @@ function testHeaderShowsMachineThenDirectory() {
   assert.strictEqual(
     Array.from(header.children, el => el.id).join(','),
     'chat-machine-wrap,chat-header-sep,chat-workdir-wrap',
-    'machine, ":", directory -- in that order',
+    'machine, ">", directory -- in that order',
   );
-  assert.strictEqual(sep.textContent, ':');
-  // Each select sits alone in a .chat-header-select span: its ::after
-  // is the down chevron that makes the plain text read as a drop-down
-  // (a bordered square turned 45deg in the current colour, over the
-  // select's right padding, letting clicks through to the select).
+  assert.strictEqual(sep.textContent, '>');
+  // Each select lies, transparent, over the label of its
+  // .chat-header-select span, which shows the selected entry; the
+  // span's ::after is the down chevron that follows the label (a
+  // bordered square turned 45deg, letting clicks through to the
+  // select).
   ['chat-machine', 'chat-workdir'].forEach(id => {
     const wrap = byId(win, id + '-wrap');
     assert.ok(wrap.classList.contains('chat-header-select'), id + ' wrapped');
-    assert.strictEqual(wrap.children.length, 1);
-    assert.strictEqual(wrap.firstElementChild.id, id);
+    assert.deepStrictEqual(
+      Array.from(wrap.children, el => el.id || el.className),
+      ['chat-header-select-label', id],
+    );
   });
   // jsdom computes no ::after pseudo-element, so the one thing that
   // matters for behaviour (clicks reach the select through the chevron)
@@ -184,7 +193,8 @@ function testHeaderShowsMachineThenDirectory() {
   );
   for (const id of ['chat-machine', 'chat-workdir']) {
     const style = win.getComputedStyle(byId(win, id));
-    assert.strictEqual(style.paddingRight, '1.1em', id + ': chevron room');
+    assert.strictEqual(style.position, 'absolute', id + ': over its label');
+    assert.strictEqual(style.opacity, '0', id + ': the label shows through');
     assert.strictEqual(style.appearance, 'none', id + ': no native arrow');
   }
   // A remote pick colours the name and its chevron green (red once
@@ -202,10 +212,10 @@ function testHeaderShowsMachineThenDirectory() {
   assert.strictEqual(wrapStyle().color, 'var(--status-fail)');
   machine.classList.remove('remote', 'down');
   machine.textContent = '';
-  // Nothing known yet: no machine name, no ":", the placeholder
+  // Nothing known yet: no machine name, no ">", the placeholder
   // selected and "Choose ..." a pick away.
   assert.strictEqual(byId(win, 'chat-machine').options.length, 0);
-  assert.ok(sep.hidden, 'no machine name yet: no ":"');
+  assert.ok(sep.hidden, 'no machine name yet: no ">"');
   assert.deepStrictEqual(optionLabels(win), [
     'No working directory',
     'Choose ...',
@@ -217,9 +227,9 @@ function testHeaderShowsMachineThenDirectory() {
     'the placeholder is no pick',
   );
 
-  // The directory alone, still without the ":".
+  // The directory alone, still without the ">".
   send(win, {type: 'configData', config: {work_dir: '/work/ws'}});
-  assert.ok(sep.hidden, 'no machine name yet: no ":"');
+  assert.ok(sep.hidden, 'no machine name yet: no ">"');
   assert.deepStrictEqual(optionLabels(win), ['/work/ws', 'Choose ...']);
   assert.strictEqual(currentDir(win), '/work/ws');
   assert.strictEqual(
@@ -227,7 +237,7 @@ function testHeaderShowsMachineThenDirectory() {
     'The next task runs in /work/ws',
   );
 
-  // The machine name joins it, separated by the ":".
+  // The machine name joins it, separated by the ">".
   send(win, {
     type: 'configData',
     machine: 'box',
@@ -235,7 +245,7 @@ function testHeaderShowsMachineThenDirectory() {
   });
   assert.strictEqual(byId(win, 'chat-machine').value, '');
   assert.strictEqual(byId(win, 'chat-machine').options[0].textContent, 'box');
-  assert.ok(!sep.hidden, 'both known: "box: /work/ws"');
+  assert.ok(!sep.hidden, 'both known: "box > /work/ws"');
 }
 
 function testMachineAloneOffersChoose() {
@@ -778,6 +788,38 @@ function testConfigDataRepaintsTheDropDown() {
   assert.strictEqual(byId(win, 'meta-workdir').textContent, '/new');
 }
 
+function testPhoneCutsTheBeginningOfALongPath() {
+  // On a phone a path too long for the header loses its beginning,
+  // not its last folder: the drop-down is laid out right to left (the
+  // ellipsis lands on the left) and every shown label is fenced by
+  // left-to-right marks so "/" and "..." keep their places.  The
+  // option values and texts stay the bare paths.
+  const LRM = '\u200e';
+  const dir = '/home/u/projects/some/deeply/nested/repo-name';
+  const phone = makePage().win;
+  installTokenisedCss(phone, 'main.css', {applyMedia: /\(width < 900px\)/});
+  send(phone, {type: 'configData', config: {work_dir: dir}});
+  const select = byId(phone, 'chat-workdir');
+  // Chromium draws the closed drop-down in its selected option's
+  // direction, so the options inherit the right-to-left one.
+  for (const el of [select, select.options[0]]) {
+    assert.strictEqual(phone.getComputedStyle(el).direction, 'rtl');
+  }
+  assert.deepStrictEqual(
+    Array.from(select.options, o => o.label),
+    [LRM + dir + LRM, LRM + 'Choose ...' + LRM],
+  );
+  assert.deepStrictEqual(optionLabels(phone), [dir, 'Choose ...']);
+  assert.strictEqual(currentDir(phone), dir);
+  const desktop = makePage().win;
+  installTokenisedCss(desktop, 'main.css');
+  assert.notStrictEqual(
+    desktop.getComputedStyle(byId(desktop, 'chat-workdir')).direction,
+    'rtl',
+    'wider screens keep the plain left-to-right layout',
+  );
+}
+
 function testOrphanedFileTabBrowsesTheGlobalDir() {
   // A file tab remembers the folder of the chat it was opened from so
   // the views keep browsing it after that chat closes -- but only as a
@@ -856,6 +898,10 @@ const tests = [
     testRemoteWorkDirChangedRescopes,
   ],
   ['configData repaints the drop-down', testConfigDataRepaintsTheDropDown],
+  [
+    'a phone cuts the beginning of a long path',
+    testPhoneCutsTheBeginningOfALongPath,
+  ],
   [
     'an orphaned file tab browses the global directory',
     testOrphanedFileTabBrowsesTheGlobalDir,

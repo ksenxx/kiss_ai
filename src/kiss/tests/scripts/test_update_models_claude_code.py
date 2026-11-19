@@ -37,7 +37,7 @@ def test_every_anthropic_model_gets_a_cc_sibling() -> None:
         "claude-opus-4-6": {"source": "anthropic"},
         "claude-sonnet-4-5-20250929": {"source": "anthropic"},
     }
-    _, new_models = compute_changes({}, {}, {}, {}, anthropic, {})
+    _, new_models = compute_changes({}, {}, {}, anthropic, {})
     names = {m["name"] for m in new_models}
     assert "cc/claude-opus-4-6" in names
     assert "cc/claude-sonnet-4-5-20250929" in names
@@ -46,7 +46,7 @@ def test_every_anthropic_model_gets_a_cc_sibling() -> None:
 def test_cc_aliases_are_seeded_alongside_api_models() -> None:
     """The short haiku/opus/sonnet aliases are proposed on a fresh catalog."""
     anthropic = {"claude-opus-4-6": {"source": "anthropic"}}
-    _, new_models = compute_changes({}, {}, {}, {}, anthropic, {})
+    _, new_models = compute_changes({}, {}, {}, anthropic, {})
     names = {m["name"] for m in new_models}
     assert {"cc/haiku", "cc/opus", "cc/sonnet"} <= names
 
@@ -125,7 +125,7 @@ def test_cc_candidates_skip_entries_already_in_catalog() -> None:
 
 def test_no_cc_candidates_when_anthropic_fetch_is_empty() -> None:
     """Without Anthropic data (e.g. missing API key), no cc/* is proposed."""
-    _, new_models = compute_changes({}, {}, {}, {}, {}, {})
+    _, new_models = compute_changes({}, {}, {}, {}, {})
     assert not any(m["name"].startswith("cc/") for m in new_models)
 
 
@@ -236,7 +236,7 @@ def test_existing_cc_entry_never_backfilled_with_openrouter_pricing() -> None:
         },
     }
     anthropic = {"claude-fable-5-1": {"source": "anthropic"}}
-    updates, _ = compute_changes(current, _priced_openrouter_twin(), {}, {}, anthropic, {})
+    updates, _ = compute_changes(current, _priced_openrouter_twin(), {}, anthropic, {})
     by_name = {u["name"]: u["changes"] for u in updates}
     assert by_name["claude-fable-5-1"]["input_price_per_1M"] == 10.0
     assert "cc/claude-fable-5-1" not in by_name
@@ -262,5 +262,5 @@ def test_existing_codex_entry_never_backfilled_with_openrouter_pricing() -> None
             "source": "openrouter",
         }
     }
-    updates, _ = compute_changes(current, openrouter, {}, {}, {}, {})
+    updates, _ = compute_changes(current, openrouter, {}, {}, {})
     assert updates == []

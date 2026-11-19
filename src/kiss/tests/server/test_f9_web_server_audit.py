@@ -39,6 +39,7 @@ import tempfile
 import threading
 import time
 import unittest
+from collections import Counter
 from concurrent.futures import Future as ConcurrentFuture
 from pathlib import Path
 from typing import Any
@@ -192,18 +193,28 @@ class TestReceiveQueue(_LoopbackServerCase):
             )
             # The pong of a ping sent now waits in the socket the daemon
             # itself is not reading: its absence is not the peer's doing.
-            ws._WS_PING_TIMEOUT = 0.4
+            # (A budget far below the time the released daemon takes to
+            # serve its queue, see below.)
+            ws._WS_PING_TIMEOUT = 0.02
             await self.server._watchdog_ping_clients()
             await asyncio.sleep(1.0)
             self.assertFalse(
                 endpoint.transport.is_closing(),
                 "a live client was aborted for a pong the daemon did not read",
             )
-        # Released: every frame is served, and the reading resumed.
-        pongs = 0
-        while pongs < sent:
-            pongs += (await self._recv(client))["type"] == "pong"
+        # Released: every frame is served, and the reading resumed.  The
+        # daemon serves its queue in one step of the event loop, longer
+        # than the pong budget, and resumes reading within it: that time
+        # is not the peer's either.  The pong read next keeps the peer,
+        # which gets the heartbeat that follows a pong.
+        types: Counter[str] = Counter()
+        while types["pong"] < sent or not types["heartbeat"]:
+            types[(await self._recv(client))["type"]] += 1
         self.assertTrue(endpoint.transport.is_reading())
+        self.assertFalse(
+            endpoint.transport.is_closing(),
+            "a live client was aborted for the time the daemon took to serve its queue",
+        )
 
 
 class TestSniffingConnectionsCloseWithTheListeners(_LoopbackServerCase):

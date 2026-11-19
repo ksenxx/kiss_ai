@@ -15,8 +15,8 @@ possible in the first place:
 * ``main.js``'s ``createResultPanel`` must not emit inline
   ``font-size`` styles (inline styles beat every stylesheet); it uses
   ``.rc-status`` / ``.rc-status-fail`` classes instead.
-* ``main.css`` styles ``.rc-status`` exactly like the old inline
-  declarations so the status line keeps its former look.
+* ``main.css`` styles ``.rc-status``: a quiet status line (medium
+  weight, base size) coloured by state.
 * ``remote-codex.css`` must not re-introduce panel body-text size
   overrides (no ``--fs-base`` repins, no hard-coded px outliers).
 """
@@ -68,17 +68,18 @@ def test_main_js_result_status_uses_class_not_inline_style() -> None:
     )
 
 
-def test_main_css_styles_rc_status_like_old_inline_style() -> None:
-    """main.css carries the status line's declarations (bold, fs-xl) and
-    colours it by state: the theme's success green, or its failure red."""
+def test_main_css_styles_rc_status_by_state() -> None:
+    """main.css carries the status line's declarations (medium weight,
+    the base size: a quiet line over the result's prose) and colours it
+    by state: the theme's success green, or its failure red."""
     css = inline_design_tokens(MAIN_CSS.read_text(encoding="utf-8"))
     m = re.search(r"\.rc-status\s*\{([^}]*)\}", css)
     assert m, ".rc-status rule missing from main.css"
     rule = m.group(1)
     assert "color: var(--green)" in rule
-    assert "font-weight: 700" in rule
-    assert "font-size: var(--fs-xl)" in rule
-    assert "margin-bottom: 10px" in rule
+    assert "font-weight: 500" in rule
+    assert "font-size: var(--fs-base)" in rule
+    assert "margin-bottom: 6px" in rule
     fail = re.search(r"\.rc-status\.rc-status-fail\s*\{([^}]*)\}", css)
     assert fail, ".rc-status.rc-status-fail rule missing from main.css"
     assert "color: var(--red)" in fail.group(1)

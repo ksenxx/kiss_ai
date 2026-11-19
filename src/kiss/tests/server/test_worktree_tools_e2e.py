@@ -15,6 +15,7 @@ import os
 import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -36,6 +37,7 @@ from kiss.agents.sorcar.sorcar_agent import (
     SorcarAgent,
     resolve_tool_profile,
 )
+from kiss.core.kiss_tmp import kiss_tmp_dir
 from kiss.server import agent_state
 from kiss.server.server import AgentServer
 from kiss.tests.server.conftest import run_git
@@ -140,7 +142,7 @@ class TestCreateWorktreeAndCommitAndMerge(_ScriptedRun):
 
         self.assertIn(REFUSED_WRITE, self.requests[1])
         self.assertIn("is not git-ignored", self.requests[1])
-        # The git-ignored scratch file was written in place, in the checkout.
+        # The git-ignored file was written in place, in the checkout.
         self.assertEqual((self.repo / "tmp" / "notes.md").read_text(), "scratch\n")
         self.assertNotIn(REFUSED_WRITE, self.requests[2][len(self.requests[1]):])
 
@@ -168,6 +170,81 @@ class TestCreateWorktreeAndCommitAndMerge(_ScriptedRun):
         self.assertEqual(self.printer.events_of_type("worktree_done"), [])
         results = self.printer.events_of_type("result")
         self.assertTrue(results and results[-1].get("success") is not False, results)
+
+
+class TestScratchFilesNeedNoWorktree(_ScriptedRun):
+    """A ``Write`` into the task's scratch dir passes the gate before any ``create_worktree``.
+
+    Also when the agents' temp directory lies inside the checkout, where
+    git does not ignore it.  ``tmp/`` of the checkout is a folder like any
+    other: not git-ignored here, a ``Write`` there waits for the worktree.
+    Once the worktree exists the scratch dir is still the one place:
+    ``Write``, ``Read`` and a command that names it reach the file there,
+    not a copy redirected into the worktree (which the merge would commit).
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        (self.repo / ".gitignore").write_text("")
+        run_git(self.repo, "commit", "-qam", "tmp/ is not ignored")
+        self.script = [
+            self._write_scratch_note,                    # 0: allowed, a scratch file
+            _write("tmp/x.md", "work\n"),                # 1: refused, not git-ignored
+            tool_call_response("create_worktree", {}),   # 2
+            _write("tmp/x.md", "work\n"),                # 3: allowed, in the worktree
+            self._write_scratch_log,                     # 4: a scratch file, not the worktree's
+            self._read_scratch_log,                      # 5
+            self._cat_scratch_log,                       # 6
+        ]
+
+    def _write_scratch_note(self) -> dict[str, Any]:
+        """The ``Write`` of a note in the scratch dir the task's settings name."""
+        scratch = self.requests[0].partition("- Scratch dir: ")[2].partition("\n")[0]
+        self.note = Path(scratch) / "notes.md"
+        return _write(str(self.note), "scratch\n")
+
+    def _write_scratch_log(self) -> dict[str, Any]:
+        """The ``Write`` of a second scratch file, made while the worktree is active."""
+        return _write(str(self.note.with_name("log.md")), "in a worktree\n")
+
+    def _read_scratch_log(self) -> dict[str, Any]:
+        return tool_call_response("Read", {"file_path": str(self.note.with_name("log.md"))})
+
+    def _cat_scratch_log(self) -> dict[str, Any]:
+        # as_posix: bash eats the backslashes of a Windows path.
+        command = f"cat {self.note.with_name('log.md').as_posix()}"
+        return tool_call_response("Bash", {"command": command, "description": "Show the log"})
+
+    def _check(self) -> None:
+        self._run()
+        self.assertEqual(len(self.requests), 9, [r[-300:] for r in self.requests])
+        self.assertEqual(self.note.parents[1], kiss_tmp_dir())
+        self.assertIn("Successfully wrote", self.requests[1])
+        self.assertEqual(self.note.read_text(), "scratch\n")
+        self.assertIn(REFUSED_WRITE, self.requests[2])
+        self.assertIn("is not git-ignored", self.requests[2])
+        self.assertIn("Successfully wrote", self.requests[4][len(self.requests[3]):])
+        self.assertIn("Successfully wrote", self.requests[5][len(self.requests[4]):])
+        self.assertEqual(self.note.with_name("log.md").read_text(), "in a worktree\n")
+        for request in (6, 7):  # What Read and cat showed.
+            shown = self.requests[request][len(self.requests[request - 1]):]
+            self.assertIn("in a worktree", shown)
+            self.assertNotIn("Error", shown)
+        self.assertEqual(worktree_changed_files(self.server, "wt-tools-tab"), ["tmp/x.md"])
+        self.assertFalse((self.repo / "tmp").exists())
+
+    def test_temp_dir_outside_the_checkout(self) -> None:
+        self._check()
+
+    def test_temp_dir_inside_the_checkout(self) -> None:
+        inside = self.repo / "T"
+        inside.mkdir()
+        session_temp_dir, tempfile.tempdir = tempfile.tempdir, str(inside)
+        try:
+            self._check()
+            self.assertEqual(self.note.parents[2], inside.resolve())
+        finally:
+            tempfile.tempdir = session_temp_dir
 
 
 class TestUnmergedWorktreeIsPresentedToTheUser(_ScriptedRun):
