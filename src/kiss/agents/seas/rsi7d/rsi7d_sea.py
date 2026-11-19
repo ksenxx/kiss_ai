@@ -111,7 +111,7 @@ sweep edits.  :func:`replay_in_clone` clones the task's repository
 to its parent repository) at the commit the task started from — the
 first parent of the task's auto-commit, found through the ``User
 prompt:`` block auto-commits carry, else the repository ``HEAD`` at the
-task's start time — into ``tmp/rsi7d/replays/<sea>-<id>``, rewrites
+task's start time — into ``<scratch dir>/rsi7d/replays/<sea>-<id>``, rewrites
 repository paths in the task text to the clone and dispatches this
 checkout's SEA file (patched prompt included) there without a worktree
 or auto-commit.  The replay's task id comes back for ``run_findings``.
@@ -153,6 +153,7 @@ from kiss.agents.sorcar.git_worktree import (
 )
 from kiss.core.brand import HOME_DIR, render_brand
 from kiss.core.config import kiss_home
+from kiss.core.kiss_tmp import kiss_tmp_dir
 from kiss.core.memoryfield.evaluate import TASK_ERROR_RE, is_failed_result
 from kiss.core.utils import rmtree_force
 from kiss.server.agent_state import current_agent
@@ -175,8 +176,8 @@ EVIDENCE_MAX_CHARS = 2500
 """Most characters ``write_autorouter_evidence`` writes, stamp line included: the autorouter
 SEA's ``EVIDENCE_MAX_CHARS`` (its ``observed_evidence()`` cuts a longer file at that size), kept
 equal to it by ``test_rsi7d_sea.py``."""
-REPLAY_DIR = Path("tmp") / "rsi7d" / "replays"
-"""Clones made by ``replay_in_clone`` live here under the task's work dir (gitignored)."""
+REPLAY_DIR = Path("replays")
+"""Clones made by ``replay_in_clone`` live here in rsi7d's folder of the task's scratch dir."""
 GIT_TIMEOUT_SECONDS = 300.0
 """Seconds a git command of the replay tools (clone, log, status ...) may take."""
 SEAS_DIR_OPTION = "--seas-dir"
@@ -306,14 +307,14 @@ Read them with `sorcar_text(target)` (code with Read/grep). Change them only wit
   `seas/`. Files outside the editable folders (`src/kiss/agents/seas/`,
   `src/kiss/agents/third_party_agents/`, or the `--seas-dir` folder) are KISS Sorcar
   itself: touch them only through `patch_sorcar` after `request_sorcar_permission`,
-  except `tmp/` and `reports/`.
+  except `<scratch dir>/` (the Scratch dir of Task Settings) and `reports/`.
 - Ground every added instruction in trajectory evidence: cite the task id and digest
   entry index (from `run_findings` / `run_transcript`) in your notes. No instruction for
   a failure that did not occur.
 - Make instructions specific, imperative and checkable ("Batch independent greps into one
   Bash call" beats "be efficient"). Read the prompt with `sea_prompt` first; do not
-  restate it. Prefer fixing the cause ("read `tmp/PROGRESS.md` before re-deriving the
-  plan") to telling the agent to try harder.
+  restate it. Prefer fixing the cause ("read `<scratch dir>/PROGRESS.md` before re-deriving
+  the plan") to telling the agent to try harder.
 - Keep each SEA's added text short: one section `## Lessons from recent runs (rsi7d)` of
   at most about 12 bullets. When the section exists, replace it with a merged,
   deduplicated version; never append a second one. Drop a bullet only when its evidence
@@ -325,23 +326,23 @@ Read them with `sorcar_text(target)` (code with Read/grep). Change them only wit
 - Call each read tool once per arguments; copy the numbers you need from every
   `sea_findings`, `run_overview`, `model_scorecard` and `sea_prompt` result into the
   findings file right after the call. `sea_runs()` returns about 220k chars: call it once
-  per sweep, write the per-SEA numbers into `tmp/rsi7d/baseline.md` at once, and never
-  call it again, with or without `name` / `days`.
+  per sweep, write the per-SEA numbers into `<scratch dir>/rsi7d/baseline.md` at once, and
+  never call it again, with or without `name` / `days`.
 - When the `Steps:` footer of a tool result ends in 9, make your next call `summary`;
   otherwise the 10th, 20th, ... call is refused.
 - In a worktree, never put a main-checkout path (`/home/ksen/kiss/...`) in a Bash
   command, heredoc bodies included: the guard rejects the whole call. Read the main
   branch's copy with `git show main:<path>`; quote such paths only in `Write`d notes.
-- Keep notes in `./tmp/rsi7d/`. Write the final report to
+- Keep notes in `<scratch dir>/rsi7d/`. Write the final report to
   `./reports/rsi7d-<YYYY-MM-DD>.md` and `git add` it. Outside a worktree `Write` refuses
-  `reports/...` (tracked): `Write` the report to `tmp/rsi7d/report.md`, then `cp` it
-  into `reports/` and `git add` it in one Bash call.
+  `reports/...` (tracked): `Write` the report to `<scratch dir>/rsi7d/report.md`, then `cp`
+  it into `reports/` and `git add` it in one Bash call.
 
 ## Procedure (the AI discovery loop runs in `/discover`)
 1. Baseline. Call `indexed_seas()` (check its `scope` against your task text),
-   `sea_runs()` and `model_scorecard()`. Write `./tmp/rsi7d/baseline.md`: per SEA the run
-   count, success/unsuccessful/failed counts, median cost, steps, seconds per step and
-   models used; per model the scorecard row. Skip SEAs with zero runs in the window (say
+   `sea_runs()` and `model_scorecard()`. Write `<scratch dir>/rsi7d/baseline.md`: per SEA
+   the run count, success/unsuccessful/failed counts, median cost, steps, seconds per step
+   and models used; per model the scorecard row. Skip SEAs with zero runs in the window (say
    so in the report).
 2. Mine mistakes per editable SEA with runs, `sorcar` included when in scope (its changes
    wait for permission). Call `sea_findings(name)` for the aggregated signals, then drill
@@ -352,10 +353,10 @@ Read them with `sorcar_text(target)` (code with Read/grep). Change them only wit
    from the user's follow-up messages and the final result; look for re-derived plans,
    re-read files, serial one-command Bash calls, oversized tool outputs, unneeded
    sub-agents, wrong tool choices, missed requirements and hallucinated facts. Record
-   each observation with its evidence in `./tmp/rsi7d/findings-<name>.md`.
-3. Ideas. Write `./tmp/rsi7d/ideas.md`: per SEA, the candidate changes (prompt bullets,
-   settings, tools, guardrail hooks) with rationale, evidence and the aspect they improve
-   (quality / mistakes / cost / speed). Rank them with pairwise `decide` "choice"
+   each observation with its evidence in `<scratch dir>/rsi7d/findings-<name>.md`.
+3. Ideas. Write `<scratch dir>/rsi7d/ideas.md`: per SEA, the candidate changes (prompt
+   bullets, settings, tools, guardrail hooks) with rationale, evidence and the aspect they
+   improve (quality / mistakes / cost / speed). Rank them with pairwise `decide` "choice"
    questions; keep the winners (at most about 6 new bullets per SEA per run). Pick the run
    that will measure them: among the SEA's past runs without external side effects
    (messaging, payments, publishing), the failed or unsuccessful run whose mistake the
@@ -415,15 +416,15 @@ Read them with `sorcar_text(target)` (code with Read/grep). Change them only wit
    rsi7d's chat and budget and would change this checkout. Replay again only when the
    first replay regressed on status or signals; never A/B two wordings of one bullet.
    Keep a change when its replay is not worse than the original run on status and
-   signals and not clearly worse on cost/steps; otherwise revert it through the editor
-   that made it and record why in `./tmp/rsi7d/explored-ideas.md` so it is not retried.
+   signals and not clearly worse on cost/steps; otherwise revert it through the editor that
+   made it and record why in `<scratch dir>/rsi7d/explored-ideas.md` so it is not retried.
    Spend at most 60% of your remaining budget on replays, the children's included; check
    `run_findings` of the sweep so far before each one. When the budget rule forbids the
    replay (a past rsi7d sweep rarely fits), keep a prompt or settings change only if it is
    small, evidence-backed and passes `uv run pytest -q
    src/kiss/tests/agents/seas/test_<name>_sea.py` (when that test exists), and mark it
-   "not replay-verified" in the report; revert a code change. Delete `tmp/rsi7d/replays`
-   before you finish.
+   "not replay-verified" in the report; revert a code change. Delete
+   `<scratch dir>/rsi7d/replays` before you finish.
 6. Autorouter evidence. From `model_scorecard()` and the per-SEA models, write a compact
    evidence block with `write_autorouter_evidence(text)`, which rewrites
    `~/{{HOME_DIR}}/AUTOROUTER.md` (the autorouter SEA splices that file into every prompt;
@@ -443,7 +444,7 @@ Read them with `sorcar_text(target)` (code with Read/grep). Change them only wit
    `run_findings` or `task_history`, never from the running `Budget:` line. Write
    "verified" for a bullet only when the replay transcript shows the behaviour it asks
    for, and cite that entry; when the replay never reached the situation, write "not
-   exercised". `git add` the report. Maintain `./tmp/PROGRESS.md` while you work.
+   exercised". `git add` the report. Maintain `<scratch dir>/PROGRESS.md` while you work.
 8. Finish with a summary that lists every changed file, every added instruction and the
    evaluation evidence.
 
@@ -489,13 +490,13 @@ Read them with `sorcar_text(target)` (code with Read/grep). Change them only wit
   `improve_sea_with_discover` refuse it (sweep 1027f9dc); use `replay_in_place` when the
   task changes nothing on disk, else patch the prompt unverified.
 - `write_autorouter_evidence` counts its 66-character stamp line against the 2,500 cap:
-  write the block to `tmp/rsi7d/evidence.md`, `wc -c` it, and call the tool only when the
-  file is at most 2,430 bytes (8a8aacf9 [56] sent 2,529 and b4c5f863 [49] 2,560 characters,
-  both refused and re-sent).
+  write the block to `<scratch dir>/rsi7d/evidence.md`, `wc -c` it, and call the tool only
+  when the file is at most 2,430 bytes (8a8aacf9 [56] sent 2,529 and b4c5f863 [49] 2,560
+  characters, both refused and re-sent).
 - For the baseline, run `_sea_runs(7)` from `rsi7d_sea` in one `uv run python` script
-  that writes `tmp/rsi7d/baseline.md` (per-SEA stats table) and
-  `tmp/rsi7d/runs-detail.md` (failed, unsuccessful and costliest runs) and prints only
-  the table: the raw `sea_runs()` JSON is about 220k characters (02fd7869, 8a8aacf9 and
+  that writes `<scratch dir>/rsi7d/baseline.md` (per-SEA stats table) and
+  `<scratch dir>/rsi7d/runs-detail.md` (failed, unsuccessful and costliest runs) and prints
+  only the table: the raw `sea_runs()` JSON is about 220k characters (02fd7869, 8a8aacf9 and
   b4c5f863 each pulled it into context for a 3-run SEA).
 - A SEA whose `prompt_constant` is empty in `indexed_seas()` (gepa: `system_prompt`
   returns `... + GEPA_INSTRUCTIONS + "\\n"`) takes no `patch_sea_prompt`; do not splice
@@ -1948,9 +1949,10 @@ def patch_sea_code(name: str, old: str, new: str) -> str:
     return f"Patched {path}: {len(source)} -> {len(candidate)} chars, {delta:+d} lines"
 
 
-SNAPSHOT_DIR = Path("tmp") / "rsi7d" / "snapshots"
+SNAPSHOT_DIR = Path("snapshots")
 """Where ``improve_sea_code`` and ``improve_sea_with_discover`` keep the copy of a SEA folder
-(and of its test file) they took before the sub-agent ran."""
+(and of its test file) they took before the sub-agent ran, in rsi7d's folder of the task's
+scratch dir."""
 
 _LEGACY_DISPATCH_ERROR = (
     "Error: the daemon's installed kiss package predates agent_dispatch.dispatch_result; "
@@ -2010,8 +2012,9 @@ replay's task id.
 """
 """The task ``improve_sea_with_discover`` gives the ``/discover`` child (``str.format`` fields)."""
 
-DISCOVER_DIR = Path("tmp") / "rsi7d" / "discover"
-"""Where ``improve_sea_with_discover`` checks out the worktree a ``/discover`` child edits."""
+DISCOVER_DIR = Path("discover")
+"""Where ``improve_sea_with_discover`` checks out the worktree a ``/discover`` child edits, in
+rsi7d's folder of the task's scratch dir."""
 
 
 def improve_sea_code(
@@ -2026,7 +2029,7 @@ def improve_sea_code(
     the checkout with the SEA's folder, file and your *instructions*
     (the ideas and the evidence they rest on), capped by *max_budget*
     (USD) and *timeout* (seconds).  The folder is copied to
-    `tmp/rsi7d/snapshots/<name>` first; `revert_sea_code(name)` restores
+    `<scratch dir>/rsi7d/snapshots/<name>` first; `revert_sea_code(name)` restores
     that copy.  When the sub-agent returns, the script goes through the
     same gate as `patch_sea_code` (compile, load with every method,
     `sea lint`); a script that fails is restored from the snapshot and
@@ -2084,7 +2087,7 @@ def revert_sea_code(name: str) -> str:
     path = _editable_path(name)
     if path is None:
         return _not_editable(name)
-    snapshot = _work_root() / SNAPSHOT_DIR / name
+    snapshot = _scratch_root() / SNAPSHOT_DIR / name
     if not snapshot.is_dir():
         return f"Error: no snapshot of {name} in {snapshot}; nothing to revert"
     _restore_snapshot(name, path.parent, _folder_checkout(path.parent))
@@ -2098,7 +2101,7 @@ def _sea_test_file(name: str, checkout: Path) -> Path:
 
 def _test_snapshot(name: str) -> Path:
     """Return where ``improve_sea_with_discover`` keeps its copy of SEA *name*'s test file."""
-    return _work_root() / SNAPSHOT_DIR / f"test_{name}_sea.py.before"
+    return _scratch_root() / SNAPSHOT_DIR / f"test_{name}_sea.py.before"
 
 
 def _discover_sea_file() -> Path:
@@ -2182,7 +2185,7 @@ def _discover_evaluation(
 
 def _take_snapshot(name: str, folder: Path, checkout: Path) -> Path:
     """Copy SEA *name*'s *folder* (and its test file in *checkout*) to the snapshot; return it."""
-    snapshot = _work_root() / SNAPSHOT_DIR / name
+    snapshot = _scratch_root() / SNAPSHOT_DIR / name
     rmtree_force(snapshot)
     shutil.copytree(folder, snapshot, ignore=shutil.ignore_patterns("__pycache__"))
     test, test_snapshot = _sea_test_file(name, checkout), _test_snapshot(name)
@@ -2197,7 +2200,7 @@ def _restore_snapshot(name: str, folder: Path, checkout: Path) -> None:
 
     A test file that did not exist then (no test snapshot) is removed.
     """
-    _restore_folder(_work_root() / SNAPSHOT_DIR / name, folder)
+    _restore_folder(_scratch_root() / SNAPSHOT_DIR / name, folder)
     test, test_snapshot = _sea_test_file(name, checkout), _test_snapshot(name)
     if test_snapshot.is_file():
         shutil.copyfile(test_snapshot, test)
@@ -2228,7 +2231,7 @@ def _discover_worktree(
     patched it so far, committed there as the commit the child's changes
     are measured from.  An ``Error: ...`` string when git fails.
     """
-    worktree = _work_root() / DISCOVER_DIR / name
+    worktree = _scratch_root() / DISCOVER_DIR / name
     _remove_worktree(checkout, worktree)
     worktree.parent.mkdir(parents=True, exist_ok=True)
     added = _git("worktree", "add", "--detach", "--quiet", str(worktree), "HEAD", cwd=checkout)
@@ -2317,7 +2320,7 @@ def improve_sea_with_discover(
     The AI discovery loop (the bundled `/discover` SEA: bestrouter, full
     toolset) gets *task* — the evidence (task ids, findings), the metric
     and the goal — and a worktree of this checkout
-    (`tmp/rsi7d/discover/<name>`, holding the SEA's script and test file
+    (`<scratch dir>/rsi7d/discover/<name>`, holding the SEA's script and test file
     as this checkout has them) where it edits the script in place, one
     idea per round, every evaluated point a commit.  Its dev evaluation
     is a replay of past run *replay_task_id*: the run's repository is
@@ -2338,7 +2341,7 @@ def improve_sea_with_discover(
     copies of every other file) or left a script the gate refuses
     changes nothing.  The worktree is then removed; every evaluated
     commit stays under `refs/discover/<child task id>/`.  The folder and
-    the test file are copied to `tmp/rsi7d/snapshots/<name>` first, and
+    the test file are copied to `<scratch dir>/rsi7d/snapshots/<name>` first, and
     `revert_sea_code(name)` restores that copy.  Returns JSON with
     `task_id` (the child), its `result`, the `applied` paths, `replays`
     (every replay the child dispatched, measured as `run_findings`
@@ -2538,7 +2541,7 @@ def settle_sea_settings(name: str, replay_task_id: str = "") -> str:
     })
     return (
         f"Reverted settings()[{pending['key']!r}] of {name} to {pending['old']!r} "
-        f"({verdict}); record why in ./tmp/rsi7d/explored-ideas.md"
+        f"({verdict}); record why in {(_scratch_root() / 'explored-ideas.md').as_posix()}"
     )
 
 
@@ -2844,6 +2847,12 @@ def _work_root() -> Path:
     return Path(agent.work_dir) if agent is not None and agent.work_dir else Path.cwd()
 
 
+def _scratch_root() -> Path:
+    """Return rsi7d's folder of this task's scratch directory (of ``kiss-tmp`` outside a task)."""
+    agent = current_agent()
+    return Path(agent._host_scratch_dir() if agent is not None else kiss_tmp_dir(), "rsi7d")
+
+
 # ---------------------------------------------------------------------------
 # KISS Sorcar itself (the pseudo-SEA ``sorcar``), changed only with permission
 # ---------------------------------------------------------------------------
@@ -3024,7 +3033,7 @@ def patch_sorcar(target: str, old: str, new: str) -> str:
     *new*; a ``.py`` file must still compile.  ``AGENTS.md`` holds one
     instruction per bullet: an empty *old* adds *new* as a bullet, an
     empty *new* removes the bullet *old*, both replace it; the file is
-    copied to ``tmp/rsi7d/AGENTS.md.before`` before its first change.
+    copied to ``<scratch dir>/rsi7d/AGENTS.md.before`` before its first change.
     Revert a checkout file with ``git checkout -- <file>``.
     """
     path = _sorcar_target(target)
@@ -3058,7 +3067,7 @@ def _patch_agents_md(path: Path, old: str, new: str) -> str:
     """Remove bullet *old* and/or add bullet *new* to ``$KISS_HOME/AGENTS.md``, after a backup."""
     if not old and not new:
         return "Error: give `old` (the bullet to remove), `new` (the bullet to add) or both"
-    backup = _work_root() / "tmp" / "rsi7d" / "AGENTS.md.before"
+    backup = _scratch_root() / "AGENTS.md.before"
     if path.is_file() and not backup.exists():
         backup.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(path, backup)
@@ -3294,7 +3303,7 @@ def prepare_replay_clone(task_id: str, name: str = "") -> dict[str, Any] | str:
     commit, source = _base_commit(repo, str(row.get("task") or ""), start_ms)
     if not commit:
         return f"Error: {repo} has no commit from before the task started"
-    clone = _work_root() / REPLAY_DIR / f"{sea}-{task_id[:8]}"
+    clone = _scratch_root() / REPLAY_DIR / f"{sea}-{task_id[:8]}"
     rmtree_force(clone)  # a plain rmtree leaves git's read-only objects behind on Windows
     clone.parent.mkdir(parents=True, exist_ok=True)
     for label, args in (
@@ -3325,7 +3334,7 @@ def replay_in_clone(
 
     Use it for tasks that modify files (papers, code, reports): the replay
     runs the SEA file of this checkout (with its patched prompt) inside
-    ``tmp/rsi7d/replays/<sea>-<task id prefix>``, so it never touches this
+    ``<scratch dir>/rsi7d/replays/<sea>-<task id prefix>``, so it never touches this
     checkout.  The commit is the first parent of the task's own auto-commit
     (found through the ``User prompt:`` block of the commit message) or,
     without one, the repository HEAD at the task's start; repository paths

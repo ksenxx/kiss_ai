@@ -92,6 +92,9 @@ from kiss.core.printer import event_cost
 
 logger = logging.getLogger(__name__)
 
+#: How long a statement of a connection waits for SQLite's lock, in milliseconds.
+_BUSY_TIMEOUT_MS = 30000
+
 
 @contextmanager
 def _immediate_txn(db: sqlite3.Connection) -> Iterator[None]:
@@ -1478,6 +1481,11 @@ _INDEX_DDL: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS idx_th_timestamp ON task_history(timestamp)",
     "CREATE INDEX IF NOT EXISTS idx_th_task ON task_history(task)",
     "CREATE INDEX IF NOT EXISTS idx_th_chat_id ON task_history(chat_id)",
+    # A chat's tasks in the order they ran: its last task, and the task
+    # just before another (``_chat_parent_locked``, ``_LINEAGE_STEP``),
+    # are one seek instead of a scan of the chat per lookup.
+    "CREATE INDEX IF NOT EXISTS idx_th_chat_timestamp "
+    "ON task_history(chat_id, timestamp)",
     "CREATE INDEX IF NOT EXISTS idx_th_parent_task_id "
     "ON task_history(parent_task_id)",
     "CREATE INDEX IF NOT EXISTS idx_ev_task_id ON events(task_id)",
@@ -1647,7 +1655,13 @@ def _init_tables(conn: sqlite3.Connection) -> None:
             -- Short host name of the machine the task ran on, stamped
             -- by kiss.scripts.sync_db when it copies the row in from
             -- that machine's database; '' = this database's machine.
-            machine TEXT DEFAULT ''
+            machine TEXT DEFAULT '',
+            -- The task this one continues in its chat's tree: the task
+            -- the user loaded before running it, else the chat's last
+            -- task then.  '' for a chat's first task, a sub-agent's row
+            -- (it continues the task that dispatched it, parent_task_id)
+            -- and a row from before the column; see _load_task_lineage.
+            chat_parent_id TEXT DEFAULT ''
         );
         -- One row per chat: a 6-8 word summary of what the chat's tasks
         -- did, the launch instant (epoch ms) of its latest task and
@@ -1780,6 +1794,21 @@ def _init_tables(conn: sqlite3.Connection) -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_rc_parent_task_id
             ON remote_charges(parent_task_id);
+        -- What a chat loaded in pieces is sent of a task before its
+        -- Trajectory panel is opened (piece, see
+        -- server/lazy_replay.py: first_piece), kept so that opening
+        -- the chat again reads neither the task's events nor a scan of
+        -- them.  It holds while the task has the events it was laid
+        -- out from (events of them, the last at last_seq) and the
+        -- layout that made it stands (layout).  It names event rows
+        -- and holds none of their text.  Dropped with its task.
+        CREATE TABLE IF NOT EXISTS first_pieces (
+            task_id TEXT PRIMARY KEY,
+            events INTEGER NOT NULL,
+            last_seq INTEGER NOT NULL,
+            layout INTEGER NOT NULL,
+            piece TEXT NOT NULL
+        );
     """)
     # Columns first: an index over a column this version added to an
     # existing table can only be created once the column is there.
@@ -2446,7 +2475,7 @@ def _open_db_connection(current_path: str, gen_snapshot: int) -> _LockedConnecti
         _require_opened_file(current_path, file_id)
         # The one busy handler; ``sqlite3.connect(timeout=...)`` would
         # install another that this pragma immediately replaces.
-        conn.execute("PRAGMA busy_timeout=30000")
+        conn.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
         conn.execute("PRAGMA foreign_keys=ON")
         conn.row_factory = sqlite3.Row
         locked_call(_init_tables_lock, _register_new_conn, conn, current_path)
@@ -2462,6 +2491,56 @@ def _open_db_connection(current_path: str, gen_snapshot: int) -> _LockedConnecti
         except sqlite3.Error:
             pass
         raise
+
+
+def _chat_parent_locked(db: sqlite3.Connection, chat_id: str, loaded_task_id: object) -> str:
+    """Under ``_rw_lock``: the task the next task of chat *chat_id* continues.
+
+    The tasks of a chat form a tree: a task run after the user loaded
+    one continues that task, any other continues the chat's last task
+    (its most recent row that is no sub-agent's).
+
+    Args:
+        db: The connection to read with.
+        chat_id: The chat the next task runs in; ``""`` has no task yet.
+        loaded_task_id: The ``task_history.id`` the user loaded, if any.
+            One that names no row (a task deleted since) is ignored.
+
+    Returns:
+        The parent's row id, or ``""`` when the next task is the
+        chat's first.
+    """
+    if (
+        isinstance(loaded_task_id, str)
+        and loaded_task_id
+        and db.execute("SELECT 1 FROM task_history WHERE id = ?", (loaded_task_id,)).fetchone()
+    ):
+        return loaded_task_id
+    if not chat_id:
+        return ""
+    row = db.execute(
+        f"SELECT id FROM task_history WHERE chat_id = ? AND {NOT_SUBAGENT} "
+        "ORDER BY timestamp DESC, rowid DESC LIMIT 1",
+        (chat_id,),
+    ).fetchone()
+    return str(row[0]) if row else ""
+
+
+def _next_task_parent(chat_id: str, loaded_task_id: str = "") -> str:
+    """Return the task the next task of chat *chat_id* continues.
+
+    Args:
+        chat_id: The chat the next task runs in.
+        loaded_task_id: The task the user loaded before running it, if
+            any (see :func:`_chat_parent_locked`).
+
+    Returns:
+        The ``task_history.id`` of the next task's parent in the chat's
+        tree, or ``""`` when the chat has no task yet.
+    """
+    db = _get_db()
+    with _rw_lock.read_lock():
+        return _chat_parent_locked(db, chat_id, loaded_task_id)
 
 
 def _add_task(
@@ -2484,6 +2563,12 @@ def _add_task(
     post-completion values (tokens, cost) later call
     :func:`_save_task_extra`, which updates only the columns it is
     given (so an ``is_favorite`` flag set in the meantime survives).
+
+    The row also records the task it continues in its chat's tree
+    (``chat_parent_id``, read back by :func:`_load_task_lineage`): the
+    ``chat_parent_id`` of *extra* when that task exists, else the
+    chat's last task at the insert (:func:`_chat_parent_locked`).  A
+    sub-agent's row records none: it continues its dispatching task.
 
     Thread-safe: all writes are protected by ``_rw_lock.write_lock()``.
     The row's ``timestamp`` is taken once ``BEGIN IMMEDIATE`` holds the
@@ -2521,12 +2606,18 @@ def _add_task(
         if chat_id == "":
             chat_id = _allocate_chat_id()
         task_id = task_id or uuid.uuid4().hex
+        chat_parent_id = (
+            ""
+            if parent_task_id
+            else _chat_parent_locked(db, chat_id, payload.get("chat_parent_id"))
+        )
         db.execute(
             "INSERT INTO task_history (id, timestamp, task, chat_id, result, "
             "model, work_dir, version, tokens, cost, steps, is_parallel, "
             "start_ts, end_ts, is_favorite, "
-            "parent_task_id, max_budget, owner, is_side_channel, sea, is_cron) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "parent_task_id, max_budget, owner, is_side_channel, sea, is_cron, "
+            "chat_parent_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 task_id, time.time(), task, chat_id,
                 "Agent Failed Abruptly",
@@ -2546,6 +2637,7 @@ def _add_task(
                 is_side_channel,
                 _safe_str(payload.get("sea", "") or ""),
                 1 if payload.get("is_cron") else 0,
+                chat_parent_id,
             ),
         )
     _invalidate_chat_context_cache(chat_id)
@@ -3360,6 +3452,81 @@ def user_tasks_since(since: float) -> list[dict[str, object]]:
         }
         for row in rows
     ]
+
+
+def reported_user_tasks(since: float, min_result_chars: int) -> list[dict[str, object]]:
+    """List the tasks of the user's own that ended in a report, on or after *since*.
+
+    What the memory self-quiz reads: top-level tasks (no sub-agent, no
+    ``/ask``) that ran no SEA and no cron job and succeeded with a result
+    of at least *min_result_chars* characters, on this machine: a row a
+    history sync copied in belongs to the machine it ran on, where its
+    work dir exists.  Thread-safe.
+
+    Args:
+        since: Epoch seconds; rows with ``timestamp >= since`` qualify.
+        min_result_chars: The shortest ``result`` that counts as a report.
+
+    Returns:
+        The rows with every typed column (``id``, ``task``, ``result``,
+        ``work_dir``, ``timestamp``, ...), newest first.
+    """
+    db = _get_db()
+    with _rw_lock.read_lock():
+        rows = db.execute(
+            _HISTORY_SELECT
+            + f"WHERE timestamp >= ? AND {NOT_SUBAGENT} AND is_side_channel = 0 "
+            "AND is_cron = 0 AND (sea IS NULL OR sea = '') AND success = 1 "
+            "AND COALESCE(machine, '') = '' "
+            "AND length(result) >= ? ORDER BY timestamp DESC, rowid DESC",
+            (float(since), int(min_result_chars)),
+        ).fetchall()
+    return [_history_row_to_dict(row) for row in rows]
+
+
+def task_tree_ids(task_id: str) -> list[str]:
+    """Return the id of task *task_id* and of every sub-task below it.
+
+    The ids a memory page's ``task`` frontmatter can hold when the task,
+    or a sub-agent it dispatched, wrote the page.  Thread-safe.
+
+    Args:
+        task_id: The ``task_history`` id of the task at the top.
+    """
+    db = _get_db()
+    with _rw_lock.read_lock():
+        rows = db.execute(
+            "WITH RECURSIVE tree(id) AS (SELECT ? UNION "
+            "SELECT t.id FROM task_history t JOIN tree ON t.parent_task_id = tree.id) "
+            "SELECT id FROM tree",
+            (task_id,),
+        ).fetchall()
+    return [_safe_str(row["id"]) for row in rows]
+
+
+def tasks_matching(id_prefix: str = "", sea: str = "", limit: int = 20) -> list[dict[str, object]]:
+    """List the newest tasks whose id starts with *id_prefix* and that ran the SEA *sea*.
+
+    An empty filter matches every task, sub-agents included.  Thread-safe.
+
+    Args:
+        id_prefix: The leading characters of the ``task_history`` id.
+        sea: The row's ``sea`` column, the stem of the SEA file (``discover_sea``).
+        limit: The most rows to return.
+
+    Returns:
+        The rows with every typed column (``id``, ``task``, ``result``,
+        ``timestamp``, ``success``, ``steps``, ...), newest first.
+    """
+    db = _get_db()
+    with _rw_lock.read_lock():
+        rows = db.execute(
+            _HISTORY_SELECT
+            + "WHERE substr(id, 1, ?) = ? AND (? = '' OR sea = ?) "
+            "ORDER BY timestamp DESC, rowid DESC LIMIT ?",
+            (len(id_prefix), id_prefix, sea, sea, int(limit)),
+        ).fetchall()
+    return [_history_row_to_dict(row) for row in rows]
 
 
 # Collapse the union to one row per distinct text, most recent first.
@@ -5427,7 +5594,8 @@ def _delete_task_rows(db: sqlite3.Connection, task_ids: list[str], chat_id: str 
     while the deletion waited for that lock would otherwise stay behind
     under a parent that is gone.  The ``remote_subtasks`` records of the
     dropped tasks (their side of the account of sub-agents run on other
-    machines) go with them, and the ``remote_charges`` they owe.  Each deleted id is recorded in
+    machines) go with them, the ``remote_charges`` they owe and the
+    ``first_pieces`` kept of their transcripts.  Each deleted id is recorded in
     ``deleted_tasks`` in that transaction too (and the chat in
     ``deleted_chats``), so that the deletion travels to the other
     machines the database is synced with instead of the task coming
@@ -5456,6 +5624,7 @@ def _delete_task_rows(db: sqlite3.Connection, task_ids: list[str], chat_id: str 
                     ).fetchall()
                 ]
             db.execute(f"DELETE FROM events WHERE task_id IN ({marks})", task_ids)
+            db.execute(f"DELETE FROM first_pieces WHERE task_id IN ({marks})", task_ids)
             cursor = db.execute(f"DELETE FROM task_history WHERE id IN ({marks})", task_ids)
             removed = cursor.rowcount or 0
             db.execute(
@@ -6969,7 +7138,11 @@ def _task_has_transcript_events(task_id: str) -> bool:
     return False
 
 
-def _select_event_rows(db: sqlite3.Connection, task_id: str) -> list[sqlite3.Row]:
+def _select_event_rows(
+    db: sqlite3.Connection,
+    task_id: str,
+    spans: list[tuple[int, int]] | None = None,
+) -> list[sqlite3.Row]:
     """Return the raw event rows of *task_id* in seq order, oversized rows clipped.
 
     Callers must hold ``_rw_lock.read_lock()`` (or ``write_lock()``);
@@ -6989,9 +7162,12 @@ def _select_event_rows(db: sqlite3.Connection, task_id: str) -> list[sqlite3.Row
     Args:
         db: Active database connection.
         task_id: Primary key of the ``task_history`` row.
+        spans: ``(first seq, last seq)`` ranges, ascending and disjoint,
+            to read instead of the whole transcript (a part of a
+            lazily loaded one: :func:`_load_task_events_by_seq`).
     """
-    return db.execute(
-        "SELECT timestamp, length(event_json) AS size, "
+    sql = (
+        "SELECT seq, timestamp, length(event_json) AS size, "
         "CASE WHEN length(event_json) <= ? THEN event_json END AS event_json, "
         "CASE WHEN length(event_json) > ? AND json_valid(event_json) "
         "THEN json_extract(event_json, '$.type') END AS big_type, "
@@ -7000,17 +7176,46 @@ def _select_event_rows(db: sqlite3.Connection, task_id: str) -> list[sqlite3.Row
         "CASE WHEN length(event_json) > ? AND json_valid(event_json) "
         "AND length(json_remove(event_json, '$.text')) <= ? "
         "THEN json_remove(event_json, '$.text') END AS big_rest "
-        "FROM events WHERE task_id = ? ORDER BY seq",
-        (
-            MAX_EVENT_ROW_CHARS,
-            MAX_EVENT_ROW_CHARS,
-            MAX_EVENT_ROW_CHARS,
-            MAX_EVENT_TEXT_CHARS,
-            MAX_EVENT_ROW_CHARS,
-            MAX_EVENT_REST_CHARS,
-            task_id,
-        ),
-    ).fetchall()
+        "FROM events WHERE task_id = ? "
+    )
+    params = (
+        MAX_EVENT_ROW_CHARS,
+        MAX_EVENT_ROW_CHARS,
+        MAX_EVENT_ROW_CHARS,
+        MAX_EVENT_TEXT_CHARS,
+        MAX_EVENT_ROW_CHARS,
+        MAX_EVENT_REST_CHARS,
+        task_id,
+    )
+    if spans is None:
+        return db.execute(sql + "ORDER BY seq", params).fetchall()
+    rows: list[sqlite3.Row] = []
+    for first, last in spans:
+        rows += db.execute(
+            sql + "AND seq BETWEEN ? AND ? ORDER BY seq", (*params, first, last),
+        ).fetchall()
+    return rows
+
+
+def _decode_event_row(r: sqlite3.Row) -> dict[str, object] | None:
+    """Decode one row of :func:`_select_event_rows`; ``None`` for one that cannot be shown.
+
+    The event dict has its ``_timestamp`` field injected from the
+    row's ``events.timestamp`` column.  A row whose ``event_json``
+    fails to decode yields ``None`` (logged at DEBUG level).
+    """
+    if r["event_json"] is None:
+        ev = _clipped_event_row(r["big_type"], r["big_text"], r["big_rest"], r["size"])
+        if ev is not None:
+            ev["_timestamp"] = r["timestamp"]
+        return ev
+    try:
+        ev = json.loads(r["event_json"])
+        ev["_timestamp"] = r["timestamp"]
+    except (json.JSONDecodeError, TypeError):
+        logger.debug("Exception caught", exc_info=True)
+        return None
+    return cast("dict[str, object]", ev)
 
 
 def _decode_event_rows(event_rows: list[sqlite3.Row]) -> list[dict[str, object]]:
@@ -7018,8 +7223,7 @@ def _decode_event_rows(event_rows: list[sqlite3.Row]) -> list[dict[str, object]]
 
     Each surviving event dict has its ``_timestamp`` field injected
     from the matching ``events.timestamp`` column.  Rows whose
-    ``event_json`` fails to decode are silently dropped (logged at
-    DEBUG level).
+    ``event_json`` fails to decode are silently dropped.
 
     Args:
         event_rows: The rows, already fetched.
@@ -7027,24 +7231,196 @@ def _decode_event_rows(event_rows: list[sqlite3.Row]) -> list[dict[str, object]]
     Returns:
         List of event dicts with ``_timestamp`` injected.
     """
-    events: list[dict[str, object]] = []
-    for r in event_rows:
-        if r["event_json"] is None:
-            ev = _clipped_event_row(
-                r["big_type"], r["big_text"], r["big_rest"], r["size"],
-            )
-            if ev is None:
-                continue
-            ev["_timestamp"] = r["timestamp"]
-            events.append(ev)
-            continue
-        try:
-            ev = json.loads(r["event_json"])
-            ev["_timestamp"] = r["timestamp"]
-            events.append(ev)
-        except (json.JSONDecodeError, TypeError):
-            logger.debug("Exception caught", exc_info=True)
+    decoded = (_decode_event_row(r) for r in event_rows)
+    return [ev for ev in decoded if ev is not None]
+
+
+def _load_task_events_by_seq(
+    task_id: str, spans: list[tuple[int, int]],
+) -> dict[int, dict[str, object]]:
+    """Load the events of *task_id* whose ``seq`` lies in one of *spans*.
+
+    The part of a transcript a lazily loaded chat asks for
+    (``server/lazy_replay.py``): only these rows leave the database.
+    Decoded like every transcript loader's (oversized rows clipped,
+    undecodable rows left out), outside the read lock.
+
+    Args:
+        task_id: Primary key of the ``task_history`` row.
+        spans: ``(first seq, last seq)`` ranges, ascending and disjoint.
+
+    Returns:
+        The events by ``seq``, in ``seq`` order.
+    """
+    db = _get_db()
+    with _rw_lock.read_lock():
+        rows = _select_event_rows(db, task_id, spans)
+    events: dict[int, dict[str, object]] = {}
+    for r in rows:
+        ev = _decode_event_row(r)
+        if ev is not None:
+            events[r["seq"]] = ev
     return events
+
+
+#: The events of the model's streamed words, nine in ten of a
+#: transcript's: its layout reads their type and nothing else.
+STREAM_EVENT_TYPES = ("thinking_start", "thinking_delta", "thinking_end", "text_delta", "text_end")
+#: The fields of any other event the layout reads, the ``facts`` of
+#: :func:`_scan_task_events`.
+EVENT_SCAN_FIELDS = (
+    "name", "steer", "early", "is_error", "command", "manual", "success",
+    "total_steps", "step_count", "ts",
+)
+#: SQL counting the ``images`` entries of event ``j`` that embed a
+#: picture (a non-empty ``b64`` string); ``{also}`` narrows the count.
+_EVENT_IMAGES_SQL = (
+    "CASE WHEN pictures THEN ("
+    "SELECT count(*) FROM json_each(j, '$.images') WHERE type = 'object' "
+    "AND json_type(value, '$.b64') = 'text' AND json_extract(value, '$.b64') <> ''{also}"
+    ") ELSE 0 END"
+)
+#: The light scan of :func:`_scan_task_events`.  ``j`` is NULL for a
+#: row :func:`_select_event_rows` clips or the decoder drops (too
+#: long, not JSON, not an object).  Each ``LIMIT -1`` keeps SQLite
+#: from merging the subquery into its parent, which would parse the
+#: event once per use of ``j`` and ``type`` instead of once.
+_EVENT_SCAN_SQL = (
+    "SELECT seq, timestamp, j IS NULL AS odd, type, "
+    f"CASE WHEN type IS NULL OR type NOT IN ({', '.join(map(repr, STREAM_EVENT_TYPES))}) "
+    f"THEN json_extract(j, {', '.join(repr('$.' + f) for f in EVENT_SCAN_FIELDS)}) END AS facts, "
+    "CASE WHEN type = 'system_output' THEN json_type(j, '$.text') = 'text' END AS merges, "
+    "CASE WHEN type = 'usage_info' AND json_extract(j, '$.total_steps') IS NULL "
+    "THEN substr(json_extract(j, '$.text'), 1, 1000) END AS usage_text, "
+    f"{_EVENT_IMAGES_SQL.format(also='')} AS images, "
+    + _EVENT_IMAGES_SQL.format(
+        also=" AND json_type(value, '$.mime') = 'text' AND json_extract(value, '$.mime') <> ''",
+    )
+    + " AS media "
+    "FROM (SELECT seq, timestamp, j, json_extract(j, '$.type') AS type, "
+    "json_type(j, '$.images') = 'array' AS pictures "
+    "FROM (SELECT seq, timestamp, CASE WHEN length(event_json) <= ? "
+    "AND json_valid(event_json) AND json_type(event_json) = 'object' THEN event_json END AS j "
+    "FROM events WHERE task_id = ? AND seq <= ? ORDER BY seq LIMIT -1) LIMIT -1)"
+)
+
+
+def _scan_task_events(task_id: str, upto: int) -> list[sqlite3.Row]:
+    """Scan the events of *task_id* up to ``seq`` *upto* without loading their bodies, in seq order.
+
+    One row per event: its ``seq``, its row ``timestamp``, its
+    ``type``, how many pictures it embeds (``images``; ``media``: with
+    a mime type) and, unless it is one of :data:`STREAM_EVENT_TYPES`,
+    its ``facts``: the JSON array of its :data:`EVENT_SCAN_FIELDS`,
+    which is all a transcript's layout reads of it besides ``merges``
+    (a ``system_output`` whose ``text`` is a string) and
+    ``usage_text`` (the head of the text of a ``usage_info`` without
+    ``total_steps``).  A row with ``odd`` set is one the decoder clips
+    or drops; its other columns are NULL and
+    :func:`_load_task_events_by_seq` says what it decodes to.  Costs
+    what loading the transcript costs the database and sends nothing
+    of it on.
+
+    Args:
+        task_id: Primary key of the ``task_history`` row.
+        upto: The ``seq`` of the last event to scan: the last of the
+            state the scan is of (:func:`_task_events_stamp`).
+    """
+    _flush_chat_events(task_id)
+    db = _get_db()
+    with _rw_lock.read_lock():
+        return db.execute(_EVENT_SCAN_SQL, (MAX_EVENT_ROW_CHARS, task_id, upto)).fetchall()
+
+
+def _task_events_stamp(task_id: str, upto: int | None = None) -> tuple[object, int, int]:
+    """What tells one state of *task_id*'s stored transcript from the next.
+
+    The database, how many events the task has in it and the last
+    one's ``seq`` (-1 without events): events are appended to a task
+    and deleted with it, never changed, so a scan of the transcript up
+    to that ``seq`` (:func:`_scan_task_events`) holds for as long as
+    its stamp does, and the stamp of an earlier state is read again by
+    its last ``seq``.  Read from the index alone.
+
+    Args:
+        task_id: Primary key of the ``task_history`` row.
+        upto: The ``seq`` of the last event of the state asked for;
+            ``None`` for the present one.
+    """
+    _flush_chat_events(task_id)
+    db = _get_db()
+    with _rw_lock.read_lock():
+        count, last = db.execute(
+            "SELECT count(*), coalesce(max(seq), -1) FROM events "
+            "WHERE task_id = ? AND seq <= coalesce(?, seq)",
+            (task_id, upto),
+        ).fetchone()
+    return (_caches_db_key, count, last)
+
+
+def _first_piece_kept(
+    task_id: str, stamp: tuple[object, int, int], layout: int,
+) -> dict[str, Any] | None:
+    """The first piece kept of *task_id*'s lazily loaded transcript, if it still holds.
+
+    Args:
+        task_id: Primary key of the ``task_history`` row.
+        stamp: The transcript's present state (:func:`_task_events_stamp`).
+        layout: The version of the layout the piece must be of.
+
+    Returns:
+        What :func:`_keep_first_piece` was given for this state and
+        layout; ``None`` when nothing was, or what was kept cannot be
+        read.
+    """
+    db = _get_db()
+    with _rw_lock.read_lock():
+        row = db.execute(
+            "SELECT piece FROM first_pieces WHERE task_id = ? AND events = ? "
+            "AND last_seq = ? AND layout = ?",
+            (task_id, stamp[1], stamp[2], layout),
+        ).fetchone()
+    try:
+        return cast("dict[str, Any]", json.loads(row[0])) if row else None
+    except ValueError:
+        return None
+
+
+def _keep_first_piece(
+    task_id: str, stamp: tuple[object, int, int], layout: int, piece: dict[str, Any],
+) -> None:
+    """Keep *piece* as the first piece of *task_id*'s lazily loaded transcript at *stamp*.
+
+    Nothing is kept of a task deleted meanwhile.  Nothing is kept
+    either while the database cannot be written (a read-only one, a
+    writer of another process in the way): the piece is then laid out
+    again the next time the chat is opened.  Such a writer is not
+    waited for: the chat being opened would wait with it, and behind
+    the write lock held meanwhile every reader of this process.
+
+    Args:
+        task_id: Primary key of the ``task_history`` row.
+        stamp: The state of the transcript the piece was laid out from
+            (:func:`_task_events_stamp`).
+        layout: The version of the layout that made the piece.
+        piece: The piece, JSON-serializable.
+    """
+    db = _get_db()
+    try:
+        with _rw_lock.write_lock():
+            db.execute("PRAGMA busy_timeout=0")
+            try:
+                with _immediate_txn(db):
+                    db.execute(
+                        "INSERT OR REPLACE INTO first_pieces "
+                        "(task_id, events, last_seq, layout, piece) SELECT ?, ?, ?, ?, ? "
+                        "WHERE EXISTS (SELECT 1 FROM task_history WHERE id = ?)",
+                        (task_id, stamp[1], stamp[2], layout, json.dumps(piece), task_id),
+                    )
+            finally:
+                db.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
+    except sqlite3.Error:
+        logger.debug("first piece of task %s not kept", task_id, exc_info=True)
 
 
 #: An event row longer than this is clipped by SQLite instead of being
@@ -7193,6 +7569,7 @@ def _load_latest_chat_events_by_chat_id(
 
 def _load_chat_events_by_task_id(
     task_id: str,
+    with_events: bool = True,
 ) -> dict[str, object] | None:
     """Load a specific task and its events by the task row ID.
 
@@ -7202,13 +7579,15 @@ def _load_chat_events_by_task_id(
 
     Args:
         task_id: The primary key of the ``task_history`` row.
+        with_events: ``False`` skips the events table (``events`` is
+            then ``[]``).
 
     Returns:
         A dict with ``task`` (str), ``task_id`` (str), ``events``
         (list of event dicts), ``chat_id`` (str), and ``extra`` (str,
         JSON metadata), or ``None`` if no such row exists.
     """
-    return _load_events_session_row("WHERE id = ?", (task_id,))
+    return _load_events_session_row("WHERE id = ?", (task_id,), with_events)
 
 
 def _load_all_chat_events_by_chat_id(
@@ -7335,7 +7714,7 @@ def _load_subagent_rows_by_parent_task_id(
 
 
 def _get_adjacent_task_by_chat_id(
-    chat_id: str, current_task_id: str | None, direction: str
+    chat_id: str, current_task_id: str | None, direction: str, with_events: bool = True,
 ) -> dict[str, object] | None:
     """Return the adjacent task within a chat session, relative to *current_task_id*.
 
@@ -7348,6 +7727,8 @@ def _get_adjacent_task_by_chat_id(
             unambiguously.
         direction: ``"prev"`` for the earlier task, ``"next"`` for the
             later task in the same chat session.
+        with_events: ``False`` skips the events table (``events`` is
+            then ``[]``).
 
     Returns:
         A dict with ``task`` (str), ``task_id`` (str) and ``events``
@@ -7377,7 +7758,7 @@ def _get_adjacent_task_by_chat_id(
         ).fetchone()
         if not adj:
             return None
-        event_rows = _select_event_rows(db, str(adj["id"]))
+        event_rows = _select_event_rows(db, str(adj["id"])) if with_events else []
     # The synthesized extra lets the replay reply builder attach
     # a task_settings event for rows that predate the event.
     return _events_session_dict(adj, event_rows)
@@ -7392,12 +7773,12 @@ def _load_chat_context(chat_id: str) -> list[_HistoryEntry]:
     ``NOT_SUBAGENT`` SQL predicate.  Sub-agent
     tasks/results are an internal implementation detail of the
     parent's ``run_parallel`` tool call; surfacing them in the chat
-    context would (a) pollute the LLM's "Previous tasks and results"
-    augmentation built by
-    :meth:`ChatSorcarAgent.build_chat_prompt` with N copies of every
+    context would (a) fill the text the composer's ghost completion
+    draws on (:func:`_load_chat_context_text`) with N copies of every
     fan-out task, and (b) cause the parent tab's history panel to
     list the sub-agent rows alongside the parent task that already
-    summarises them.
+    summarises them.  A task's prompt is built from its own path in
+    the chat's tree instead (:func:`_load_task_lineage`).
 
     Args:
         chat_id: The string chat session identifier.
@@ -7419,31 +7800,48 @@ def _load_chat_context(chat_id: str) -> list[_HistoryEntry]:
     return [{"task": r["task"], "result": r["result"]} for r in rows]
 
 
-def _load_task_chain_context(task_id: str) -> list[_HistoryEntry]:
-    """Load the tasks and results along a task's parent chain.
+#: One step of :func:`_load_task_lineage`: a task's text and result, and
+#: its parent in its chat's tree.  The parent is the first of these that
+#: names a row: the task it recorded (``chat_parent_id``), the task that
+#: dispatched it (a sub-agent's ``parent_task_id``), the task just
+#: before it in its chat (``NOT_SUBAGENT`` binds to ``p`` there).
+_LINEAGE_STEP = (
+    "SELECT t.task, t.result, COALESCE("
+    "(SELECT p.id FROM task_history p WHERE p.id = t.chat_parent_id), "
+    "(SELECT p.id FROM task_history p WHERE p.id = t.parent_task_id), "
+    "(SELECT p.id FROM task_history p "
+    f"WHERE p.chat_id = t.chat_id AND p.chat_id != '' AND {NOT_SUBAGENT} "
+    "AND (p.timestamp, p.rowid) < (t.timestamp, t.rowid) "
+    "ORDER BY p.timestamp DESC, p.rowid DESC LIMIT 1), "
+    "'') AS parent "
+    "FROM task_history t WHERE t.id = ?"
+)
 
-    Starting at *task_id*, follows ``parent_task_id`` links upward
-    (task → parent → grandparent → …) and returns the collected
-    entries in chronological order (root ancestor first, the *task_id*
-    row last) — the same shape :func:`_load_chat_context` returns, so
-    :meth:`ChatSorcarAgent.build_chat_prompt` can consume either
-    interchangeably.  Used when a tab is opened by a specific task id
-    and the first task subsequently issued in that tab needs the
-    opened task's lineage — rather than its whole chat — as context.
 
-    Traversal is cycle-safe (each row id is visited at most once) and
-    stops silently at a missing row or an empty ``parent_task_id``.
+def _load_task_lineage(task_id: str) -> list[_HistoryEntry]:
+    """Load the tasks and results on the path from a tree's root to a task.
+
+    The tasks of a chat form a tree whose root is the chat's first
+    task.  Each row records the task it continues (``chat_parent_id``,
+    see :func:`_add_task`); a row that records none, or one deleted
+    since, continues the task that dispatched it when it is a
+    sub-agent's and else the task just before it in its chat (a row
+    from before the parent was recorded ran after that one).  So the
+    path exists for every row, whatever was deleted or synced in from
+    another machine, and it is what a task continuing *task_id* is
+    given as its previous tasks
+    (:meth:`ChatSorcarAgent.build_chat_prompt`).
+
+    Traversal is cycle-safe (each row id is visited at most once).
 
     Args:
-        task_id: The ``task_history.id`` to start the traversal at.
+        task_id: The ``task_history.id`` the path leads to.
 
     Returns:
-        List of dicts with ``task`` and ``result`` keys, ordered
-        oldest ancestor first.  Empty when *task_id* is empty or has
-        no persisted row.
+        List of dicts with ``task`` and ``result`` keys, the root
+        first and the *task_id* row last.  Empty when *task_id* is
+        empty or has no persisted row.
     """
-    if not task_id:
-        return []
     db = _get_db()
     rows: list[sqlite3.Row] = []
     seen: set[str] = set()
@@ -7451,15 +7849,11 @@ def _load_task_chain_context(task_id: str) -> list[_HistoryEntry]:
     with _rw_lock.read_lock():
         while current and current not in seen:
             seen.add(current)
-            row = db.execute(
-                "SELECT task, result, parent_task_id FROM task_history "
-                "WHERE id = ?",
-                (current,),
-            ).fetchone()
+            row = db.execute(_LINEAGE_STEP, (current,)).fetchone()
             if row is None:
                 break
             rows.append(row)
-            current = _safe_str(row["parent_task_id"])
+            current = str(row["parent"])
     return [{"task": r["task"], "result": r["result"]} for r in reversed(rows)]
 
 

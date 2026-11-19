@@ -63,7 +63,7 @@ def _on_disk(current: dict[str, dict]) -> dict[str, dict]:
 
 def _changes(current: dict[str, dict]) -> tuple[list[dict], list[dict]]:
     """Run the updater's change computation with every vendor listing empty."""
-    return compute_changes(current, {}, {}, {}, {}, {})
+    return compute_changes(current, {}, {}, {}, {})
 
 
 def test_twin_key_maps_dotted_slugs_to_hyphenated_claude_ids() -> None:
@@ -191,7 +191,6 @@ def _run_main(
     monkeypatch.setattr(update_models, "README_PATH", tmp_path / "README.md")
     for fetcher in (
         "fetch_openrouter",
-        "fetch_together",
         "fetch_anthropic",
         "fetch_gemini",
         "fetch_openai",

@@ -22,9 +22,6 @@ class TestGetAvailableModels:
             "OPENROUTER_API_KEY",
             "GEMINI_API_KEY",
             "OPENAI_API_KEY",
-            "TOGETHER_API_KEY",
-            "ZAI_API_KEY",
-            "MOONSHOT_API_KEY",
         ]
         saved = {k: os.environ.get(k) for k in env_keys}
         original_config = config_module.DEFAULT_CONFIG
@@ -42,25 +39,6 @@ class TestGetAvailableModels:
                 assert get_default_model() == "codex/default"
             else:
                 assert get_default_model() == "No model"
-
-            # A Moonshot-only or Z.AI-only install has a default model too.
-            os.environ["MOONSHOT_API_KEY"] = "t"
-            config_module.DEFAULT_CONFIG = config_module.Config()
-            selected = get_default_model()
-            assert selected == "kimi-k3"
-            assert selected in MODEL_INFO
-
-            os.environ["ZAI_API_KEY"] = "t"
-            config_module.DEFAULT_CONFIG = config_module.Config()
-            selected = get_default_model()
-            assert selected == "glm-4.7"
-            assert selected in MODEL_INFO
-
-            os.environ["TOGETHER_API_KEY"] = "t"
-            config_module.DEFAULT_CONFIG = config_module.Config()
-            selected = get_default_model()
-            assert selected == "moonshotai/Kimi-K3"
-            assert selected in MODEL_INFO
 
             os.environ["OPENROUTER_API_KEY"] = "t"
             config_module.DEFAULT_CONFIG = config_module.Config()

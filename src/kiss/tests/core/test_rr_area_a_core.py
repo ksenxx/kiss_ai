@@ -211,7 +211,7 @@ class TestSaveApiKeyToShellCrossProcessRace:
         """
         fake_home = tmp_path / "home"
         fake_home.mkdir()
-        keys = [f"MOONSHOT_API_KEY_{i}" for i in range(6)]
+        keys = [f"OPENAI_API_KEY_{i}" for i in range(6)]
 
         for round_no in range(5):
             procs = [
@@ -283,7 +283,7 @@ class TestSaveApiKeyToShellCrossProcessRace:
         monkeypatch.setitem(
             vars(user_config), "CONFIG_PATH", fake_home / ".kiss" / "config.json",
         )
-        keys = [f"ZAI_API_KEY_{i}" for i in range(8)]
+        keys = [f"ANTHROPIC_API_KEY_{i}" for i in range(8)]
         for key in keys:
             monkeypatch.delenv(key, raising=False)
 

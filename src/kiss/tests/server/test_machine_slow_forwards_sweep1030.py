@@ -17,6 +17,14 @@ graph's "Checkout (Detached)" on the machine runs git, so the hook:
   machine is answered at once (the action waits on a link lane of its
   own), and afterwards the machine is not backed off as down.
 
+A reader who opens a folded panel of the machine's transcript
+(``getTaskEvents``) is answered at once while the machine is seconds
+away from answering a sidebar subpanel: the fetch has an ``events``
+link lane of its own.  It used to share the subpanels' ``panels`` lane,
+where it waited for the machine's app probe at every click on a chat.
+The slow subpanel request here is the machine's own ``add`` of an
+address that accepts the connection and never answers.
+
 The settings sheet's ``getClaudeCodeStatus`` / ``getCodexStatus`` are
 waited for as long as the machine's own bound on ``claude auth status``
 / ``codex login status`` (20 s / 30 s).  A CLI that slow cannot be had
@@ -30,6 +38,7 @@ from __future__ import annotations
 import asyncio
 import json
 import shlex
+import socket
 import subprocess
 import time
 from pathlib import Path
@@ -120,6 +129,38 @@ class TestSlowMachineForwards(RemoteMachineCase):
         }, "gitStatus")
         self.assertEqual(status.get("error", ""), "")
         self.assertEqual(status["machine"], "box")
+
+    async def test_a_folded_panels_events_do_not_wait_for_a_subpanel(self) -> None:
+        silent = socket.socket()
+        silent.bind(("127.0.0.1", 0))
+        silent.listen(1)
+        silent.settimeout(60)
+        self.addCleanup(silent.close)
+        await self._send({
+            "type": "machineAction", "action": "add", "name": "typo", "machine": "box",
+            "address": f"https://127.0.0.1:{silent.getsockname()[1]}", "machinePassword": "pw",
+        })
+        # The machine is fetching the address's certificate, which never
+        # comes: its ``machines`` reply holds its ``panels`` lane from here.
+        held, _ = await asyncio.to_thread(silent.accept)
+        self.addCleanup(held.close)
+        started = time.monotonic()
+        piece = await self._ask({
+            "type": "getTaskEvents", "taskId": "no-such-task", "tabId": "tab-box",
+            "token": "lazy-1", "machine": "box",
+        }, "taskEventsPiece")
+        self.assertLess(
+            time.monotonic() - started, mach.REQUEST_TIMEOUT / 2,
+            "the panel's events waited for the subpanel's reply",
+        )
+        self.assertEqual(piece.get("error", ""), "")
+        self.assertEqual(
+            (piece["machine"], piece["token"], piece["events"]), ("box", "lazy-1", []),
+        )
+        held.close()  # the machine's fetch fails now
+        added = await self._next("machines", forwarded=True)
+        self.assertEqual((added["action"], added["name"]), ("add", "typo"))
+        self.assertIn("Cannot reach", added["error"])
 
     async def test_cli_status_probes_are_the_machines_answers(self) -> None:
         for cmd_type, reply_type in (

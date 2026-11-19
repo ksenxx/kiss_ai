@@ -39,14 +39,6 @@ class TestAnthropicModel:
 
 class TestModelInfo:
 
-    def test_zai_and_moonshot_api_key_routing(self):
-        from kiss.tests.conftest import get_required_api_key_for_model
-
-        assert get_required_api_key_for_model("glm-4.6") == "ZAI_API_KEY"
-        assert get_required_api_key_for_model("glm-4.5-flash") == "ZAI_API_KEY"
-        assert get_required_api_key_for_model("kimi-k2.6") == "MOONSHOT_API_KEY"
-        assert get_required_api_key_for_model("moonshot-v1-32k") == "MOONSHOT_API_KEY"
-
     def test_native_provider_and_keyless_routing(self):
         """The non-OpenAI-compatible branches route the same way ``model()`` does."""
         from kiss.tests.conftest import get_required_api_key_for_model

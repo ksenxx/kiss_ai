@@ -516,8 +516,9 @@ the task you are asking about (`{task_id}`, filled in by the daemon from the run
 parent task id) and telling the agent to call `task_context` on it. The answering session has exactly two tools: `task_context(task_id)`
 and `finish`. `task_context` (over `kiss.agents.sorcar.task_digest.context`) returns the
 whole context in one call: the task's status, model, spend and the sub-agents it
-dispatched, the newest 8k characters of the progress log the task keeps in its work dir
-(`PROGRESS_LOG.md`, `PROGRESS.md` or `tmp/PROGRESS.md`, freshest wins), and its digested
+dispatched, the newest 8k characters of the task's progress log (`<scratch dir>/PROGRESS.md`,
+rebuilt from its persisted `Write` and `Edit` calls to a `PROGRESS.md` or `PROGRESS_LOG.md`
+file rather than read from disk, newest write wins), and its digested
 transcript entries oldest first, the whole text capped at 60k characters by dropping the
 oldest entries. The class's `system_prompt()` swaps the system prompt for the compact SYSTEM_LITE prompt (the
 bundled `seas/ask/_ask_system_lite.md`, a copy of the ablation prompt with the brand

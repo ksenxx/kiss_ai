@@ -25,6 +25,7 @@ import os
 import shlex
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +35,7 @@ from kiss.agents.seas.coding import gate_readers as gr
 from kiss.agents.sorcar.container_jobs import JOBS_DIR, ContainerJobs
 from kiss.agents.sorcar.shell_scan import MAX_NESTING, bash_path, simple_commands
 from kiss.agents.sorcar.useful_tools import UsefulTools, digest_parallel_report
+from kiss.core.kiss_tmp import kiss_tmp_dir
 from kiss.core.processes import find_bash
 from kiss.core.tool_interrupt import USER_INTERRUPTED_MESSAGE
 from kiss.tests.conftest import IS_WINDOWS
@@ -350,6 +352,28 @@ def test_exit_0_is_the_verifiers_pass_only_when_its_run_decides_the_commands_exi
     assert not gr.verifier_decides(f"bash tmp/verify.sh && {deep}", work, verifier)
 
 
+def test_a_verifier_kept_in_the_scratch_dir_is_named_by_its_absolute_path(tmp_path: Path) -> None:
+    """The scratch dir is a folder of the agents' temp directory (``kiss-tmp`` in the
+    system's), no longer ``tmp/`` of the work dir: the verifier kept there is run by its
+    absolute path, or by its name after a ``cd`` into the scratch dir, and bash says that
+    such a run decides the command's exit.  A script of that name in a ``tmp`` folder of
+    the work dir is not the verifier."""
+    scratch = Path(tempfile.mkdtemp(dir=kiss_tmp_dir()))
+    script = scratch / "verify.sh"
+    script.write_text("echo FAILURE; exit 7\n")
+    (tmp_path / "tmp").mkdir()
+    (tmp_path / "tmp" / "verify.sh").write_text("echo OTHER; exit 0\n")
+    work, verifier, named = str(tmp_path), str(script), shlex.quote(script.as_posix())
+    for command in (f"bash {named}", f"bash -x {named} 2>&1 && echo VERIFIED",
+                    f"cd {shlex.quote(scratch.as_posix())} && bash verify.sh"):
+        assert gr.verifier_decides(command, work, verifier), command
+        assert _bash(command, tmp_path)[0] == 7, command
+    for command in (f"bash {named} || true", f"bash -n {named}", "bash tmp/verify.sh",
+                    "cd tmp && bash verify.sh"):
+        assert not gr.verifier_decides(command, work, verifier), command
+        assert _bash(command, tmp_path)[0] == 0, command
+
+
 @pytest.mark.skipif(IS_WINDOWS, reason="symbolic links")
 def test_the_verifier_is_the_script_the_filesystem_resolves_the_path_to(tmp_path: Path) -> None:
     """Audit 2026-11-10 S10-F6, review round 1: ``link/..`` is the directory the link points
@@ -369,6 +393,14 @@ def test_the_verifier_is_the_script_the_filesystem_resolves_the_path_to(tmp_path
     (tmp_path / "tmp" / "check.sh").symlink_to("verify.sh")
     assert _bash("bash tmp/check.sh", tmp_path) == (7, "FAILURE\n")
     assert gr.verifier_decides("bash tmp/check.sh", str(tmp_path), str(script))
+    # the system's temp directory behind a symbolic link (macOS: /var -> /private/var): the
+    # verifier kept in the scratch dir is the same script by either path
+    scratch = Path(tempfile.mkdtemp(dir=kiss_tmp_dir()))
+    (scratch / "verify.sh").write_text("echo SCRATCH; exit 7\n")
+    (tmp_path / "T").symlink_to(scratch.parent)
+    linked = f"bash {shlex.quote(f'{tmp_path}/T/{scratch.name}/verify.sh')}"
+    assert _bash(linked, tmp_path) == (7, "SCRATCH\n")
+    assert gr.verifier_decides(linked, str(tmp_path), str(scratch / "verify.sh"))
 
 
 def _container_bash(work_dir: Path, command: str, description: str, timeout: int,

@@ -42,7 +42,7 @@ Three ways to run it::
     uv run python -m kiss.agents.seas.skillopt.skillopt_sea \\
         --target src/kiss/agents/seas/sh/sh_sea.py \\
         --evals src/kiss/agents/seas/sh/evals/sh_sea_evals.json \\
-        --out-dir tmp/skillopt/sh_sea --model claude-fable-5-1
+        --out-dir <scratch dir>/skillopt/sh_sea --model claude-fable-5-1
 
 Eval set JSON::
 
@@ -1455,10 +1455,10 @@ optimization loop; you drive it and report the outcome.
 Procedure:
 1. From the request, identify the target file (and constant name, if any), the eval set
    JSON, the epoch count (default 1), the rollout model (default: your own) and the
-   artifact dir (default: <work_dir>/tmp/skillopt/<target stem>). If the eval set path
-   is missing, ask for it; do not write one unless asked. An eval set may name its own
-   rollout env (`"env"`) and imported trajectories (`"train_rollouts"`) that stand in
-   for its tasks' training rollouts.
+   artifact dir (default: <scratch dir>/skillopt/<target stem>, in the Scratch dir of
+   Task Settings). If the eval set path is missing, ask for it; do not write one unless
+   asked. An eval set may name its own rollout env (`"env"`) and imported trajectories
+   (`"train_rollouts"`) that stand in for its tasks' training rollouts.
 2. Call `optimize` once with those arguments. It runs every round (rollouts, analysts,
    ranking, gate) and returns a report. Expect many minutes.
 3. Report: pass rate before and after, which patches were accepted or rejected and why,

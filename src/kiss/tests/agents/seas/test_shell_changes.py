@@ -11,8 +11,9 @@ The coding SEA's finish gate reads what a shell command changes
 changes since the agent's own passing verifier run and to review only after a
 change: a program counts in command position only, a package or build tool
 writes through its mutating subcommands only (``uv run pytest`` is a check,
-``uv sync`` a write), and a file under a ``tmp`` directory is the run's
-scratch, not a change of the work.
+``uv sync`` a write), and a file in a temp directory (the agents' ``kiss-tmp``,
+where the scratch dir is, or a ``tmp`` directory) is the run's scratch, not a
+change of the work.
 """
 
 from __future__ import annotations
@@ -27,15 +28,56 @@ from pathlib import Path
 import pytest
 
 from kiss.agents.seas.coding import shell_changes as sc
-from kiss.tests.conftest import posix_only
+from kiss.tests.conftest import IS_WINDOWS, posix_only
+
+#: Scratch dirs as Task Settings name them: a task's on macOS (the resolved path, and the
+#: same behind the ``/var`` link), on Linux or in a container, in a temp directory whose
+#: ``kiss-tmp`` is another user's (``kiss-tmp-<uid>``), a sub-agent's private folder, and
+#: a task's on Windows in Git Bash's two spellings.
+SCRATCH_DIRS = (
+    "/private/var/folders/x/T/kiss-tmp/1dcdc6bb", "/var/folders/x/T/kiss-tmp/1dcdc6bb",
+    "/tmp/kiss-tmp/1dcdc6bb", "/dev/shm/kiss-tmp-501/1dcdc6bb",
+    "/var/folders/x/T/kiss-tmp/kiss-sub-ab12cd34",
+    "C:/Users/u/AppData/Local/Temp/kiss-tmp/1dcdc6bb",
+    "/c/Users/u/AppData/Local/Temp/kiss-tmp/1dcdc6bb",
+)
+
+
+@pytest.mark.parametrize("scratch", SCRATCH_DIRS)
+def test_a_file_in_the_agents_temp_directory_is_scratch_on_every_system(scratch: str) -> None:
+    """The scratch dir is a folder of ``kiss-tmp`` in the system's temp directory, no longer
+    ``tmp/`` of the work dir: a file there is the run's own wherever the system keeps its
+    temp directory, and so is the file a command names after a ``cd`` into the scratch dir."""
+    assert sc.is_scratch_path(f"{scratch}/f")
+    commands = [f"pytest -q > {scratch}/out.txt 2>&1", f"mkdir -p {scratch}/probe",
+                f"cp src/a.py {scratch}/", f"S={scratch}; sed -i s/a/b/ $S/f",
+                f"find {scratch} -name '*.pyc' -delete"]
+    if scratch.startswith("/") or IS_WINDOWS:
+        # the scanner follows a cd to an absolute path, which a drive path is in Git Bash only
+        commands += [f"cd {scratch} && cat > probe.py <<'EOF'\nimport x\nEOF",
+                     f"cd {scratch}/ && cp a.py b.py && sed -i s/a/b/ c.py && rm -rf old",
+                     f"cd {scratch} && find . -name '*.pyc' -delete"]
+        # ...while a file of the work named from there, or a cd out of it, keeps the write
+        assert sc.file_changes({"command": f"cd {scratch} && cp a.py /w/b.py"}) == [
+            "cp", "/w/b.py"]
+        if IS_WINDOWS:  # absolute in Git Bash, not a file of the directory the cd went to
+            assert sc.file_changes({"command": f"cd {scratch} && cp a.py C:/w/b.py"}) == [
+                "cp", "C:/w/b.py"]
+        assert sc.file_changes({"command": f"cd {scratch} && cd /w && rm b.py"}) == [
+            "rm", "b.py"]
+    for command in commands:
+        assert not sc.writes_files({"command": command}), command
+    assert sc.file_changes({"command": f"cp {scratch}/a.py src/a.py"}) == ["cp", "src/a.py"]
 
 
 def test_writing_commands_and_scratch_paths_are_recognised() -> None:
-    for path in ("tmp/x", "./tmp/a.log", "/u/repo/tmp/probe/out", "sub/tmp/notes", "tmp",
-                 "/var/folders/T/kiss-sub-ab12cd34/probe.py"):  # a sub-agent's private folder
+    for path in ("tmp/x", "./tmp/a.log", "/u/repo/tmp/probe/out", "sub/tmp/notes", "tmp"):
         assert sc.is_scratch_path(path), path
+    # a file merely named like the agents' temp directory or a sub-agent's private folder,
+    # and a path that leaves the temp directory, are the work's
     for path in ("tmpfile", "mytmp/x", "tmp/../a.py", "a.tmp", "src/a.py", "src/kiss-sub-x.py",
-                 "/var/folders/T/kiss-sub-ab12cd34/../a.py"):
+                 "kiss-tmp/../a.py", "kiss-tmp-notes.md", "docs/kiss-tmp-notes.md",
+                 "/var/folders/x/T/kiss-tmp/kiss-sub-ab12cd34/../../a.py"):
         assert not sc.is_scratch_path(path), path
     for command in ("echo x > f.txt", "cat a >> log", "tee out.txt", "cp a b", "mv a b",
                     "sed -i s/a/b/ f", "sed --in-place s/a/b/ f", "git apply p.diff",
@@ -200,9 +242,11 @@ def test_writing_commands_and_scratch_paths_are_recognised() -> None:
                     "cd /w/tmp/x && find /w/src -type f -execdir sh -c 'echo x > b.py' \\;",
                     "cd /w/tmp/x && find /w/src -name x -delete"):
         assert sc.writes_files({"command": command}), command
-    # ...but not one into a file whose name only starts with tmp, or one tmp file among others
+    # ...but not one into a file whose name only starts with tmp (or with the name of the
+    # agents' temp directory), or one tmp file among others
     for command in ("cmd > tmpfile", "cmd > mytmp/x", "cmd > tmp/a > out.txt",
-                    "cmd > tmp/a; cmd > b"):
+                    "cmd > tmp/a; cmd > b", "cmd > kiss-tmp-notes.md",
+                    "cp a.py kiss-tmp/../b.py"):
         assert sc.writes_files({"command": command}), command
     assert sc.writes_files({"commands": '["ls", "echo 1 > f"]'})
     assert not sc.writes_files({"commands": '["ls", "pwd"]'})

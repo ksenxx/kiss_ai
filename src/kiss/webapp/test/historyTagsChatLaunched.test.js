@@ -6,9 +6,9 @@
 // The "... ago" labels of the task-history list, tested against the
 // real chat.html + main.js + panelCopy.js in JSDOM:
 //
-//  * the strip under every task panel's header ends with the task's
-//    "... ago" age label: the classification tags and the SEA the row
-//    carries for the Tag and SEA filters are not listed there;
+//  * the "…" menu of every task panel ends with the task's "... ago"
+//    age label and its machine: the classification tags and the SEA the
+//    row carries for the Tag and SEA filters are not listed there;
 //  * every collapsible chat panel carries a "... ago" line under its
 //    header counting from the chat's newest instant, fed by the daemon's
 //    `chat_last_launched` / `chat_last_finished` stamps (falling back to
@@ -61,6 +61,16 @@ function groups(win) {
   );
 }
 
+/** The class names of what follows the age label *launched* in its menu. */
+function following(launched) {
+  return Array.from(
+    launched.parentElement.querySelectorAll('.sidebar-item-launched ~ *'),
+  ).map(el => el.className);
+}
+
+// A row that ran on this daemon names this machine.
+const MACHINE_ONLY = ['sidebar-item-machine sidebar-item-machine-local'];
+
 function testStripEndsWithTheAgeLabel() {
   const {win} = makePage();
   const now = win.Date.now();
@@ -79,19 +89,24 @@ function testStripEndsWithTheAgeLabel() {
   const strip = list[0].querySelector('.sidebar-item-actions');
   const launched = strip.querySelector('.sidebar-item-launched');
   assert.strictEqual(
-    strip.querySelector('.sidebar-item-collapse').nextElementSibling,
-    launched,
+    strip.querySelector('.sidebar-item-launched ~ button'),
+    null,
     'the age label follows the last button of the strip',
+  );
+  assert.strictEqual(
+    launched.previousElementSibling.className,
+    'sidebar-item-confirm',
+    'which is the delete button, with its question',
   );
   assert.strictEqual(launched.textContent, '2 hours ago');
   assert.ok(
     launched.title.indexOf('Launched ') === 0,
     'the tooltip still spells out the launch instant',
   );
-  assert.strictEqual(
-    launched.nextElementSibling,
-    null,
-    'nothing follows the age label: no tags, no SEA name',
+  assert.deepStrictEqual(
+    following(launched),
+    MACHINE_ONLY,
+    'only the machine follows the age label: no tags, no SEA name',
   );
   assert.ok(
     !/work|coding|write_paper_sea/.test(strip.textContent),
@@ -102,9 +117,9 @@ function testStripEndsWithTheAgeLabel() {
   assert.strictEqual(list[0].dataset.sea, 'write_paper_sea');
   const plain = list[1].querySelector('.sidebar-item-launched');
   assert.strictEqual(plain.textContent, '1 hour ago');
-  assert.strictEqual(plain.nextElementSibling, null);
+  assert.deepStrictEqual(following(plain), MACHINE_ONLY);
   win.close();
-  console.log('  ok - the strip of a task row ends with its age label');
+  console.log('  ok - the menu of a task row ends with its age and machine');
 }
 
 function testChatLastLaunchedLine() {
@@ -152,19 +167,15 @@ function testChatLastLaunchedLine() {
   gs.forEach(g => {
     byChat[g.dataset.chatId] = g;
   });
-  // The label closes the header's action strip, after the "Show
-  // details" chevron, the chat's favourite star, the rename pencil and
-  // the delete control (the trash button and its hidden Delete /
-  // Cancel strip), where a task panel shows its age label.
+  // The label follows the buttons of the header's action strip (the
+  // "Show details" chevron, the chat's favourite star, the rename
+  // pencil and the delete control: the trash button and its hidden
+  // Delete / Cancel strip), where a task panel shows its age label;
+  // the chat's machine ends the strip.
   const lineA = byChat['chat-a'].querySelector(
     ':scope > .history-chat-header > .history-chat-actions > .history-chat-launched',
   );
   assert.ok(lineA, 'the chat panel has a launched label in its action strip');
-  assert.strictEqual(
-    lineA.nextElementSibling,
-    null,
-    'the label ends the action strip',
-  );
   const strip = Array.from(lineA.parentNode.children).map(el => el.className);
   assert.deepStrictEqual(
     strip,
@@ -175,8 +186,9 @@ function testChatLastLaunchedLine() {
       'sidebar-item-delete',
       'sidebar-item-confirm',
       'history-chat-launched',
+      'sidebar-item-machine sidebar-item-machine-local history-chat-machine',
     ],
-    'chevron, star, rename pencil, delete control, then the label',
+    'chevron, star, rename pencil, delete control, the label, then the machine',
   );
   assert.strictEqual(
     byChat['chat-a'].querySelector(':scope > .history-chat-header')

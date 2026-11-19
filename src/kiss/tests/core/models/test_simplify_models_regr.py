@@ -95,11 +95,6 @@ def test_model_routing_by_prefix() -> None:
     for name in (
         "gpt-4o",
         "openrouter/foo/bar",
-        "glm-4",
-        "kimi-k2",
-        "moonshot-v1",
-        "meta-llama/Llama-3",
-        "Qwen/qwen-x",
         "o3-mini",
     ):
         info = MODEL_INFO.get(name)
@@ -143,7 +138,7 @@ def test_model_base_url_override_without_api_key_never_builds_keyless_client() -
         return m.api_key
 
     keys = config_module.DEFAULT_CONFIG
-    names = ("OPENROUTER_API_KEY", "OPENAI_API_KEY", "ZAI_API_KEY")
+    names = ("OPENROUTER_API_KEY", "OPENAI_API_KEY")
     saved = {name: getattr(keys, name) for name in names}
     gateway = "http://my-gateway.local/v1"
     openrouter = "https://openrouter.ai/api/v1"
@@ -157,9 +152,11 @@ def test_model_base_url_override_without_api_key_never_builds_keyless_client() -
         # not even the key of the vendor the model name routes to.
         for url in ("http://127.0.0.1:1/openrouter.ai/v1", "https://openrouter.ai.evil.example/v1"):
             assert endpoint_key("gpt-4o-mini", {"base_url": url}) == KEYLESS_ENDPOINT_TOKEN, url
-        assert endpoint_key("glm-4.5", {"base_url": gateway}) == KEYLESS_ENDPOINT_TOKEN
+        assert (
+            endpoint_key("openrouter/z-ai/glm-4.5", {"base_url": gateway}) == KEYLESS_ENDPOINT_TOKEN
+        )
         # An explicit key is always used verbatim.
-        assert endpoint_key("glm-4.5", {"base_url": gateway, "api_key": "k"}) == "k"
+        assert endpoint_key("openrouter/z-ai/glm-4.5", {"base_url": gateway, "api_key": "k"}) == "k"
         # A vendor host whose own key is missing never gets another vendor's.
         keys.OPENROUTER_API_KEY = ""
         assert endpoint_key("gpt-4o-mini", {"base_url": openrouter}) == KEYLESS_ENDPOINT_TOKEN
@@ -220,7 +217,6 @@ def test_provider_registry_lookup() -> None:
     """Provider registry routes by prefix and by base_url host substring."""
     assert _provider_name(_match_openai_compatible_provider("openrouter/x")) == "openrouter"
     assert _provider_name(_match_openai_compatible_provider("gpt-4o")) == "openai"
-    assert _provider_name(_match_openai_compatible_provider("openai/gpt-oss-120b")) == "together"
     assert _provider_name(_match_openai_compatible_provider("text-embedding-004")) == "openai"
     assert _match_openai_compatible_provider("codex/default") is None
     assert _match_openai_compatible_provider("claude-x") is None
@@ -239,11 +235,7 @@ def test_get_model_provider_labels() -> None:
     assert get_model_provider("claude-x") == "Anthropic"
     assert get_model_provider("gemini-x") == "Gemini"
     assert get_model_provider("text-embedding-004") == "OpenAI"
-    assert get_model_provider("glm-5") == "Z.AI"
-    assert get_model_provider("kimi-k2") == "Moonshot"
     assert get_model_provider("gpt-4o") == "OpenAI"
-    assert get_model_provider("openai/gpt-oss-120b") == "Together"
-    assert get_model_provider("meta-llama/Llama-3") == "Together"
     assert get_model_provider("something-else") == "Unknown"
 
 

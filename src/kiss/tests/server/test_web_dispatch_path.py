@@ -9,7 +9,8 @@ backend dispatch path (:meth:`RemoteAccessServer._ws_handler` to ``ServerApi.dis
 These tests lock in:
 
 * ``submit`` must forward the page's per-run fields (``useWebTools``,
-  ``activeFile``, ``useMemory``, ``classifyTasks``) into the backend
+  ``activeFile``, ``useMemory``, ``classifyTasks``, ``continueTaskId``)
+  into the backend
   ``run`` command (the daemon's ``_handle_submit`` is the one submit
   path and used to drop such toggles).
 * ``runUpdate`` must locate and run ``~/.kiss/kiss_ai/install.sh`` —
@@ -272,6 +273,10 @@ class TestDispatchPath(IsolatedAsyncioTestCase):
         server's submit → run translation must forward it so
         ``task_runner`` passes ``web_tools=False`` to the agent instead
         of silently falling back to the persisted config default.
+
+        So does ``continueTaskId``, the task a CHATS click scrolled the
+        tab to: the run continues it, so the agent's next prompt carries
+        that task.
         """
         from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
         from kiss.core import config as config_module
@@ -306,6 +311,7 @@ class TestDispatchPath(IsolatedAsyncioTestCase):
 
             work_dir = Path(self.tmpdir) / "work"
             work_dir.mkdir(parents=True, exist_ok=True)
+            scrolled_to, _ = th._add_task("the task the click scrolled to")
 
             reader, writer = await self._connect()
             try:
@@ -318,6 +324,7 @@ class TestDispatchPath(IsolatedAsyncioTestCase):
                     "attachments": [],
                     "isParallel": False,
                     "useWebTools": False,
+                    "continueTaskId": scrolled_to,
                 })
                 _, seen = await self._drain_until(reader, "setTaskText")
                 self._assert_no_unknown_command(seen)
@@ -331,6 +338,11 @@ class TestDispatchPath(IsolatedAsyncioTestCase):
                     seen_kwargs.get("web_tools"),
                     False,
                     "useWebTools was dropped on the submit → run path",
+                )
+                self.assertIn(
+                    "### Task 1\nthe task the click scrolled to",
+                    agent.build_chat_prompt("next"),
+                    "continueTaskId was dropped on the submit → run path",
                 )
             finally:
                 writer.close()

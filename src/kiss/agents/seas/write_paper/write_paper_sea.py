@@ -71,7 +71,8 @@ what it asks, keep every rule below, rebuild the PDF after any edit. A review-on
 ## The contribution
 
 Reviewers reject a paper they cannot state in one sentence. Before the outline, write in
-`./tmp/PLAN.md`: the research question; the central claim; the controlled comparison
+`<scratch dir>/PLAN.md` (the Scratch dir of Task Settings): the research question; the
+central claim; the controlled comparison
 that tests it (same model, same budget, same hardware, with the component against
 without it, or against the closest system); what a reader learns that holds beyond our
 system. A system description, a case study or a deployment log is evidence, never the
@@ -144,7 +145,7 @@ artifacts and no ablation 1 of 4 from all four reviewers.
   abstract page) before adding it: title, every author's correct first name, venue,
   year, pages or DOI. No invented venue for an arXiv-only paper. No citation of a
   paper you could not open. Log each verification with its URL in
-  `./tmp/information-<paper>.md`.
+  `<scratch dir>/information-<paper>.md`.
 - Cite what the text names: "Bitcask-style" cites Bitcask.
 - Every `\\cite` key has a bib entry; every bib entry is cited.
 - Prefer well known work; among recent work, papers already highly cited.
@@ -276,10 +277,10 @@ script. Nothing spills into the margin.
 
 ## Process for a new paper
 
-1. Read the sources. Write `./tmp/PLAN.md`: the contribution statement (above), the
+1. Read the sources. Write `<scratch dir>/PLAN.md`: the contribution statement (above), the
    section outline and the numbers to compute, each with its command.
 2. Search the internet extensively for the state of the art and related work: at least
-   20 distinct sources, each logged in `./tmp/information-<paper>.md` with a summary of
+   20 distinct sources, each logged in `<scratch dir>/information-<paper>.md` with a summary of
    what it says about the topic.
 3. Write the paper.
 4. Build with the `build_paper` tool: zero errors, zero undefined references or
@@ -305,7 +306,7 @@ script. Nothing spills into the margin.
    a finding, not a report line.
 7. Open the venue's website; check the paper against the current guidelines: page limit,
    anonymity, checklist, fonts, margins, LLM-usage disclosure.
-8. Rebuild, rerun `check_paper`, delete the planning and research files under `./tmp`,
+8. Rebuild, rerun `check_paper`, delete the planning and research files under the scratch dir,
    and git add the .tex, .bib, figures, scripts and .pdf. Never add .aux, .bbl, .blg, .log
    or .out files.
 
@@ -320,7 +321,7 @@ when the task caps the reviewer's share, sum the costs the reviewers' results re
 ## Working rules
 
 - Decide who writes before the first edit: compare the writer model the task names with
-  the `Model name:` line of your Task Settings; record the decision in `tmp/PLAN.md`. If
+  the `Model name:` line of your Task Settings; record the decision in `<scratch dir>/PLAN.md`. If
   they differ, a `run_parallel` writer sub-agent on that model is your first step; edit
   no .tex yourself. The child cannot see your task: dispatch the reviewer
   yourself, or copy the reviewer model name, its budget share and the "do not invent new
@@ -334,7 +335,7 @@ when the task caps the reviewer's share, sum the costs the reviewers' results re
   times that in one edit (whole paragraphs to the appendix before trimming sentences),
   rebuild, re-measure.
 - When revising a paper that already ends on its last allowed page (zero slack, per
-  `tmp/PROGRESS.md` or memory), pair each added sentence, citation or caption with a cut
+  `<scratch dir>/PROGRESS.md` or memory), pair each added sentence, citation or caption with a cut
   of at least the same length in the same section and edit pass, before the first
   build; then build once and measure. Adding first and cutting later costs several
   build rounds.
@@ -355,9 +356,9 @@ when the task caps the reviewer's share, sum the costs the reviewers' results re
   `artifact/README.md`, the .bib, a log), `Read` it (or the region you will change) in
   this session: the first `Edit` of an unread file is refused and only shows the region,
   so the same call is sent twice.
-- Inside a worktree, never put a parent-checkout path (`/home/ksen/kiss/...`,
-  `/home/ksen/kiss/tmp/...`) in a Bash command, `ls`/`grep`/`find` included; use the
-  worktree path (an earlier round's tools live under `<worktree>/tmp/` or `/tmp`), or
+- Inside a worktree, never put a parent-checkout path (`/home/ksen/kiss/...`)
+  in a Bash command, `ls`/`grep`/`find` included; use the
+  worktree path (an earlier round's tools live in that round's scratch dir), or
   `git show main:<path>` for a file of the main branch. When the guard refuses a
   command, re-issue the rewritten command it prints, verbatim.
 - Give every reviewer sub-agent an explicit `max_budget` (for example `"25"`); never let
@@ -367,8 +368,8 @@ when the task caps the reviewer's share, sum the costs the reviewers' results re
 - In a worktree, run project commands as the shared environment's binary:
   `PYTHONPATH=<worktree>/src:<worktree>/projects /home/ksen/kiss/.venv/bin/<cmd>`, never
   `uv run <cmd>` (it times out after 600 s).
-- Your progress file is `tmp/<task id>/PROGRESS.md` in the scratch dir, the file you
-  created; never `Edit` `<worktree>/tmp/PROGRESS.md` (it does not exist: two refused Edits
+- Your progress file is `<scratch dir>/PROGRESS.md`, the file you
+  created; never `Edit` one in the worktree (it does not exist: two refused Edits
   in one round, cf5db742 [711], [1123]).
 - To fit a page limit, measure the overflow once after a build (`pdftotext -f N -l N+1`
   line counts past the limit), cut about 1.2x that amount in one `Edit` batch (whole

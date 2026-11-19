@@ -2,10 +2,12 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Tool outputs are capped at the source and the rest spilled to ``tmp/tool-out/``.
+"""Tool outputs are capped at the source and the rest spilled to ``tool-out/`` of the scratch dir.
 
 ``Bash`` keeps the default budget (8,000 characters) of its output in the
-result, writes the full output under the work dir and names the file;
+result, writes the full output under the agent's scratch dir (the agents'
+temp directory itself for tools built without one, never the work dir) and
+names the file by its absolute path;
 the model may raise the budget up to the configured ceiling, not
 beyond.  A whole-file ``Read`` keeps the same budget and says where to
 continue; ``memory_list`` cuts a long listing with a note.
@@ -13,37 +15,46 @@ continue; ``memory_list`` cuts a long listing with a note.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
+
+import pytest
 
 from kiss.agents.seas.coding.gate_readers import bash_exit_code
 from kiss.agents.sorcar.useful_tools import SPILL_DIR, UsefulTools, _lines_within_budget
 from kiss.core.config import DEFAULT_CONFIG
+from kiss.core.kiss_tmp import kiss_tmp_dir
 from kiss.core.memoryfield.index import hashed_embedding
 from kiss.core.memoryfield.tools import MemoryTools
 
 
 def test_bash_keeps_the_budget_and_spills_the_full_output(tmp_path: Path) -> None:
-    tools = UsefulTools(work_dir=str(tmp_path))
+    work, scratch = tmp_path / "work", tmp_path / "scratch"
+    work.mkdir()
+    tools = UsefulTools(work_dir=str(work), scratch_dir=str(scratch))
     result = tools.Bash("seq 1 20000", "count")
     assert len(result) <= DEFAULT_CONFIG.tool_output_default_chars
     assert result.startswith("1\n2\n3\n")
     assert result.rstrip().endswith("20000")
     tag = tools._spill_tag
-    spill = tmp_path / SPILL_DIR / f"{tag}-1-bash.txt"
-    assert f"full output ({spill.stat().st_size} chars) in tmp/tool-out/{tag}-1-bash.txt" in result
+    spill = scratch / SPILL_DIR / f"{tag}-1-bash.txt"
+    # The file is in the scratch dir and named by its absolute path.
+    assert f"full output ({spill.stat().st_size} chars) in {spill.as_posix()}]" in result
     assert spill.read_text().splitlines()[-1] == "20000"
     # A second oversized output gets its own file; a small one none.
     tools.Bash("seq 1 20000", "count again")
-    assert (tmp_path / SPILL_DIR / f"{tag}-2-bash.txt").exists()
+    assert (scratch / SPILL_DIR / f"{tag}-2-bash.txt").exists()
     assert tools.Bash("echo small", "small") == "small\n"
-    assert not (tmp_path / SPILL_DIR / f"{tag}-3-bash.txt").exists()
-    # Another instance sharing the work dir (a sub-agent) never overwrites these files.
-    other = UsefulTools(work_dir=str(tmp_path))
+    assert not (scratch / SPILL_DIR / f"{tag}-3-bash.txt").exists()
+    # Another instance sharing the scratch dir never overwrites these files.
+    other = UsefulTools(work_dir=str(work), scratch_dir=str(scratch))
     other.Bash("seq 1 20000", "count")
     assert other._spill_tag != tag
-    assert sorted(p.name for p in (tmp_path / SPILL_DIR).iterdir()) == sorted(
+    assert sorted(p.name for p in (scratch / SPILL_DIR).iterdir()) == sorted(
         [f"{tag}-1-bash.txt", f"{tag}-2-bash.txt", f"{other._spill_tag}-1-bash.txt"]
     )
+    # Nothing is left in the work dir: no ``tmp`` folder, no spill.
+    assert list(work.iterdir()) == []
 
 
 def test_bash_budget_can_be_raised_only_up_to_the_ceiling(tmp_path: Path) -> None:
@@ -55,7 +66,11 @@ def test_bash_budget_can_be_raised_only_up_to_the_ceiling(tmp_path: Path) -> Non
     assert "[truncated" in capped
     failed = tools.Bash("seq 1 20000; exit 3", "fail")
     assert failed.startswith("Error (exit code 3):\n1\n")
-    assert "in tmp/tool-out/" in failed
+    # Tools built without a scratch dir spill into the agents' temp directory itself.
+    spilled = re.search(r"; full output \(\d+ chars\) in (\S+)\] \.\.\.\n", failed)
+    assert spilled and Path(spilled[1]).parent == kiss_tmp_dir() / SPILL_DIR, failed
+    assert Path(spilled[1]).read_text().splitlines()[-1] == "20000"
+    assert list(tmp_path.iterdir()) == []
     # Only the output is cut: the status is whole under any budget (cross finding of B2 and
     # B4, 2026-11-12: cut with the output, a failed command read as one that passed).
     for budget in (1, 20, 60):
@@ -67,10 +82,19 @@ def test_bash_budget_can_be_raised_only_up_to_the_ceiling(tmp_path: Path) -> Non
     assert bash_exit_code(late) == "timeout"
 
 
-def test_bash_without_a_work_dir_truncates_without_a_spill(tmp_path: Path) -> None:
+def test_bash_without_a_work_dir_spills_all_the_same(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The spill is in the scratch dir, so it needs no work dir (it was skipped without one)."""
+    monkeypatch.chdir(tmp_path)
     tools = UsefulTools()
     result = tools.Bash("seq 1 20000", "count")
-    assert "[truncated" in result and "tool-out" not in result
+    spill = kiss_tmp_dir() / SPILL_DIR / f"{tools._spill_tag}-1-bash.txt"
+    assert len(result) <= DEFAULT_CONFIG.tool_output_default_chars
+    assert f"full output ({spill.stat().st_size} chars) in {spill.as_posix()}]" in result
+    assert spill.read_text().splitlines() == [str(n) for n in range(1, 20001)]
+    # Where the command ran gets no file of the tools.
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_whole_file_read_keeps_the_budget_and_says_where_to_continue(tmp_path: Path) -> None:

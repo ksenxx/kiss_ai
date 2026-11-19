@@ -2,13 +2,13 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""E2E tests: the remote webapp is restyled like the Codex mobile app.
+"""E2E tests: the remote webapp's chrome wears Claude Code Desktop's look.
 
 The remote webapp (served by ``RemoteAccessServer`` via
-``_build_html()``) must adopt the OpenAI Codex / ChatGPT mobile visual
-language — near-black ``#0d0d0d`` page, an elevated rounded ``#212121``
-composer card with circular controls, pill-shaped chips, and rounded
-drawer panels — WITHOUT changing any control: every DOM id present in
+``_build_html()``) must adopt Claude Code Desktop's visual language —
+a near-black ``#0b0b0b`` page, a raised ``#1f1f1f`` composer box with a
+hairline and a 10px corner, quiet 6px tab chips, and docked side
+panels — WITHOUT changing any control: every DOM id present in
 ``media/chat.html`` must survive, and the event panels styled by
 ``main.css`` must be completely unaffected.  The restyle therefore
 lives in a separate stylesheet ``media/remote-codex.css`` whose every
@@ -24,9 +24,9 @@ to ``kiss.tests.server.test_codex_mobile_layout``):
   ``chat.html`` is still present in the built page.
 * Every top-level selector in ``remote-codex.css`` is scoped under
   ``body.remote-chat`` (including selectors inside ``@media`` blocks).
-* The Codex design tokens are actually in the stylesheet: page
-  ``#0d0d0d``, composer surface ``#212121`` at 28px radius with
-  circular 36px controls, white circular send button, pill tab chips.
+* The design tokens are actually in the stylesheet: page ``#0b0b0b``,
+  composer surface ``#1f1f1f`` at a 10px radius with 36px controls,
+  the primary-fill send button, 6px tab chips.
 * The restyle stops at the chrome: the EVENT PANELS (including the
   inline ``.task-panel`` that heads each task's thread) are NOT
   touched, so they keep main.css's look (see
@@ -130,10 +130,7 @@ CONTROL_IDS = [
     "cfg-server-reset-btn",
     "cfg-key-ANTHROPIC_API_KEY",
     "cfg-key-OPENAI_API_KEY",
-    "cfg-key-ZAI_API_KEY",
-    "cfg-key-MOONSHOT_API_KEY",
     "cfg-key-OPENROUTER_API_KEY",
-    "cfg-key-TOGETHER_API_KEY",
     "cfg-key-GEMINI_API_KEY",
     "cfg-custom-endpoint",
     "cfg-custom-api-key",
@@ -177,11 +174,34 @@ def test_chat_html_template_does_not_hardcode_codex_css() -> None:
     assert "remote-codex" not in tpl
 
 
-def test_main_css_not_polluted_with_codex_tokens() -> None:
-    """main.css must not gain the Codex page-background token; the
-    restyle lives only in remote-codex.css."""
-    main_css = (MEDIA_DIR / "main.css").read_text(encoding="utf-8")
-    assert "#0d0d0d" not in main_css
+def test_main_css_and_remote_css_share_one_canvas() -> None:
+    """The retired remote-only page background ``#0d0d0d`` is gone from
+    both stylesheets: main.css and remote-codex.css now fall back to the
+    same ``#0b0b0b`` canvas, so the page looks the same with or without
+    the remote restyle."""
+    canvas = r"--bg:\s*var\(--theme-editor-background,\s*#0b0b0b\)"
+    for name in ("main.css", "remote-codex.css"):
+        css = (MEDIA_DIR / name).read_text(encoding="utf-8")
+        assert "#0d0d0d" not in css, f"{name} still carries the retired canvas"
+        assert re.search(canvas, css), f"{name} must fall back to the #0b0b0b canvas"
+
+
+def _split_selector_list(header: str) -> list[str]:
+    """Split a rule header on its top-level commas only: a comma inside
+    ``:not(.a, .b)`` / ``:is(...)`` belongs to that pseudo-class."""
+    parts: list[str] = []
+    depth = 0
+    start = 0
+    for i, char in enumerate(header):
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+        elif char == "," and depth == 0:
+            parts.append(header[start:i])
+            start = i + 1
+    parts.append(header[start:])
+    return [part.strip() for part in parts if part.strip()]
 
 
 def _iter_top_level_selectors(css: str) -> list[str]:
@@ -215,9 +235,7 @@ def _iter_top_level_selectors(css: str) -> list[str]:
                 ):
                     scan(body)
             else:
-                selectors.extend(
-                    s.strip() for s in header.split(",") if s.strip()
-                )
+                selectors.extend(_split_selector_list(header))
             i = j
         return
 
@@ -239,19 +257,23 @@ def test_every_codex_rule_scoped_under_remote_chat() -> None:
         )
     ]
     assert not bad, f"unscoped selectors in remote-codex.css: {bad}"
+    # A selector list inside a pseudo-class is one selector, not two.
+    assert _split_selector_list(
+        "body.remote-chat .a:not(.b, :is(.c, .d)):hover, body.remote-chat .e"
+    ) == ["body.remote-chat .a:not(.b, :is(.c, .d)):hover", "body.remote-chat .e"]
 
 
 def test_codex_page_palette() -> None:
-    """The page background and primary text are VS Code's editor
-    colours, taken from the injected --theme-* variables with the
-    Dark Modern values as fallbacks."""
+    """The page background and primary text are the theme's canvas and
+    body colours, taken from the injected --theme-* variables with the
+    dark palette's values as fallbacks."""
     dark = _dark_palette_block()
     assert re.search(
-        r"--bg:\s*var\(--theme-editor-background,\s*#1f1f1f\)", dark
-    ), "page background must be editor.background (Dark Modern #1f1f1f)"
+        r"--bg:\s*var\(--theme-editor-background,\s*#0b0b0b\)", dark
+    ), "page background must be editor.background (dark #0b0b0b)"
     assert re.search(
-        r"--fg:\s*var\(--theme-editor-foreground,\s*#ccc\)", dark
-    ), "primary text must be editor.foreground (Dark Modern #cccccc)"
+        r"--fg:\s*var\(--theme-editor-foreground,\s*#f0efec\)", dark
+    ), "primary text must be editor.foreground (dark #f0efec)"
 
 
 def _dark_palette_block() -> str:
@@ -263,15 +285,16 @@ def _dark_palette_block() -> str:
 
 
 def test_codex_composer_card() -> None:
-    """Composer = --surface2 (VS Code's input.background) card at 28px
-    radius with an inset edge drawn via --ring (input.border)."""
+    """Composer = a raised --surface2 (input.background) box with the
+    input hairline (--border-input), a 10px corner and the soft
+    --shadow-sm; focus darkens the hairline instead of adding a glow."""
     dark = _dark_palette_block()
     assert re.search(
-        r"--surface2:\s*var\(--theme-input-background,\s*#313131\)", dark
+        r"--surface2:\s*var\(--theme-input-background,\s*#1f1f1f\)", dark
     ), "composer surface --surface2 must be input.background"
     assert re.search(
-        r"--ring:\s*var\(--theme-input-border,\s*#3c3c3c\)", dark
-    ), "--ring must be input.border"
+        r"--border-input:\s*var\(--theme-input-border,\s*#ffffff26\)", dark
+    ), "--border-input must be input.border"
     css = inline_design_tokens(_read_codex_css())
     m = re.search(
         r"body\.remote-chat #input-container\s*\{([^}]*)\}", css
@@ -281,24 +304,46 @@ def test_codex_composer_card() -> None:
     assert "background: var(--surface2)" in composer, (
         "composer surface must be themed via var(--surface2)"
     )
-    assert "border-radius: 28px" in composer, (
-        "28px composer radius missing"
+    assert "border: 1px solid var(--border-input)" in composer, (
+        "composer hairline must be themed via var(--border-input)"
     )
-    assert "inset 0 0 1px var(--ring)" in composer, (
-        "inset edge shadow must be themed via var(--ring)"
+    assert "border-radius: 10px" in composer, (
+        "10px composer radius missing"
     )
+    # The shadow is a design token, which inline_design_tokens expands:
+    # read the token's name from the stylesheet as written.
+    raw = re.search(
+        r"body\.remote-chat #input-container\s*\{([^}]*)\}", _read_codex_css()
+    )
+    assert raw and "box-shadow: var(--shadow-sm)" in raw.group(1), (
+        "composer must carry the soft --shadow-sm"
+    )
+    focus = re.search(
+        r"body\.remote-chat #input-container:focus-within\s*\{([^}]*)\}", css
+    )
+    assert focus and "border-color: var(--border-hover)" in focus.group(1), (
+        "focus must darken the hairline"
+    )
+    assert "box-shadow" not in focus.group(1), "focus must not add a glow"
 
 
 def test_codex_circular_composer_controls() -> None:
     """Composer controls are 36px circles; send is a --send-bg circle
-    in VS Code's button colours (button.background / foreground)."""
+    in the theme's primary-button colours (button.background /
+    button.foreground, reached through --primary-bg / --primary-fg)."""
     dark = _dark_palette_block()
     assert re.search(
-        r"--send-bg:\s*var\(--theme-button-background,\s*#0078d4\)", dark
-    ), "--send-bg must be button.background"
+        r"--primary-bg:\s*var\(--theme-button-background,\s*#efefef\)", dark
+    ), "--primary-bg must be button.background (dark #efefef)"
     assert re.search(
-        r"--send-fg:\s*var\(--theme-button-foreground,\s*#fff\)", dark
-    ), "--send-fg must be button.foreground"
+        r"--primary-fg:\s*var\(--theme-button-foreground,\s*#0b0b0b\)", dark
+    ), "--primary-fg must be button.foreground (dark #0b0b0b)"
+    assert re.search(r"--send-bg:\s*var\(--primary-bg\);", dark), (
+        "--send-bg must be the primary button fill"
+    )
+    assert re.search(r"--send-fg:\s*var\(--primary-fg\);", dark), (
+        "--send-fg must be the primary button text colour"
+    )
     css = inline_design_tokens(_read_codex_css())
     m = re.search(r"body\.remote-chat #send-btn[^{]*\{([^}]*)\}", css)
     assert m, "#send-btn rule missing"
@@ -315,34 +360,42 @@ def test_codex_circular_composer_controls() -> None:
     )
 
 
-def test_codex_pill_tabs_and_status() -> None:
-    """Tab chips and the status row become rounded pills."""
+def test_codex_tab_chips_and_status() -> None:
+    """Tab chips are quiet 6px chips: no fill until hovered, the
+    selection fill when active; the status row is restyled too."""
     css = inline_design_tokens(_read_codex_css())
-    assert re.search(
-        r"body\.remote-chat #tab-bar .chat-tab[^{]*\{[^}]*"
-        r"border-radius:\s*(999px|9999px)",
-        css,
-    ), "tab chips must be pills"
+    chip = re.search(
+        r"body\.remote-chat #tab-bar \.chat-tab\s*\{([^}]*)\}", css
+    )
+    assert chip, "tab chip rule missing"
+    assert "border-radius: 6px" in chip.group(1), "tab chips must have 6px corners"
+    assert "background: transparent" in chip.group(1)
+    active = re.search(
+        r"body\.remote-chat #tab-bar \.chat-tab\.active\s*\{([^}]*)\}", css
+    )
+    assert active and "background: var(--selected)" in active.group(1), (
+        "the active chip must carry the selection fill"
+    )
     assert "body.remote-chat #tab-status-bar" in css
 
 
 def test_task_panel_not_restyled_on_remote() -> None:
     """The inline task panel (``.ev.task-panel``, the first event of
-    every task's thread) must keep main.css's full-width accent-tinted
-    look, so remote-codex.css must not target it at all."""
+    every task's thread) must keep main.css's look, the right-aligned
+    neutral user bubble, so remote-codex.css must not target it at all."""
     css = re.sub(r"/\*.*?\*/", "", _read_codex_css(), flags=re.S)
     assert "task-panel" not in css
 
 
 def test_codex_rounded_panels() -> None:
-    """Sidebar / settings / modals get the dark rounded treatment."""
+    """Sidebar / settings / modals sit on the panel surface."""
     css = _read_codex_css()
     assert "body.remote-chat #sidebar" in css
     assert "body.remote-chat #settings-panel" in css
     assert re.search(
-        r"--surface:\s*var\(--theme-sideBar-background,\s*#181818\)",
+        r"--surface:\s*var\(--theme-sideBar-background,\s*#151515\)",
         _dark_palette_block(),
-    ), "drawer surface must be sideBar.background (Dark Modern #181818)"
+    ), "drawer surface must be sideBar.background (dark #151515)"
 
 
 def test_desktop_media_query_docks_sidebar() -> None:
@@ -432,14 +485,15 @@ def test_error_panels_keep_red() -> None:
 
 
 def test_muted_label_color_tokens_present() -> None:
-    """Muted labels use VS Code's dim foregrounds: tab.inactiveForeground
-    for --dim and input.placeholderForeground for --faint."""
+    """Muted labels use the theme's two dim text steps:
+    tab.inactiveForeground for --dim and input.placeholderForeground
+    for --faint."""
     dark = _dark_palette_block()
     assert re.search(
-        r"--dim:\s*var\(--theme-tab-inactiveForeground,\s*#9d9d9d\)", dark
+        r"--dim:\s*var\(--theme-tab-inactiveForeground,\s*#9c9a92\)", dark
     )
     assert re.search(
-        r"--faint:\s*var\(--theme-input-placeholderForeground,\s*#989898\)",
+        r"--faint:\s*var\(--theme-input-placeholderForeground,\s*#898781\)",
         dark,
     )
 
@@ -561,10 +615,12 @@ def test_sidebar_default_width_is_one_fifth_of_the_window() -> None:
 
 
 def test_chat_column_spans_full_width() -> None:
-    """Chat panels (the inline task panel among them) keep main.css's
-    full-width layout (remote-codex.css must not cap or realign
-    #output children), and the composer (input textbox + buttons)
-    spans the FULL chat page width with no max-width cap at all."""
+    """Chat panels keep main.css's layout: the transcript runs the
+    chat column's full width and the user's bubble (the inline task
+    panel) sits against its right edge (remote-codex.css must not cap
+    or realign #output children), and the composer (input textbox +
+    buttons) spans the FULL chat page width with no max-width cap at
+    all."""
     css = re.sub(r"/\*.*?\*/", "", _read_codex_css(), flags=re.S)
     assert "#output" not in css, (
         "remote-codex.css must not restyle #output or its children; "

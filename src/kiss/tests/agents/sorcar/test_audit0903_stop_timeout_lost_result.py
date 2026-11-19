@@ -94,6 +94,15 @@ _HELPER_SEA = (
     "    def settings(self, settings):\n"
     "        return settings | {'model': 'm'}\n"
 )
+# The client's deadline in the direct ``daemon_client.run`` calls below.  The run
+# opens its connection inside it, so it leaves room for the dial: at 0.3 s one
+# full garbage-collection pass of a large pytest process (0.2-0.5 s on CPython
+# 3.13) used the deadline up during the TLS handshake ("Cannot connect to the
+# sorcar daemon ... timed out").
+_DEADLINE = 2.0
+# When the racing daemon finishes on its own: past the deadline, the client's
+# stop already on the wire.
+_FINISH_DELAY = _DEADLINE + 0.3
 
 
 @pytest.fixture(autouse=True)
@@ -286,19 +295,19 @@ class _StopKillDaemon(_FakeDaemon):
 def test_stop_on_timeout_returns_naturally_finished_result() -> None:
     """A natural finish racing the timeout's stop must not be discarded.
 
-    The daemon stand-in finishes the task successfully 0.6 s in — past
-    the client's 0.3-s deadline, so the client has already sent its
-    ``stop`` — and the completed result + terminal status cross the
-    stop on the wire.  The client holds the successful result when the
+    The daemon stand-in finishes the task successfully 0.3 s past the
+    client's deadline, so the client has already sent its ``stop`` —
+    and the completed result + terminal status cross the stop on the
+    wire.  The client holds the successful result when the
     terminal status confirms the task is dead: it must return it, not
     raise a ``TimeoutError`` claiming the task "was stopped".
     """
-    daemon = _RacingFinishDaemon(finish_delay=0.6)
+    daemon = _RacingFinishDaemon(finish_delay=_FINISH_DELAY)
     try:
         result = daemon_client.run(
             "finishes while stop is in flight",
             endpoint_file=daemon.endpoint_file,
-            timeout=0.3,
+            timeout=_DEADLINE,
             stop_on_timeout=True,
         )
         assert result.success
@@ -362,7 +371,7 @@ def test_stop_killed_task_still_raises_timeout() -> None:
             daemon_client.run(
                 "never finishes",
                 endpoint_file=daemon.endpoint_file,
-                timeout=0.3,
+                timeout=_DEADLINE,
                 stop_on_timeout=True,
             )
         assert not isinstance(
@@ -386,18 +395,23 @@ def test_unconfirmed_stop_with_successful_result_still_raises(
     must raise ``StopUnconfirmedTimeoutError``, never return the
     result as if the task were confirmed finished.
     """
-    monkeypatch.setattr(daemon_client, "_STOP_CONFIRM_GRACE_SECONDS", 1.0)
-    daemon = _RacingFinishDaemon(finish_delay=0.6, send_terminal_status=False)
+    # The daemon's clock starts at the run command, up to ``_DEADLINE`` after the
+    # client's: the grace outlasts the finish also when the dial took that long.
+    monkeypatch.setattr(daemon_client, "_STOP_CONFIRM_GRACE_SECONDS", _FINISH_DELAY + 0.7)
+    daemon = _RacingFinishDaemon(finish_delay=_FINISH_DELAY, send_terminal_status=False)
     try:
         with pytest.raises(
             daemon_client.StopUnconfirmedTimeoutError, match="did not finish",
-        ):
+        ) as excinfo:
             daemon_client.run(
                 "finishes but the terminal status never comes",
                 endpoint_file=daemon.endpoint_file,
-                timeout=0.3,
+                timeout=_DEADLINE,
                 stop_on_timeout=True,
             )
+        # The successful result was in hand when the grace expired.
+        assert excinfo.value.result.success
+        assert excinfo.value.result.text == "finished on my own"
         # The stop was sent (deadline expired before the finish).
         assert daemon.wait_for_command("stop")
     finally:
@@ -471,9 +485,9 @@ def test_unconfirmed_stop_with_failure_result_still_raises(
             daemon_client.run(
                 "never finishes",
                 endpoint_file=daemon.endpoint_file,
-                timeout=0.3,
+                timeout=_DEADLINE,
                 stop_on_timeout=True,
             )
-        assert time.monotonic() - begin < 5
+        assert time.monotonic() - begin < _DEADLINE + 4
     finally:
         daemon.close()

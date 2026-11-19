@@ -115,7 +115,7 @@ def _changes(
 ) -> tuple[list[dict], list[dict]]:
     """Run the updater's Bedrock pipeline (candidates, then the thinking sync) on *bedrock*."""
     updates, new_models = compute_changes(
-        current, openrouter or {}, {}, {}, {}, {}, bedrock=bedrock
+        current, openrouter or {}, {}, {}, {}, bedrock=bedrock
     )
     _sync_bedrock_thinking(bedrock, current, updates, new_models)
     return updates, new_models
@@ -213,7 +213,7 @@ def test_mirrors_follow_a_twin_repaired_or_retested_in_the_same_run() -> None:
     bedrock = _listing(_US_OPUS, _GLOBAL_OPUS, _US_HAIKU)
     # The Anthropic listing: a twin new this run.
     listed: dict[str, dict] = {"claude-haiku-4-5-20251001": {}}
-    updates, new_models = compute_changes(current, openrouter, {}, {}, listed, {}, bedrock=bedrock)
+    updates, new_models = compute_changes(current, openrouter, {}, listed, {}, bedrock=bedrock)
     repaired = {"context_length": 300000, "input_price_per_1M": 7.0, "output_price_per_1M": 35.0}
     changes = {upd["name"]: upd["changes"] for upd in updates}
     assert changes == {"claude-opus-4-6": repaired, _GLOBAL_OPUS: repaired}
@@ -255,7 +255,7 @@ def test_bedrock_entries_skip_the_openrouter_repricing_pass() -> None:
             "output_price_per_1M": 1.25,
         }
     }
-    updates, _ = compute_changes(current, openrouter, {}, {}, {}, {})
+    updates, _ = compute_changes(current, openrouter, {}, {}, {})
     assert updates == []
 
 
@@ -424,7 +424,7 @@ def test_twin_discovered_in_the_same_run_hands_over_its_probed_level() -> None:
     }
     bedrock = _listing(_GLOBAL_OPUS)
     updates, new_models = compute_changes(
-        {}, openrouter, {}, {}, {"claude-opus-4-6": {"source": "anthropic"}}, {}, bedrock=bedrock
+        {}, openrouter, {}, {"claude-opus-4-6": {"source": "anthropic"}}, {}, bedrock=bedrock
     )
     by_name = _by_name(new_models)
     assert by_name[_GLOBAL_OPUS]["thinking"] is None
@@ -507,7 +507,6 @@ def test_main_repairs_a_thinking_only_drift(tmp_path: Path, monkeypatch, capsys)
     monkeypatch.setattr(update_models, "README_PATH", tmp_path / "README.md")
     for fetcher in (
         "fetch_openrouter",
-        "fetch_together",
         "fetch_anthropic",
         "fetch_gemini",
         "fetch_openai",

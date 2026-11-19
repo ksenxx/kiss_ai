@@ -70,6 +70,11 @@ function options(win) {
   return Array.from(select(win).options).map(o => [o.value, o.textContent]);
 }
 
+// The name the header shows: the label the transparent select lies over.
+function shown(win) {
+  return select(win).previousElementSibling.textContent;
+}
+
 function submit(win, text) {
   win.document.getElementById('task-input').value = text;
   win.document.getElementById('send-btn').click();
@@ -109,9 +114,11 @@ function testListsThisMachineThenTheReachableOnes() {
     [],
     'empty (hidden) until a name is known',
   );
+  assert.strictEqual(shown(win), '');
   send(win, {type: 'configData', config: {}, machine: 'laptop'});
   assert.deepStrictEqual(options(win), [['', 'laptop']]);
   assert.strictEqual(select(win).value, '');
+  assert.strictEqual(shown(win), 'laptop');
   assert.strictEqual(
     win.document.getElementById('status-machine').textContent,
     'laptop',
@@ -361,6 +368,7 @@ function testAnAddressNamedMachineIsListedByItsHostName() {
     ['10.0.0.7', 'rack-7'],
   ]);
   pick(win, '10.0.0.7');
+  assert.strictEqual(shown(win), 'rack-7', 'the pick is the name shown');
   assert.strictEqual(
     runTask(win, posted, 'hello rack').machine,
     '10.0.0.7',
@@ -395,12 +403,14 @@ function testAnAddressNamedMachineIsListedByItsHostName() {
     ],
     'the registered name until the first machines reply',
   );
+  assert.strictEqual(shown(again.win), '10.0.0.7');
   send(again.win, {type: 'machines', machines: rows, checkedAt: 3});
   assert.deepStrictEqual(options(again.win), [
     ['', 'laptop'],
     ['gpu-box', 'gpu-box'],
     ['10.0.0.7', 'rack-7'],
   ]);
+  assert.strictEqual(shown(again.win), 'rack-7', 'the name shown follows');
   again.win.close();
   console.log('  ok - an address-named machine is listed by its host name');
 }

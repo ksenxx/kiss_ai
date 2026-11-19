@@ -31,7 +31,7 @@ def _new_model(new_models: list[dict], name: str) -> dict:
 def test_new_openai_model_without_openrouter_listing_gets_default_context() -> None:
     """No OpenRouter twin: context falls back to the OpenAI default, pricing stays unknown."""
     openai = {"gpt-6-luna": {"source": "openai"}}
-    _, new_models = compute_changes({}, {}, {}, {}, {}, openai)
+    _, new_models = compute_changes({}, {}, {}, {}, openai)
     entry = _new_model(new_models, "gpt-6-luna")
     assert entry["context_length"] == _OPENAI_DEFAULT_CONTEXT_LENGTH
     assert entry["context_length"] > 0
@@ -49,7 +49,7 @@ def test_new_openai_model_with_openrouter_listing_uses_its_context() -> None:
         }
     }
     openai = {"gpt-6-luna": {"source": "openai"}}
-    _, new_models = compute_changes({}, openrouter, {}, {}, {}, openai)
+    _, new_models = compute_changes({}, openrouter, {}, {}, openai)
     entry = _new_model(new_models, "gpt-6-luna")
     assert entry["context_length"] == 262144
     assert entry["input_price_per_1M"] == 5.0
@@ -74,7 +74,7 @@ def test_new_gemini_model_without_a_reported_limit_never_lands_with_context_zero
         }
         for tier in ("pro", "lite")
     }
-    _, new_models = compute_changes({}, openrouter, {}, gemini, {}, {})
+    _, new_models = compute_changes({}, openrouter, gemini, {}, {})
     assert _new_model(new_models, "gemini-9-flash")["context_length"] == (
         _DEFAULT_CONTEXT_LENGTH_BY_SOURCE["gemini"]
     )
@@ -95,7 +95,7 @@ def test_existing_zero_context_openai_entry_is_repaired_without_openrouter() -> 
         }
     }
     openai = {"gpt-6-luna": {"source": "openai"}}
-    updates, new_models = compute_changes(current, {}, {}, {}, {}, openai)
+    updates, new_models = compute_changes(current, {}, {}, {}, openai)
     assert new_models == []
     upd = next(u for u in updates if u["name"] == "gpt-6-luna")
     assert upd["source"] == "openrouter-xref"
@@ -115,7 +115,7 @@ def test_existing_zero_context_anthropic_entry_is_repaired_without_openrouter() 
         }
     }
     anthropic = {"claude-nova-6": {"source": "anthropic"}}
-    updates, _ = compute_changes(current, {}, {}, {}, anthropic, {})
+    updates, _ = compute_changes(current, {}, {}, anthropic, {})
     upd = next(u for u in updates if u["name"] == "claude-nova-6")
     assert upd["changes"] == {"context_length": 200000}
 
@@ -133,7 +133,7 @@ def test_vendor_reported_context_is_not_overwritten_by_the_default() -> None:
         }
     }
     gemini = {"gemini-example": {"context_length": 128000, "source": "gemini"}}
-    updates, _ = compute_changes(current, {}, {}, gemini, {}, {})
+    updates, _ = compute_changes(current, {}, gemini, {}, {})
     matching = [u for u in updates if u["name"] == "gemini-example"]
     assert matching == [
         {"name": "gemini-example", "changes": {"context_length": 128000}, "source": "gemini"}
@@ -161,7 +161,7 @@ def test_existing_zero_context_entry_prefers_openrouter_context() -> None:
         }
     }
     openai = {"gpt-6-luna": {"source": "openai"}}
-    updates, _ = compute_changes(current, openrouter, {}, {}, {}, openai)
+    updates, _ = compute_changes(current, openrouter, {}, {}, openai)
     upd = next(u for u in updates if u["name"] == "gpt-6-luna")
     assert upd["changes"]["context_length"] == 262144
     assert upd["changes"]["input_price_per_1M"] == 5.0
@@ -181,7 +181,7 @@ def test_priced_entry_with_context_is_left_alone() -> None:
         }
     }
     openai = {"gpt-6-luna": {"source": "openai"}}
-    updates, new_models = compute_changes(current, {}, {}, {}, {}, openai)
+    updates, new_models = compute_changes(current, {}, {}, {}, openai)
     assert new_models == []
     assert [u for u in updates if u["name"] == "gpt-6-luna"] == []
 
@@ -199,5 +199,5 @@ def test_zero_priced_entry_with_context_but_no_openrouter_twin_is_left_alone() -
         }
     }
     openai = {"gpt-6-luna": {"source": "openai"}}
-    updates, _ = compute_changes(current, {}, {}, {}, {}, openai)
+    updates, _ = compute_changes(current, {}, {}, {}, openai)
     assert [u for u in updates if u["name"] == "gpt-6-luna"] == []

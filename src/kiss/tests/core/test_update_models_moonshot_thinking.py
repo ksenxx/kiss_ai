@@ -19,7 +19,7 @@ import pytest
 
 
 class _MoonshotHandler(BaseHTTPRequestHandler):
-    """Emulates api.moonshot.ai/v1/chat/completions for kimi-k3.
+    """Emulates the OpenRouter chat/completions route of moonshotai/kimi-k3.
 
     Accepts ``reasoning_effort`` values in ``accepted_efforts`` (and
     requests without the field), rejects every other value with HTTP 400
@@ -52,7 +52,7 @@ class _MoonshotHandler(BaseHTTPRequestHandler):
                 "id": "cmpl-k3",
                 "object": "chat.completion.chunk",
                 "created": 0,
-                "model": "kimi-k3",
+                "model": "moonshotai/kimi-k3",
                 "choices": [
                     {"index": 0, "delta": {"content": "hello"}, "finish_reason": None}
                 ],
@@ -61,7 +61,7 @@ class _MoonshotHandler(BaseHTTPRequestHandler):
                 "id": "cmpl-k3",
                 "object": "chat.completion.chunk",
                 "created": 0,
-                "model": "kimi-k3",
+                "model": "moonshotai/kimi-k3",
                 "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
                 "usage": {"prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4},
             }
@@ -82,7 +82,7 @@ class _MoonshotHandler(BaseHTTPRequestHandler):
                     "id": "cmpl-k3",
                     "object": "chat.completion",
                     "created": 0,
-                    "model": "kimi-k3",
+                    "model": "moonshotai/kimi-k3",
                     "choices": [
                         {
                             "index": 0,
@@ -109,7 +109,12 @@ class _MoonshotHandler(BaseHTTPRequestHandler):
 
 @pytest.fixture
 def moonshot_wire(monkeypatch: pytest.MonkeyPatch) -> Generator[str]:
-    """Route the registered moonshot vendor at an in-process K3 emulator."""
+    """Route the registered openrouter vendor at an in-process K3 emulator.
+
+    The emulator speaks Chat Completions only, and the catalog flags the
+    OpenRouter K3 entries for the Responses API: a test that sends a
+    request pins the transport (``use_responses_api: False``).
+    """
     import dataclasses
 
     from kiss.core import config as config_module
@@ -123,12 +128,12 @@ def moonshot_wire(monkeypatch: pytest.MonkeyPatch) -> Generator[str]:
     thread.start()
     base_url = f"http://127.0.0.1:{server.server_port}/v1"
     providers = tuple(
-        dataclasses.replace(p, base_url=base_url) if p.name == "moonshot" else p
+        dataclasses.replace(p, base_url=base_url) if p.name == "openrouter" else p
         for p in model_info.OPENAI_COMPATIBLE_PROVIDERS
     )
     monkeypatch.setattr(model_info, "OPENAI_COMPATIBLE_PROVIDERS", providers)
     monkeypatch.setattr(
-        config_module.DEFAULT_CONFIG, "MOONSHOT_API_KEY", "test-key", raising=False
+        config_module.DEFAULT_CONFIG, "OPENROUTER_API_KEY", "test-key", raising=False
     )
     try:
         yield base_url
@@ -140,12 +145,12 @@ class TestRuntimeAliasResolution:
     """Kimi K3 aliases must resolve and route like every other alias."""
 
     def test_factory_builds_kimi_max_alias_with_effort(self, moonshot_wire: str) -> None:
-        """model('kimi-k3-max') must send model=kimi-k3, effort=max."""
+        """The ``-max`` alias must send model=moonshotai/kimi-k3, effort=max."""
         from kiss.core.models.model_info import model as create_model
 
-        m = create_model("kimi-k3-max")
+        m = create_model("openrouter/moonshotai/kimi-k3-max")
         assert m.model_config.get("reasoning_effort") == "max"
-        assert getattr(m, "_api_model_name", None) == "kimi-k3"
+        assert getattr(m, "_api_model_name", None) == "moonshotai/kimi-k3"
 
     def test_alias_generate_sends_base_model_and_max_on_the_wire(
         self, moonshot_wire: str
@@ -153,12 +158,14 @@ class TestRuntimeAliasResolution:
         """A real generate() through the alias must carry both wire fields."""
         from kiss.core.models.model_info import model as create_model
 
-        m = create_model("kimi-k3-max")
+        m = create_model(
+            "openrouter/moonshotai/kimi-k3-max", model_config={"use_responses_api": False}
+        )
         m.initialize("Say hello in one word.")
         text, _ = m.generate()
 
         assert text.strip() == "hello"
         assert len(_MoonshotHandler.captured_bodies) == 1
         body = _MoonshotHandler.captured_bodies[0]
-        assert body["model"] == "kimi-k3", "The wire id must be the base model"
+        assert body["model"] == "moonshotai/kimi-k3", "The wire id must be the base model"
         assert body["reasoning_effort"] == "max"

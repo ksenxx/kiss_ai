@@ -193,6 +193,9 @@ def test_sea_methods_follow_the_contract(tmp_path: Path) -> None:
     assert "{python}" not in prompt and "{module}" not in prompt
     assert f"{shlex.quote(sys.executable)} -m {sea.MODULE} write-page" in prompt
     assert "ABSOLUTE path" in prompt
+    # A page file is in the scratch dir, named as Task Settings names it, not in ``tmp/``.
+    assert "`<scratch dir>/conventions.md`, in the Scratch dir of Task Settings" in " ".join(
+        prompt.split())
     for page in ("overview", "domain-glossary", "architecture", "history", "faq"):
         assert f"`{page}`" in prompt
     # The real loader accepts the file and stages ``tools`` / ``system_prompt``

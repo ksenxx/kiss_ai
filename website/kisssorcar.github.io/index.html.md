@@ -1,6 +1,6 @@
 # KISS Sorcar — Tell it what to do, in English. It picks the best LLM and ships the work.
 
-> Open-source AI agent. Tell it what to do in English — it picks the best LLM, runs on your laptop, and ships the work. Apache 2.0, 695 models. Works as a web/mobile app, a Python API, and a terminal command.
+> Open-source AI agent. Tell it what to do in English — it picks the best LLM, runs on your laptop, and ships the work. Apache 2.0, 988 models. Works as a web/mobile app, a Python API, and a terminal command.
 
 This is the plain-Markdown twin of <https://kisssorcar.github.io/>. Machine-readable entry points: [/llms.txt](https://kisssorcar.github.io/llms.txt) and [/llms-full.txt](https://kisssorcar.github.io/llms-full.txt).
 
@@ -9,7 +9,7 @@ This is the plain-Markdown twin of <https://kisssorcar.github.io/>. Machine-read
 **KISS Sorcar is a free, simple, local-first, bring-your-own-key AI agent framework** for long-horizon tasks and AI discovery. It runs as a browser/mobile web app served by a local daemon (`kiss-web`), and offers a Python client API for scripting tasks. Your prompts and code are sent directly to the model provider or local endpoint you configure — not through our servers. It supports multi-model workflows just via prompts. Agents run as daemons hosted by the local server (a standalone `sorcar` terminal command can also run a task without the daemon). Complex AI systems/techniques can be replaced with a paragraph of prompt.
 
 - **License:** Apache-2.0 · **Source:** <https://github.com/ksenxx/kiss_ai> · **PyPI:** `kiss-agent-framework`
-- **695 models** across 9 provider categories (OpenAI, Anthropic, Gemini, Together AI, Z.AI, Moonshot AI, OpenRouter, Claude Code CLI, Codex CLI)
+- **988 models** across 7 provider categories (OpenAI, Anthropic, Amazon Bedrock, Gemini, OpenRouter, Claude Code CLI, Codex CLI)
 - **44 third-party agents**: 32 messaging channels (Slack, Gmail, Email, WhatsApp, SMS, iMessage, Telegram, Discord, Signal, Phone Control, Home Assistant, …) plus service agents for GitHub, Notion, Overleaf, Postgres, Brave Search, Firecrawl, and Google Workspace
 - Unique features: AI discovery via prompt, GEPA prompt optimization via prompt, multi-vendor multi-model tasks, dynamic `set_model` switching, steering-on-the-fly, git-worktree task isolation, wake-word voice chat, persistent agent memory, inbound channel gateways, Muse-auth credential isolation for connector secrets
 

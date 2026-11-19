@@ -244,12 +244,22 @@ FINISH_BLOCK = "```json\n" + json.dumps({
 # turn with the turn's ``usage`` (3 input / 4 output tokens unless given),
 # dying with exit 1 after that when it says ``die: "after-usage"``.  ``thread.started``
 # goes out before anything else so the model's stall timeout starts from
-# a line, as with Codex.  Like Codex, it hands the proxy only the
+# a line, as with Codex.  Until the proxy has listed its tools the fake
+# says so twice a second: its start-up (the ``mcp`` imports, the bridge
+# server it spawns, the handshake) takes seconds on a loaded machine and
+# is no stall, so the only silence is the one a turn asks for.  Like
+# Codex, it hands the proxy only the
 # ``env_vars`` the server config names (the bridge's secret).  It records
 # argv, the stdin prompt and the instructions file per call.
 _FAKE_CODEX = """#!{python}
-import json, os, pathlib, sys
+import json, os, pathlib, sys, threading
 print(json.dumps({{"type": "thread.started", "thread_id": "t-1"}}), flush=True)
+started = threading.Event()
+def report_starting():
+    while not started.wait(0.5):
+        print(json.dumps({{"type": "starting"}}), flush=True)
+starting = threading.Thread(target=report_starting, daemon=True)
+starting.start()
 import asyncio, tomllib
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
@@ -275,6 +285,8 @@ async def main():
         async with ClientSession(read, write) as session:
             await session.initialize()
             names = sorted(t.name for t in (await session.list_tools()).tools)
+            started.set()
+            starting.join()
             for tool, arguments in turn["mcp_calls"]:
                 print(json.dumps({{"type": "item.started", "item": {{
                     "type": "mcp_tool_call", "server": "kiss", "tool": tool,
@@ -356,8 +368,8 @@ SEEN_STOP_EVENTS: list[threading.Event | None] = []
 SHOUT_DELAY_SECONDS = 0.0
 
 # The stall timeout of the tests that make the fake codex stall.  It also
-# bounds the fake's silent start-up (its ``mcp`` imports, the bridge
-# server it spawns, the handshake), which takes over 1.5 s on Windows.
+# bounds what the fake does in silence: its interpreter's start, and a
+# hitch of the start-up reports.
 STALL_TIMEOUT_SECONDS = 4.0
 
 

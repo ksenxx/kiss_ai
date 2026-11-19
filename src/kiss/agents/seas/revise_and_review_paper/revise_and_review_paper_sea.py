@@ -55,6 +55,8 @@ from typing import Any
 
 from kiss.agents.seas.base.base_sea import BaseSea
 from kiss.agents.seas.discover.discover_sea import DiscoverSea
+from kiss.core.kiss_tmp import kiss_tmp_dir
+from kiss.server.agent_state import current_agent
 
 WRITE_PAPER_SEA = str(Path(__file__).resolve().parents[1] / "write_paper" / "write_paper_sea.py")
 """Absolute path of the bundled ``/write_paper`` SEA, the writer of every round."""
@@ -133,8 +135,9 @@ to your worktree).
 
 The reviewer judges a blind submission. Before each review:
 
-1. copy the built PDF alone to `<work dir>/tmp/revise_review/round-<N>/<stem>.pdf`;
-2. delete earlier review notes under `<work dir>/tmp/` (`PAPER-NOTES.md`,
+1. copy the built PDF alone to `<scratch dir>/revise_review/round-<N>/<stem>.pdf` (the
+   Scratch dir of Task Settings);
+2. delete earlier review notes under `<scratch dir>/` (`PAPER-NOTES.md`,
    `information-<stem>*.md`);
 3. build the task with `reviewer_task(...)` (it forbids opening earlier reviews, notes,
    git history or the paper's source directory); run it with `use_memory="false"` and no
@@ -184,9 +187,8 @@ with a larger timeout.
 
 Keep `<work dir>/reports/<stem>-revise-review-log.md`: per round, the recommendation and
 score lines, each weakness and its outcome (fixed where, experiment and numbers, declined
-why), the experiments run, the child's cost and time. Update
-`<work dir>/tmp/revise_review/PROGRESS.md` each round (the writer overwrites
-`./tmp/PROGRESS.md`). Git add the paper directory (`.tex`, `.bib`, figures, scripts, raw
+why), the experiments run, the child's cost and time. Update `<scratch dir>/PROGRESS.md`
+each round. Git add the paper directory (`.tex`, `.bib`, figures, scripts, raw
 results, `.pdf`; never `.aux`, `.bbl`, `.blg`, `.log`, `.out`), the reviews and the log;
 the children commit nothing.
 
@@ -219,12 +221,14 @@ Rules for this round:
   gate counts, each experiment run with its numbers, and (for a revision) one line per
   weakness of the review: fixed (where), experiment run (numbers), or declined (why).
   Longer detail (verified citations, full reviewer findings) goes to
-  `<paper dir>/tmp/writer-report-round<N>.md` on disk, not into the report: the
+  `{scratch_dir}revise_review/writer-report-round<N>.md` on disk, not into the report: the
   coordinator reads the report every round and keeps it in context.
 - Do not run a review of your own in this round; an independent reviewer follows.
 - Stay within this session's budget; when it runs short, finish with the paper building
   and report what is left undone.
 """
+"""The rules of every writer task, a ``str.format`` template: ``{scratch_dir}`` is the
+coordinator's scratch dir, where the writer leaves its longer report."""
 
 _DISCOVER_RULES = f"""\
 Slash command for a stronger method or result:
@@ -310,7 +314,10 @@ def writer_task(
             left, and other notes from the coordinator; empty for none.
 
     Returns:
-        The task text to pass verbatim to ``run_agent`` on the ``/write_paper`` SEA.
+        The task text to pass verbatim to ``run_agent`` on the ``/write_paper`` SEA.  Its
+        rules send the round's longer report to a file in the calling task's scratch dir
+        (in the agents' temp directory outside a task): the writer's own scratch dir is
+        deleted when the writer ends.
     """
     if review_path:
         head = (
@@ -328,7 +335,9 @@ def writer_task(
     parts = [head, "", "Writing instructions from the user:", instructions.strip(), ""]
     if coordinator_notes.strip():
         parts += ["Notes from the loop coordinator:", coordinator_notes.strip(), ""]
-    parts += [_WRITER_RULES.rstrip(), "", _DISCOVER_RULES.rstrip()]
+    agent = current_agent()
+    scratch_dir = agent._scratch_dir() if agent is not None else f"{kiss_tmp_dir().as_posix()}/"
+    parts += [_WRITER_RULES.format(scratch_dir=scratch_dir).rstrip(), "", _DISCOVER_RULES.rstrip()]
     return "\n".join(parts)
 
 
@@ -366,7 +375,7 @@ revision cycle; do not mention rounds, earlier versions or a revision in the rev
 Judge only the file named above. Do not open any other file of the repository, any \
 earlier review or review notes, the git history, memory pages, or the paper's source \
 directory. Keep your notes and your research log under {round_dir}/notes/, not under \
-./tmp. Run unattended: do not ask the user questions; when something is unclear, say so \
+your scratch dir. Run unattended: do not ask the user questions; when something is unclear, say so \
 in the review.
 
 End the review with the venue's score lines (one per line, as the venue's form names \

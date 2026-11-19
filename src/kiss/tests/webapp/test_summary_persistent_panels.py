@@ -180,14 +180,26 @@ def test_user_response_is_a_right_aligned_user_message(chat_page: Page) -> None:
       const p = parent.getBoundingClientRect();
       const s = getComputedStyle(parent);
       const content = parent.clientWidth - parseFloat(s.paddingLeft) - parseFloat(s.paddingRight);
+      // The width the bubble's content asks for, measured with the
+      // bubble's own limits lifted for one layout.
+      const saved = el.style.cssText;
+      el.style.cssText = 'width: max-content; min-width: 0; max-width: none';
+      const natural = el.getBoundingClientRect().width;
+      el.style.cssText = saved;
       return {
-        width: r.width / content,
+        width: r.width,
+        natural,
+        content,
         gap: p.left + parent.clientWidth - parseFloat(s.paddingRight) - r.right,
       };
     }""")
-    # User panels leave a tenth of the chat's width clear on their left
-    # (`.ev.user-msg { width: 90% }` in main.css).
-    assert geometry["width"] == pytest.approx(0.9, abs=0.01), geometry
+    # A user bubble is as wide as its content, between 120px and 85% of
+    # the chat column, against the column's right edge
+    # (`.ev.user-msg { width: fit-content; min-width: 120px; max-width: 85% }`
+    # in main.css).
+    bubble = max(120, min(geometry["natural"], 0.85 * geometry["content"]))
+    assert geometry["width"] == pytest.approx(bubble, abs=1), geometry
+    assert geometry["width"] < 0.5 * geometry["content"], geometry
     assert geometry["gap"] == pytest.approx(0, abs=1), geometry
     # The user can still explicitly fold their response.
     response.locator(".task-panel-h").click()

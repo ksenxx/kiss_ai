@@ -16,16 +16,9 @@ published pricing pages:
   billed at 2x input / 1.5x output for the full request.
 * Gemini 3 Pro / 3.1 Pro have a long-context (prompts >200k) pricing tier.
 * Gemini server-side tool-use prompt tokens count as input tokens.
-* Direct Moonshot (kimi-*) models carry their published per-family
-  cache-hit prices (0.10x-0.20x input) and bill 5-minute cache writes at
-  the uncached input rate.
-* Z.AI GLM models carry their published cached-input prices.
 * Anthropic Opus 5.5 reads its cache at 0.05x input ($0.20 on $4.00),
   Fable/Mythos 5.1 at 0.025x, every other Claude at 0.1x.
 * OpenAI gpt-6-sol / gpt-6-luna share gpt-6-astra's long-context tier.
-* Together publishes cached-input prices that the catalog carries, so a
-  cache hit reported in ``prompt_tokens_details.cached_tokens`` is not
-  billed at the full input rate.
 """
 
 import json
@@ -248,47 +241,7 @@ class TestGeminiToolUsePromptTokens:
         assert usage == (500, 100, 0, 0)
 
 
-class TestDirectMoonshotCachePricing:
-    def test_direct_kimi_models_carry_published_prices(self):
-        """platform.kimi.ai July 2026: hit / miss / output per MTok."""
-        expected = {
-            "kimi-k2.5": (0.10, 0.60, 3.00),
-            "kimi-k2.6": (0.16, 0.95, 4.00),
-            "kimi-k2.7-code": (0.19, 0.95, 4.00),
-            "kimi-k3": (0.30, 3.00, 15.00),
-        }
-        for name, (hit, miss, out) in expected.items():
-            info = MODEL_INFO[name]
-            assert info.cache_read_price_per_1M == pytest.approx(hit), name
-            assert info.input_price_per_1M == pytest.approx(miss), name
-            assert info.output_price_per_1M == pytest.approx(out), name
-            # A 5-minute cache write is billed at the uncached input rate
-            # (kimi-k3: $3.00 write on $3.00 input) and reported in
-            # ``prompt_tokens_details.cache_write_tokens``, which the
-            # adapter removes from the uncached remainder:
-            # https://platform.kimi.ai/docs/guide/use-context-caching-feature-of-kimi-api
-            assert info.cache_write_price_per_1M == pytest.approx(miss), name
-            assert calculate_cost(name, 0, 0, 0, 1_000_000) == pytest.approx(miss), name
-
-    def test_kimi_k3_aliases_bill_cache_writes_like_the_base_model(self):
-        for name in ("kimi-k3-low", "kimi-k3-high", "kimi-k3-max"):
-            assert MODEL_INFO[name].cache_write_price_per_1M == pytest.approx(3.0), name
-
-    def test_moonshot_v1_fallback_cache_read_quarter(self):
-        """Entries without explicit cache prices fall back to 0.25x read / 1x write."""
-        info = MODEL_INFO["moonshot-v1-8k"]
-        assert info.cache_read_price_per_1M == pytest.approx(info.input_price_per_1M * 0.25)
-        assert info.cache_write_price_per_1M == pytest.approx(info.input_price_per_1M)
-
-    def test_kimi_k25_cache_hit_cost(self):
-        cost = calculate_cost("kimi-k2.5", 100_000, 0, 1_000_000, 0)
-        assert cost == pytest.approx((100_000 * 0.60 + 1_000_000 * 0.10) / 1e6)
-
-    def test_kimi_k3_cost(self):
-        cost = calculate_cost("kimi-k3", 100_000, 10_000, 500_000, 0)
-        expected = (100_000 * 3.0 + 10_000 * 15.0 + 500_000 * 0.30) / 1e6
-        assert cost == pytest.approx(expected)
-
+class TestOpenRouterMoonshotCachePricing:
     def test_openrouter_kimi_k3_cache_read_not_overcharged(self):
         """OpenRouter kimi-k3 keeps its published cache price on the base entry and every alias.
 
@@ -298,7 +251,7 @@ class TestDirectMoonshotCachePricing:
         was 0.1x ($3.00 / $0.30); on 2026-10-01 the headline endpoint
         (Relace) published $0.7072 input with an undiscounted $0.7072
         cache read.  What must hold is that the catalog bills the explicit
-        published ``input_cache_read_price`` rather than the 0.25x
+        published ``input_cache_read_price`` rather than the former 0.25x
         direct-Moonshot default, and that the thinking aliases bill
         exactly like the base model.
         """
@@ -327,7 +280,7 @@ class TestDirectMoonshotCachePricing:
         # below the cache rate (2026-09-30: $0.318 input, $0.40 cache
         # read), so no bound ties the two.  What must hold is that the
         # explicit OpenRouter cache price was kept: a positive price that
-        # is not the 0.25x direct-Moonshot default.
+        # is not the former 0.25x direct-Moonshot default.
         latest = MODEL_INFO["openrouter/~moonshotai/kimi-latest"]
         assert latest.input_price_per_1M > 0
         cache_read = latest.cache_read_price_per_1M
@@ -459,25 +412,6 @@ class TestLongContextTierUsesPromptTokens:
     def test_gemini_output_excluded_from_tier_decision(self):
         cost = calculate_cost("gemini-2.5-pro", 150_000, 100_000)
         assert cost == pytest.approx((150_000 * 1.25 + 100_000 * 10.0) / 1e6)
-
-
-class TestGlmCachePricing:
-    def test_glm_models_carry_published_cached_input_prices(self):
-        expected = {
-            "glm-4.5": 0.11,
-            "glm-4.5-air": 0.03,
-            "glm-4.5-airx": 0.22,
-            "glm-4.5-x": 0.45,
-            "glm-4.6": 0.11,
-            "glm-4.7": 0.11,
-        }
-        for name, price in expected.items():
-            info = MODEL_INFO[name]
-            assert info.cache_read_price_per_1M == pytest.approx(price), name
-
-    def test_glm45_cache_hit_cost(self):
-        cost = calculate_cost("glm-4.5", 10_000, 5_000, 100_000, 0)
-        assert cost == pytest.approx((10_000 * 0.6 + 5_000 * 2.2 + 100_000 * 0.11) / 1e6)
 
 
 class TestAnthropicCacheReadFamilies:
@@ -908,48 +842,6 @@ class TestDirectOverrideWithReadPriceOnly:
         _apply_cache_pricing("openrouter/anthropic/claude-sonnet-4.6", info)
         assert info.cache_write_price_per_1M is None
         assert info.cache_write_1h_price_per_1M == pytest.approx(6.0)
-
-
-class TestTogetherCachedInputPrices:
-    """https://www.together.ai/pricing and ``/v1/models`` ``pricing.cached_input``.
-
-    Kimi-K3 ran a $2.70/$13.50/$0.27 promo "valid until 10/11/2026";
-    ``/v1/models`` returned the $3.00/$15.00/$0.30 list price again on
-    2026-10-14, and the ``-high``/``-low``/``-max`` thinking aliases must
-    follow the base entry.
-    """
-
-    def test_together_models_carry_published_cache_read_prices(self):
-        expected = {
-            "moonshotai/Kimi-K3": 0.30,
-            "moonshotai/Kimi-K3-high": 0.30,
-            "moonshotai/Kimi-K3-low": 0.30,
-            "moonshotai/Kimi-K3-max": 0.30,
-            "zai-org/GLM-5.3": 0.26,
-            "zai-org/GLM-5.3-Flash": 0.03,
-            "deepseek-ai/DeepSeek-V4-Pro-0813": 0.13,
-            "deepseek-ai/DeepSeek-V4.1-Flash": 0.006,
-            "Qwen/Qwen3.5-397B-A17B": 0.35,
-        }
-        for name, price in expected.items():
-            assert MODEL_INFO[name].cache_read_price_per_1M == pytest.approx(price), name
-
-    def test_together_kimi_k3_cache_hit_is_not_billed_as_input(self):
-        for name in (
-            "moonshotai/Kimi-K3",
-            "moonshotai/Kimi-K3-high",
-            "moonshotai/Kimi-K3-low",
-            "moonshotai/Kimi-K3-max",
-        ):
-            cost = calculate_cost(name, 90, 20, 3_012, 0)
-            assert cost == pytest.approx((90 * 3.0 + 20 * 15.0 + 3_012 * 0.30) / 1e6), name
-
-    def test_together_models_without_a_published_cache_price_bill_hits_as_input(self):
-        info = MODEL_INFO["meta-llama/Llama-3.3-70B-Instruct-Turbo"]
-        assert info.cache_read_price_per_1M is None
-        assert calculate_cost("meta-llama/Llama-3.3-70B-Instruct-Turbo", 0, 0, 1_000_000, 0) == (
-            pytest.approx(info.input_price_per_1M)
-        )
 
 
 class TestHotAddedCustomModelCachePricing:

@@ -55,7 +55,7 @@ class TestPageMediaCacheBust(unittest.TestCase):
 
     def test_remote_html_uses_content_versioned_media_urls(self) -> None:
         html = web_server._build_html()
-        # The remote page defaults to Light Modern, so the linked
+        # The remote page defaults to the light theme, so the linked
         # highlight sheet is the light one; the dark sheet's URL only
         # appears inside the theme JSON main.js swaps in at runtime.
         for name in (

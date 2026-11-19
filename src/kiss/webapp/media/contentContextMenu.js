@@ -21,30 +21,46 @@
 (function () {
   const MENU_ID = 'sorcar-content-context-menu';
 
+  // The menu is a floating surface of the chat page, like the sidebar
+  // trees' menu (main.css .tree-ctx-menu): the raised surface with a
+  // hairline, an 8px corner and the wide soft shadow; its rows have a
+  // 6px corner and take the neutral hover fill, the shortcut is
+  // tertiary text.  Every themed value is a token of main.css, written
+  // `var(--token,fallback)` with the dark palette's value as the
+  // fallback, so the menu follows the page's theme; the sandboxed
+  // preview gets the values instead (see literalMenuCss).  Sizes are in
+  // px: the preview's root font size is not the page's.
   const MENU_CSS =
     '#' +
     MENU_ID +
-    '{position:fixed;z-index:2147483647;min-width:180px;padding:4px 0;' +
-    'margin:0;background:#252526;color:#ccc;border:1px solid #454545;' +
-    'border-radius:6px;box-shadow:0 4px 16px rgb(0 0 0 / 50%);' +
-    "font:13px -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica," +
-    'Arial,sans-serif;user-select:none;-webkit-user-select:none}' +
+    '{position:fixed;z-index:2147483647;min-width:180px;' +
+    'padding:var(--space-1,4px);margin:0;' +
+    'background:var(--menu-bg,#1f1f1f);color:var(--fg,#f0efec);' +
+    'border:1px solid var(--border,#ffffff1a);' +
+    'border-radius:var(--radius-lg,8px);' +
+    'box-shadow:var(--shadow-lg,0 12px 40px #00000073);' +
+    'font:13px var(--font-ui,system-ui,-apple-system,"Segoe UI",Roboto,' +
+    'Helvetica,Arial,sans-serif);user-select:none;' +
+    '-webkit-user-select:none}' +
     '#' +
     MENU_ID +
     ' .sorcar-ctx-item{display:flex;justify-content:space-between;' +
-    'gap:24px;padding:5px 14px;cursor:pointer;white-space:nowrap}' +
+    'gap:24px;padding:var(--space-1,4px) var(--space-2,8px);' +
+    'border-radius:var(--radius-md,6px);cursor:pointer;' +
+    'white-space:nowrap}' +
     '#' +
     MENU_ID +
     ' .sorcar-ctx-item:hover,#' +
     MENU_ID +
-    ' .sorcar-ctx-item:focus{background:#04395e;color:#fff;outline:none}' +
+    ' .sorcar-ctx-item:focus{background:var(--hover,#ffffff13);' +
+    'outline:none}' +
     '#' +
     MENU_ID +
     ' .sorcar-ctx-item.disabled{opacity:.4;cursor:default;' +
     'pointer-events:none}' +
     '#' +
     MENU_ID +
-    ' .sorcar-ctx-key{opacity:.6}';
+    ' .sorcar-ctx-key{color:var(--faint,#898781);font-size:11px}';
 
   /** True when *el* is an `<input>`/`<textarea>` with a text cursor. */
   function isTextField(el) {
@@ -729,12 +745,7 @@
     }
 
     function ensureStyle() {
-      if (doc.getElementById(MENU_ID + '-style')) return;
-      const style = doc.createElement('style');
-      style.id = MENU_ID + '-style';
-      style.setAttribute('data-sorcar-ctx', '');
-      style.textContent = MENU_CSS;
-      (doc.head || doc.documentElement).appendChild(style);
+      if (!doc.getElementById(MENU_ID + '-style')) setMenuStyle(doc, MENU_CSS);
     }
 
     function open(x, y, target) {
@@ -821,9 +832,72 @@
     return {close: close};
   }
 
+  /** Give *doc* the menu's stylesheet *css*, in place of the one it has. */
+  function setMenuStyle(doc, css) {
+    let style = doc.getElementById(MENU_ID + '-style');
+    if (!style) {
+      style = doc.createElement('style');
+      style.id = MENU_ID + '-style';
+      style.setAttribute('data-sorcar-ctx', '');
+      (doc.head || doc.documentElement).appendChild(style);
+    }
+    style.textContent = css;
+  }
+
   /**
-   * Return `<script>` markup that installs this menu on whatever document
-   * it is parsed into.
+   * In the sandboxed preview: restyle the menu whenever the host page
+   * sends its stylesheet again (restylePreviewMenu).  The parent window
+   * alone is listened to, not the previewed page or a frame inside it.
+   */
+  function followHostMenuStyle(win) {
+    win.addEventListener('message', e => {
+      const css = e.source === win.parent && e.data && e.data.kissMenuCss;
+      if (typeof css === 'string') setMenuStyle(win.document, css);
+    });
+  }
+
+  /**
+   * Send the preview in *frame* (an iframe fed with
+   * contentContextMenuBootstrapHtml()) this page's menu stylesheet as it
+   * is now.  `main.js` calls it for every open preview when the page's
+   * appearance changes: the values in the frame's markup are those of
+   * the moment it was built.
+   */
+  function restylePreviewMenu(frame) {
+    frame.contentWindow.postMessage({kissMenuCss: literalMenuCss()}, '*');
+  }
+
+  /**
+   * *text* as a JavaScript string literal that can sit in an HTML
+   * `<script>`: JSON with `<` escaped, so that no closing script tag in
+   * the text ends the script, and with the line separators U+2028 /
+   * U+2029 escaped (raw, they end the line in an older engine's
+   * literal).
+   */
+  function scriptStringLiteral(text) {
+    return JSON.stringify(text).replace(
+      /[<\u2028\u2029]/g,
+      c => '\\u' + c.charCodeAt(0).toString(16).padStart(4, '0'),
+    );
+  }
+
+  /**
+   * MENU_CSS for a document that does not inherit this page's tokens
+   * (the sandboxed preview, whose own stylesheet may even use the same
+   * names): every `var(--token,fallback)` is replaced by the value the
+   * token has on this page's body, or by its fallback.
+   */
+  function literalMenuCss() {
+    const style = window.getComputedStyle(document.body);
+    return MENU_CSS.replace(
+      /var\((--[\w-]+),([^()]+)\)/g,
+      (_, token, fallback) => style.getPropertyValue(token).trim() || fallback,
+    );
+  }
+
+  /**
+   * Return `<script>` markup that installs this menu, in this page's
+   * current theme, on whatever document it is parsed into.
    *
    * `main.js` appends the result to the `srcdoc` of the sandboxed iframe
    * that shows an opened .html file, which is the only way to give that
@@ -832,51 +906,65 @@
   function contentContextMenuBootstrapHtml() {
     return (
       '\n<script data-sorcar-ctx>' +
-      installContentContextMenu.SOURCE +
+      menuSource(literalMenuCss()) +
       '<' +
       '/script>\n'
     );
   }
 
-  // The exact source text shipped into the sandboxed iframe.  It is built
-  // from the very functions above via Function.prototype.toString so the
-  // iframe and the parent can never drift apart.
-  installContentContextMenu.SOURCE =
-    '(function(){' +
-    'var MENU_ID=' +
-    JSON.stringify(MENU_ID) +
-    ';' +
-    'var MENU_CSS=' +
-    JSON.stringify(MENU_CSS) +
-    ';' +
-    isTextField.toString() +
-    isWritable.toString() +
-    selectedText.toString() +
-    focusedElement.toString() +
-    rendered.toString() +
-    copyViaTextarea.toString() +
-    copyText.toString() +
-    isHiddenSource.toString() +
-    inHiddenSource.toString() +
-    invisible.toString() +
-    selectAll.toString() +
-    closestTag.toString() +
-    editableTarget.toString() +
-    isMac.toString() +
-    buildMenuModel.toString() +
-    insertIntoContentEditable.toString() +
-    editState.toString() +
-    sameEditState.toString() +
-    pasteInto.toString() +
-    menuKeyNav.toString() +
-    clampMenu.toString() +
-    installContentContextMenu.toString() +
-    'installContentContextMenu(document,{});' +
-    '})();';
+  /**
+   * The source text that installs this menu, styled by *css*, on the
+   * document that runs it.  It is built from the very functions above
+   * via Function.prototype.toString so the iframe and the parent can
+   * never drift apart.
+   */
+  function menuSource(css) {
+    return (
+      '(function(){' +
+      'var MENU_ID=' +
+      JSON.stringify(MENU_ID) +
+      ';' +
+      'var MENU_CSS=' +
+      scriptStringLiteral(css) +
+      ';' +
+      isTextField.toString() +
+      isWritable.toString() +
+      selectedText.toString() +
+      focusedElement.toString() +
+      rendered.toString() +
+      copyViaTextarea.toString() +
+      copyText.toString() +
+      isHiddenSource.toString() +
+      inHiddenSource.toString() +
+      invisible.toString() +
+      selectAll.toString() +
+      closestTag.toString() +
+      editableTarget.toString() +
+      isMac.toString() +
+      buildMenuModel.toString() +
+      insertIntoContentEditable.toString() +
+      editState.toString() +
+      sameEditState.toString() +
+      pasteInto.toString() +
+      menuKeyNav.toString() +
+      clampMenu.toString() +
+      setMenuStyle.toString() +
+      installContentContextMenu.toString() +
+      followHostMenuStyle.toString() +
+      'installContentContextMenu(document,{});' +
+      'followHostMenuStyle(window);' +
+      '})();'
+    );
+  }
+
+  // The source text with the page's own stylesheet: the menu of a
+  // document without the tokens takes the dark palette's fallbacks.
+  installContentContextMenu.SOURCE = menuSource(MENU_CSS);
 
   const api = {
     installContentContextMenu: installContentContextMenu,
     contentContextMenuBootstrapHtml: contentContextMenuBootstrapHtml,
+    restylePreviewMenu: restylePreviewMenu,
     copyViaTextarea: copyViaTextarea,
     menuKeyNav: menuKeyNav,
     clampMenu: clampMenu,

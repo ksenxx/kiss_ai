@@ -2,41 +2,47 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""E2E tests: opening a tab by task id seeds the first run's chat
-context from the opened task's ``parent_task_id`` chain.
+"""E2E tests: the tasks of a chat form a tree, and a task's prompt
+carries the tasks on the path from the tree's root to its parent.
 
 Spec
 ----
-When a tab is opened by a task id (``resumeSession`` carrying
-``taskId``) and NO task has been run in the tab after opening, the
-next task the user issues in that tab must have its
-:meth:`ChatSorcarAgent.build_chat_prompt` context built by traversing
-the ``parent_task_id`` links starting at the opened task (walking
-parents upward, then reversed to chronological order) and then taking
-at most ``MAX_TASKS`` (10) entries exactly the way the current
-chat-context trimming works (``del ctx[2:2 + len(ctx) - 10]`` — keep
-the first 2 and the last 8).
-
-After that first run consumes the opened-task seed, subsequent runs
-in the same tab fall back to the normal chat-context path.  The seed
-is also discarded when the tab is re-pointed at a chat without a
-task id (``resumeSession`` without ``taskId``), when the user starts
-a new chat in the tab (``newChat``), and when the tab is closed.
+* A task run after the user loaded a task of the chat (a CHATS click:
+  ``resumeSession`` carrying ``taskId``, or the ``continueTaskId`` a
+  page sends when the click only scrolled its tab) has the loaded task
+  as its parent.  The load counts once: it is discarded when the tab is
+  re-pointed at a chat without a task id, starts a new chat or closes.
+  A ``<task>`` message sent while the tab's task runs is a task of its
+  own, run after that one: it takes the load too (the
+  ``continueTaskId`` of its ``appendUserMessage``), whether it runs as
+  a subtask of the run or as the tab's next run.
+* A task run without a load has the chat's last task as its parent.
+* The root of the tree is the chat's first task.  A row from before the
+  parent was recorded, and one whose parent was deleted, continues the
+  task just before it in its chat; a sub-agent's parent is the task
+  that dispatched it.
+* The prompt's "Previous tasks and results" section holds the tasks on
+  the path root -> parent, at most ``MAX_TASKS`` (10) of them: the
+  first 2 and the last 8.
 """
 
 from __future__ import annotations
 
+import functools
+import re
 import shutil
 import subprocess
 import tempfile
+import time
 import unittest
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
 
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
-from kiss.agents.sorcar.persistence import _load_task_chain_context
-from kiss.server import agent_state
+from kiss.agents.sorcar.persistence import _load_task_lineage
+from kiss.server import agent_state, task_runner
 from kiss.server.server import AgentServer
 from kiss.tests.server.conftest import (
     make_recording_server,
@@ -45,6 +51,8 @@ from kiss.tests.server.conftest import (
     restore_persistence,
     restore_sorcar_parent_run,
 )
+
+_CONTEXT_TASK_RE = re.compile(r"^### Task \d+\n(.*)$", re.MULTILINE)
 
 
 def _init_git_repo(tmpdir: str) -> None:
@@ -67,10 +75,15 @@ class _PromptCapture:
     def __init__(self) -> None:
         self.prompts: list[str] = []
         self.counter = 0
+        # Called once, inside the first run: what the user does in the
+        # tab while its task is running.
+        self.during_first_run: Callable[[], None] | None = None
 
     def fake_run(self, agent_self: object, **kwargs: object) -> str:
         self.prompts.append(str(kwargs.get("prompt_template", "")))
         self.counter += 1
+        if self.counter == 1 and self.during_first_run is not None:
+            self.during_first_run()
         summary = f"run-{self.counter} done"
         printer = kwargs.get("printer")
         if printer is not None and hasattr(printer, "broadcast"):
@@ -82,12 +95,34 @@ class _PromptCapture:
         return f"success: true\nsummary: {summary}\n"
 
 
+def _context_tasks(prompt: str) -> list[str]:
+    """The task texts of *prompt*'s "Previous tasks" section, oldest first."""
+    return _CONTEXT_TASK_RE.findall(prompt.split("# Task (work on it now)")[0])
+
+
+def _lineage_of(task: str) -> list[str]:
+    """The task texts on the path from the tree's root to the row whose text is *task*."""
+    row = th._get_db().execute(
+        "SELECT id FROM task_history WHERE task = ?", (task,),
+    ).fetchone()
+    return [str(entry["task"]) for entry in _load_task_lineage(str(row[0]))]
+
+
+def _chat_of(task: str) -> str:
+    """The chat of the row whose text is *task*."""
+    row = th._get_db().execute(
+        "SELECT chat_id FROM task_history WHERE task = ?", (task,),
+    ).fetchone()
+    return str(row[0])
+
+
 def _run_and_wait(server: AgentServer, tab_id: str, prompt: str,
-                  work_dir: str) -> None:
+                  work_dir: str, **fields: object) -> None:
+    """Send a ``run`` of *prompt* (plus the wire *fields*) and wait for its end."""
     server._handle_command({
         "type": "run", "prompt": prompt,
         "model": "claude-fable-5", "workDir": work_dir,
-        "tabId": tab_id,
+        "tabId": tab_id, **fields,
     })
     with agent_state.STATE_LOCK:
         state = agent_state.find_by_tab(tab_id)
@@ -101,10 +136,29 @@ def _run_and_wait(server: AgentServer, tab_id: str, prompt: str,
         assert not t.is_alive()
 
 
-def _seed_chain(
+def _seed_chat(chat_id: str, names: list[str]) -> list[str]:
+    """Persist finished tasks run one after another in chat *chat_id*.
+
+    Args:
+        chat_id: The chat the tasks belong to.
+        names: One name per task, oldest first; the task's text is
+            ``"<name> task"`` and its result ``"<name> result"``.
+
+    Returns:
+        The inserted row ids, oldest first.
+    """
+    ids: list[str] = []
+    for name in names:
+        tid, _ = th._add_task(f"{name} task", chat_id=chat_id)
+        th._save_task_result(f"{name} result", task_id=tid)
+        ids.append(tid)
+    return ids
+
+
+def _seed_dispatch_chain(
     specs: list[tuple[str, str, str]],
 ) -> list[tuple[str, str]]:
-    """Persist a parent-linked chain of finished tasks.
+    """Persist a chain of finished tasks, each the sub-agent of the one before.
 
     Args:
         specs: List of ``(task_text, result_text, chat_id)`` tuples in
@@ -157,87 +211,118 @@ class _ChainContextBase(unittest.TestCase):
         with agent_state.STATE_LOCK:
             agent_state.agent_states.clear()
 
+    def _run_twice(self, tab: str, chat_id: str, first: str, second: str) -> None:
+        """Run two tasks one after the other in *tab*, on chat *chat_id* (``""``: a new one).
 
-class TestChainContextFirstRun(_ChainContextBase):
-    """First run after open-by-task-id uses the parent-chain context."""
-
-    def test_chain_context_spans_chats_and_orders_root_first(self) -> None:
-        rows = _seed_chain([
-            ("t1 magic word apple", "r1 apple stored", "chatA"),
-            ("t2 magic word pear", "r2 pear stored", "chatA"),
-            ("t3 magic word plum", "r3 plum stored", "chatB"),
-        ])
-        t3_id = rows[2][0]
-
-        tab = "tab-chain-basic"
-        _open_by_task_id(self.server, tab, "chatB", t3_id)
-        _run_and_wait(self.server, tab, "recall all magic words",
-                      self.tmpdir)
-
-        assert self.capture.prompts, "expected a captured prompt"
-        prompt = self.capture.prompts[0]
-        assert "Previous tasks and results" in prompt, prompt
-        assert "### Task 1\nt1 magic word apple" in prompt, prompt
-        assert "### Result 1\nr1 apple stored" in prompt, prompt
-        assert "### Task 2\nt2 magic word pear" in prompt, prompt
-        assert "### Result 2\nr2 pear stored" in prompt, prompt
-        assert "### Task 3\nt3 magic word plum" in prompt, prompt
-        assert "### Result 3\nr3 plum stored" in prompt, prompt
-        assert prompt.rstrip().endswith("recall all magic words")
-
-    def test_second_run_falls_back_to_chat_context(self) -> None:
-        rows = _seed_chain([
-            ("t1 magic word apple", "r1 apple stored", "chatA"),
-            ("t2 magic word pear", "r2 pear stored", "chatA"),
-            ("t3 magic word plum", "r3 plum stored", "chatB"),
-        ])
-        t3_id = rows[2][0]
-
-        tab = "tab-chain-oneshot"
-        _open_by_task_id(self.server, tab, "chatB", t3_id)
-        # Drive both runs synchronously through _run_task: the second
-        # run must reuse the tab's idle state.  (The async _cmd_run
-        # path currently leaves a dead task_thread behind after the
-        # mid-run rekey — see SUSPECTED SOURCE BUGS in the batch
-        # report — which would swallow the second run as steering.)
-        for prompt in ("first follow-up quokka", "second follow-up wombat"):
+        Driven synchronously through ``_run_task``: the second run must
+        reuse the tab's idle state.  (The async ``_cmd_run`` path leaves
+        a dead ``task_thread`` behind after the mid-run rekey, which
+        would swallow the second run as steering.)  A direct run is on
+        the chat its command names, where ``_cmd_run`` takes the tab's.
+        """
+        for prompt in (first, second):
             self.server._run_task({
                 "type": "run", "prompt": prompt,
                 "model": "claude-fable-5", "workDir": self.tmpdir,
-                "tabId": tab,
+                "tabId": tab, "chatId": chat_id,
             })
-
         assert len(self.capture.prompts) == 2
+
+
+class TestChatTree(_ChainContextBase):
+    """Which task a run continues, and what its prompt carries of the tree."""
+
+    def test_task_run_after_loading_a_task_continues_it(self) -> None:
+        _, two, _ = _seed_chat("chatT", ["one", "two", "three"])
+
+        tab = "tab-tree-branch"
+        _open_by_task_id(self.server, tab, "chatT", two)
+        self._run_twice(tab, "chatT", "four task", "five task")
+        assert _chat_of("four task") == _chat_of("five task") == "chatT"
+
+        # The loaded task is the parent: the path to it leaves out the
+        # task that came after it in the chat.
+        first = self.capture.prompts[0]
+        assert _context_tasks(first) == ["one task", "two task"], first
+        assert "### Result 1\none result" in first, first
+        assert "### Result 2\ntwo result" in first, first
+        assert first.rstrip().endswith("four task")
+        assert _lineage_of("four task") == ["one task", "two task", "four task"]
+        # No task loaded since: the chat's last task is the parent.
         second = self.capture.prompts[1]
-        assert "Previous tasks and results" in second, second
-        assert "first follow-up quokka" in second, second
-        assert "t1 magic word apple" not in second, second
-        assert "t2 magic word pear" not in second, second
-
-    def test_chain_trimmed_to_max_tasks(self) -> None:
-        specs = [
-            (f"chain-task-{i:02d} sentinel{i:02d}",
-             f"chain-result-{i:02d}", "chatX")
-            for i in range(1, 14)
+        assert _context_tasks(second) == ["one task", "two task", "four task"], second
+        assert _lineage_of("five task") == [
+            "one task", "two task", "four task", "five task",
         ]
-        rows = _seed_chain(specs)
-        last_id = rows[-1][0]
+        # The branch left behind is still a path from the same root.
+        assert _lineage_of("three task") == ["one task", "two task", "three task"]
 
-        tab = "tab-chain-trim"
-        _open_by_task_id(self.server, tab, "chatX", last_id)
+    def test_lineage_trimmed_to_max_tasks(self) -> None:
+        ids = _seed_chat("chatX", [f"sentinel{i:02d}" for i in range(1, 14)])
+
+        tab = "tab-tree-trim"
+        _open_by_task_id(self.server, tab, "chatX", ids[-1])
         _run_and_wait(self.server, tab, "trim check", self.tmpdir)
 
         prompt = self.capture.prompts[0]
-        for kept in (1, 2, 6, 7, 8, 9, 10, 11, 12, 13):
-            assert f"sentinel{kept:02d}" in prompt, (kept, prompt)
-        for dropped in (3, 4, 5):
-            assert f"sentinel{dropped:02d}" not in prompt, (dropped, prompt)
-        assert "### Task 1\nchain-task-01" in prompt, prompt
-        assert "### Task 3\nchain-task-06" in prompt, prompt
-        assert "### Task 10\nchain-task-13" in prompt, prompt
+        kept = (1, 2, 6, 7, 8, 9, 10, 11, 12, 13)
+        assert _context_tasks(prompt) == [f"sentinel{i:02d} task" for i in kept], prompt
+        assert "### Task 3\nsentinel06 task" in prompt, prompt
+        assert "### Task 10\nsentinel13 task" in prompt, prompt
+
+    def test_row_without_recorded_parent_continues_the_task_before_it(self) -> None:
+        _, two, _ = _seed_chat("chatL", ["one", "two", "three"])
+        # Rows from before the parent was recorded, which here share a
+        # timestamp too: the row inserted first ran first.
+        db = th._get_db()
+        with th._rw_lock.write_lock():
+            db.execute("UPDATE task_history SET chat_parent_id = '', timestamp = 1000.0")
+            db.commit()
+
+        tab = "tab-tree-legacy"
+        _open_by_task_id(self.server, tab, "chatL", two)
+        _run_and_wait(self.server, tab, "legacy check", self.tmpdir)
+
+        prompt = self.capture.prompts[0]
+        assert _context_tasks(prompt) == ["one task", "two task"], prompt
+        assert _lineage_of("three task") == ["one task", "two task", "three task"]
+
+    def test_task_whose_parent_was_deleted_continues_the_task_before_it(self) -> None:
+        _, two, three = _seed_chat("chatD", ["one", "two", "three"])
+        assert th._delete_task(two) == 1
+
+        tab = "tab-tree-deleted"
+        _open_by_task_id(self.server, tab, "chatD", three)
+        _run_and_wait(self.server, tab, "deleted check", self.tmpdir)
+
+        prompt = self.capture.prompts[0]
+        assert _context_tasks(prompt) == ["one task", "three task"], prompt
+
+    def test_task_run_in_a_subagent_tab_keeps_the_dispatch_chain(self) -> None:
+        rows = _seed_dispatch_chain([
+            ("t1 magic word apple", "r1 apple stored", "chatA"),
+            ("t2 magic word pear", "r2 pear stored", "chatA"),
+            ("t3 magic word plum", "r3 plum stored", "chatB"),
+        ])
+
+        tab = "tab-tree-subagent"
+        _open_by_task_id(self.server, tab, "chatB", rows[2][0])
+        self._run_twice(tab, "", "first follow-up quokka", "second follow-up wombat")
+
+        chain = ["t1 magic word apple", "t2 magic word pear", "t3 magic word plum"]
+        first = self.capture.prompts[0]
+        assert _context_tasks(first) == chain, first
+        assert "### Result 3\nr3 plum stored" in first, first
+        # The run started a chat of its own, whose next task still
+        # carries the path the first one continued.
+        own_chat = _chat_of("first follow-up quokka")
+        assert own_chat not in ("chatA", "chatB")
+        assert _chat_of("second follow-up wombat") == own_chat
+        second = self.capture.prompts[1]
+        assert _context_tasks(second) == [*chain, "first follow-up quokka"], second
 
     def test_cycle_in_parent_links_terminates(self) -> None:
-        rows = _seed_chain([
+        rows = _seed_dispatch_chain([
             ("cyc-a task", "cyc-a result", "chatC"),
             ("cyc-b task", "cyc-b result", "chatC"),
         ])
@@ -255,18 +340,13 @@ class TestChainContextFirstRun(_ChainContextBase):
         _run_and_wait(self.server, tab, "cycle check", self.tmpdir)
 
         prompt = self.capture.prompts[0]
-        assert "cyc-a task" in prompt, prompt
-        assert "cyc-b task" in prompt, prompt
+        assert _context_tasks(prompt) == ["cyc-a task", "cyc-b task"], prompt
 
     def test_rejected_run_preserves_seed(self) -> None:
-        rows = _seed_chain([
-            ("t1 magic word apple", "r1 apple stored", "chatA"),
-            ("t2 magic word pear", "r2 pear stored", "chatB"),
-        ])
-        t2_id = rows[1][0]
+        one, _ = _seed_chat("chatR", ["one", "two"])
 
         tab = "tab-chain-rejected"
-        _open_by_task_id(self.server, tab, "chatB", t2_id)
+        _open_by_task_id(self.server, tab, "chatR", one)
         with self.server._state_lock:
             merging_state = agent_state.AgentState(
                 f"merge-review-{tab}",
@@ -284,86 +364,260 @@ class TestChainContextFirstRun(_ChainContextBase):
             "tabId": tab,
         })
         assert not self.capture.prompts, "rejected run must not reach agent"
-        assert self.server._tab_opened_task_ids.get(tab) == t2_id
+        assert self.server._tab_opened_task_ids.get(tab) == one
 
         with self.server._state_lock:
             merging_state.is_merging = False
         _run_and_wait(self.server, tab, "accepted run", self.tmpdir)
         prompt = self.capture.prompts[0]
-        assert "t1 magic word apple" in prompt, prompt
-        assert "t2 magic word pear" in prompt, prompt
+        assert _context_tasks(prompt) == ["one task"], prompt
 
-    def test_missing_parent_row_stops_traversal(self) -> None:
-        tid, _ = th._add_task(
-            "orphan task zebra", chat_id="chatD",
-            extra={"parent_task_id": "no-such-task-id"},
+    def test_task_named_by_the_page_is_continued_and_takes_the_pin(self) -> None:
+        one, two, _ = _seed_chat("chatP", ["one", "two", "three"])
+
+        tab = "tab-tree-page"
+        _open_by_task_id(self.server, tab, "chatP", two)
+        # The page's click on a task its tab already showed is the later
+        # one: it asked the daemon for nothing and comes with the run.
+        self.server._run_task({
+            "type": "run", "prompt": "four task",
+            "model": "claude-fable-5", "workDir": self.tmpdir,
+            "tabId": tab, "chatId": "chatP", "continueTaskId": one,
+        })
+        self.server._run_task({
+            "type": "run", "prompt": "five task",
+            "model": "claude-fable-5", "workDir": self.tmpdir,
+            "tabId": tab,
+        })
+        assert _chat_of("four task") == _chat_of("five task") == "chatP"
+
+        first, second = self.capture.prompts
+        assert _context_tasks(first) == ["one task"], first
+        # The tab's own load went with that run too.
+        assert _context_tasks(second) == ["one task", "four task"], second
+
+    def test_message_a_run_left_unread_continues_that_run(self) -> None:
+        one, _ = _seed_chat("chatQ", ["one", "two"])
+
+        tab = "tab-tree-leftover"
+        # Typed while the run is on and never read by it: the daemon
+        # runs it next, as a task of its own, from the run's command.
+        self.capture.during_first_run = functools.partial(
+            self.server._cmd_run, {"tabId": tab, "prompt": "four task"},
         )
-        th._save_task_result("orphan result", task_id=tid)
+        self.server._run_task({
+            "type": "run", "prompt": "three task",
+            "model": "claude-fable-5", "workDir": self.tmpdir,
+            "tabId": tab, "chatId": "chatQ", "continueTaskId": one,
+        })
+        deadline = time.monotonic() + 60
+        while len(self.capture.prompts) < 2 and time.monotonic() < deadline:
+            time.sleep(0.05)
 
-        tab = "tab-chain-orphan"
-        _open_by_task_id(self.server, tab, "chatD", tid)
-        _run_and_wait(self.server, tab, "orphan check", self.tmpdir)
+        first, second = self.capture.prompts
+        assert _context_tasks(first) == ["one task"], first
+        # The task the page named was loaded for the run that took it.
+        assert _context_tasks(second) == ["one task", "three task"], second
+        assert _chat_of("three task") == _chat_of("four task") == "chatQ"
 
+    def _send_during_first_run(self, tab: str, prompt: str, **fields: object) -> None:
+        """Have the user send *prompt* (plus wire *fields*) to *tab* during its first run."""
+        self.capture.during_first_run = functools.partial(
+            self.server._handle_command,
+            {"type": "appendUserMessage", "tabId": tab, "prompt": prompt, **fields},
+        )
+
+    def _run(self, tab: str, prompt: str, **fields: object) -> None:
+        """Run *prompt* (plus the wire *fields*) in *tab* and whatever is queued behind it."""
+        self.server._run_task({
+            "type": "run", "prompt": prompt,
+            "model": "claude-fable-5", "workDir": self.tmpdir,
+            "tabId": tab, **fields,
+        })
+
+    def _wait_for(self, done: Callable[[], bool]) -> None:
+        """Wait for a run the daemon starts itself (a hang guard, not a latency bound)."""
+        deadline = time.monotonic() + 60
+        while not done() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert done()
+
+    def test_task_queued_on_a_run_continues_the_task_loaded_before_it(self) -> None:
+        one, _ = _seed_chat("chatK", ["one", "two"])
+
+        tab = "tab-tree-queued"
+        # While ``three`` runs the reader clicks ``one`` and queues two
+        # tasks behind the run: tasks of their own, the first of which
+        # takes the click and the second follows the first.
+        self._send_during_first_run(
+            tab, "<task>four task</task><task>five task</task>", continueTaskId=one,
+        )
+        self._run(tab, "three task", chatId="chatK")
+        self._run(tab, "six task")
+        assert _chat_of("four task") == _chat_of("six task") == "chatK"
+
+        three, four, five, six = self.capture.prompts
+        assert _context_tasks(three) == ["one task", "two task"], three
+        assert _context_tasks(four) == ["one task"], four
+        assert _lineage_of("four task") == ["one task", "four task"]
+        assert _context_tasks(five) == ["one task", "four task"], five
+        # The click went with the task it was sent with.
+        assert _context_tasks(six) == ["one task", "four task", "five task"], six
+        assert _lineage_of("three task") == ["one task", "two task", "three task"]
+
+    def test_task_queued_on_a_run_without_a_load_continues_that_run(self) -> None:
+        _seed_chat("chatN", ["one", "two"])
+
+        tab = "tab-tree-queued-plain"
+        self._send_during_first_run(tab, "<task>four task</task>")
+        self._run(tab, "three task", chatId="chatN")
+
+        _, four = self.capture.prompts
+        assert _context_tasks(four) == ["one task", "two task", "three task"], four
+
+    def test_command_queued_on_a_run_continues_the_task_loaded_before_it(self) -> None:
+        one, _ = _seed_chat("chatC2", ["one", "two"])
+
+        tab = "tab-tree-queued-command"
+        # A queued ``/xxx`` command is no subtask of the run: the daemon
+        # runs it next, as a run of its own, and it keeps the click.
+        self._send_during_first_run(tab, "<task>/sync help</task>", continueTaskId=one)
+        self._run(tab, "three task", chatId="chatC2")
+        self._wait_for(lambda: th._get_db().execute(
+            "SELECT 1 FROM task_history WHERE task = '/sync help' AND result != ?",
+            ("Agent Failed Abruptly",),
+        ).fetchone() is not None)
+
+        assert len(self.capture.prompts) == 1, "a help exchange runs no agent"
+        assert _lineage_of("/sync help") == ["one task", "/sync help"]
+        assert _chat_of("/sync help") == "chatC2"
+
+    def test_task_sent_as_a_run_ends_continues_the_task_loaded_before_it(self) -> None:
+        one, _ = _seed_chat("chatE", ["one", "two"])
+
+        tab = "tab-tree-late"
+
+        def send_after_the_last_drain() -> None:
+            # The run's loop is past its last look at the queue: the
+            # task waits as a message of the tab for the daemon to run
+            # it next, and is still a task of its own.
+            with agent_state.STATE_LOCK:
+                state = agent_state.find_by_tab(tab)
+                assert state is not None
+                state.followup_queue_closed = True
+            self.server._handle_command({
+                "type": "appendUserMessage", "tabId": tab,
+                "prompt": "<task>four task</task>", "continueTaskId": one,
+            })
+
+        self.capture.during_first_run = send_after_the_last_drain
+        self._run(tab, "three task", chatId="chatE")
+        self._wait_for(lambda: len(self.capture.prompts) == 2)
+
+        _, four = self.capture.prompts
+        assert _context_tasks(four) == ["one task"], four
+        assert _chat_of("four task") == "chatE"
+
+    def test_follow_up_of_a_run_that_never_ran_keeps_the_task_loaded_before_it(self) -> None:
+        one, _ = _seed_chat("chatV", ["one", "two"])
+
+        tab = "tab-tree-unrun"
+        # A run that ends before its agent starts (a ``/xxx help``
+        # answer, a refusal) leaves the tasks queued on it to the
+        # daemon, which runs them next: each still continues the task
+        # loaded before it was sent.
+        with agent_state.STATE_LOCK:
+            state = agent_state.AgentState(f"unrun-{tab}", tab_id=tab, server_owned=True)
+            state.chat_id = "chatV"
+            agent_state.register(state)
+            routed = self.server._route_prompt_to_owner(
+                state, "<task>four task</task>", tab, None, continued_task_id=one,
+            )
+            assert routed is True
+            task_runner._end_run_before_loop(state)
+            reruns, redispatch, _ = self.server._release_run_state(
+                state, {"tabId": tab}, tab, "", "claude-fable-5",
+            )
+        assert redispatch
+        assert [str(prompt) for prompt, _ in reruns] == ["<task>four task</task>"]
+        self.server._redispatch_leftover_prompts(
+            {"type": "run", "model": "claude-fable-5", "workDir": self.tmpdir,
+             "tabId": tab, "chatId": "chatV"},
+            reruns,
+        )
+        self._wait_for(lambda: len(self.capture.prompts) == 1)
+
+        (four,) = self.capture.prompts
+        assert _context_tasks(four) == ["one task"], four
+        assert _chat_of("four task") == "chatV"
+
+    def test_help_exchange_continues_the_loaded_task(self) -> None:
+        one, _ = _seed_chat("chatH", ["one", "two"])
+
+        tab = "tab-tree-help"
+        _open_by_task_id(self.server, tab, "chatH", one)
+        # ``/xxx help`` is answered without an agent, by a row of the chat.
+        self.server._run_task({
+            "type": "run", "prompt": "/sync help",
+            "model": "claude-fable-5", "workDir": self.tmpdir,
+            "tabId": tab, "chatId": "chatH",
+        })
+        assert not self.capture.prompts, "a help exchange runs no agent"
+        assert _lineage_of("/sync help") == ["one task", "/sync help"]
+        assert _chat_of("/sync help") == "chatH"
+
+        _run_and_wait(self.server, tab, "three task", self.tmpdir)
         prompt = self.capture.prompts[0]
-        assert "### Task 1\norphan task zebra" in prompt, prompt
-        assert "### Task 2" not in prompt, prompt
+        assert _context_tasks(prompt) == ["one task", "/sync help"], prompt
 
 
 class TestChainContextCleared(_ChainContextBase):
-    """The opened-task seed is discarded on re-open / newChat / close."""
+    """The loaded task is discarded on re-open / newChat / close."""
 
     def test_resume_without_task_id_clears_seed(self) -> None:
-        rows = _seed_chain([
-            ("t1 magic word apple", "r1 apple stored", "chatA"),
-            ("t2 magic word pear", "r2 pear stored", "chatA"),
-        ])
-        t2_id = rows[1][0]
+        one, _ = _seed_chat("chatA", ["one", "two"])
 
         tab = "tab-clear-resume"
-        _open_by_task_id(self.server, tab, "chatA", t2_id)
+        _open_by_task_id(self.server, tab, "chatA", one)
         self.server._handle_command({
             "type": "resumeSession", "chatId": "chatA", "tabId": tab,
         })
         _run_and_wait(self.server, tab, "post-clear check", self.tmpdir)
 
         prompt = self.capture.prompts[0]
-        assert "t1 magic word apple" in prompt, prompt
-        assert "t2 magic word pear" not in prompt, prompt
+        assert _context_tasks(prompt) == ["one task", "two task"], prompt
 
     def test_unknown_task_id_falls_back_to_chat_context(self) -> None:
-        _seed_chain([("plain chat task koala", "plain result", "chatE")])
+        _seed_chat("chatE", ["koala"])
 
         tab = "tab-fallback"
         _open_by_task_id(self.server, tab, "chatE", "missing-task-id")
         _run_and_wait(self.server, tab, "fallback check", self.tmpdir)
 
         prompt = self.capture.prompts[0]
-        assert "plain chat task koala" in prompt, prompt
+        assert _context_tasks(prompt) == ["koala task"], prompt
+        assert _lineage_of("fallback check") == ["koala task", "fallback check"]
 
     def test_new_chat_clears_seed(self) -> None:
-        rows = _seed_chain([
-            ("t1 magic word apple", "r1 apple stored", "chatA"),
-        ])
-        t1_id = rows[0][0]
+        (one,) = _seed_chat("chatA", ["one"])
 
         tab = "tab-clear-newchat"
-        _open_by_task_id(self.server, tab, "chatA", t1_id)
+        _open_by_task_id(self.server, tab, "chatA", one)
         self.server._handle_command({"type": "newChat", "tabId": tab})
         _run_and_wait(self.server, tab, "fresh chat check", self.tmpdir)
 
         prompt = self.capture.prompts[0]
         assert "Previous tasks and results" not in prompt, prompt
         assert prompt.startswith("# Task\n"), prompt
+        # The first task of a chat is the root of its tree.
+        assert _lineage_of("fresh chat check") == ["fresh chat check"]
 
     def test_close_tab_clears_seed(self) -> None:
-        rows = _seed_chain([
-            ("t1 magic word apple", "r1 apple stored", "chatA"),
-        ])
-        t1_id = rows[0][0]
+        (one,) = _seed_chat("chatA", ["one"])
 
         tab = "tab-clear-close"
-        _open_by_task_id(self.server, tab, "chatA", t1_id)
-        assert self.server._tab_opened_task_ids.get(tab) == t1_id
+        _open_by_task_id(self.server, tab, "chatA", one)
+        assert self.server._tab_opened_task_ids.get(tab) == one
         self.server._handle_command({"type": "closeTab", "tabId": tab})
         assert tab not in self.server._tab_opened_task_ids
 
@@ -371,19 +625,17 @@ class TestChainContextCleared(_ChainContextBase):
 class TestChainContextPrimitives(_ChainContextBase):
     """Direct behavior of the persistence helper and agent seed API."""
 
-    def test_load_task_chain_context_empty_id(self) -> None:
-        assert _load_task_chain_context("") == []
+    def test_lineage_of_no_or_unknown_task_is_empty(self) -> None:
+        assert _load_task_lineage("") == []
+        assert _load_task_lineage("nope") == []
 
-    def test_load_task_chain_context_unknown_id(self) -> None:
-        assert _load_task_chain_context("nope") == []
-
-    def test_load_task_chain_context_order(self) -> None:
-        rows = _seed_chain([
+    def test_lineage_runs_from_the_root_to_the_task(self) -> None:
+        rows = _seed_dispatch_chain([
             ("root", "root-res", "chatZ"),
             ("mid", "mid-res", "chatZ"),
             ("leaf", "leaf-res", "chatZ"),
         ])
-        ctx = _load_task_chain_context(rows[-1][0])
+        ctx = _load_task_lineage(rows[-1][0])
         assert [e["task"] for e in ctx] == ["root", "mid", "leaf"]
         assert [e["result"] for e in ctx] == [
             "root-res", "mid-res", "leaf-res",
@@ -392,18 +644,17 @@ class TestChainContextPrimitives(_ChainContextBase):
     def test_resume_from_task_id_empty_is_noop(self) -> None:
         agent = ChatSorcarAgent("chain-noop")
         agent.resume_from_task_id("")
-        assert agent._context_task_id == ""
+        assert agent.build_chat_prompt("go") == "# Task\ngo"
 
     def test_resume_from_task_id_seeds_one_prompt_only(self) -> None:
-        rows = _seed_chain([
+        rows = _seed_dispatch_chain([
             ("root", "root-res", "chatZ"),
             ("leaf", "leaf-res", "chatZ"),
         ])
         agent = ChatSorcarAgent("chain-seed")
         agent.resume_from_task_id(rows[-1][0])
         first = agent.build_chat_prompt("go")
-        assert "### Task 1\nroot" in first
-        assert "### Task 2\nleaf" in first
+        assert _context_tasks(first) == ["root", "leaf"], first
         second = agent.build_chat_prompt("go again")
         assert second == "# Task\ngo again"
 

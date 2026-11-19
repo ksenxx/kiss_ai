@@ -391,7 +391,9 @@ class TestBugs:
         the detach grace (the default), and each failed start left its
         empty log.
         """
-        ut = UsefulTools(work_dir=str(temp_test_dir))
+        work, scratch = temp_test_dir / "work", temp_test_dir / "scratch"
+        work.mkdir()
+        ut = UsefulTools(work_dir=str(work), scratch_dir=str(scratch))
         commands = ("echo a\0b",) if sys.platform == "win32" else ("echo \ud800", "echo a\0b")
         for command in commands:
             for out in (
@@ -401,7 +403,9 @@ class TestBugs:
                 ut.Bash(command, "as a job at the deadline", on_timeout="background"),
             ):
                 assert out.startswith("Error: "), out
-        assert ut._jobs == {} and os.listdir(temp_test_dir / "tmp" / "bash_jobs") == []
+        # The log folder is in the scratch dir (the work dir gets nothing) and holds no log.
+        assert ut._jobs == {} and os.listdir(scratch / "bash_jobs") == []
+        assert os.listdir(scratch) == ["bash_jobs"] and os.listdir(work) == []
 
     def test_bash_reads_no_input_from_the_process_that_runs_it(self, temp_test_dir):
         """A command that reads its input gets end of file, as a background job does.

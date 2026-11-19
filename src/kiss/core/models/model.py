@@ -2388,8 +2388,8 @@ def hand_off_conversation(old: Model, new: Model, boundary: int = 0) -> int:
     Used by :meth:`kiss.core.kiss_agent.KISSAgent.switch_model` (the
     agent's fallback and Sorcar's ``set_model`` tool).
     Responses API items belong to the endpoint that produced them:
-    OpenAI rejects Together's reasoning items (they lack ``summary``) and
-    its item ids.  So when the two models talk to different endpoints
+    OpenAI rejects another vendor's reasoning items (they lack
+    ``summary``) and its item ids.  So when the two models talk to different endpoints
     (``base_url``, which native adapters lack) the conversation is
     converted with :func:`responses_items_to_chat_messages`, which every
     adapter reads; on the same endpoint it is kept verbatim, so an

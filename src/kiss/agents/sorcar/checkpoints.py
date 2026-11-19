@@ -13,7 +13,7 @@ private copy of the index: HEAD, the branch, the real index and the
 stash are never touched, and nothing is committed.  A restore makes
 those files match the snapshot again: files changed or deleted since
 are rewritten from it, files created since are deleted, and ignored
-files (build output, ``tmp/``, virtualenvs) are left as they are.
+files (build output, caches, virtualenvs) are left as they are.
 A saved snapshot is the target of a ref of its own under
 ``refs/kiss-checkpoints/``, which keeps ``git gc`` from collecting it
 for as long as its checkpoint lasts.

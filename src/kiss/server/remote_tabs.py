@@ -1542,7 +1542,7 @@ class RemoteTabs:
                     if not entry["chatId"] and entry["tabId"] not in self._tabs:
                         server._broadcast_replay_status(entry["tabId"], {"connId": conn_id})
 
-    def replay_to(self, conn_id: str, shown_tab_id: str = "") -> None:
+    def replay_to(self, conn_id: str, shown_tab_id: str = "", lazy: bool = False) -> None:
         """Replay the bound tab *conn_id* shows to it; offer every other bound tab.
 
         Called after a client's ``ready`` was handled, so the client has
@@ -1581,6 +1581,8 @@ class RemoteTabs:
         Args:
             conn_id: The connection that sent the ``ready``.
             shown_tab_id: The tab it shows (``""`` for none).
+            lazy: The page loads transcripts in pieces (the ``ready``'s
+                ``lazy``): the machine is asked for a lazy replay.
         """
         with self._lock:
             tabs = {tab.tab_id: tab for tab in self._tabs.values()}
@@ -1604,6 +1606,8 @@ class RemoteTabs:
             if tab.subagent:
                 continue
             resume: dict[str, Any] = {"type": "resumeSession", "tabId": tab_id}
+            if lazy:
+                resume["lazy"] = True
             with tab.lock:
                 if not tab.chat_id:
                     continue

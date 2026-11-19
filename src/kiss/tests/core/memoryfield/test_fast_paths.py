@@ -30,6 +30,7 @@ from kiss.core.memoryfield.index import (
     stat_key,
 )
 from kiss.core.memoryfield.pages import MemoryDir
+from kiss.core.memoryfield.statements import MAX_STATEMENT_BYTES
 from kiss.core.memoryfield.tools import MemoryTools
 
 requires_openai = pytest.mark.skipif(
@@ -158,21 +159,22 @@ def test_same_size_rewrite_with_restored_mtime_is_detected(tmp_path: Path) -> No
 
 def test_sync_batches_embeddings_and_commits_each_batch(tmp_path: Path) -> None:
     memory = MemoryDir(tmp_path)
-    total = EMBED_BATCH_INPUTS + 10
-    for i in range(total):
+    # Each page sends two inputs: its own text and its one statement.
+    batch_pages = EMBED_BATCH_INPUTS // 2
+    for i in range(batch_pages + 10):
         memory.write(f"page-{i:04d}", f"Note number {i} about topic {i % 7}.")
     failing = CountingEmbedder(fail_on_batch=2)
     index = VectorIndex(memory, embed=failing, model_code="counting")
     with pytest.raises(RuntimeError, match="unavailable"):
         index.sync()
     # The first batch was committed before the second request failed.
-    assert failing.batches == [EMBED_BATCH_INPUTS, 10]
-    assert index.count() == EMBED_BATCH_INPUTS
+    assert failing.batches == [EMBED_BATCH_INPUTS, 20]
+    assert index.count() == batch_pages
     embedder = CountingEmbedder()
     index = VectorIndex(memory, embed=embedder, model_code="counting")
     report = index.sync()
-    assert (report.added, report.unchanged) == (10, EMBED_BATCH_INPUTS)
-    assert embedder.batches == [10] and embedder.calls == []
+    assert (report.added, report.unchanged) == (10, batch_pages)
+    assert embedder.batches == [20] and embedder.calls == []
 
 
 def test_batches_split_on_byte_limit(tmp_path: Path) -> None:
@@ -181,12 +183,14 @@ def test_batches_split_on_byte_limit(tmp_path: Path) -> None:
         memory.write(f"big-{i:02d}", f"page {i} " + "x" * 7900)
     embedder = CountingEmbedder()
     VectorIndex(memory, embed=embedder, model_code="counting").sync()
-    assert sum(embedder.batches) == 40
+    # Each page sends its own text and its one statement, cut to MAX_STATEMENT_BYTES.
+    assert sum(embedder.batches) == 80
     assert len(embedder.batches) == 2
-    assert all(n * 7900 <= index_module.EMBED_BATCH_BYTES for n in embedder.batches)
+    page_bytes = 7900 + MAX_STATEMENT_BYTES
+    assert all(n // 2 * page_bytes <= index_module.EMBED_BATCH_BYTES for n in embedder.batches)
 
 
-def test_embedder_without_embed_many_is_called_per_page(tmp_path: Path) -> None:
+def test_embedder_without_embed_many_is_called_per_input(tmp_path: Path) -> None:
     memory = MemoryDir(tmp_path)
     memory.write("one", "first")
     memory.write("two", "second")
@@ -197,7 +201,8 @@ def test_embedder_without_embed_many_is_called_per_page(tmp_path: Path) -> None:
         return hashed_embedding(text)
 
     VectorIndex(memory, embed=plain, model_code="plain").sync()
-    assert len(calls) == 2
+    # Per page: the page's input, then its statement under the page title.
+    assert calls == ["one\nfirst\n", "one\nfirst", "two\nsecond\n", "two\nsecond"]
 
 
 def test_row_cache_follows_deletes_updates_and_rebuilds(tmp_path: Path) -> None:

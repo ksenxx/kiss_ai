@@ -5,7 +5,7 @@
 
 """A memory search abandoned by a Stop ends after its embedding batch; it does not search.
 
-``MemoryTools._search`` leaves its sync-and-search worker running when
+``MemoryTools.search`` leaves its sync-and-search worker running when
 the task thread is stopped (``cancel`` set, pool shut down without a
 join).  The worker used to go on to ``VectorIndex.search`` once the sync
 had finished: a result nobody reads, computed seconds later on a pool

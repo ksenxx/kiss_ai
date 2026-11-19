@@ -46,6 +46,7 @@ from kiss.agents.sorcar.agent_dispatch import resolve_agent
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.sea_apply import apply_sea
 from kiss.core.base import SYSTEM_PROMPT, SYSTEM_PROMPT_LITE
+from kiss.core.kiss_tmp import kiss_tmp_dir
 from kiss.core.tool_verdict import ALLOW
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
@@ -107,14 +108,15 @@ def test_the_instructions_are_the_discovery_loop_and_left_the_default_prompt() -
         "in a lab: write `git diff --binary <B commit> <best commit>` to "
         "<scratch dir>/best.patch",
         # Every point is a commit held by a ref that outlives resets and squash merges;
-        # every reset is followed by a clean, so data and the scratch dir are ignored.
+        # every reset is followed by a clean, so data and large outputs are ignored (the
+        # scratch dir is in the agents' temp directory, outside the repo: no clean reaches it).
         "COMMIT(id) git add -A && git commit && git update-ref refs/discover/<task id>/<id> "
         "HEAD",
         "RESET(c)  git reset --hard c && git clean -fd",
         # The ignore rules go into the repo worked in, the lab's for a no-change task.
         "else: work in the task's git repo, else `git init` one around the artifact\n"
-        "    in the repo you work in, git-ignore data, large outputs and <scratch dir> (or\n"
-        "        `git clean -fd` deletes them)",
+        "    in the repo you work in, git-ignore data and large outputs (or `git clean -fd`\n"
+        "        deletes them)",
         # The held-out ban is up front and concrete; the split command is its one exception.
         "HELD-OUT RULE: when the task names the held-out part, it is off limits from the "
         "first\n#   command on; else no command reads the data before the split command, "
@@ -347,7 +349,7 @@ _COMMIT = "git -c user.email=t@example.com -c user.name=T -c commit.gpgsign=fals
 class _LabScript:
     """The stand-in model's answers: a ``/discover`` sub-agent working in a lab.
 
-    Step 0 copies the caller's current files to ``<scratch dir>/lab`` and
+    Step 0 copies the caller's current files to the lab (:meth:`lab`) and
     commits them (the baseline), step 1 isolates the lab with
     ``create_worktree``, step 2 writes an idea into the lab's worktree,
     step 3 commits it and writes ``best.patch``, and every later step is
@@ -360,9 +362,13 @@ class _LabScript:
         self.child: ChatSorcarAgent | None = None
 
     def lab(self) -> Path:
-        """Return the lab directory inside the sub-agent's scratch dir."""
+        """Return the lab directory: in the task's folder of the agents' temp directory.
+
+        Not in the sub-agent's own scratch dir, a private folder there
+        that is deleted when the sub-agent ends, ``best.patch`` with it.
+        """
         assert self.child is not None
-        return Path(self.child.work_dir or "") / "tmp" / self.child.last_task_id / "lab"
+        return kiss_tmp_dir() / self.child.last_task_id / "lab"
 
     def lab_tree(self) -> Path:
         """Return the worktree ``create_worktree`` made for the lab."""
@@ -437,9 +443,6 @@ def test_a_sub_agent_lab_leaves_the_callers_tree_alone_and_hands_back_a_patch() 
     try:
         credentials = _FakeCredentials()
         parent = ChatSorcarAgent("parent")
-        (home.repo / ".gitignore").write_text("tmp/\n", encoding="utf-8")
-        run_git(home.repo, "add", ".gitignore")
-        run_git(home.repo, "commit", "-qm", "ignore tmp")
         artifact = home.tmpdir / "artifact"
         init_repo(artifact)
         (artifact / "model.py").write_text("SCORE = 1\n", encoding="utf-8")

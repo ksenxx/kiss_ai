@@ -199,10 +199,7 @@ API_KEY_ENV_VARS: frozenset[str] = frozenset(
         "OPENAI_API_KEY",
         "ANTHROPIC_API_KEY",
         "ANTHROPIC_WORKSPACE_ID",
-        "TOGETHER_API_KEY",
         "OPENROUTER_API_KEY",
-        "ZAI_API_KEY",
-        "MOONSHOT_API_KEY",
         # Amazon Bedrock credentials (``bedrock/`` Claude models); AWS_REGION
         # is not a secret but is stored and edited alongside them.
         "AWS_BEARER_TOKEN_BEDROCK",

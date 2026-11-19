@@ -23,9 +23,9 @@ class TestRuntimeAliasResolution:
         from kiss.core.models.model_info import MODEL_INFO, _strip_thinking_alias
 
         for level in MOONSHOT_LEVELS:
-            name = f"kimi-k3-{level}"
+            name = f"openrouter/moonshotai/kimi-k3-{level}"
             assert name in MODEL_INFO, f"{name} missing from loaded MODEL_INFO"
-            assert _strip_thinking_alias(name) == "kimi-k3"
+            assert _strip_thinking_alias(name) == "openrouter/moonshotai/kimi-k3"
 
     def test_provider_model_name_and_effort_for_max_alias(self) -> None:
         from kiss.core.models.openai_compatible_model import (
@@ -33,8 +33,6 @@ class TestRuntimeAliasResolution:
             _provider_model_name,
         )
 
-        assert _provider_model_name("kimi-k3-max") == "kimi-k3"
-        assert _model_thinking_level("kimi-k3-max") == "max"
         assert (
             _provider_model_name("openrouter/moonshotai/kimi-k3-max")
             == "moonshotai/kimi-k3"
@@ -50,9 +48,10 @@ class TestRuntimeAliasResolution:
     def test_kimi_aliases_cost_the_same_as_base(self) -> None:
         from kiss.core.models.model_info import calculate_cost
 
-        base_cost = calculate_cost("kimi-k3", 1000, 500, 200, 100)
+        base = "openrouter/moonshotai/kimi-k3"
+        base_cost = calculate_cost(base, 1000, 500, 200, 100)
         for level in MOONSHOT_LEVELS:
-            assert calculate_cost(f"kimi-k3-{level}", 1000, 500, 200, 100) == base_cost
+            assert calculate_cost(f"{base}-{level}", 1000, 500, 200, 100) == base_cost
 
 
 def test_every_bundled_alias_thinking_is_a_known_level() -> None:

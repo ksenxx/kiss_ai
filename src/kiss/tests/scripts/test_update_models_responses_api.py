@@ -169,7 +169,6 @@ def test_main_test_existing_flips_the_flag_from_probe_verdict(
     monkeypatch.setattr(mod, "README_PATH", tmp_path / "README.md")
     for fetcher in (
         "fetch_openrouter",
-        "fetch_together",
         "fetch_anthropic",
         "fetch_gemini",
         "fetch_openai",
@@ -309,7 +308,6 @@ class TestInconclusiveVerdicts:
         monkeypatch.setattr(mod, "README_PATH", tmp_path / "README.md")
         for fetcher in (
             "fetch_openrouter",
-            "fetch_together",
             "fetch_anthropic",
             "fetch_gemini",
             "fetch_openai",
@@ -348,10 +346,11 @@ class TestInconclusiveVerdicts:
         ``gpt-7`` is routed to a local endpoint that answers 503 to every
         request; ``claude-7`` to a local port nobody listens on, so the
         Anthropic SDK's own connection error (not a builtin one) is what
-        the probe catches; ``glm-7`` has no ``ZAI_API_KEY``.  None of the
-        failures says anything about the models, so ``fc``, ``thinking``,
-        the v2 flag, every generated effort alias and ``glm-7``'s ``emb``
-        must survive the run.
+        the probe catches; ``openrouter/z-ai/glm-7`` has no
+        ``OPENROUTER_API_KEY``.  None of the failures says anything about
+        the models, so ``fc``, ``thinking``, the v2 flag, every generated
+        effort alias and ``openrouter/z-ai/glm-7``'s ``emb`` must survive
+        the run.
         """
         import dataclasses
 
@@ -368,19 +367,23 @@ class TestInconclusiveVerdicts:
             [
                 _new_model("gpt-7", True, thinking="xhigh"),
                 _new_model("claude-7", False, thinking="high"),
-                {**_new_model("glm-7", True), "emb": True},
+                {**_new_model("openrouter/z-ai/glm-7", True), "emb": True},
             ],
             [],
             {},
         )
         before = _read(target)
-        assert {"gpt-7", "gpt-7-low", "gpt-7-xhigh", "claude-7", "claude-7-low", "glm-7"} <= set(
-            before
-        )
+        assert {
+            "gpt-7",
+            "gpt-7-low",
+            "gpt-7-xhigh",
+            "claude-7",
+            "claude-7-low",
+            "openrouter/z-ai/glm-7",
+        } <= set(before)
 
         for fetcher in (
             "fetch_openrouter",
-            "fetch_together",
             "fetch_anthropic",
             "fetch_gemini",
             "fetch_openai",
@@ -394,7 +397,7 @@ class TestInconclusiveVerdicts:
         monkeypatch.setattr(mod.time, "sleep", lambda seconds: None)
         monkeypatch.setattr(config_module.DEFAULT_CONFIG, "OPENAI_API_KEY", "sk-test")
         monkeypatch.setattr(config_module.DEFAULT_CONFIG, "ANTHROPIC_API_KEY", "sk-ant-test")
-        monkeypatch.setattr(config_module.DEFAULT_CONFIG, "ZAI_API_KEY", "")
+        monkeypatch.setattr(config_module.DEFAULT_CONFIG, "OPENROUTER_API_KEY", "")
         monkeypatch.setattr(sys, "argv", ["update_models.py", "--test-existing"])
 
         with _http_status_server(503) as endpoint, _refused_port() as refused:
@@ -411,7 +414,7 @@ class TestInconclusiveVerdicts:
         assert "changed" not in out
         assert "gpt-7: probe inconclusive" in out
         assert "claude-7: probe inconclusive" in out
-        assert "glm-7: probe inconclusive" in out
+        assert "openrouter/z-ai/glm-7: probe inconclusive" in out
 
     @pytest.mark.parametrize(
         ("status", "kept"), [(401, True), (402, True), (403, True), (404, False)]

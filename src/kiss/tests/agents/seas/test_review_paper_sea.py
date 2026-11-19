@@ -171,6 +171,18 @@ def test_sea_methods_follow_the_user_contract() -> None:
     assert "\n       Scores\n       Originality: N/10." in prompt
     assert all(f"       {d}: N/10." in prompt for d in review_paper_sea._DIMENSIONS)
     assert review_paper_sea._HEADINGS[-1] == "Scores"
+    # The notes, the research log and the downloads are in the task's scratch dir, which
+    # the prompt introduces once; nothing goes to a tmp folder of the work tree.
+    assert prompt.count("Scratch dir of Task Settings") == 1
+    for phrase in (
+        "download a URL to `<scratch dir>/`,\nthe Scratch dir of Task Settings, first).",
+        "Write\n   `<scratch dir>/PAPER-NOTES.md`: the one-sentence statement of item 1",
+        "Write 6 to 9 queries in\n   `<scratch dir>/information-<paper stem>.md`: three",
+        "download the PDF to the scratch dir (`curl -L",
+        "4. Score the seven dimensions in `<scratch dir>/PAPER-NOTES.md`, 1 to 10 each",
+    ):
+        assert phrase in prompt, phrase
+    assert "tmp" not in prompt
     assert [t.__name__ for t in sea.tools([print])] == ["print", "read_paper", "check_review"]
     # Browse, skip the classifier; a ``run_agent`` dispatch waits two hours.
     assert sea.settings({}) == {

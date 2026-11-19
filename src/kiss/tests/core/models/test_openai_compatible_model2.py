@@ -8249,21 +8249,21 @@ _OPENAI_CALL = {
     "arguments": '{"index":1}',
     "status": "completed",
 }
-# Items as Together's Responses endpoint issued them for
-# openai/gpt-oss-120b on 2026-10-30, after an OpenAI turn.
-_TOGETHER_REASONING = {
+# Items as another vendor's Responses endpoint issued them for
+# gpt-oss-120b on 2026-10-30, after an OpenAI turn.
+_GPT_OSS_REASONING = {
     "id": "reasoning_responses-01a18cec-b9fa",
     "type": "reasoning",
     "content": [{"type": "reasoning_text", "text": "I should call the tool."}],
 }
-_TOGETHER_MESSAGE = {
+_GPT_OSS_MESSAGE = {
     "id": "msg_responses-01a18cec-b9fa",
     "type": "message",
     "role": "assistant",
     "status": "completed",
     "content": [{"type": "output_text", "text": "Calling it."}],
 }
-_TOGETHER_CALL = {
+_GPT_OSS_CALL = {
     "id": "call_01a18cec-c40f",
     "type": "function_call",
     "call_id": "call_01a18cec-c40f",
@@ -8277,9 +8277,9 @@ _TWO_VENDOR_CONVERSATION: list[dict[str, Any]] = [
     _OPENAI_CALL,
     {"type": "function_call_output", "call_id": "call_openai1", "output": "PLUTONIUM-KITE"},
     {"role": "user", "content": "Reveal secret 2."},
-    _TOGETHER_REASONING,
-    _TOGETHER_MESSAGE,
-    _TOGETHER_CALL,
+    _GPT_OSS_REASONING,
+    _GPT_OSS_MESSAGE,
+    _GPT_OSS_CALL,
     {"type": "function_call_output", "call_id": "call_01a18cec-c40f", "output": "MARIGOLD-ANVIL"},
     {"id": "item_42", "type": "message", "role": "assistant", "content": "Both revealed."},
     {"role": "user", "content": "List both secrets."},
@@ -8291,7 +8291,7 @@ class TestForeignResponsesItemsAfterHandOff:
 
     OpenAI rejects a reasoning item it did not issue and any item id
     without its own prefix (``Expected an ID that begins with 'fc'``), so
-    the hop Together ``openai/gpt-oss-120b`` -> ``gpt-4o`` failed every
+    the hop from another vendor's ``gpt-oss-120b`` to ``gpt-4o`` failed every
     request with ``Missing required parameter: 'input[8].summary'``.
     """
 
@@ -8306,8 +8306,8 @@ class TestForeignResponsesItemsAfterHandOff:
         assert text == "ok"
         body = _last_body()
         assert _wire_items_by_type(body, "reasoning") == [_OPENAI_REASONING]
-        together_call = {k: v for k, v in _TOGETHER_CALL.items() if k != "id"}
-        assert _wire_items_by_type(body, "function_call") == [_OPENAI_CALL, together_call]
+        gpt_oss_call = {k: v for k, v in _GPT_OSS_CALL.items() if k != "id"}
+        assert _wire_items_by_type(body, "function_call") == [_OPENAI_CALL, gpt_oss_call]
         assert [item.get("id") for item in _wire_items_by_type(body, "message")] == [
             "msg_responses-01a18cec-b9fa",
             None,
@@ -8318,16 +8318,16 @@ class TestForeignResponsesItemsAfterHandOff:
         ]
         assert m.conversation[: len(_TWO_VENDOR_CONVERSATION)] == _TWO_VENDOR_CONVERSATION
 
-    def test_together_request_replays_its_items_verbatim(self, capture_server: str) -> None:
-        """An endpoint without id rules (Together) gets every item as stored."""
-        base_url = capture_server.removesuffix("/v1") + "/api.together.xyz/v1"
-        m = OpenAICompatibleModel2("openai/gpt-oss-120b", base_url=base_url, api_key="k")
+    def test_openrouter_request_replays_its_items_verbatim(self, capture_server: str) -> None:
+        """An endpoint without id rules (OpenRouter) gets every item as stored."""
+        base_url = capture_server.removesuffix("/v1") + "/openrouter.ai/api/v1"
+        m = OpenAICompatibleModel2("openrouter/openai/gpt-oss-120b", base_url=base_url, api_key="k")
         m.initialize("seed")
         m.conversation = copy.deepcopy(_TWO_VENDOR_CONVERSATION)
         m.generate()
         body = _last_body()
-        assert _wire_items_by_type(body, "reasoning") == [_OPENAI_REASONING, _TOGETHER_REASONING]
-        assert _wire_items_by_type(body, "function_call") == [_OPENAI_CALL, _TOGETHER_CALL]
+        assert _wire_items_by_type(body, "reasoning") == [_OPENAI_REASONING, _GPT_OSS_REASONING]
+        assert _wire_items_by_type(body, "function_call") == [_OPENAI_CALL, _GPT_OSS_CALL]
         assert [item.get("id") for item in _wire_items_by_type(body, "message")] == [
             "msg_responses-01a18cec-b9fa",
             "item_42",

@@ -3,19 +3,20 @@
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
 
-// End-to-end (jsdom) tests for the action-button strip of a task panel
-// inside the task-history panel.
+// End-to-end (jsdom) tests for the actions of a task panel inside the
+// task-history panel.
 //
 // A task panel (``.sidebar-item.running-item`` inside ``#history-list``)
-// used to squeeze its favourite / copy / collapse buttons onto the same
-// line as the task text, which left the text almost no room on a narrow
-// sidebar.  The buttons must sit on their own full-width line *below*
-// the task text.
+// is ONE line: its text and, at the right end, a "…" button.  The
+// favourite / copy / details / delete buttons, the "... ago" label and
+// the machine the task ran on are the lines of the menu that button
+// opens (the panel's ``.sidebar-item-actions`` strip, a popover).  They
+// used to sit on a line of their own under the text.
 //
-// They were briefly drawn 50% bigger than the compact buttons used by
-// every other sidebar list.  That size bump has been reverted: a task
-// panel now uses exactly the same 12x12 icon in a 12x16 box as the rest
-// of the sidebar, so only the *placement* differs.
+// jsdom has no Popover API, so the menu cannot be opened here: these
+// tests cover what the page builds and what the menu's buttons do, and
+// ``tests/webapp/test_history_row_menu.py`` covers the open menu in a
+// real browser.
 //
 // The page is booted the way ``web_server.py`` serves ``chat.html``
 // (``<body class="remote-chat">`` plus ``remote-codex.css``).
@@ -30,46 +31,7 @@ const {
 } = require('./simplify2_harness');
 const {loadHistory, makeSession, historyRow} = require('./history_helpers');
 
-// The compact sidebar button is a 12x16 box: a 12px icon with "2px 0"
-// padding and no explicit min-width/min-height.  A history task panel
-// must use exactly that geometry - the 18x24 / 18x18 enlargement it
-// briefly carried has been reverted.
 const ICON_PX = 12;
-const BUTTON_W_PX = 12;
-const BUTTON_H_PX = 16;
-const REVERTED_ICON_PX = 18;
-const REVERTED_BUTTON_W_PX = 18;
-const REVERTED_BUTTON_H_PX = 24;
-
-const ACTION_BUTTON_SELECTORS = [
-  '.sidebar-item-favorite',
-  '.sidebar-item-copy',
-  '.sidebar-item-collapse',
-];
-
-// A compact icon takes its size from its own markup attributes, so no
-// stylesheet rule may set a width for it.  An icon left at its intrinsic
-// size therefore computes to the initial value, which jsdom reports as
-// 'auto' (or '' for an <svg> outside any layout).
-function assertCompactIcon(win, svg, what) {
-  const width = win.getComputedStyle(svg).width;
-  assert.ok(
-    width === '' || width === 'auto',
-    `${what}: no CSS rule may resize the icon away from its intrinsic ` +
-      `${ICON_PX}px; the reverted rule forced ${REVERTED_ICON_PX}px, ` +
-      `got width=${width}`,
-  );
-  assert.strictEqual(
-    px(svg.getAttribute('width')),
-    ICON_PX,
-    `${what}: the icon markup must stay ${ICON_PX}px`,
-  );
-  assert.strictEqual(
-    px(svg.getAttribute('height')),
-    ICON_PX,
-    `${what}: the icon markup must stay ${ICON_PX}px tall`,
-  );
-}
 
 function makePage() {
   return makeChatPage({beforeScripts: win => loadRemoteCss(win, true)});
@@ -80,206 +42,181 @@ function px(value) {
   return isNaN(n) ? 0 : n;
 }
 
+/** The class that names each child of *el*, in DOM order. */
+function childKinds(el, kinds) {
+  return Array.from(el.children).map(
+    child =>
+      kinds.find(kind => child.classList.contains(kind)) || child.tagName,
+  );
+}
+
 // ---------------------------------------------------------------------------
-// 1. The buttons live on their own line.  (Tests 1-3 read and then click
-//    the same rendered row, so they share one page.)
+// 1. The panel is one line: text, then the "…" button; the buttons are
+//    the menu's.  (Tests 1-2 read and then click the same rendered row,
+//    so they share one page.)
 // ---------------------------------------------------------------------------
 
-function testActionsOnSeparateLine(win) {
+function testPanelIsOneLineWithMenu(win) {
   const row = historyRow(win);
-  assert.ok(row, `history row rendered`);
-
-  const actions = row.querySelector('.sidebar-item-actions');
-  assert.ok(actions, `action strip rendered`);
-
+  assert.ok(row, 'history row rendered');
+  assert.deepStrictEqual(
+    childKinds(row, [
+      'sidebar-item-text',
+      'sidebar-item-more',
+      'sidebar-item-actions',
+      'running-item-info',
+    ]),
+    [
+      'sidebar-item-text',
+      'sidebar-item-more',
+      'sidebar-item-actions',
+      'running-item-info',
+    ],
+    'the panel holds its text, the "…" button, its menu and its details',
+  );
   const text = row.querySelector('.sidebar-item-text');
-  assert.ok(text, `task text rendered`);
+  const more = row.querySelector('.sidebar-item-more');
+  const actions = row.querySelector('.sidebar-item-actions');
 
-  // The row is a wrapping flex container; a child only gets its own line
-  // when it is forced to span the full content width.
-  const rowStyle = win.getComputedStyle(row);
-  assert.strictEqual(
-    rowStyle.display,
-    'flex',
-    `the task panel must stay a flex container`,
-  );
-  assert.strictEqual(
-    rowStyle.flexWrap,
-    'wrap',
-    `the task panel must wrap so the actions can break to a new line`,
-  );
-
-  const actionsStyle = win.getComputedStyle(actions);
-  assert.strictEqual(
-    actionsStyle.flexBasis,
-    '100%',
-    `the action strip must claim a full-width line of its own; ` +
-      `got flex-basis=${actionsStyle.flexBasis}`,
-  );
-  assert.strictEqual(
-    px(actionsStyle.marginLeft),
-    0,
-    `the action strip must not keep the inline left gutter; ` +
-      `got margin-left=${actionsStyle.marginLeft}`,
-  );
-
-  // The task text must no longer have to share its line with the buttons:
-  // it keeps flex:1 while the actions wrap away onto the next line.
+  // One line: the text takes the room the button leaves and is cut
+  // with an ellipsis; only the details break onto lines of their own.
   const textStyle = win.getComputedStyle(text);
-  assert.ok(
-    px(textStyle.flexGrow) >= 1,
-    `the task text must still grow to fill its line`,
-  );
-  // Regression guard: the title needs its own full-width basis too. With the
-  // default flex-basis of 0 it is squeezed to zero width beside the
-  // full-width action strip and the task title becomes invisible.
-  assert.strictEqual(
+  assert.ok(px(textStyle.flexGrow) >= 1, 'the task text fills its line');
+  assert.notStrictEqual(
     textStyle.flexBasis,
     '100%',
-    `the task text must claim a full-width line of its own, ` +
-      `otherwise the full-width action strip collapses it; ` +
-      `got flex-basis=${textStyle.flexBasis}`,
-  );
-
-  // DOM order decides which line comes first when nothing reorders them:
-  // text -> actions -> info.
-  const children = Array.prototype.slice.call(row.children);
-  assert.ok(
-    children.indexOf(text) < children.indexOf(actions),
-    `the action strip must come after the task text`,
-  );
-  const info = row.querySelector('.running-item-info');
-  assert.ok(
-    children.indexOf(actions) < children.indexOf(info),
-    `the action strip must come before the metadata block`,
+    'the task text shares its line with the "…" button',
   );
   assert.strictEqual(
-    win.getComputedStyle(actions).order,
-    win.getComputedStyle(text).order,
-    `no CSS 'order' trickery may re-shuffle the action strip`,
+    win.getComputedStyle(row.querySelector('.running-item-info')).flexBasis,
+    '100%',
+    'the details take lines of their own below',
   );
 
-  console.log(`  ok - action buttons sit on their own line`);
+  // The strip is the menu of the "…" button: a popover (closed, so not
+  // displayed) that the button targets, both named for a screen reader.
+  assert.strictEqual(more.tagName, 'BUTTON');
+  assert.strictEqual(more.type, 'button');
+  assert.strictEqual(more.getAttribute('aria-label'), 'Task actions');
+  assert.strictEqual(more.popoverTargetElement, actions);
+  assert.strictEqual(actions.getAttribute('popover'), 'auto');
+  assert.strictEqual(actions.getAttribute('role'), 'group');
+  assert.strictEqual(actions.getAttribute('aria-label'), 'Task actions');
+  assert.strictEqual(
+    win.getComputedStyle(actions).display,
+    'none',
+    'the menu is not part of the row until the "…" button opens it',
+  );
+
+  // The menu's lines, top to bottom: the buttons (the destructive one
+  // last), then when the task was launched and on which machine.  Each
+  // button carries the name its line shows (main.css draws it from the
+  // aria-label).
+  assert.deepStrictEqual(
+    childKinds(actions, [
+      'sidebar-item-favorite',
+      'sidebar-item-copy',
+      'sidebar-item-collapse',
+      'sidebar-item-delete',
+      'sidebar-item-confirm',
+      'sidebar-item-launched',
+      'sidebar-item-machine',
+    ]),
+    [
+      'sidebar-item-favorite',
+      'sidebar-item-copy',
+      'sidebar-item-collapse',
+      'sidebar-item-delete',
+      'sidebar-item-confirm',
+      'sidebar-item-launched',
+      'sidebar-item-machine',
+    ],
+  );
+  assert.deepStrictEqual(
+    Array.from(actions.querySelectorAll(':scope > button')).map(btn =>
+      btn.getAttribute('aria-label'),
+    ),
+    [
+      'Favourite task',
+      'Copy task to clipboard',
+      'Expand task details',
+      'Delete task',
+    ],
+  );
+  assert.match(
+    actions.querySelector('.sidebar-item-launched').textContent,
+    / ago$|^just now$/,
+    'the menu says when the task was launched',
+  );
+  assert.strictEqual(
+    actions.querySelector('.sidebar-item-machine').textContent,
+    'this machine',
+    'and where it ran: here, on a daemon that has not said its name yet',
+  );
+  console.log('  ok - a task panel is one line with a "…" menu');
 }
 
 // ---------------------------------------------------------------------------
-// 2. The buttons keep the compact sidebar size.
+// 2. The menu's buttons act on the task, never on the row under them,
+//    and rename themselves with their state.
 // ---------------------------------------------------------------------------
 
-function testActionsKeepCompactSize(win) {
+function testMenuButtonsAct(win, posted) {
   const row = historyRow(win);
-  const compact = win.document.createElement('button');
-  compact.className = 'sidebar-item-copy';
-  win.document.body.appendChild(compact);
-  const compactStyle = win.getComputedStyle(compact);
+  const actions = row.querySelector('.sidebar-item-actions');
+  const opened = () =>
+    posted.filter(m => m.type === 'resumeSession' || m.type === 'openTab');
+  const before = opened().length;
 
-  ACTION_BUTTON_SELECTORS.forEach(sel => {
-    const btn = row.querySelector(sel);
-    assert.ok(btn, `${sel} rendered`);
-
-    const btnStyle = win.getComputedStyle(btn);
-    // No min-width/min-height override may survive: the box has to be
-    // sized by its 12px icon plus the shared "2px 0" padding.
-    assert.strictEqual(
-      px(btnStyle.minWidth),
-      0,
-      `${sel} must not force a wider box; the reverted rule set ` +
-        `min-width=${REVERTED_BUTTON_W_PX}px, got ${btnStyle.minWidth}`,
-    );
-    assert.strictEqual(
-      px(btnStyle.minHeight),
-      0,
-      `${sel} must not force a taller box; the reverted rule set ` +
-        `min-height=${REVERTED_BUTTON_H_PX}px, got ${btnStyle.minHeight}`,
-    );
-    assert.strictEqual(
-      px(btnStyle.paddingTop),
-      2,
-      `${sel} must keep the compact "2px 0" padding so the box ` +
-        `stays ${BUTTON_H_PX}px tall; got padding-top=${btnStyle.paddingTop}`,
-    );
-    assert.strictEqual(
-      px(btnStyle.paddingLeft),
-      0,
-      `${sel} must keep the compact "2px 0" padding so the box ` +
-        `stays ${BUTTON_W_PX}px wide; got padding-left=${btnStyle.paddingLeft}`,
-    );
-    // Every declaration must match a plain compact sidebar button, so no
-    // leftover of the enlargement (border-radius, justify-content, ...)
-    // can distinguish a history panel's button from the others.
-    ['borderRadius', 'justifyContent', 'alignItems', 'display'].forEach(
-      prop => {
-        assert.strictEqual(
-          btnStyle[prop],
-          compactStyle[prop],
-          `${sel} must render exactly like a compact sidebar ` +
-            `button; ${prop} differs (${btnStyle[prop]} vs ${compactStyle[prop]})`,
-        );
-      },
-    );
-
-    const svg = btn.querySelector('svg');
-    assert.ok(svg, `${sel} renders an icon`);
-    assertCompactIcon(win, svg, `${sel}`);
-  });
-
-  console.log(`  ok - action buttons keep the compact size`);
-}
-
-// ---------------------------------------------------------------------------
-// 3. The compact icon size survives every innerHTML rewrite.
-// ---------------------------------------------------------------------------
-
-function testIconSizeSurvivesStateChanges(win, posted) {
-  const row = historyRow(win);
-
-  // Favouriting swaps the outline star for the filled star via innerHTML.
-  const fav = row.querySelector('.sidebar-item-favorite');
+  const fav = actions.querySelector('.sidebar-item-favorite');
   fav.click();
-  assert.ok(
-    fav.classList.contains('favorited'),
-    `clicking the star favourites the task`,
-  );
+  assert.ok(fav.classList.contains('favorited'), 'the star favourites');
+  assert.strictEqual(fav.getAttribute('aria-label'), 'Unfavourite task');
   assert.ok(
     posted.some(m => m.type === 'setFavorite'),
-    `favouriting still reaches the backend`,
+    'favouriting reaches the backend',
   );
-  assertCompactIcon(win, fav.querySelector('svg'), `filled star`);
-
   fav.click();
-  assert.ok(
-    !fav.classList.contains('favorited'),
-    `clicking again unfavourites the task`,
+  assert.ok(!fav.classList.contains('favorited'), 'and unfavourites');
+  assert.strictEqual(fav.getAttribute('aria-label'), 'Favourite task');
+
+  const toggle = actions.querySelector('.sidebar-item-collapse');
+  toggle.click();
+  assert.ok(!row.classList.contains('collapsed'), 'the chevron unfolds');
+  assert.strictEqual(
+    toggle.getAttribute('aria-label'),
+    'Collapse task details',
   );
-  assertCompactIcon(win, fav.querySelector('svg'), `outline star`);
+
+  // A click on a line that is no button (the age) does nothing either.
+  actions
+    .querySelector('.sidebar-item-launched')
+    .dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  assert.strictEqual(
+    opened().length,
+    before,
+    'nothing clicked in the menu opens the chat of the row',
+  );
 
   // The copy button swaps in a check mark after a successful copy.
-  const copy = row.querySelector('.sidebar-item-copy');
+  const copy = actions.querySelector('.sidebar-item-copy');
   const clip = stubClipboard(win);
   copy.click();
   // The flash follows PanelCopy.copyText's promise chain: wait a macrotask.
   return new Promise(r => setTimeout(r, 0)).then(() => {
-    assert.strictEqual(
-      clip.last(),
-      'refactor the parser',
-      `the copy button still copies the task text`,
-    );
-    assert.ok(
-      copy.classList.contains('copied'),
-      `the copy button flashes its success state`,
-    );
-    assertCompactIcon(win, copy.querySelector('svg'), `check mark`);
+    assert.strictEqual(clip.last(), 'refactor the parser');
+    assert.ok(copy.classList.contains('copied'), 'the copy line shows it');
+    assert.strictEqual(opened().length, before);
     win.close();
-    console.log(`  ok - icon size survives every state swap`);
+    console.log('  ok - the menu buttons act on the task only');
   });
 }
 
 // ---------------------------------------------------------------------------
-// 4. Rows without a task id only show the collapse toggle - still on its
-//    own, full-width line.
+// 3. Rows without a task id have a menu with the details toggle alone.
 // ---------------------------------------------------------------------------
 
-function testRowWithoutTaskIdKeepsOwnLine() {
+function testRowWithoutTaskIdKeepsMenu() {
   const {win} = makePage();
   loadHistory(win, [
     {
@@ -292,36 +229,25 @@ function testRowWithoutTaskIdKeepsOwnLine() {
   ]);
   const row = historyRow(win);
   const actions = row.querySelector('.sidebar-item-actions');
-  assert.ok(actions, `action strip rendered without a task id`);
   assert.strictEqual(
-    row.querySelector('.sidebar-item-favorite'),
-    null,
-    `no favourite button without a task id`,
+    row.querySelector('.sidebar-item-more').popoverTargetElement,
+    actions,
+    'a row without a task id has its "…" menu too',
   );
-  assert.strictEqual(
-    row.querySelector('.sidebar-item-copy'),
-    null,
-    `no copy button without a task id`,
-  );
-  assert.strictEqual(
-    win.getComputedStyle(actions).flexBasis,
-    '100%',
-    `the lone collapse toggle still gets its own line`,
-  );
-  const toggle = actions.querySelector('.sidebar-item-collapse');
-  assertCompactIcon(win, toggle.querySelector('svg'), `lone collapse toggle`);
-  assert.strictEqual(
-    px(win.getComputedStyle(toggle).minHeight),
-    0,
-    `the lone collapse toggle keeps the compact box too`,
+  assert.deepStrictEqual(
+    Array.from(actions.querySelectorAll('button')).map(btn =>
+      btn.getAttribute('aria-label'),
+    ),
+    ['Expand task details'],
+    'with no favourite, copy or delete line',
   );
   win.close();
-  console.log(`  ok - task-id-less rows keep the layout`);
+  console.log('  ok - task-id-less rows keep the menu');
 }
 
 // ---------------------------------------------------------------------------
-// 5. Only the *history* task panels change - the promptlets list keeps
-//    its compact inline buttons.
+// 4. Only the *history* panels have a menu - the promptlets list keeps
+//    its compact inline buttons (a 12px icon in a "2px 0" padded box).
 // ---------------------------------------------------------------------------
 
 function testTricksListUnaffected() {
@@ -334,10 +260,20 @@ function testTricksListUnaffected() {
     !item.classList.contains('running-item'),
     'promptlet rows are not history task panels',
   );
+  assert.strictEqual(
+    item.querySelector('.sidebar-item-more, [popover]'),
+    null,
+    'promptlet rows have no "…" menu',
+  );
   const copy = item.querySelector('.sidebar-item-copy');
   assert.ok(copy, 'promptlet row has a copy button');
   const svg = copy.querySelector('svg');
-  assertCompactIcon(win, svg, 'promptlet copy');
+  const width = win.getComputedStyle(svg).width;
+  assert.ok(
+    width === '' || width === 'auto',
+    `no CSS rule resizes a promptlet icon; got width=${width}`,
+  );
+  assert.strictEqual(px(svg.getAttribute('width')), ICON_PX);
   const btnStyle = win.getComputedStyle(copy);
   assert.strictEqual(
     px(btnStyle.minWidth),
@@ -356,10 +292,9 @@ function testTricksListUnaffected() {
 async function main() {
   const {win, posted} = makePage();
   loadHistory(win, [makeSession()]);
-  testActionsOnSeparateLine(win);
-  testActionsKeepCompactSize(win);
-  await testIconSizeSurvivesStateChanges(win, posted);
-  testRowWithoutTaskIdKeepsOwnLine();
+  testPanelIsOneLineWithMenu(win);
+  await testMenuButtonsAct(win, posted);
+  testRowWithoutTaskIdKeepsMenu();
   testTricksListUnaffected();
   console.log('All historyTaskActionsRow tests passed');
 }

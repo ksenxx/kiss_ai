@@ -87,8 +87,8 @@ function testDotRendersForRunningRow() {
   const cs = win.getComputedStyle(dot);
   assert.strictEqual(
     cs.color,
-    'var(--green)',
-    `spinner colour must be the theme green (--status-ok -> var(--green)); got: ${cs.color}`,
+    'var(--brand-clay)',
+    `spinner colour must be the clay of every running indicator (--brand-clay); got: ${cs.color}`,
   );
   const animName = cs.getPropertyValue('animation-name') || '';
   const animShort = cs.getPropertyValue('animation') || '';
@@ -107,7 +107,7 @@ function testDotRendersForRunningRow() {
   assert.strictEqual(running.dataset.category, 'running');
 
   win.close();
-  console.log('  ok - green spinner renders on is_running rows');
+  console.log('  ok - clay spinner renders on is_running rows');
 }
 
 function testDotAppearsLiveOnStatusRunningTrue() {

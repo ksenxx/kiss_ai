@@ -177,7 +177,7 @@ def test_compute_changes_marks_new_decisions_models(monkeypatch: pytest.MonkeyPa
             "dec": True,
         },
     }
-    updates, new_models = compute_changes(current, fetched, {}, {}, {}, {})
+    updates, new_models = compute_changes(current, fetched, {}, {}, {})
     [candidate] = new_models
     assert candidate["name"] == JEV
     assert candidate["is_decisions"] is True
@@ -317,14 +317,14 @@ def test_skip_test_assumes_flags_from_listing() -> None:
     """--skip-test derives gen/emb/fc/dec from the listing markers without probing.
 
     Only a candidate assumed to generate text is assumed to call tools:
-    embedding-only (Together or Gemini) and decisions-only candidates get
+    embedding-only (OpenAI or Gemini) and decisions-only candidates get
     ``fc=False``, and a Gemini candidate advertising neither
     ``generateContent`` nor ``embedContent`` is dropped like a candidate
     that fails every live probe.
     """
     candidates: list[dict[str, Any]] = [
         {"name": JEV, "is_decisions": True},
-        {"name": "BAAI/bge-large-en-v1.5", "is_embedding": True},
+        {"name": "text-embedding-3-small", "is_embedding": True},
         {"name": "openrouter/openai/gpt-4o"},
         {"name": "gemini-embedding-001", "is_embedding": True, "is_generation": False},
         {"name": "gemini-9-flash", "is_embedding": False, "is_generation": True},
@@ -444,7 +444,6 @@ def _retest_decisions_catalog(
     monkeypatch.setattr(mod, "MODEL_INFO_PATH", target)
     monkeypatch.setattr(mod, "README_PATH", tmp_path / "README.md")
     for fetcher in (
-        "fetch_together",
         "fetch_anthropic",
         "fetch_gemini",
         "fetch_openai",

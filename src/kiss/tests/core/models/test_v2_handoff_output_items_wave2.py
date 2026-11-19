@@ -4,12 +4,12 @@
 # add your name here
 """A Responses conversation handed to another endpoint carries no foreign item state.
 
-The live ``test_together_hop_via_set_model_tool`` failed with OpenAI's
+A live hop through the ``set_model`` tool failed with OpenAI's
 400 ``Missing required parameter: 'input[8].summary'``: the
-conversation handed back from a Together ``gpt-oss`` model (Responses
-API) to ``gpt-4o`` still held Together's output items verbatim.  OpenAI
+conversation handed back from another vendor's ``gpt-oss`` model (Responses
+API) to ``gpt-4o`` still held that vendor's output items verbatim.  OpenAI
 rejects all of their endpoint-bound state: the reasoning item has no
-``summary`` and has a ``status``, and Together's ``function_call`` ids
+``summary`` and has a ``status``, and the vendor's ``function_call`` ids
 (equal to the call ids, ``call_…``) are not OpenAI item ids (``fc_…``).
 A hand-off between endpoints
 (:func:`kiss.core.models.model.hand_off_conversation`) now converts the
@@ -43,21 +43,21 @@ _USAGE = {
     "total_tokens": 9,
 }
 
-# Output items in the shape Together's Responses endpoint returns them.
-_TOGETHER_REASONING = {
+# Output items in the shape a non-OpenAI Responses endpoint returns them for ``gpt-oss``.
+_GPT_OSS_REASONING = {
     "id": "reasoning_responses-1",
     "type": "reasoning",
     "status": "completed",
     "content": [{"type": "reasoning_text", "text": "I should call reveal_secret."}],
 }
-_TOGETHER_MESSAGE = {
+_GPT_OSS_MESSAGE = {
     "id": "msg_responses-1",
     "type": "message",
     "role": "assistant",
     "status": "completed",
     "content": [{"type": "output_text", "text": "Calling the tool.", "annotations": []}],
 }
-_TOGETHER_CALL = {
+_GPT_OSS_CALL = {
     "id": "call_t1",
     "type": "function_call",
     "call_id": "call_t1",
@@ -126,7 +126,7 @@ class _Handler(BaseHTTPRequestHandler):
 
 @pytest.fixture
 def endpoints() -> Iterator[tuple[_Endpoint, _Endpoint]]:
-    """Two live endpoints: (together, openai)."""
+    """Two live endpoints: (openrouter, openai)."""
     servers = (_Endpoint(), _Endpoint())
     for server in servers:
         threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -162,19 +162,21 @@ def _assistant_texts(body: dict[str, Any]) -> list[str]:
     return texts
 
 
-def _together_tool_turn(together: _Endpoint) -> OpenAICompatibleModel2:
-    """Run one tool turn on a Together-served model, ending with its text answer."""
-    together.replies = [
+def _openrouter_tool_turn(openrouter: _Endpoint) -> OpenAICompatibleModel2:
+    """Run one tool turn on an OpenRouter-served model, ending with its text answer."""
+    openrouter.replies = [
         _response(
             [
-                copy.deepcopy(_TOGETHER_REASONING),
-                copy.deepcopy(_TOGETHER_MESSAGE),
-                copy.deepcopy(_TOGETHER_CALL),
+                copy.deepcopy(_GPT_OSS_REASONING),
+                copy.deepcopy(_GPT_OSS_MESSAGE),
+                copy.deepcopy(_GPT_OSS_CALL),
             ]
         ),
         _response([_text_message("msg_responses-2", "The secret is SECRET-2.")]),
     ]
-    model = OpenAICompatibleModel2("openai/gpt-oss-120b", base_url=together.base_url, api_key="k")
+    model = OpenAICompatibleModel2(
+        "openrouter/openai/gpt-oss-120b", base_url=openrouter.base_url, api_key="k"
+    )
     model.initialize("Play the memory game.")
     calls, _, _ = model.generate_and_process_with_tools({"reveal_secret": reveal_secret})
     assert [call["name"] for call in calls] == ["reveal_secret"]
@@ -187,20 +189,20 @@ def _together_tool_turn(together: _Endpoint) -> OpenAICompatibleModel2:
 
 def test_own_output_items_replay_verbatim(endpoints: tuple[_Endpoint, _Endpoint]) -> None:
     """The model that produced the items sends them back unchanged within its tool turn."""
-    together, _ = endpoints
-    _together_tool_turn(together)
-    replay = together.bodies[1]
-    assert _items(replay, "reasoning") == [_TOGETHER_REASONING]
-    assert _items(replay, "function_call") == [_TOGETHER_CALL]
-    assert _TOGETHER_MESSAGE in replay["input"]
+    openrouter, _ = endpoints
+    _openrouter_tool_turn(openrouter)
+    replay = openrouter.bodies[1]
+    assert _items(replay, "reasoning") == [_GPT_OSS_REASONING]
+    assert _items(replay, "function_call") == [_GPT_OSS_CALL]
+    assert _GPT_OSS_MESSAGE in replay["input"]
 
 
 def test_handoff_to_another_endpoint_drops_foreign_item_state(
     endpoints: tuple[_Endpoint, _Endpoint],
 ) -> None:
-    """Together -> OpenAI: no reasoning item and no Together item id reaches OpenAI."""
-    together, openai = endpoints
-    old = _together_tool_turn(together)
+    """OpenRouter -> OpenAI: no reasoning item and no foreign item id reaches OpenAI."""
+    openrouter, openai = endpoints
+    old = _openrouter_tool_turn(openrouter)
     new = OpenAICompatibleModel2("gpt-5.5", base_url=openai.base_url, api_key="k")
     new.initialize("Play the memory game.")
     hand_off_conversation(old, new)
@@ -224,8 +226,8 @@ def test_handoff_to_another_endpoint_drops_foreign_item_state(
     assert all("id" not in item and "status" not in item for item in body["input"])
     assert _assistant_texts(body) == ["Calling the tool.", "The secret is SECRET-2."]
     # The converter copies: the old model's items are not edited.
-    assert _TOGETHER_REASONING in old.conversation
-    assert _TOGETHER_CALL in old.conversation
+    assert _GPT_OSS_REASONING in old.conversation
+    assert _GPT_OSS_CALL in old.conversation
 
 
 def test_items_that_are_not_dicts_pass_through(endpoints: tuple[_Endpoint, _Endpoint]) -> None:

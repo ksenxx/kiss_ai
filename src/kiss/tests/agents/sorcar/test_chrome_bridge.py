@@ -34,6 +34,7 @@ import queue
 import re
 import socket
 import sys
+import tempfile
 import threading
 import time
 import traceback
@@ -60,6 +61,7 @@ from kiss.agents.sorcar.chrome_bridge import (
 )
 from kiss.agents.sorcar.web_use_tool import WebUseTool, _format_bridge_result
 from kiss.core.brand import PRODUCT_NAME
+from kiss.core.kiss_tmp import kiss_tmp_dir
 from kiss.core.user_config import load_config, save_config
 from kiss.tests.conftest import IS_WINDOWS
 from kiss.tests.lock_injection import inject
@@ -328,6 +330,34 @@ def test_command_timeout(bridge: ChromeBridge) -> None:
         assert box2["result"] == []
     finally:
         peer2.close()
+
+
+@pytest.mark.parametrize(
+    ("timeout", "given_ms"),
+    [(0.4, 200), (1.0, 700), (5.0, 4500), (30.0, 29000)],
+    ids=["half", "least", "tenth", "most"],
+)
+def test_a_command_frame_leaves_the_extension_time_to_answer_its_deadline(
+    bridge: ChromeBridge, timeout: float, given_ms: int,
+) -> None:
+    """The deadline a frame gives the extension runs short of the caller's by the reply margin.
+
+    A tenth of the timeout, 0.3 s at least and 1 s at most, and never more than half of it.
+    Chrome on macOS fires the timer of an extension's service worker up to 0.15 s late (Linux
+    1 ms, Windows 8 ms).  A tenth of one second was less than that: the extension's "command
+    exceeded its deadline" came in after the bridge's own wait, which dropped the connection.
+    """
+    peer = ExtensionPeer(bridge.port, bridge.token)
+    try:
+        t, box = _call_in_thread(bridge, "list_tabs", timeout=timeout)
+        cmd = peer.next_command()
+        peer.reply(cmd["id"], result=[])
+        t.join(timeout=10)
+        assert box["result"] == []
+        # The frame is written a moment after the call began, with what is left by then.
+        assert given_ms - 100 <= cmd["timeout_ms"] <= given_ms
+    finally:
+        peer.close()
 
 
 def _parked_in_a_wait_of(thread: threading.Thread, function: str) -> bool:
@@ -1202,7 +1232,7 @@ def test_tool_type_text_sends_args() -> None:
         peer.close()
 
 
-def test_tool_screenshot_saves_png_under_the_work_dir(tmp_path: Path) -> None:
+def test_tool_screenshot_saves_png_in_the_scratch_dir(tmp_path: Path) -> None:
     def respond(cmd: dict[str, Any]) -> Any:
         if cmd["cmd"] == "screenshot":
             return f"data:image/png;base64,{_TINY_PNG_B64}"
@@ -1212,25 +1242,26 @@ def test_tool_screenshot_saves_png_under_the_work_dir(tmp_path: Path) -> None:
 
     peer = ExtensionPeer(ChromeBridge.instance().port, ChromeBridge.instance().token, respond)
     try:
-        # The task's work dir, not the process CWD (the daemon's), like
-        # screenshot().
+        # The task's scratch dir (a sub-agent's is its private folder), not
+        # its work dir and not the process CWD (the daemon's).
         work_dir = tmp_path / "task"
         work_dir.mkdir()
-        tool = WebUseTool(work_dir=str(work_dir))
+        scratch = Path(tempfile.mkdtemp(dir=kiss_tmp_dir()))
+        tool = WebUseTool(work_dir=str(work_dir), scratch_dir=str(scratch))
         out = tool.use_my_chrome("screenshot", tab_id=1)
         assert out.startswith("Screenshot saved to ")
-        shots = list((work_dir / "tmp").glob("chrome-shot-*.png"))
+        shots = list(scratch.glob("chrome-shot-*.png"))
         assert len(shots) == 1
-        assert str(shots[0].resolve()) in out
+        assert shots[0].as_posix() in out  # with forward slashes, for a shell command
         assert base64.b64encode(shots[0].read_bytes()).decode() == _TINY_PNG_B64
         assert tool.use_my_chrome("close_tab", tab_id=1) == "Tab closed."
-        # A sub-agent's goes to its private folder, not to the work tree.
-        private = tmp_path / "kiss-sub-x"
-        private.mkdir()
-        sub = WebUseTool(work_dir=str(work_dir), private_dir=str(private))
-        assert str(private / "chrome-shot-") in sub.use_my_chrome("screenshot", tab_id=1)
-        assert len(list(private.glob("chrome-shot-*.png"))) == 1
-        assert len(list((work_dir / "tmp").iterdir())) == 1
+        # A tool built without a scratch dir saves it in the agents' temp directory itself.
+        out = WebUseTool(work_dir=str(work_dir)).use_my_chrome("screenshot", tab_id=1)
+        shot = Path(out.removeprefix("Screenshot saved to ").partition(" (")[0])
+        assert shot.parent == kiss_tmp_dir() and shot.name.startswith("chrome-shot-")
+        assert base64.b64encode(shot.read_bytes()).decode() == _TINY_PNG_B64
+        # Neither left anything in the work tree.
+        assert list(work_dir.iterdir()) == [] and len(list(scratch.iterdir())) == 1
         # A malformed payload is an error string, not a crash.
         assert "unexpected screenshot payload" in tool._save_bridge_shot("not-a-data-url")
     finally:

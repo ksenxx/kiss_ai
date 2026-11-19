@@ -106,6 +106,14 @@ def test_manifest_names_the_brand_and_asks_for_a_standalone_window() -> None:
     assert manifest["description"] == BRAND["tagline"]
     assert manifest["display"] == "standalone"
     assert manifest["start_url"] == "/" and manifest["scope"] == "/" and manifest["id"] == "/"
+    # The launch splash and the window chrome take the canvas of the light
+    # palette, which is what the page paints first.
+    canvas = re.search(
+        r"body\.remote-chat\.light-theme \{[^}]*?--theme-editor-background: (#[0-9a-f]{6});",
+        _get("/")[2].decode(),
+    )
+    assert canvas, "the page inlines no light palette"
+    assert manifest["background_color"] == manifest["theme_color"] == canvas.group(1)
     assert manifest["icons"] == [
         {"src": _media_url("kiss-icon.png"), "sizes": "512x512", "type": "image/png"},
         {"src": _media_url("kiss-icon.svg"), "sizes": "any", "type": "image/svg+xml"},

@@ -62,6 +62,7 @@ from kiss.server.json_printer import IdentifiedPrompt, name_prompts, prompt_ids_
 from kiss.server.tab_registry import OpenTabOutcome
 from kiss.server.task_runner import (
     _client_task_id_of,
+    _continued_task_named,
     _prompt_of,
     _result_event,
     _stop_requested,
@@ -528,6 +529,7 @@ class _CommandsMixin:
             replay_id: str = "",
             reopen: bool = False,
             recovery: bool = False,
+            lazy: bool = False,
         ) -> None: ...
         def _defer_replay(
             self,
@@ -557,7 +559,7 @@ class _CommandsMixin:
         def _get_adjacent_task(
             self, chat_id: str, task_id: str | None, direction: str,
             tab_id: str = "", *, view: tuple[str, str] | None = None,
-            conn_id: str = "",
+            conn_id: str = "", lazy: bool = False,
         ) -> None: ...
         def _commit_main_tree(
             self, tab_id: str, work_dir: str = "", reply_to: str = "",
@@ -901,7 +903,9 @@ class _CommandsMixin:
                 # would receive the text).
                 steer = typed
                 if steer:
-                    admitted = self._admit_steer(prev, prompt, tab_id, attachments)
+                    admitted = self._admit_steer(
+                        prev, prompt, tab_id, attachments, _continued_task_named(cmd),
+                    )
             elif asked is not None:
                 queued = self._queue_prompt_on_owner(asked, prompt, tab_id, attachments)
                 if queued is None:
@@ -1713,6 +1717,7 @@ class _CommandsMixin:
         prompt: str,
         tab_id: str,
         attachments: list[Attachment] | None = None,
+        continued_task_id: str = "",
     ) -> bool | None:
         """Queue a mid-run user *prompt* on the right list of *owner*.
 
@@ -1768,11 +1773,22 @@ class _CommandsMixin:
         pending question carries none (the composer never attaches
         files to an answer).
 
+        The task the sender had loaded (*continued_task_id*) follows a
+        ``<task>`` message, which is a task of its own: its first block
+        continues that task (each block after it the one before),
+        wherever the message waits.  A follow-up remembers it for the
+        subtask loop, a message left to be the tab's next run for that
+        run's command (:class:`IdentifiedPrompt`).  A plain message is
+        for the running task and names none: left unread, it is re-run
+        as a task that continues the run it waited for.
+
         Args:
             owner: The running-task state that accepted the prompt.
             prompt: The user's message (non-empty).
             tab_id: Frontend tab id the message was typed into.
             attachments: The message's decoded attachments, if any.
+            continued_task_id: The task the page says the sender had
+                loaded (``continueTaskId``); ``""`` for none.
 
         Returns:
             ``True`` when the text was queued as a prompt (steering
@@ -1789,6 +1805,8 @@ class _CommandsMixin:
             and contains_task_tags(prompt)
         ):
             blocks = parse_task_tags(prompt)
+            if continued_task_id:
+                blocks[0] = IdentifiedPrompt(blocks[0], continued_task_id=continued_task_id)
             owner.queued_followup_tasks.extend(blocks)
             owner.queued_followup_files.extend(list(attachments or []) for _ in blocks)
             return True
@@ -1800,6 +1818,8 @@ class _CommandsMixin:
         if owner.followup_queue_closed and not _reruns_after_teardown(owner):
             self._refuse_prompt(tab_id, prompt)
             return None
+        if continued_task_id and contains_task_tags(prompt):
+            prompt = IdentifiedPrompt(prompt, tuple(prompt_ids_of(prompt)), continued_task_id)
         owner.pending_user_messages.append(prompt)
         owner.pending_user_attachments.append(list(attachments or []))
         return True
@@ -1810,6 +1830,7 @@ class _CommandsMixin:
         prompt: str,
         tab_id: str,
         attachments: list[Attachment] | None = None,
+        continued_task_id: str = "",
     ) -> tuple[bool, str] | None:
         """Route *prompt* to *owner* and resolve how to echo it.
 
@@ -1840,6 +1861,8 @@ class _CommandsMixin:
             prompt: The user's message (non-empty).
             tab_id: Frontend tab id the message was typed into.
             attachments: The message's decoded attachments, if any.
+            continued_task_id: The task the sender had loaded, if any
+                (see :meth:`_route_prompt_to_owner`).
 
         Returns:
             ``(remember, owner_task)`` — the *remember* flag of
@@ -1848,7 +1871,9 @@ class _CommandsMixin:
             must be emitted (the next run echoes the prompt, or it was
             refused).
         """
-        remember = self._route_prompt_to_owner(owner, prompt, tab_id, attachments)
+        remember = self._route_prompt_to_owner(
+            owner, prompt, tab_id, attachments, continued_task_id,
+        )
         if remember is None:
             return None
         if _reruns_after_teardown(owner):
@@ -2305,7 +2330,9 @@ class _CommandsMixin:
             if owner is None:
                 self._refuse_prompt(tab_id, prompt)
                 return
-            admitted = self._admit_steer(owner, prompt, tab_id, attachments)
+            admitted = self._admit_steer(
+                owner, prompt, tab_id, attachments, _continued_task_named(cmd),
+            )
         if admitted is not None:
             self._deliver_steer(admitted, cmd, prompt, tab_id)
 
@@ -2328,6 +2355,7 @@ class _CommandsMixin:
         prompt: str,
         tab_id: str,
         attachments: list[Attachment] | None,
+        continued_task_id: str = "",
     ) -> _Steer | None:
         """Admit *prompt*, typed into a running task, on *owner*.
 
@@ -2362,6 +2390,10 @@ class _CommandsMixin:
             prompt: The user's message (non-empty).
             tab_id: Frontend tab id the message was typed into.
             attachments: The message's lazily decoded attachments.
+            continued_task_id: The task the page says the sender had
+                loaded (``continueTaskId``), which a ``<task>`` message
+                continues (:meth:`_route_prompt_to_owner`); ``""`` for
+                none.
 
         Returns:
             What the delivery needs, or ``None`` when the agent loop is
@@ -2397,7 +2429,9 @@ class _CommandsMixin:
             return _Steer(
                 owner_task, owner.chat_id, owner_agent, publication, ask_question=question,
             )
-        queued = self._queue_prompt_on_owner(owner, prompt, tab_id, attachments)
+        queued = self._queue_prompt_on_owner(
+            owner, prompt, tab_id, attachments, continued_task_id,
+        )
         if queued is None:
             return None
         remember, owner_task = queued
@@ -2490,6 +2524,11 @@ class _CommandsMixin:
         a dropped connection: it gets its subscription and transcript
         back, but a tab the user closed meanwhile is not reopened, see
         ``_replay_session``.
+
+        ``lazy: true`` is a page that loads transcripts in pieces: it
+        gets the outline of a running task, or the results of a finished
+        one, and asks for the rest as panels are opened
+        (``getTaskEvents``), see ``_replay_session``.
         """
         raw_id = cmd.get("chatId")
         chat_id = str(raw_id) if raw_id else ""
@@ -2513,6 +2552,7 @@ class _CommandsMixin:
                 replay_id=replay_id,
                 reopen=cmd.get("reopen") is True,
                 recovery=cmd.get("recovery") is True,
+                lazy=cmd.get("lazy") is True,
             )
         except BaseException as e:
             # Whatever ended the replay, the asker waits for the marker.
@@ -2774,6 +2814,9 @@ class _CommandsMixin:
         navigation is a read-only view operation.  The tab's view is
         captured in the same lock hold and fences the reply (review
         2026-11-04 R2): a task selected meanwhile drops the request.
+
+        ``lazy: true`` asks for the neighbour as a lazily loaded
+        finished task (``_cmd_resume_session``).
         """
         tab_id = cmd.get("tabId", "")
         with self._state_lock:
@@ -2787,6 +2830,7 @@ class _CommandsMixin:
             tab_id,
             view=view,
             conn_id=cmd.get("connId", ""),
+            lazy=cmd.get("lazy") is True,
         )
 
     def _run_autocommit_job(self, tab_id: str, job: Callable[[], None]) -> None:

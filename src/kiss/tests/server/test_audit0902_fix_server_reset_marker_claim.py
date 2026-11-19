@@ -13,9 +13,11 @@ instead of the JSON ``_write_server_reset_flag`` wrote was consumed
 and announced too.  The consumer must claim the marker atomically,
 validate its JSON and only then schedule the toast.
 
-Each test pre-creates a marker of one kind next to the url file,
-starts a real daemon, connects a real local client and observes whether
-the toast is broadcast (a probe command bounds the wait).
+Each test puts a marker of one kind next to the url file of a real
+daemon, which consumes it at startup (or when the test runs the consumer
+directly, where a client must be connected or the directory read-only
+first), and observes on a real local client whether the toast is
+broadcast (a probe command bounds the wait).
 """
 
 from __future__ import annotations
@@ -34,7 +36,12 @@ import kiss.agents.sorcar.persistence as th
 import kiss.server.web_server as web_server_mod
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.conftest import is_root, posix_only
-from kiss.tests.local_ws import LocalWriter, _generate_self_signed_cert, open_local_connection
+from kiss.tests.local_ws import (
+    LocalReader,
+    LocalWriter,
+    _generate_self_signed_cert,
+    open_local_connection,
+)
 from kiss.tests.server.conftest import find_free_port
 
 _VALID_MARKER = json.dumps({"requested_at": 0.0, "conn_id": ""})
@@ -89,18 +96,23 @@ class TestResetMarkerClaim(IsolatedAsyncioTestCase):
         await self.server.start_async()
         return self.server
 
-    async def _saw_complete_toast(self) -> bool:
-        """Connect, outwait the (shrunk) toast delay, then probe.
-
-        The toast, when scheduled, is broadcast to every connection
-        present 0.1 s after startup; a ``activeTasksQuery`` probe sent
-        well after that bounds the read loop.
-        """
+    async def _connect(self) -> tuple[LocalReader, LocalWriter]:
+        """Open a local client connection that teardown closes."""
         reader, writer = await open_local_connection(
             self.endpoint_file, limit=16 * 1024 * 1024,
         )
         self._writers.append(writer)
-        await asyncio.sleep(0.6)
+        return reader, writer
+
+    async def _toast_before_probe_reply(
+        self, reader: LocalReader, writer: LocalWriter,
+    ) -> bool:
+        """Probe with ``activeTasksQuery``; True when the toast precedes its reply.
+
+        The reply bounds the read loop.  It also shows that the daemon
+        reads this connection's commands, which it does only once the
+        connection is registered for broadcasts.
+        """
         writer.write(
             json.dumps({"type": "activeTasksQuery"}).encode("utf-8") + b"\n",
         )
@@ -118,6 +130,17 @@ class TestResetMarkerClaim(IsolatedAsyncioTestCase):
                 return False
         self.fail("probe reply never arrived")
 
+    async def _saw_complete_toast(self) -> bool:
+        """Connect, outwait the (shrunk) toast delay, then probe.
+
+        The toast, when scheduled, is broadcast to every connection
+        present 0.1 s after startup; a ``activeTasksQuery`` probe sent
+        well after that bounds the read loop.
+        """
+        reader, writer = await self._connect()
+        await asyncio.sleep(0.6)
+        return await self._toast_before_probe_reply(reader, writer)
+
     def _url_dir_entries(self) -> list[str]:
         """The directory's entries besides the URL file and its publication lock."""
         url_file = self.url_dir / "remote-url.json"
@@ -125,9 +148,20 @@ class TestResetMarkerClaim(IsolatedAsyncioTestCase):
         return sorted(p.name for p in self.url_dir.iterdir() if p.name not in own)
 
     async def test_valid_marker_is_claimed_once_and_announced(self) -> None:
+        # The toast goes only to the connections present when its delay
+        # expires, and no client can connect before the daemon that
+        # consumes the marker at startup is up: the handshake (0.09 s
+        # at best on Windows, 2 s on a loaded machine) lost that race
+        # against the 0.1 s delay.  So the client connects first and
+        # the consumer is then run directly, as in
+        # ``test_unclaimable_marker_is_not_announced``.
+        server = await self._start()
+        reader, writer = await self._connect()
+        self.assertFalse(await self._toast_before_probe_reply(reader, writer))
         self.flag_path.write_text(_VALID_MARKER, encoding="utf-8")
-        await self._start()
-        self.assertTrue(await self._saw_complete_toast())
+        server._maybe_schedule_server_reset_complete()
+        await asyncio.sleep(0.6)
+        self.assertTrue(await self._toast_before_probe_reply(reader, writer))
         # Marker consumed; no claimed-copy residue either.
         self.assertEqual(self._url_dir_entries(), [])
 

@@ -17,7 +17,12 @@ machine (:meth:`RemoteViews.bind`, told by
 carries no terminal or page and no tab is bound to the machine any
 more (or when this daemon stops), over which the commands are
 forwarded and the machine's terminal and browser events are relayed
-to this daemon's clients.  A tab's binding keeps the stream because
+to this daemon's clients.  A tab on its way to the machine keeps the
+stream as a bound one does (:meth:`RemoteViews.expect`): a page that
+switches between two chats of one machine binds a new tab and closes
+the one it left, and the stream closed in between was connected
+again, a handshake and a login the chat's first frame waited for.
+A tab's binding keeps the stream because
 the agent of a task running on the machine may call for the user
 (``show_browser``, a sign-in hand-off): the page it opens is
 announced, focused, to every client of the machine's daemon, and the
@@ -426,6 +431,11 @@ class RemoteViews:
         self._streams: dict[str, RemoteViewStream] = {}
         # By chat tab id, the machine the tab is bound to.
         self._bound: dict[str, str] = {}
+        # The machine of every bind on its way (:meth:`expect`), once
+        # per bind.  Under a lock of its own, never held across I/O:
+        # the event loop takes it.
+        self._expected: list[str] = []
+        self._expected_lock = threading.Lock()
         # Set by close_all: no stream is registered (or opened) from then on.
         self._closing = False
         self._lock = threading.Lock()
@@ -445,6 +455,32 @@ class RemoteViews:
             self._bound.pop(tab_id, None)
             if machine_name:
                 self._bound[tab_id] = machine_name
+
+    def expect(self, machine_name: str) -> None:
+        """Note that a chat tab is about to be bound to *machine_name*.
+
+        Called on the event loop when the daemon takes a command that
+        binds its tab, before it takes the connection's next one.  The
+        machine's stream stays open from here as for a bound tab: the
+        page that sent the command closes the tab it left right after
+        it, and when that tab was the last one bound to the machine
+        the stream closed with it, before the new tab was registered.
+        The caller drops the note with :meth:`settled` once the
+        command is done.
+        """
+        with self._expected_lock:
+            self._expected.append(machine_name)
+
+    def settled(self, machine_name: str) -> None:
+        """Drop one note of :meth:`expect`, on the event loop.
+
+        The bind registered its tab (which keeps the stream from now
+        on), was refused or stood down.  The caller then calls
+        :meth:`release`, off the event loop: a stream the note alone
+        kept is closed when idle.
+        """
+        with self._expected_lock:
+            self._expected.remove(machine_name)
 
     def warm(self, machine_name: str) -> threading.Thread:
         """Start opening the stream of *machine_name* in the background; return the thread.
@@ -499,7 +535,10 @@ class RemoteViews:
         self.close_if_idle(stream)
 
     def release(self, machine_name: str) -> None:
-        """Close the stream of *machine_name* once no tab is bound to it and it is idle."""
+        """Close the stream of *machine_name* once it is idle and no tab is bound to the machine.
+
+        A tab on its way to the machine keeps it too: see :meth:`close_if_idle`.
+        """
         with self._lock:
             stream = self._streams.get(machine_name)
         if stream is not None:
@@ -695,10 +734,15 @@ class RemoteViews:
     def close_if_idle(self, stream: RemoteViewStream) -> None:
         """Close *stream* once it carries no terminal, page or pending open.
 
-        A stream whose machine a chat tab is bound to stays (see :meth:`bind`).
+        A stream whose machine a chat tab is bound to stays (see
+        :meth:`bind`), and so does one a tab is on its way to (see
+        :meth:`expect`).
         """
+        name = stream.machine.name
         with self._lock:
-            if stream.machine.name in self._bound.values():
+            with self._expected_lock:
+                expected = name in self._expected
+            if expected or name in self._bound.values():
                 return
             with stream.lock:
                 if stream.retired or stream.terminals or stream.browser_tabs or stream.openers:

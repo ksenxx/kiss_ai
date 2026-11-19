@@ -48,7 +48,12 @@ from kiss.agents.sorcar.agent_dispatch import (
 )
 from kiss.agents.sorcar.cron_agent import CHAT_TASK_HEADING
 from kiss.agents.sorcar.daemon_client import TaskResult
-from kiss.agents.sorcar.fanout_guard import named_pieces, same_model_conflict, undivided_work
+from kiss.agents.sorcar.fanout_guard import (
+    is_scratch_piece,
+    named_pieces,
+    same_model_conflict,
+    undivided_work,
+)
 from kiss.core import config as config_module
 from kiss.core.models.model_families import family_of, other_family_model
 from kiss.core.models.model_info import delete_custom_model, save_custom_model
@@ -775,12 +780,20 @@ def test_undivided_work_reports_every_overlap_and_ignores_shared_instructions() 
     # tmp/ paths never count, however many tasks name them
     assert undivided_work(["fix a.py, notes in tmp/x/notes.md", "fix b.py; log to ./tmp/x/log"
                            ", see /w/tmp/x/notes.md"]) == ""
-    # nor do paths in a sub-agent's private folder, wherever the temp directory is
-    plan = "/var/folders/T/kiss-sub-ab12cd34/plan.md"
-    assert undivided_work([f"fix a.py as {plan} says", f"fix b.py as {plan} says"]) == ""
+    # nor do paths in the agents' temp directory, wherever the system keeps its own: a task's
+    # scratch dir, a sub-agent's private folder in a container, the kiss-tmp-<uid> of a shared one
+    for plan in ("/var/folders/T/kiss-tmp/0123abcd/notes.md",
+                 "/tmp/kiss-tmp/kiss-sub-ab12cd34/plan.md", "kiss-tmp-501/t/plan.md"):
+        assert is_scratch_piece(plan)
+        assert undivided_work([f"fix a.py as {plan} says", f"fix b.py as {plan} says"]) == ""
+    # ...while a file of the work tree merely named so is a piece of work
+    named = "docs/kiss-tmp-notes.md"
+    assert not is_scratch_piece(named)
+    assert undivided_work([f"fix a.py and {named}", f"fix b.py and {named}"]) == (
+        f"tasks 1 and 2 of the fan-out both name {named}")
     assert undivided_work(["work in tmp/x/", "work in tmp/y/"]) == (
         "task 1 of the fan-out names no file, directory, module, URL or `command` of its own "
-        "(pieces every task names, and tmp/ paths, do not count)")
+        "(pieces every task names, and scratch files, do not count)")
     # a directory both tasks name is no overlap when each names its own file under it
     assert undivided_work(["tests in src/kiss/webapp/test/: fix src/kiss/webapp/test/a.js",
                            "tests in src/kiss/webapp/test/: fix src/kiss/webapp/test/b.js"]) == ""

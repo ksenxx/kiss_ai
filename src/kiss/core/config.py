@@ -464,21 +464,9 @@ class Config(BaseModel):
             "(can also be set via ANTHROPIC_WORKSPACE_ID env var)"
         ),
     )
-    TOGETHER_API_KEY: str = Field(
-        default_factory=lambda: os.getenv("TOGETHER_API_KEY", ""),
-        description="Together API key (can also be set via TOGETHER_API_KEY env var)",
-    )
     OPENROUTER_API_KEY: str = Field(
         default_factory=lambda: os.getenv("OPENROUTER_API_KEY", ""),
         description="OpenRouter API key (can also be set via OPENROUTER_API_KEY env var)",
-    )
-    ZAI_API_KEY: str = Field(
-        default_factory=lambda: os.getenv("ZAI_API_KEY", ""),
-        description="Z.AI (Zhipu/GLM) API key (can also be set via ZAI_API_KEY env var)",
-    )
-    MOONSHOT_API_KEY: str = Field(
-        default_factory=lambda: os.getenv("MOONSHOT_API_KEY", ""),
-        description="Moonshot AI (Kimi) API key (can also be set via MOONSHOT_API_KEY env var)",
     )
     # Amazon Bedrock (``bedrock/<id>`` Claude models): a bearer token OR
     # an access key pair; the region selects the Bedrock endpoint.
@@ -711,7 +699,7 @@ class Config(BaseModel):
         description=(
             "Default budget of characters one Bash / whole-file Read / memory_list "
             "result keeps in the conversation (head and tail are kept; the rest is "
-            "spilled to tmp/tool-out/) (KISS_TOOL_OUTPUT_DEFAULT_CHARS)."
+            "spilled to tool-out/ in the scratch dir) (KISS_TOOL_OUTPUT_DEFAULT_CHARS)."
         ),
     )
     bash_detach_seconds: int = Field(

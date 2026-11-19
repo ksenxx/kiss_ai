@@ -93,6 +93,8 @@ def test_sea_methods_follow_the_contract_and_name_the_models_literally() -> None
     # Same working rules as the bestrouter, word for word.
     rules = protocol.split("Working rules:", 1)[1]
     assert rules == bestrouter_sea.SYSTEM_PROMPT.split("Working rules:", 1)[1]
+    # Gathered facts go to the scratch dir, in the agents' temp directory, not to ``tmp/``.
+    assert "Save gathered facts to `<scratch dir>/` files before composing." in flat
     description = sea.description()
     assert orbestrouter_sea.PRIMARY_MODEL in description
     assert orbestrouter_sea.REVIEW_MODEL in description

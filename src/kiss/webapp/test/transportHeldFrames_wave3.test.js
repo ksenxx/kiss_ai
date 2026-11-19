@@ -158,6 +158,7 @@ const REPLAYABLE = [
   'openFile',
   'checkPaths',
   'getReplayImage',
+  'getTaskEvents',
   'getCronJobs',
   'getMachines',
   'getMachineWorkDirs',

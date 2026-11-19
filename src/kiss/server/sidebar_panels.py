@@ -686,6 +686,30 @@ def machine_replay_image_reply(name: str, cmd: dict[str, Any]) -> dict[str, Any]
     return _machine_reply(name, cmd, "replayImage", refused, lane="panels")
 
 
+def machine_task_events_reply(name: str, cmd: dict[str, Any]) -> dict[str, Any]:
+    """Forward a chat page's ``getTaskEvents`` *cmd* to registered machine *name*.
+
+    A tab bound to a machine shows the machine's transcript, which a
+    page that loads transcripts in pieces is sent without the panels
+    it shows folded; the machine's daemon holds their events, so it
+    answers the page's fetch of a piece.  The command goes on an
+    ``events`` link lane of its own: the reader is waiting for the
+    panel they just opened, and on the ``panels`` lane the fetch waited
+    for the subpanels' polls, which a click on a machine's chat sends
+    again (its app probe alone takes most of a second).  The lane's
+    socket is opened by the first fetch, which waits for its handshake
+    and login, and is kept from then on.
+
+    Returns:
+        The machine's ``taskEventsPiece``, or one with ``error`` (the
+        page lets the reader try again) carrying the command's
+        ``taskId``, ``seg`` and ``token`` when the machine is not
+        registered or unreachable.
+    """
+    refused: dict[str, Any] = {k: cmd[k] for k in ("taskId", "seg", "token") if k in cmd}
+    return _machine_reply(name, cmd, "taskEventsPiece", refused, lane="events")
+
+
 def machine_share_tasks_reply(name: str, cmd: dict[str, Any]) -> dict[str, Any]:
     """Forward a chat page's ``shareChatTasks`` *cmd* to registered machine *name*.
 
@@ -832,6 +856,7 @@ MACHINE_FORWARDERS: dict[str, Callable[[str, dict[str, Any]], dict[str, Any] | N
     **dict.fromkeys(MACHINE_PANEL_REPLIES, machine_panel_reply),
     "getTaskUpdate": machine_task_update_reply,
     "getReplayImage": machine_replay_image_reply,
+    "getTaskEvents": machine_task_events_reply,
     "shareChatTasks": machine_share_tasks_reply,
     "getFiles": machine_files_reply,
     "recordFileUsage": machine_file_usage,
@@ -843,6 +868,23 @@ MACHINE_FORWARDERS: dict[str, Callable[[str, dict[str, Any]], dict[str, Any] | N
 
 A forwarder returning ``None`` (``recordFileUsage``, a delivered
 ``selectModel``) sends no reply."""
+
+MACHINE_READ_QUEUES: dict[str, str] = {
+    **dict.fromkeys(
+        ("listDir", "gitStatus", "gitLog", "gitShow", "openFile", "checkPaths"), "workspace",
+    ),
+    "getReplayImage": "images",
+    "getTaskEvents": "events",
+}
+"""The reads a registered machine answers in the background, by the queue each waits in.
+
+A page that opens a machine's chat sends dozens of them (a
+``checkPaths`` per batch of file links, the Source Control view's
+status and log), each a round trip to the machine.  They change
+nothing there, so none of the sender's later commands waits for them;
+those sharing a queue are answered in the order asked, per connection
+and machine: the Explorer and the Source Control view as before, while
+a folded panel's events and a picture wait for neither."""
 
 MACHINE_COMMIT_TIMEOUT = 900.0
 """Seconds a machine gets to stage, write a commit message with an LLM and commit.

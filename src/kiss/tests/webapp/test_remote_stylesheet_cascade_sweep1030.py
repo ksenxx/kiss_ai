@@ -9,17 +9,20 @@ These tests render the REAL page returned by
 ``main.css``, ``remote-codex.css``, the inlined palettes and
 ``brand.css``) in headless Chromium and read what the browser computes:
 
-* The Machine filter pill ships ``hidden`` (chat.html) and stays hidden
-  until a remote machine is registered; the pill's own ``display`` must
-  not undo the attribute.
+* The Machine filter field ships ``hidden`` (chat.html) and stays
+  hidden until a remote machine is registered; the field's own
+  ``display`` must not undo the attribute.
 * The sign-in window's box wears the same frame as the password dialog
   and the server-reset dialog.
-* History row buttons take the theme foreground, a favourite the
-  theme's favourite colour and a copied button the theme's ok colour.
+* The icons of a history row's menu read in the theme's secondary text
+  step at rest (the ids line's copy button in its faintest one) and in
+  its foreground under the pointer, a favourite in the theme's
+  favourite colour and a copied button in the theme's ok colour.
 * The settings dialog carries the theme's widget-border hairline and
   the large elevation.
-* The Schedule / Machines inline form's Save button reads in the accent,
-  not in the delete confirmation's red it shares a class with.
+* The Schedule / Machines inline form's Save button is the form's
+  primary button, not the red button of the delete confirmation it
+  shares a class with.
 * The elements whose classes meet in main.js (a promptlet row, the
   prompt toast's field, a strip tab, the Stop button, the folder
   picker's buttons, a history row's ids copy button) render as the
@@ -78,34 +81,50 @@ _FRAME_JS = """
 """
 
 # A history row as renderHistory builds it (a `.sidebar-item
-# .running-item` with its action buttons and the ids line), plus probes
-# that resolve the palette names in the same place.
-_ROW_COLOURS_JS = """
+# .running-item` with its "…" button, that button's menu of action
+# buttons, each holding its 12px icon, and the ids line), its menu
+# open.
+_ROW_BUILD_JS = """
 () => {
-  const list = document.getElementById('history-list');
+  const icon = '<svg width="12" height="12"></svg>';
   const row = document.createElement('div');
+  row.id = 'probe-row';
   row.className = 'sidebar-item running-item';
   row.innerHTML =
-    '<div class="sidebar-item-actions">' +
-    '<button class="sidebar-item-favorite"></button>' +
-    '<button class="sidebar-item-favorite favorited"></button>' +
-    '<button class="sidebar-item-copy"></button>' +
-    '<button class="sidebar-item-copy copied"></button>' +
-    '<button class="sidebar-item-collapse"></button>' +
+    '<button class="sidebar-item-more">' + icon + '</button>' +
+    '<div class="sidebar-item-actions" popover="auto">' +
+    '<button class="sidebar-item-favorite">' + icon + '</button>' +
+    '<button class="sidebar-item-favorite favorited">' + icon + '</button>' +
+    '<button class="sidebar-item-copy">' + icon + '</button>' +
+    '<button class="sidebar-item-copy copied">' + icon + '</button>' +
+    '<button class="sidebar-item-collapse">' + icon + '</button>' +
     '</div>' +
     '<div class="running-item-info"><span class="running-item-ids">ids' +
-    '<button class="ids-copy-btn"></button>' +
-    '<button class="ids-copy-btn copied"></button></span></div>';
-  list.appendChild(row);
+    '<button class="ids-copy-btn">' + icon + '</button>' +
+    '<button class="ids-copy-btn copied">' + icon + '</button></span></div>';
+  document.getElementById('history-list').appendChild(row);
+  row.querySelector('.sidebar-item-actions').showPopover();
+}
+"""
+
+# The colours of that row's buttons, next to the palette names resolved
+# in the same place.
+_ROW_COLOURS_JS = """
+() => {
+  const row = document.getElementById('probe-row');
   const probe = (value) => {
     const el = document.createElement('span');
     el.style.color = value;
     row.appendChild(el);
-    return getComputedStyle(el).color;
+    const colour = getComputedStyle(el).color;
+    el.remove();
+    return colour;
   };
   const colour = (sel) => getComputedStyle(row.querySelector(sel)).color;
-  const out = {
+  return {
     fg: probe('var(--fg)'),
+    dim: probe('var(--dim)'),
+    faint: probe('var(--faint)'),
     favorite: probe('var(--favorite)'),
     ok: probe('var(--status-ok)'),
     favoriteBtn: colour('.sidebar-item-favorite:not(.favorited)'),
@@ -116,8 +135,6 @@ _ROW_COLOURS_JS = """
     idsCopyBtn: colour('.ids-copy-btn:not(.copied)'),
     idsCopied: colour('.ids-copy-btn.copied'),
   };
-  row.remove();
-  return out;
 }
 """
 
@@ -195,37 +212,37 @@ def page(browser: Browser, remote_url: str) -> Iterator[Page]:
         context.close()
 
 
-def _machine_pill(page: Page) -> dict[str, Any]:
-    """The Machine pill's ``hidden`` flag, display and box."""
-    pill: dict[str, Any] = page.evaluate(
+def _machine_field(page: Page) -> dict[str, Any]:
+    """The Machine filter field's ``hidden`` flag, display and box."""
+    field: dict[str, Any] = page.evaluate(
         """() => {
-          const pill = document.getElementById('hf-machine').parentElement;
-          const r = pill.getBoundingClientRect();
-          return {hidden: pill.hidden, display: getComputedStyle(pill).display,
+          const field = document.getElementById('hf-machine').parentElement;
+          const r = field.getBoundingClientRect();
+          return {hidden: field.hidden, display: getComputedStyle(field).display,
                   width: r.width, height: r.height};
         }"""
     )
-    return pill
+    return field
 
 
 def test_machine_filter_stays_hidden_until_a_machine_is_registered(page: Page) -> None:
     """With the Filters drawer open and no remote machine registered,
-    the Machine pill takes no room; once main.js clears ``hidden`` (a
-    machine was registered) it lays out like the SEA pill beside it."""
+    the Machine field takes no room; once main.js clears ``hidden`` (a
+    machine was registered) it lays out like the SEA field beside it."""
     page.click("#history-filters-toggle")
     page.wait_for_selector("#history-filters-body", state="visible")
     sea = page.locator("#hf-sea").locator("..").bounding_box()
     assert sea and sea["width"] > 0 and sea["height"] > 0, sea
 
-    pill = _machine_pill(page)
-    assert pill["hidden"] is True, pill
-    assert pill["display"] == "none", pill
-    assert pill["width"] == 0 and pill["height"] == 0, pill
+    field = _machine_field(page)
+    assert field["hidden"] is True, field
+    assert field["display"] == "none", field
+    assert field["width"] == 0 and field["height"] == 0, field
 
     page.evaluate("() => { document.getElementById('hf-machine').parentElement.hidden = false; }")
-    pill = _machine_pill(page)
-    assert pill["display"] != "none", pill
-    assert pill["width"] > 0 and pill["height"] == pytest.approx(sea["height"]), pill
+    field = _machine_field(page)
+    assert field["display"] != "none", field
+    assert field["width"] > 0 and field["height"] == pytest.approx(sea["height"]), field
 
 
 @pytest.mark.parametrize("theme", ["light", "dark"])
@@ -245,17 +262,24 @@ def test_sign_in_box_matches_the_other_dialogs(page: Page, theme: str) -> None:
 
 @pytest.mark.parametrize("theme", ["light", "dark"])
 def test_history_row_buttons_use_the_theme_colours(page: Page, theme: str) -> None:
-    """History row buttons read in the theme foreground; a favourite
+    """The icons of a history row's menu read in the theme's secondary
+    text step at rest and the ids line's ghost copy button in its
+    faintest one, each in the foreground under the pointer; a favourite
     turns the favourite colour and a copied button the ok colour."""
-    if theme == "dark":
-        page.evaluate("() => document.body.classList.remove('light-theme')")
+    _themed(page, theme)
+    page.evaluate(_ROW_BUILD_JS)
     got = page.evaluate(_ROW_COLOURS_JS)
-    for key in ("favoriteBtn", "copyBtn", "collapseBtn", "idsCopyBtn"):
-        assert got[key] == got["fg"], (key, got)
+    for key in ("favoriteBtn", "copyBtn", "collapseBtn"):
+        assert got[key] == got["dim"], (key, got)
+    assert got["idsCopyBtn"] == got["faint"], got
     assert got["favorited"] == got["favorite"], got
     assert got["copied"] == got["ok"], got
     assert got["idsCopied"] == got["ok"], got
-    assert len({got["fg"], got["favorite"], got["ok"]}) == 3, got
+    assert len({got["fg"], got["dim"], got["faint"], got["favorite"], got["ok"]}) == 5, got
+    page.hover("#probe-row .sidebar-item-copy:not(.copied)")
+    hovered = page.evaluate(_ROW_COLOURS_JS)
+    assert hovered["copyBtn"] == got["fg"], hovered
+    assert hovered["favoriteBtn"] == got["dim"], hovered
 
 
 @pytest.mark.parametrize("theme", ["light", "dark"])
@@ -306,32 +330,47 @@ _INLINE_FORM_JS = """
 
 
 @pytest.mark.parametrize("theme", ["light", "dark"])
-def test_inline_form_save_takes_the_accent_not_the_delete_red(page: Page, theme: str) -> None:
+def test_inline_form_save_is_the_primary_button_not_the_delete_red(
+    page: Page, theme: str
+) -> None:
     """The inline form's Save button shares the delete confirmation's
-    class for its shape and hover background, but it is not
-    destructive: it reads in the accent and its hover tints the border
-    the accent, while "Yes, delete" keeps the failure red."""
-    if theme == "dark":
-        page.evaluate("() => document.body.classList.remove('light-theme')")
-    page.emulate_media(reduced_motion="reduce")  # hover colours settle at once
+    class for its shape, but it is not destructive: it is the form's
+    primary button (the primary fill and text, the primary hover fill
+    under the pointer), while "Yes, delete" keeps the error red on the
+    raised surface and takes a faint red wash under the pointer."""
+    _themed(page, theme)  # hover colours settle at once
     page.evaluate(_INLINE_FORM_JS)
-    accent = page.evaluate(_PALETTE_JS, "var(--accent)")
-    fail = page.evaluate(_PALETTE_JS, "var(--status-fail)")
-    assert accent != fail
-    assert page.evaluate(_BUTTON_JS, "#probe-save")["color"] == accent
-    assert page.evaluate(_BUTTON_JS, "#probe-delete")["color"] == fail
+    error = _colour(page, "var(--error)")
+    primary = {
+        "color": _colour(page, "var(--primary-fg)"),
+        "border": "rgba(0, 0, 0, 0)",
+        "background": _colour(page, "var(--primary-bg)"),
+    }
+    assert primary["color"] != error
+    assert page.evaluate(_BUTTON_JS, "#probe-save") == primary
+    destructive = {
+        "color": error,
+        "border": _colour(page, "color-mix(in srgb, var(--error) 45%, transparent)"),
+        "background": _colour(page, "var(--surface2)"),
+    }
+    assert page.evaluate(_BUTTON_JS, "#probe-delete") == destructive
     page.hover("#probe-save")
     save = page.evaluate(_BUTTON_JS, "#probe-save")
-    assert save["border"] == accent, save
+    assert save == dict(primary, background=_colour(page, "var(--primary-hover-bg)")), save
     page.hover("#probe-delete")
     delete = page.evaluate(_BUTTON_JS, "#probe-delete")
-    assert delete["border"] == fail, delete
-    assert save["background"] == delete["background"], (save, delete)
-    # Cancel's hover tints its border the ok colour, and a spent
-    # (disabled) delete does not react to the pointer.
+    wash = _colour(page, "color-mix(in srgb, var(--error) 12%, transparent)")
+    assert delete == dict(destructive, background=wash), delete
+    # Cancel is the secondary button: its hover takes the neutral fill
+    # and the stronger frame; a spent (disabled) delete does not react
+    # to the pointer.
     page.hover(".sidebar-confirm-no")
     cancel = page.evaluate(_BUTTON_JS, ".sidebar-confirm-no")
-    assert cancel["border"] == page.evaluate(_PALETTE_JS, "var(--status-ok)"), cancel
+    assert cancel == {
+        "color": _colour(page, "var(--fg)"),
+        "border": _colour(page, "var(--border-hover)"),
+        "background": _colour(page, "var(--hover)"),
+    }, cancel
     page.evaluate("() => { document.getElementById('probe-delete').disabled = true; }")
     spent = page.evaluate(_BUTTON_JS, "#probe-delete")
     page.hover("#probe-delete", force=True)
@@ -342,25 +381,25 @@ def test_inline_form_save_takes_the_accent_not_the_delete_red(page: Page, theme:
 # (`sidebar-item tricks-item`, its editor `editing`), the prompt toast's
 # field (`kiss-notification-input explorer-input`), a tab of the strip,
 # the Stop button, the folder picker's buttons and a history row's ids
-# copy button next to its sidebar copy button.
+# copy button next to a promptlet row's sidebar copy button.
 _MET_CLASSES_JS = """
 () => {
   const wrap = document.createElement('div');
   wrap.innerHTML =
     '<div id="probe-trick" class="sidebar-item tricks-item">' +
-    '<span class="sidebar-item-text">a promptlet</span></div>' +
+    '<span class="sidebar-item-text">a promptlet</span>' +
+    '<button id="probe-copy" class="sidebar-item-copy"></button></div>' +
     '<div id="probe-trick-edit" class="sidebar-item tricks-item editing"></div>' +
     '<div class="kiss-notification-field">' +
     '<input id="probe-prompt" class="kiss-notification-input explorer-input"></div>' +
     '<div class="folder-picker-actions">' +
     '<button id="probe-cancel" class="folder-picker-cancel">Cancel</button>' +
     '<button id="probe-select" class="folder-picker-select">Select Folder</button>' +
-    '</div><div class="sidebar-item running-item"><div class="sidebar-item-actions">' +
-    '<button id="probe-copy" class="sidebar-item-copy"></button></div>' +
+    '</div><div class="sidebar-item running-item">' +
     '<div class="running-item-info"><span class="running-item-ids">ids' +
     '<button id="probe-ids" class="ids-copy-btn"></button></span></div></div>' +
-    '<span id="probe-tint" style="background: color-mix(in srgb, var(--accent) 25%, ' +
-    'transparent)"></span><span id="probe-bg" style="background: var(--bg)"></span>';
+    '<span id="probe-primary" style="background: var(--primary-bg)"></span>' +
+    '<span id="probe-raised" style="background: var(--surface2)"></span>';
   document.getElementById('history-list').appendChild(wrap);
   const tab = document.createElement('button');
   tab.className = 'chat-tab';
@@ -378,8 +417,8 @@ _MET_CLASSES_JS = """
     stop: cs('#stop-btn').borderTopStyle,
     select: pick('#probe-select', ['borderTopColor', 'backgroundColor', 'padding']),
     cancel: pick('#probe-cancel', ['borderTopColor', 'backgroundColor', 'padding']),
-    tint: cs('#probe-tint').backgroundColor,
-    bg: cs('#probe-bg').backgroundColor,
+    primary: cs('#probe-primary').backgroundColor,
+    raised: cs('#probe-raised').backgroundColor,
     ids: pick('#probe-ids', ['display', 'verticalAlign', 'padding', 'margin']),
     idsShared: pick('#probe-ids', shared),
     copyShared: pick('#probe-copy', shared),
@@ -396,25 +435,26 @@ def test_met_classes_render_as_the_winning_rules_say(page: Page) -> None:
     rule wins: a promptlet row is laid out as a sidebar item, the prompt
     toast's field as an explorer input, the strip's tabs as the chat
     page's, the Stop button has no border, the folder picker's Select
-    button takes the accent frame and its Cancel the plain one, and the
-    ids copy button is the sidebar copy button inline."""
+    button takes the primary fill and its Cancel the raised secondary
+    one, and the ids copy button is the sidebar copy button inline."""
     got = page.evaluate(_MET_CLASSES_JS)
-    accent = page.evaluate(_PALETTE_JS, "var(--accent)")
-    border = page.evaluate(_PALETTE_JS, "var(--border)")
+    frame = page.evaluate(_PALETTE_JS, "var(--border-input)")
     assert got["trick"] == {
         "padding": "6px 10px 3.5px", "cursor": "pointer", "borderRadius": "6px",
         "whiteSpace": "nowrap", "gap": "6px",
     }, got
     assert got["trickEditing"] == "default", got
     assert got["prompt"] == "20px", got
-    assert got["tab"] == "2px 10px", got
+    assert got["tab"] == "2px 8px", got
     assert got["stop"] == "none", got
     assert got["select"] == {
-        "borderTopColor": accent, "backgroundColor": got["tint"], "padding": "4px 12px",
+        "borderTopColor": "rgba(0, 0, 0, 0)", "backgroundColor": got["primary"],
+        "padding": "6px 12px",
     }, got
     assert got["cancel"] == {
-        "borderTopColor": border, "backgroundColor": got["bg"], "padding": "4px 12px",
+        "borderTopColor": frame, "backgroundColor": got["raised"], "padding": "6px 12px",
     }, got
+    assert got["primary"] != got["raised"], got
     assert got["ids"] == {
         "display": "inline-flex", "verticalAlign": "middle", "padding": "0px 2px",
         "margin": "0px 0px 0px 4px",
@@ -623,19 +663,24 @@ def test_voice_button_shows_recording_and_transcribing(page: Page, theme: str) -
 
 @pytest.mark.parametrize("theme", ["light", "dark"])
 def test_history_view_switch_fills_on_hover_and_when_selected(page: Page, theme: str) -> None:
-    """The flat-list switch sits on the field surface; the pointer
-    washes it and the selected (flat list) state fills it with the
-    accent tint, pointer or not."""
+    """The flat-list switch is a ghost icon button: no fill at rest,
+    the icon-button wash under the pointer, and in the selected (flat
+    list) state the selection fill under the strongest text, pointer
+    or not."""
     _themed(page, theme)
     switch = "#history-view-toggle"
-    assert page.evaluate(_BUTTON_JS, switch)["background"] == _colour(page, "var(--surface2)")
+    rest = page.evaluate(_BUTTON_JS, switch)
+    assert rest["background"] == "rgba(0, 0, 0, 0)", rest
+    assert rest["color"] == _colour(page, "var(--dim)"), rest
     page.hover(switch)
-    wash = _colour(page, "color-mix(in srgb, var(--fg) 10%, transparent)")
-    assert page.evaluate(_BUTTON_JS, switch)["background"] == wash
+    hovered = page.evaluate(_BUTTON_JS, switch)
+    assert hovered["background"] == _colour(page, "var(--hover-strong)"), hovered
+    assert hovered["color"] == _colour(page, "var(--fg)"), hovered
     page.evaluate(_SET_CLASS_JS, [switch, "active", True])
-    accent = _colour(page, "var(--accent)")
-    tint = _colour(page, "color-mix(in srgb, var(--accent) 15%, transparent)")
-    selected = {"color": accent, "border": accent, "background": tint}
+    strong = _colour(page, "var(--fg-strong)")
+    # The switch has no border, so its border colour is its text colour.
+    selected = {"color": strong, "border": strong, "background": _colour(page, "var(--selected)")}
+    assert selected["background"] != hovered["background"], (hovered, selected)
     assert page.evaluate(_BUTTON_JS, switch) == selected
     page.mouse.move(0, 0)
     assert page.evaluate(_BUTTON_JS, switch) == selected
@@ -644,7 +689,7 @@ def test_history_view_switch_fills_on_hover_and_when_selected(page: Page, theme:
 @pytest.mark.parametrize("theme", ["light", "dark"])
 def test_stop_button_takes_the_send_hover_fill(page: Page, theme: str) -> None:
     """The Stop button (shown while a task runs) is the Send button's
-    filled circle, and under the pointer it darkens like Send."""
+    filled circle, and under the pointer it takes Send's hover fill."""
     _themed(page, theme)
     page.evaluate("() => { document.getElementById('stop-btn').style.display = 'flex'; }")
     rest = page.evaluate(_BUTTON_JS, "#stop-btn")
@@ -656,13 +701,14 @@ def test_stop_button_takes_the_send_hover_fill(page: Page, theme: str) -> None:
 
 @pytest.mark.parametrize("theme", ["light", "dark"])
 def test_focused_settings_field_takes_the_accent_border(page: Page, theme: str) -> None:
-    """A settings field is framed by the theme's border; focused, the
-    frame turns the accent like its outline."""
+    """A settings field is framed by the theme's input border; focused,
+    the frame turns the accent like its outline."""
     _themed(page, theme)
     page.evaluate(_SET_CLASS_JS, ["#settings-panel", "open", True])
     page.click("#custom-models-toggle")  # the textarea's section starts folded
     for field in ("#cfg-max-budget", "#cfg-voice-auto-submit", "#cfg-custom-headers"):
-        assert page.evaluate(_BUTTON_JS, field)["border"] == _colour(page, "var(--border)"), field
+        frame = _colour(page, "var(--border-input)")
+        assert page.evaluate(_BUTTON_JS, field)["border"] == frame, field
         page.focus(field)
         assert page.evaluate(_BUTTON_JS, field)["border"] == _colour(page, "var(--accent)"), field
 

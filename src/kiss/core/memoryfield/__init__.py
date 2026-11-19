@@ -6,7 +6,9 @@
 
 A memory is a flat directory of short Markdown pages with YAML frontmatter
 (:mod:`kiss.core.memoryfield.pages`) plus one regenerable SQLite index of
-embeddings (:mod:`kiss.core.memoryfield.index`). :class:`MemoryTools` turns
+embeddings (:mod:`kiss.core.memoryfield.index`): one per page and one per
+statement of a page (:mod:`kiss.core.memoryfield.statements`), by which
+search ranks the pages. :class:`MemoryTools` turns
 that into seven agent tools; :mod:`kiss.core.memoryfield.evaluate` measures
 recall against real past Sorcar tasks.
 """

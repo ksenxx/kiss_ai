@@ -78,10 +78,9 @@ MAX_CONTEXT_CHARS = 60_000
 # Only the newest progress-log entries matter for a question about
 # the current state of the task.
 _PROGRESS_LOG_CHARS = 8_000
-# File names of a task's progress log: a top-level task keeps
-# ``tmp/PROGRESS.md`` in its work dir, a sub-agent ``PROGRESS.md`` in its
-# scratch dir; ``PROGRESS.md`` / ``PROGRESS_LOG.md`` at the root are
-# older conventions.
+# File names of a task's progress log: every task keeps ``PROGRESS.md`` in
+# its scratch dir; ``tmp/PROGRESS.md`` in the work dir and ``PROGRESS.md``
+# / ``PROGRESS_LOG.md`` at its root are older conventions.
 _PROGRESS_LOG_NAMES = frozenset({"PROGRESS.md", "PROGRESS_LOG.md"})
 # What a container's batch ``Edit`` answers when it stopped part-way
 # (:meth:`~kiss.agents.sorcar.docker_tools.DockerTools.Edit` writes edit by

@@ -11,7 +11,10 @@
 // loops (and the secret-input listeners) from one shared constant; this
 // test pins the behavior the constant guarantees — every key the daemon
 // can send is round-tripped: displayed on configData, editable, and
-// serialized back into saveConfig.
+// serialized back into saveConfig.  It also pins what the API Keys
+// subpanel lists, in order, and that the keys of the providers the
+// product no longer routes (Together, Z.AI, Moonshot) have no box and
+// are never saved.
 
 'use strict';
 
@@ -26,10 +29,7 @@ const KEYS = [
   'OPENAI_API_KEY',
   'ANTHROPIC_API_KEY',
   'ANTHROPIC_WORKSPACE_ID',
-  'TOGETHER_API_KEY',
   'OPENROUTER_API_KEY',
-  'ZAI_API_KEY',
-  'MOONSHOT_API_KEY',
   'AWS_BEARER_TOKEN_BEDROCK',
   'AWS_ACCESS_KEY_ID',
   'AWS_SECRET_ACCESS_KEY',
@@ -39,13 +39,30 @@ const KEYS = [
   'CODEX_ACCESS_TOKEN',
 ];
 
+// Keys of providers the product routed once; a daemon older than their
+// removal (a registered machine's) may still send them.
+const RETIRED_KEYS = ['TOGETHER_API_KEY', 'ZAI_API_KEY', 'MOONSHOT_API_KEY'];
+
 function main() {
   const {win, posted} = makePage();
   openSettings(win);
 
+  // The API Keys subpanel: one labelled box per key, Gemini's before
+  // OpenRouter's.
+  const labels = Array.from(
+    win.document.querySelectorAll('#api-keys-body label.config-label'),
+  ).map(label => label.textContent.trim());
+  assert.deepStrictEqual(labels, [
+    'Anthropic API Key',
+    'Anthropic Workspace ID (identity-linked keys only)',
+    'OpenAI API Key',
+    'Gemini API Key',
+    'OpenRouter API Key',
+  ]);
+
   // Load path: every stored key populates its box.
   const stored = {};
-  for (const k of KEYS) stored[k] = 'sk-' + k.toLowerCase();
+  for (const k of KEYS.concat(RETIRED_KEYS)) stored[k] = 'sk-' + k.toLowerCase();
   send(win, {
     type: 'configData',
     config: {max_budget: 100},
@@ -69,6 +86,13 @@ function main() {
       `${k} reveal toggle presence`,
     );
   }
+  for (const k of RETIRED_KEYS) {
+    assert.strictEqual(
+      win.document.getElementById('cfg-key-' + k),
+      null,
+      `${k} must have no box`,
+    );
+  }
 
   // Save path: every edited key is serialized back.
   for (const k of KEYS) typeInto(win, 'cfg-key-' + k, 'new-' + k);
@@ -81,6 +105,9 @@ function main() {
       'new-' + k,
       `saveConfig must serialize ${k} (save-path inventory is missing it)`,
     );
+  }
+  for (const k of RETIRED_KEYS) {
+    assert.ok(!(k in msg.apiKeys), `saveConfig must not carry ${k}`);
   }
 
   console.log('audit0911_api_key_inventory_parity: OK');

@@ -9,6 +9,7 @@ import argparse
 import json
 import os
 import sqlite3
+import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -272,11 +273,19 @@ def test_run_evaluation_offline(tmp_path: Path) -> None:
             memory, probes, vector, hashed, keyword, families=task_families(tasks)
         )
         strict, _ = run_evaluation(memory, probes, vector, hashed, keyword)
-    assert set(results) == {"vector", "hashed", "bm25", "hybrid"}
+    assert set(results) == {"vector", "pages", "hashed", "bm25", "hybrid"}
     assert len(rows) == 4 and rows[0]["gold_title"] == tasks[0].title
     # The drive-cycle probe shares "drive cycle" with exactly one page.
     drive = rows[1]
     assert drive["rank_vector"] == 1 and drive["rank_bm25"] == 1 and drive["rank_hybrid"] == 1
+    # "pages" ranks the rows of the vector index by one vector per page: what an
+    # index without statement vectors returns for the same queries.
+    by_page = VectorIndex(memory, embed=hashed_embedding, model_code="v", statements=False)
+    assert [row["rank_pages"] for row in rows] == [
+        rank_of(probe.gold, [hit.name for hit in by_page.search(probe.query, k=5)])
+        for probe in probes
+    ]
+    assert drive["rank_pages"] == 1
     # The repeated "run all tests" pages are a family: strict rank may miss, family rank must hit.
     tests_row = rows[3]
     assert tests_row["family_rank_bm25"] == 1
@@ -311,7 +320,7 @@ def test_main_cli_offline(tmp_path: Path, capsys: pytest.CaptureFixture[str]) ->
     assert "Probes from source 'hand'" in printed
     data = json.loads(out.read_text())
     assert data["corpus_pages"] == 5 and data["pages_in_duplicate_families"] == 2
-    assert set(data["results"]) == {"vector", "hashed", "bm25", "hybrid"}
+    assert set(data["results"]) == {"vector", "pages", "hashed", "bm25", "hybrid"}
     assert len(data["probes"]) == 3
     assert (tmp_path / "memory" / f"{HASHED_EMBEDDING_MODEL_CODE}.sqlite3").exists()
 
@@ -333,6 +342,26 @@ def test_main_cli_offline(tmp_path: Path, capsys: pytest.CaptureFixture[str]) ->
     assert len(list((tmp_path / "memory").glob("*.md"))) == 2
     assert main(args) == 0
     assert json.loads(out.read_text())["corpus_pages"] == 5
+
+
+def test_main_cli_keeps_its_default_outputs_in_the_agents_temp_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without ``--memory-dir`` and ``--out`` the corpus and the report are in
+    ``<temp dir>/kiss-tmp/memoryfield-eval``, not in ``tmp/`` of where the evaluation runs."""
+    temp, cwd = tmp_path / "temp", tmp_path / "cwd"
+    temp.mkdir()
+    cwd.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(temp))
+    monkeypatch.chdir(cwd)
+    db = make_db(tmp_path / "history.db")
+    args = ["--db", str(db), "--limit", "10", "--llm-probes", "0", "--min-result-chars", "10",
+            "--embedding-model", HASHED_EMBEDDING_MODEL_CODE]
+    assert main(args) == 0
+    eval_dir = temp.resolve() / "kiss-tmp" / "memoryfield-eval"
+    assert json.loads((eval_dir / "results.json").read_text())["corpus_pages"] == 5
+    assert (eval_dir / "memory" / f"{HASHED_EMBEDDING_MODEL_CODE}.sqlite3").exists()
+    assert list(cwd.iterdir()) == []
 
 
 @live_api

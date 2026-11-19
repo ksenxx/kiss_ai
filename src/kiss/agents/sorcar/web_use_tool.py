@@ -50,6 +50,7 @@ from kiss.agents.sorcar import web_stealth
 from kiss.agents.sorcar.useful_tools import resolve_tool_path
 from kiss.core.config import kiss_home
 from kiss.core.file_lock import exclusive_file_lock
+from kiss.core.kiss_tmp import kiss_tmp_dir
 from kiss.core.processes import (
     IS_WINDOWS,
     SIGKILL,
@@ -575,6 +576,30 @@ def _driver_is_dead(playwright: Any) -> bool:
     return proc is not None and proc.returncode is not None
 
 
+def _kill_with_descendants(proc: Any) -> None:  # pragma: no cover — Windows-only
+    """Kill the Node driver *proc* and the processes it started (Windows).
+
+    Windows ends no child with its parent.  A Chromium the driver
+    launched does exit when the driver's pipe closes, but a renderer
+    that is busy then (the wedged page a watchdog is here for) never
+    learns of it and spins on a core until the machine restarts.  The
+    descendants are ended first, while the browser still hangs off the
+    live driver and its own children can be found through it.
+
+    Args:
+        proc: The driver's asyncio subprocess.
+    """
+    pinned = pin_process(proc.pid)
+    try:
+        if pinned is not None:
+            try:
+                end_pinned_descendants(pinned)
+            finally:
+                unpin_process(pinned)
+    finally:
+        proc.kill()
+
+
 def _kill_driver_process(playwright: Any, act: Callable[..., Any] = _unwatched) -> int | None:
     """Send SIGKILL to the Node driver behind a sync *playwright*; return the pid to reap.
 
@@ -582,7 +607,8 @@ def _kill_driver_process(playwright: Any, act: Callable[..., Any] = _unwatched) 
     is still an unreaped one (:func:`kiss.core.processes.signal_unreaped_child`):
     asyncio's ``Process.kill`` signals the bare pid, which, once the
     loop's child watcher has reaped the driver, may belong to another
-    process.  On Windows the kill goes through the process handle and
+    process.  On Windows the kill goes through the process handle, takes
+    the driver's descendants with it (:func:`_kill_with_descendants`) and
     there is nothing to reap.  A watchdog sends the signal through its
     *act* (:meth:`_Watchdog.act`): not at all once its operation ended.
 
@@ -600,7 +626,7 @@ def _kill_driver_process(playwright: Any, act: Callable[..., Any] = _unwatched) 
     if proc.returncode is not None:
         return None
     if IS_WINDOWS:  # pragma: no cover — Windows-only branch
-        act(proc.kill)
+        act(_kill_with_descendants, proc)
         return None
     try:
         return pid if act(signal_unreaped_child, pid, SIGKILL) else None
@@ -624,8 +650,9 @@ def _kill_driver(
     fails the blocked call instead (its request dies with the driver's
     pipe), and :func:`_driver_is_dead` lets the next call discard the
     driver and relaunch, or say how to reconnect; a Chromium the driver
-    launched exits with it (its remote-debugging pipe closes).  It is
-    also the deadline of a navigation and the failsafe of raw input.
+    launched exits with it (its remote-debugging pipe closes; on Windows
+    it and its renderers are ended, :func:`_kill_with_descendants`).  It
+    is also the deadline of a navigation and the failsafe of raw input.
 
     Args:
         playwright: The sync Playwright whose driver to kill.
@@ -1380,12 +1407,13 @@ class WebUseTool:
         work_dir: str | None = None,
         ephemeral: bool = False,
         live_browser: Any = None,
-        private_dir: str | None = None,
+        scratch_dir: str | None = None,
     ) -> None:
         self._live_browser = live_browser
-        # A sub-agent's private folder, deleted when the sub-agent ends:
-        # where its files that would go to the work dir's tmp/ go instead.
-        self._private_dir = private_dir
+        # The task's scratch dir (a sub-agent's private folder, deleted
+        # when the sub-agent ends): where the files the tool names itself
+        # go.  Without one they go to the agents' temp directory.
+        self._scratch_dir = scratch_dir
         # True while the session lives in the Browser tab (show_browser);
         # _live_tab is the id of the tab this tool opened there.
         self._live = False
@@ -4360,7 +4388,7 @@ class WebUseTool:
                 Uses the page's main world where the site's CSP allows it,
                 so page variables and fetch() with the site's session work.
             "screenshot": capture tab_id's viewport; returns the path of
-                the saved PNG (under the work dir's tmp/).
+                the saved PNG (in the scratch dir).
             "snapshot": list the visible interactive elements of tab_id's
                 page as a compact numbered list, e.g.
                 '[3] <button> "Save"'. The numbers (uids) are the handles
@@ -4447,15 +4475,12 @@ class WebUseTool:
             png = base64.b64decode(data_url.split(",", 1)[1], validate=True)
         except Exception as e:  # noqa: BLE001 - a buggy/compromised extension must not crash the tool
             return f"Error: the extension returned an undecodable screenshot payload: {e}"
-        # ns: no same-second collisions.  Under the task's work dir like
-        # screenshot(), not the daemon's CWD; a sub-agent's goes to its
-        # private folder, so that it leaves nothing in the work tree.
-        name = f"chrome-shot-{time.time_ns()}.png"
-        out = (Path(self._private_dir, name) if self._private_dir
-               else resolve_tool_path(f"tmp/{name}", self.work_dir))
+        # ns: no same-second collisions.  In the scratch dir, so that it
+        # leaves nothing in the work tree.
+        out = Path(self._scratch_dir or kiss_tmp_dir(), f"chrome-shot-{time.time_ns()}.png")
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_bytes(png)
-        return f"Screenshot saved to {out} ({out.stat().st_size} bytes)."
+        return f"Screenshot saved to {out.as_posix()} ({out.stat().st_size} bytes)."
 
     def close(self) -> str:
         """Close the browser and release resources. Call when done with the session or before exit.

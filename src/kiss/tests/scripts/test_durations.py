@@ -10,11 +10,24 @@ import os
 import platform
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
 
+from kiss.core.kiss_tmp import kiss_tmp_dir
 from kiss.scripts import durations, impacted_tests
+
+ME = Path(__file__).relative_to(impacted_tests.PROJECT_ROOT).as_posix()
+
+
+def _run_session(env: dict[str, str], *options: str) -> subprocess.CompletedProcess[str]:
+    """Run one quick test of this file in a pytest session of its own under *env*."""
+    return subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "--timeout=120", *options,
+         f"{ME}::test_record_durations_merges_under_the_lock_and_load_tolerates_junk"],
+        cwd=impacted_tests.PROJECT_ROOT, env=env, capture_output=True, text=True, timeout=300,
+    )
 
 
 def test_record_durations_merges_under_the_lock_and_load_tolerates_junk(tmp_path: Path) -> None:
@@ -40,21 +53,17 @@ def test_record_durations_merges_under_the_lock_and_load_tolerates_junk(tmp_path
     assert durations.load_durations(path) == {"a.py": 2.0, "z.py": 0.5}
 
 
-def test_durations_path_prefers_the_env_then_the_main_checkout(
+def test_durations_path_prefers_the_env_then_the_agents_temp_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("KISS_TEST_DURATIONS", str(tmp_path / "d.json"))
     assert durations.durations_path() == tmp_path / "d.json"
     monkeypatch.delenv("KISS_TEST_DURATIONS")
-    # Outside git the file is under the root given; inside the real
-    # repository (a worktree included) it is the main checkout's.
-    assert durations.durations_path(tmp_path) == tmp_path / "tmp" / "test-durations.json"
-    common = subprocess.run(
-        ["git", "rev-parse", "--git-common-dir"], cwd=durations.PROJECT_ROOT,
-        capture_output=True, text=True, check=True,
-    ).stdout.strip()
-    main = (durations.PROJECT_ROOT / common).resolve().parent
-    assert durations.durations_path() == main / "tmp" / "test-durations.json"
+    # One file per machine, whichever checkout asks: it is in the agents'
+    # temp directory, a folder of the temp directory, and in no checkout.
+    assert durations.durations_path() == kiss_tmp_dir() / "test-durations.json"
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    assert durations.durations_path() == tmp_path.resolve() / "kiss-tmp" / "test-durations.json"
 
 
 def test_the_suite_records_its_file_durations_for_the_next_split(tmp_path: Path) -> None:
@@ -62,20 +71,32 @@ def test_the_suite_records_its_file_durations_for_the_next_split(tmp_path: Path)
     store = tmp_path / "durations.json"
     # What another writer left in the machine's store is no failure of this session.
     store.write_text('{"src/kiss/tests/test_stale.py": null}')
-    me = Path(__file__).relative_to(durations.PROJECT_ROOT).as_posix()
-    env = {**os.environ, "KISS_TEST_DURATIONS": str(store)}
-    run = subprocess.run(
-        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "--timeout=120",
-         f"{me}::test_record_durations_merges_under_the_lock_and_load_tolerates_junk"],
-        cwd=durations.PROJECT_ROOT, env=env, capture_output=True, text=True, timeout=300,
-    )
+    run = _run_session({**os.environ, "KISS_TEST_DURATIONS": str(store)})
     assert run.returncode == 0, run.stdout + run.stderr
     # The run begins with the interpreter it ran on (the root conftest), though -q drops
     # pytest's own header; only the conftest's file-descriptor notice may precede it.
     interpreter = f"interpreter: {sys.executable} (Python {platform.python_version()})"
     assert interpreter in run.stdout.splitlines()[:2], run.stdout
     recorded = durations.load_durations(store)
-    assert list(recorded) == [me] and recorded[me] > 0, recorded
+    assert list(recorded) == [ME] and recorded[ME] > 0, recorded
     # The next --splits of that file is balanced by what was recorded.
     commands = impacted_tests.split_commands([Path(__file__)], 2, durations=recorded)
-    assert commands == [f"uv run pytest -q -p no:cacheprovider --timeout=600 {me}"]
+    assert commands == [f"uv run pytest -q -p no:cacheprovider --timeout=600 {ME}"]
+
+
+def test_the_suite_keeps_its_durations_in_the_temp_directory_it_started_in(tmp_path: Path) -> None:
+    """Without ``$KISS_TEST_DURATIONS`` a session records into ``<temp dir>/kiss-tmp``.
+
+    While its tests run, the session's temp directory is a root of its own that is deleted
+    when the session ends: recorded under that one, no run would feed the next balance.
+    """
+    env = {**os.environ, "TMPDIR": str(tmp_path), "TEMP": str(tmp_path), "TMP": str(tmp_path)}
+    env.pop("KISS_TEST_DURATIONS", None)
+    # A session that ran no test has nothing to record: it does not even make the directory.
+    collected = _run_session(env, "--collect-only")
+    assert collected.returncode == 0, collected.stdout + collected.stderr
+    assert not (tmp_path / "kiss-tmp").exists()
+    run = _run_session(env)
+    assert run.returncode == 0, run.stdout + run.stderr
+    recorded = durations.load_durations(tmp_path / "kiss-tmp" / "test-durations.json")
+    assert list(recorded) == [ME] and recorded[ME] > 0, recorded

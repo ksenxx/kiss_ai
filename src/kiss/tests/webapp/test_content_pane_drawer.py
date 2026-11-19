@@ -11,7 +11,10 @@ and task-info panel.
   the chat fills the window between the history panel and the docked
   task-info panel, and never runs under the panel.
 * The machine drop-down (this machine's name until a pick is made)
-  sits in bold green at the top centre of the chat.
+  leads a breadcrumb at the top left of the chat: the body colour at
+  the medium weight, from the chat column's left edge, a ">" between
+  it and the working directory.  Each name's down chevron follows it
+  directly, however long the other entries of its list are.
 * A file opened from the Explorer opens the content pane, which runs
   under the task-info panel, and slides the panel off the right edge
   (animated), leaving a drawer tab there; the tab brings the panel back
@@ -125,7 +128,48 @@ def test_no_content_pane_until_a_file_opens_and_the_panel_overlays_it(browser, h
         context.close()
 
 
-def test_machine_name_sits_in_bold_green_at_the_top_centre_of_the_chat(browser, harness):
+# Lists a registered machine whose name is far longer than this
+# machine's and measures both drop-downs in the same task (the daemon's
+# next `machines` reply repaints the list): how far the right end of
+# each drop-down, where its down chevron sits, is from the end of the
+# name shown, and what of the header a click on the name and on the
+# chevron lands on.
+_CHEVRONS_JS = """() => {
+  const header = document.getElementById('chat-header');
+  const machines = document.getElementById('chat-machine');
+  window.dispatchEvent(new MessageEvent('message', {data: {
+    type: 'machines', checkedAt: 1, machines: [
+      {name: machines.options[0].textContent, local: true, status: 'reachable'},
+      {name: 'a-machine-with-a-very-long-registered-name-indeed', status: 'reachable'},
+    ]}}));
+  const measure = id => {
+    const box = document.getElementById(id + '-wrap').getBoundingClientRect();
+    const label = document.getElementById(id).previousElementSibling;
+    const text = document.createRange();
+    text.selectNodeContents(label);
+    // The name ends where its text does, or where the label cuts it.
+    const end = Math.min(
+      text.getBoundingClientRect().right, label.getBoundingClientRect().right);
+    const y = (box.top + box.bottom) / 2;
+    const hit = x => document.elementsFromPoint(x, y).find(el => header.contains(el)).id;
+    return {gap: box.right - end, hits: [hit((box.left + end) / 2), hit(box.right - 3)]};
+  };
+  return {listed: machines.options.length,
+          machine: measure('chat-machine'), workdir: measure('chat-workdir')};
+}"""
+
+
+def _assert_chevrons_follow_the_names(chevrons: dict) -> None:
+    """Check a ``_CHEVRONS_JS`` measurement: each down chevron follows its
+    name directly, however long the other entries of the list are, and a
+    click on the name or on the chevron lands on the native drop-down."""
+    assert chevrons["listed"] == 2, chevrons
+    for which in ("machine", "workdir"):
+        assert 0 < chevrons[which]["gap"] <= 16, chevrons
+        assert chevrons[which]["hits"] == ["chat-" + which] * 2, chevrons
+
+
+def test_machine_name_leads_a_breadcrumb_at_the_top_left_of_the_chat(browser, harness):
     context, page, _ = _open_page(browser, harness)
     try:
         page.wait_for_function(
@@ -147,24 +191,29 @@ def test_machine_name_sits_in_bold_green_at_the_top_centre_of_the_chat(browser, 
         )
         style = page.evaluate(
             """() => {
-              const el = document.getElementById('chat-machine');
+              const el = document.getElementById('chat-machine').previousElementSibling;
               const cs = getComputedStyle(el);
-              const green = getComputedStyle(document.body).getPropertyValue('--green').trim();
               const probe = document.createElement('span');
-              probe.style.color = green;
+              probe.style.color = 'var(--fg)';
               document.body.appendChild(probe);
-              const greenRgb = getComputedStyle(probe).color;
+              const fg = getComputedStyle(probe).color;
               probe.remove();
-              return {color: cs.color, green: greenRgb, weight: cs.fontWeight,
-                      align: cs.textAlign};
+              const out = document.getElementById('output');
+              const column = out.getBoundingClientRect().left
+                + parseFloat(getComputedStyle(out).paddingLeft);
+              return {shown: el.textContent, color: cs.color, fg,
+                      weight: cs.fontWeight, column};
             }"""
         )
-        assert style["color"] == style["green"]
-        assert style["weight"] in ("700", "bold")
-        assert style["align"] == "center"
-        # The header strip ("machine: directory") sits at the top centre
-        # of the chat pane: above the transcript, centred on it, the
-        # machine name left of the ":" and the directory right of it.
+        # A breadcrumb, not a banner: the name in the body colour (no
+        # green) at the medium weight.
+        assert style["shown"] == name
+        assert style["color"] == style["fg"]
+        assert style["weight"] == "500"
+        # The header strip ("machine > directory") sits at the top of the
+        # chat pane: above the transcript and as wide as it, the machine
+        # name at the transcript's own left edge, left of the ">", and
+        # the directory right of it.
         header = _rect(page, "#chat-header")
         output = _rect(page, "#output")
         assert header["bottom"] <= output["top"] + 1
@@ -172,11 +221,13 @@ def test_machine_name_sits_in_bold_green_at_the_top_centre_of_the_chat(browser, 
         mid_output = output["left"] + output["width"] / 2
         assert mid_header == pytest.approx(mid_output, abs=2)
         machine = _rect(page, "#chat-machine")
+        assert machine["left"] == pytest.approx(style["column"], abs=1)
         sep = _rect(page, "#chat-header-sep")
         workdir = _rect(page, "#chat-workdir")
-        assert page.locator("#chat-header-sep").inner_text() == ":"
+        assert page.locator("#chat-header-sep").inner_text() == ">"
         assert machine["right"] <= sep["left"] + 1 <= workdir["left"]
         assert page.locator("#chat-workdir").input_value() == str(harness.work_dir)
+        _assert_chevrons_follow_the_names(page.evaluate(_CHEVRONS_JS))
         # With a file open the strip stays over the chat, not the pane.
         _open_file(page)
         header = _rect(page, "#chat-header")
@@ -222,25 +273,25 @@ def test_machine_name_is_parted_from_the_chat_by_the_same_hairline_as_the_tab_ro
         assert header["top"] == pytest.approx(tabs["top"], abs=1)
         assert header["bottom"] == pytest.approx(tabs["bottom"], abs=1)
         # The strip is a one-line drop-down (no list box) showing this
-        # machine's name, centred and still ellipsizing: the row stays
-        # exactly as tall as the tab row beside it.
+        # machine's name on one line that still ellipsizes: the row
+        # stays exactly as tall as the tab row beside it.
         select = page.evaluate(
             """() => {
               const el = document.getElementById('chat-machine');
-              const cs = getComputedStyle(el);
+              const cs = getComputedStyle(el.previousElementSibling);
               return {tag: el.tagName, multiple: el.multiple, size: el.size,
                       value: el.value,
                       label: el.options[el.selectedIndex].text,
-                      whiteSpace: cs.whiteSpace, overflow: cs.textOverflow,
-                      align: cs.textAlignLast};
+                      shown: el.previousElementSibling.textContent,
+                      whiteSpace: cs.whiteSpace, overflow: cs.textOverflow};
             }"""
         )
         assert select["tag"] == "SELECT"
         assert not select["multiple"] and select["size"] <= 1
         assert select["value"] == "" and select["label"].strip()
+        assert select["shown"] == select["label"]
         assert select["whiteSpace"] == "nowrap"
         assert select["overflow"] == "ellipsis"
-        assert select["align"] == "center"
     finally:
         context.close()
 

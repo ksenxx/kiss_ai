@@ -509,7 +509,6 @@ def test_main_test_existing_skips_marked_level_aliases(
     monkeypatch.setattr(mod, "MODEL_INFO_PATH", target)
     monkeypatch.setattr(mod, "README_PATH", tmp_path / "README.md")
     monkeypatch.setattr(mod, "fetch_openrouter", lambda verbose=False: {})
-    monkeypatch.setattr(mod, "fetch_together", lambda verbose=False: {})
     monkeypatch.setattr(mod, "fetch_anthropic", lambda verbose=False: {})
     monkeypatch.setattr(mod, "fetch_gemini", lambda verbose=False: {})
     monkeypatch.setattr(mod, "fetch_openai", lambda verbose=False: {})
@@ -559,7 +558,6 @@ def test_main_reports_up_to_date_when_catalog_already_normalized(
     monkeypatch.setattr(mod, "MODEL_INFO_PATH", target)
     monkeypatch.setattr(mod, "README_PATH", tmp_path / "README.md")
     monkeypatch.setattr(mod, "fetch_openrouter", lambda verbose=False: {})
-    monkeypatch.setattr(mod, "fetch_together", lambda verbose=False: {})
     monkeypatch.setattr(mod, "fetch_anthropic", lambda verbose=False: {})
     monkeypatch.setattr(mod, "fetch_gemini", lambda verbose=False: {})
     monkeypatch.setattr(mod, "fetch_openai", lambda verbose=False: {})
@@ -599,7 +597,6 @@ def test_main_discovers_new_model_and_writes_level_aliases(
         }
     }
     monkeypatch.setattr(mod, "fetch_openrouter", lambda verbose=False: dict(openrouter))
-    monkeypatch.setattr(mod, "fetch_together", lambda verbose=False: {})
     monkeypatch.setattr(mod, "fetch_anthropic", lambda verbose=False: {})
     monkeypatch.setattr(mod, "fetch_gemini", lambda verbose=False: {})
     monkeypatch.setattr(mod, "fetch_openai", lambda verbose=False: {"gpt-6": {"source": "openai"}})

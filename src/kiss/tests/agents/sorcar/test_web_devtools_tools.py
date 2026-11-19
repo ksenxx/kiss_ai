@@ -604,7 +604,9 @@ class TestEvaluateScript:
         # The navigation cancelled the one-shot evaluation (an error) —
         # it must NOT have been re-armed in the new document.
         assert result.startswith("Error evaluating script: ")
-        assert srv.effect_count == 1
+        # The error text tells a cancelled evaluation from a fetch the
+        # browser itself failed, which never reaches the server.
+        assert srv.effect_count == 1, result
 
 
 class TestListConsoleMessages:

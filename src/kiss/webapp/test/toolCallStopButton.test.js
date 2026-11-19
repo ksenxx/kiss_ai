@@ -17,10 +17,10 @@ const path = require('path');
 const {JSDOM} = require('jsdom');
 const {makeRunner} = require('./ui_antipattern_harness');
 const {announceRetaggedSubagent} = require('./subagent_tab_helpers');
+const {installTokenisedCss} = require('./designTokens');
 const {
   makePage: makeSharedPage,
   send,
-  loadMainCss,
   click,
   MEDIA,
   recordTimers,
@@ -41,10 +41,13 @@ async function test(name, fn) {
 /**
  * Boot the chat page with the real stylesheet, so the running/finished
  * visibility of the button is checked through the cascade, not through
- * class names.
+ * class names.  Its design tokens are inlined, so the buttons' offsets
+ * (spacing tokens) compute to lengths.
  */
 function makePage() {
-  const wv = makeSharedPage({beforeScripts: loadMainCss});
+  const wv = makeSharedPage({
+    beforeScripts: win => installTokenisedCss(win, 'main.css'),
+  });
   openWindows.push(wv.win);
   return wv;
 }

@@ -33,6 +33,7 @@ from kiss.agents.seas.rsi7d import rsi7d_sea as sea
 from kiss.agents.sorcar import cron_agent
 from kiss.agents.sorcar.git_worktree import USER_PROMPT_HEADING
 from kiss.core import user_config
+from kiss.core.kiss_tmp import kiss_tmp_dir
 from kiss.tests.agents.seas.conftest import commit, git, persist_task
 from kiss.tests.agents.seas.sea_contract import system_message
 from kiss.tests.server.parallel_agent_harness import (
@@ -130,13 +131,14 @@ class ReplayInCloneTest(DaemonLocalHarness):
         )
 
         clone = Path(out["clone"])
-        assert clone == self.checkout / sea.REPLAY_DIR / f"demo-{task_id[:8]}"
+        assert clone == kiss_tmp_dir() / "rsi7d" / sea.REPLAY_DIR / f"demo-{task_id[:8]}"
         assert out["commit"] == base and out["commit_source"].startswith("first parent")
         assert out["task"] == f"Add a results section to {clone}/seed.txt"
         assert (clone / "seed.txt").read_text(encoding="utf-8") == "seed\n"  # pre-task state
         assert (clone / "replayed.txt").read_text(encoding="utf-8") == "replayed\n"
         assert not (repo / "replayed.txt").exists()
         assert git(repo, "status", "--porcelain") == ""  # the repo is untouched
+        assert not (self.checkout / "tmp").exists()  # and this task's directory got no tmp/
         result = out["result"]
         assert result["success"] is True and "replayed in the clone" in result["summary"]
         assert result["steps"] >= 2
@@ -179,7 +181,7 @@ class ReplayInCloneTest(DaemonLocalHarness):
         clone = Path(out["clone"])
         assert out["sea"] == sea.SORCAR and out["commit"] == base
         assert out["sea_file"] == str((self.checkout / "src" / "kiss" / "SYSTEM.md").resolve())
-        assert clone == self.checkout / sea.REPLAY_DIR / f"sorcar-{task_id[:8]}"
+        assert clone == kiss_tmp_dir() / "rsi7d" / sea.REPLAY_DIR / f"sorcar-{task_id[:8]}"
         assert out["task"] == f"Leave a mark in {clone}"
         assert (clone / "replayed.txt").read_text(encoding="utf-8") == "replayed\n"
         assert not (repo / "replayed.txt").exists()
@@ -212,6 +214,7 @@ class ReplayInCloneTest(DaemonLocalHarness):
         assert out["model"] == STANDIN_MODEL and "clone" not in out
         assert (self.checkout / "replayed.txt").read_text(encoding="utf-8") == "replayed\n"
         assert not (repo / "replayed.txt").exists()
+        assert not (self.checkout / "tmp").exists()  # the replayed agent scratches elsewhere
         result = out["result"]
         assert result["success"] is True and "replayed in the clone" in result["summary"]
         assert out["replay_task_id"], out

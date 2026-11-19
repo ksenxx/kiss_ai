@@ -153,11 +153,10 @@ class TestConfigOverrides:
         """A DIFFERENT registered vendor's default URL must not inherit the flag.
 
         The probe verified gpt-4o on api.openai.com only; pointing it at
-        Together's or OpenRouter's default endpoint is an unverified
-        model/endpoint pair and must stay on Chat Completions.
+        OpenRouter's default endpoint is an unverified model/endpoint pair
+        and must stay on Chat Completions.
         """
         for base_url in (
-            "https://api.together.xyz/v1",
             "https://openrouter.ai/api/v1",
         ):
             m = model(

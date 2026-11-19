@@ -35,6 +35,7 @@ import subprocess
 from collections.abc import Sequence
 from typing import Any
 
+from kiss.core.kiss_tmp import KISS_TMP_NAME
 from kiss.core.models.model_families import other_worker_model, same_model_and_effort
 
 _REVIEW_WORDS = re.compile(
@@ -282,23 +283,18 @@ def named_pieces(task: str) -> set[str]:
     return pieces
 
 
-#: How the name of a sub-agent's private folder, in the system temp directory,
-#: starts.  The folder is the sub-agent's scratch dir, holds its job logs and
-#: spilled output, is the temp directory of every command its tools start, and
-#: is deleted when the sub-agent ends.
-SUBAGENT_DIR_PREFIX = "kiss-sub-"
-
-
 def is_scratch_piece(piece: str) -> bool:
-    """Whether *piece* is a path under a ``tmp`` directory (``tmp/x``, ``./tmp/x``, ``/w/tmp/x``).
+    """Whether *piece* is a path in a temp directory: the agents' or the system's.
 
-    Or one in a sub-agent's private folder (:data:`SUBAGENT_DIR_PREFIX`),
-    wherever the system keeps its temp directory.  Scratch files are
-    shared by design (a progress log, instructions copied for every
-    child, probe output): naming one is no claim on the work.
+    One with a ``kiss-tmp`` directory in it (the agents' temp directory,
+    wherever the system keeps its own: a task's scratch dir, a
+    sub-agent's private folder) or with a ``tmp`` directory (``/tmp/x``).
+    Scratch files are shared by design (instructions copied for every
+    child, probe output, a file the caller asks a child to leave): naming
+    one is no claim on the work.
     """
     parts = piece.strip().lstrip("~").split("/")
-    return any(part == "tmp" or part.startswith(SUBAGENT_DIR_PREFIX) for part in parts[:-1])
+    return any(part == "tmp" or part.startswith(KISS_TMP_NAME) for part in parts[:-1])
 
 
 def _under(piece: str, directory: str) -> bool:
@@ -309,7 +305,7 @@ def _under(piece: str, directory: str) -> bool:
 def undivided_work(tasks: Sequence[str]) -> str:
     """Return why *tasks* are not a fan-out over disjoint named pieces of work, or ``""``.
 
-    Pieces under ``tmp/`` (:func:`is_scratch_piece`) do not count, nor
+    Pieces in a temp directory (:func:`is_scratch_piece`) do not count, nor
     do pieces every task of a fan-out of three or more names (shared
     instructions: a file to read, a command to run; with two tasks
     "every" is "both", and the check would be void).  A directory a
@@ -340,7 +336,7 @@ def undivided_work(tasks: Sequence[str]) -> str:
             return (
                 f"task {i + 1} of the fan-out names no file, directory, module, URL or "
                 "`command` of its own"
-                + (" (pieces every task names, and tmp/ paths, do not count)" if pieces[i]
+                + (" (pieces every task names, and scratch files, do not count)" if pieces[i]
                    else "")
             )
     claimed = [{p for p in found if not any(_under(q, p) for q in found)} for found in counted]

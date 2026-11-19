@@ -62,9 +62,20 @@ function optionLabels(win) {
   return Array.from(byId(win, 'chat-workdir').options, o => o.textContent);
 }
 
-/** The directory the drop-down shows as current ('' = none). */
+/**
+ * The directory the drop-down shows as current ('' = none).  What it
+ * shows is the label its transparent select lies over: the selected
+ * entry as a native list words it (an option's `text`), whatever
+ * repainted the select.
+ */
 function currentDir(win) {
-  return byId(win, 'chat-workdir').value;
+  const select = byId(win, 'chat-workdir');
+  assert.strictEqual(
+    select.previousElementSibling.textContent,
+    select.options[select.selectedIndex].text,
+    'the label shows the selected entry',
+  );
+  return select.value;
 }
 
 /**

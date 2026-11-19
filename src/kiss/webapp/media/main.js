@@ -290,6 +290,17 @@
   }
 
   // trajectory-coverage:start
+  /** A folded, empty Trajectory panel (foldTrajectory, lazyTrajectoryPanel). */
+  function mkTrajectoryPanel() {
+    const panel = mkEl('div', 'ev trajectory collapsed');
+    const hdr = mkEl('div', 'trajectory-h');
+    hdr.textContent = 'Trajectory';
+    panel.appendChild(hdr);
+    panel.appendChild(mkEl('div', 'trajectory-sub'));
+    addCollapse(panel, hdr, undefined);
+    return panel;
+  }
+
   /**
    * Fold the event panels of a finished task into one collapsed
    * "Trajectory" panel.
@@ -328,12 +339,7 @@
     }
     if (!adopt.length) return;
     if (!panel) {
-      panel = mkEl('div', 'ev trajectory');
-      const hdr = mkEl('div', 'trajectory-h');
-      hdr.textContent = 'Trajectory';
-      panel.appendChild(hdr);
-      panel.appendChild(mkEl('div', 'trajectory-sub'));
-      addCollapse(panel, hdr, undefined);
+      panel = mkTrajectoryPanel();
       root.insertBefore(panel, adopt[0]);
     }
     const sub = panel.querySelector(':scope > .trajectory-sub');
@@ -1323,9 +1329,27 @@
       // runs, until the thread on screen has been read back to it
       // (seekSoughtTask); '' when none.
       soughtTaskId: '',
+      // The task a history click showed by scrolling this tab's
+      // transcript (at once, or read back to while the tab's task
+      // ran), which asks the daemon for nothing: the next task sent
+      // from the tab continues it (`continueTaskId` of its submit,
+      // or of the `<task>` message that queues it behind the running
+      // task, with which it goes).  '' once the transcript is replaced
+      // (a run's `clear`, a replay), when the daemon knows what the
+      // tab shows.
+      continueTaskId: '',
+      // Bumped by every history click and transcript replacement: a
+      // refused `<task>` message gives its continueTaskId back only
+      // when nothing has changed the selection since it was sent
+      // (putPromptBack).
+      selectionEpoch: 0,
       // The _subagentClock tick of the tab's last transcript replay
       // (0: none yet); see finishedSubagentStands.
       replayedAt: 0,
+      // The sub-agents announced below this tab whose fan-out panel a
+      // lazily loaded transcript has not rendered yet: task id -> start
+      // stamp (see adoptPendingSubagents).
+      pendingSubagents: new Map(),
       // Raised by the Stop button until the task actually ends, so a
       // stop the agent has not reached yet looks different from a stop
       // that never arrived (see stop_button_delay_2026-08-05.html).
@@ -1907,13 +1931,13 @@
     refreshSidebarDataViews(false);
   }
 
-  // Appearance.  The theme mode is 'light' (VS Code's Light Modern
-  // palette, the default and what the server renders: body.light-theme),
-  // 'dark' (Dark Modern, see remote-codex.css) or 'auto' (light by day,
+  // Appearance.  The theme mode is 'light' (the light palette, the
+  // default and what the server renders: body.light-theme), 'dark'
+  // (the dark palette, see remote-codex.css) or 'auto' (light by day,
   // dark by night on this device's clock).  The contrast is 'low' (the
-  // default) or 'high' (body.high-contrast: the Cursor-style
-  // high-contrast palettes web_server.py inlines).  Both are persisted
-  // in localStorage.
+  // default) or 'high' (body.high-contrast: the full-contrast
+  // palettes web_server.py inlines).  Both are persisted in
+  // localStorage.
   const REMOTE_THEME_KEY = 'kissRemoteTheme';
   const REMOTE_CONTRAST_KEY = 'kissRemoteContrast';
   // Auto mode is dark from AUTO_DARK_FROM_HOUR up to (not including)
@@ -2068,13 +2092,17 @@
     tabs.forEach(t => {
       if (t.terminalView) t.terminalView.retheme();
     });
+    // The menu inside an open preview holds the old palette's values.
+    document.querySelectorAll('iframe.content-html-frame').forEach(frame => {
+      window.ContentContextMenu.restylePreviewMenu(frame);
+    });
   }
 
-  // The page palette variables (VS Code Dark/Light Modern, injected by
-  // web_server.py) that the Monaco themes take their colours from.  Each
-  // name is a VS Code colour id with its first '.' written as '-'.
+  // The page palette variables (the dark or the light palette, injected
+  // by web_server.py) that the Monaco themes take their colours from.
+  // Each name is a VS Code colour id with its first '.' written as '-'.
   // Only colours whose paired foreground/background is also in the
-  // palette are listed, so Monaco never mixes a Modern background with
+  // palette are listed, so Monaco never mixes a palette background with
   // a mismatched built-in foreground.
   const CONTENT_MONACO_COLOR_VARS = [
     '--theme-foreground',
@@ -3462,7 +3490,7 @@
   function setChatSurfaceVisible(visible) {
     if (O) O.style.display = visible ? '' : 'none';
     // The composer's button row stays on screen on every layout: a
-    // content tab still offers + (new chat) and ... (more
+    // content tab still offers New chat and ... (more
     // actions). CSS scoped by `content-tab-open` hides the text box
     // and the chat-only controls (Inject promptlet, model picker,
     // Send) instead — they act on a transcript that is not on screen.
@@ -3799,6 +3827,9 @@
       at: _subagentClock,
     };
     if (req.chatId && !tab.backendChatId) tab.statusKnown = false;
+    // The transcript comes in pieces: the folded panels are fetched
+    // when they are opened (loadLazyPanel).
+    req.lazy = true;
     api.resumeSession(req);
   }
 
@@ -3956,20 +3987,25 @@
     // This click is what the reader wants now: it ends the search an
     // earlier one began (for a task of a chat that has finished since).
     tab.soughtTaskId = readBack ? String(taskId) : '';
+    // So does the task an earlier click made the next task continue.
+    tab.continueTaskId = '';
+    tab.selectionEpoch++;
     if (readBack) {
       if (!deferred) seekSoughtTask();
-    } else if (
-      !tab.isContentTab &&
-      hasTaskId &&
-      (deferred || !scrollChatToTask(taskId))
-    ) {
-      requestReplay(
-        remoteResume(
-          {chatId: chatId, taskId: taskId, tabId: tab.id},
-          machine,
-          tab.title,
-        ),
-      );
+    } else if (!tab.isContentTab && hasTaskId) {
+      if (deferred || !scrollChatToTask(taskId)) {
+        requestReplay(
+          remoteResume(
+            {chatId: chatId, taskId: taskId, tabId: tab.id},
+            machine,
+            tab.title,
+          ),
+        );
+      } else {
+        // Shown without a word to the daemon: the tab's next task
+        // says itself which task it continues (sendMessage).
+        tab.continueTaskId = String(taskId);
+      }
     }
   }
 
@@ -5988,16 +6024,16 @@
     if (body === null) body = '<pre>' + esc(text || '') + '</pre>';
     return (
       '<!DOCTYPE html><html><head><meta charset="utf-8"><style>' +
-      'body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",' +
-      'Helvetica,Arial,sans-serif;line-height:1.6;color:#24292f;' +
+      'body{font-family:system-ui,-apple-system,"Segoe UI",Roboto,' +
+      'Helvetica,Arial,sans-serif;line-height:1.6;color:#0b0b0b;' +
       'background:#fff;max-width:860px;margin:0 auto;padding:2em 1.5em}' +
-      'pre{background:#f6f8fa;padding:12px;border-radius:6px;' +
-      'overflow-x:auto}code{background:#f6f8fa;padding:.1em .3em;' +
+      'pre{background:#f4f4f2;padding:12px;border-radius:6px;' +
+      'overflow-x:auto}code{background:#f4f4f2;padding:.1em .3em;' +
       'border-radius:4px}pre code{background:none;padding:0}' +
-      'table{border-collapse:collapse}td,th{border:1px solid #d0d7de;' +
+      'table{border-collapse:collapse}td,th{border:1px solid #0b0b0b1a;' +
       'padding:5px 10px}img{max-width:100%}' +
-      'blockquote{border-left:4px solid #d0d7de;margin-left:0;' +
-      'padding-left:1em;color:#57606a}' +
+      'blockquote{border-left:4px solid #0b0b0b26;margin-left:0;' +
+      'padding-left:1em;color:#5e5d59}' +
       '</style></head><body>' +
       body +
       '</body></html>'
@@ -7176,10 +7212,10 @@
    *
    * It shows the status label of the tab's own task (#status-text:
    * Ready before any task, "Running 2m 5s" while it runs, the time it
-   * took once it is over) in the label's colour (accent while running,
-   * dim when over).  While the panel's rows are lent to a neighbouring
-   * task of the thread (metaTimeNeighbour) it shows the time THAT task
-   * took.
+   * took once it is over) in the label's colour (--running-fg while
+   * running, dim when over).  While the panel's rows are lent to a
+   * neighbouring task of the thread (metaTimeNeighbour) it shows the
+   * time THAT task took.
    */
   function paintMetaTime() {
     if (metaTimeNeighbour) {
@@ -9459,6 +9495,7 @@
         !!chosen && !!reachableMachines && !reachable.includes(chosen),
       );
     }
+    renderChatHeaderLabel(chatMachineSelect);
     renderChatHeaderSeparator();
   }
 
@@ -9476,7 +9513,7 @@
       .filter(m => m && !m.local && m.status === 'reachable')
       .map(m => String(m.name));
     const local = rows.find(m => m && m.local && m.name);
-    if (local) localMachineName = String(local.name);
+    if (local) setLocalMachineName(String(local.name));
     const labels = {};
     for (const m of rows) {
       if (m && !m.local && m.name && m.label) labels[m.name] = m.label;
@@ -14595,6 +14632,13 @@
     // empty); only "Choose ..." can be picked, and it is told apart
     // by its id.
     appendOption(chatWorkDirSelect, '', 'Choose ...', 'chat-workdir-choose');
+    // Phone widths lay the drop-down out right to left so a long path
+    // is cut at its beginning (main.css); a left-to-right mark at each
+    // end of the shown label keeps its leading "/" (and the trailing
+    // "..." of "Choose ...") where they belong.
+    for (const option of chatWorkDirSelect.options) {
+      option.label = '\u200e' + option.textContent + '\u200e';
+    }
     if (listed) {
       chatWorkDirSelect.value = listed;
     } else {
@@ -14604,11 +14648,29 @@
     chatWorkDirSelect.title = current
       ? 'The next task runs in ' + current + where
       : 'Choose the working directory the next task runs in' + where;
+    renderChatHeaderLabel(chatWorkDirSelect);
     renderChatHeaderSeparator();
   }
 
   /**
-   * Show the ":" of the chat header only once the machine drop-down
+   * Show a chat header drop-down's selected entry in the label the
+   * transparent select lies over (chat.html).  The label is as wide
+   * as that one name, where a native select is as wide as its longest
+   * option, so the down chevron follows the name directly.  A label
+   * that already shows the entry is left alone: like the options (see
+   * renderChatMachine), nothing moves under a phone's open picker.
+   *
+   * @param {HTMLSelectElement} select #chat-machine or #chat-workdir.
+   */
+  function renderChatHeaderLabel(select) {
+    const option = select.options[select.selectedIndex];
+    const text = option ? option.label : '';
+    const label = select.previousElementSibling;
+    if (label.textContent !== text) label.textContent = text;
+  }
+
+  /**
+   * Show the ">" of the chat header only once the machine drop-down
    * has a name to put before it (the directory drop-down always has
    * at least its "Choose ..." entry).
    */
@@ -15954,6 +16016,12 @@
       '<span class="ghost-text">' +
       esc(currentGhost) +
       '</span>';
+    syncGhostScroll();
+  }
+
+  /** Scroll the ghost overlay with the composer it is laid over. */
+  function syncGhostScroll() {
+    if (ghostOverlay) ghostOverlay.scrollTop = inp.scrollTop;
   }
 
   function acceptGhost() {
@@ -16105,7 +16173,9 @@
     // The hover timer may fire after a re-render replaced the element
     // under the pointer; a detached node measures 0x0 at the origin and
     // would park the tooltip in the corner with no mouseout to hide it.
-    if (!target.isConnected) return;
+    // No tooltip opens while a Chats row's menu is open: the menu names
+    // its own buttons, and a tooltip is drawn under it (the top layer).
+    if (!target.isConnected || historyOpenRowMenu()) return;
     tooltipAnchor = target;
     tooltipAnchorWatch.observe(document.body, {childList: true, subtree: true});
     tooltipEl.textContent = target.dataset.tooltip;
@@ -16177,6 +16247,113 @@
     }
   });
   document.addEventListener('scroll', hideTooltip, true);
+
+  // Scrollbars stay out of sight until the user scrolls, as overlay
+  // scrollbars do.  main.css paints a scroller's thumb only while the
+  // scroller carries `scrolling`, and only under the root class set
+  // below: a page that runs without this script keeps its bars.  A
+  // scroll shows the bar when the user caused it: a wheel turn, a touch
+  // drag (or the finger's lift, for the glide after it), a scroll key
+  // or a press on the bar itself, inside that scroller and at most a
+  // second before.  A press held on the bar scrolls for as long as it is
+  // held, so it counts until its release.  A scroll key pressed with
+  // nothing focused goes to <body>, and the browser scrolls the scroller
+  // the user last clicked in: it counts for whichever scroller moves.  A
+  // transcript that follows the agent's output therefore shows no bar.
+  // The bar goes 1.2 s after the last such scroll.
+  const SCROLL_KEYS = new Set([
+    ' ',
+    'ArrowUp',
+    'ArrowDown',
+    'ArrowLeft',
+    'ArrowRight',
+    'PageUp',
+    'PageDown',
+    'Home',
+    'End',
+  ]);
+  let scrollIntentTarget = null;
+  let scrollIntentTs = 0;
+  let scrollbarPressed = false; // a press on a bar, until its release
+  const scrollbarHideTimers = new WeakMap(); // scroller -> its hide timer
+
+  /** Whether a press landed on its target's scrollbar: past the client box. */
+  function pressOnScrollbar(e) {
+    const el = e.target;
+    return (
+      (el.clientWidth > 0 && e.offsetX >= el.clientWidth) ||
+      (el.clientHeight > 0 && e.offsetY >= el.clientHeight)
+    );
+  }
+
+  /** Remember a user input that scrolls: where it landed, and when. */
+  function noteScrollIntent(e) {
+    if (e.type === 'keydown' && !SCROLL_KEYS.has(e.key)) return;
+    if (e.type === 'pointerdown') {
+      scrollbarPressed = pressOnScrollbar(e);
+      if (!scrollbarPressed) return;
+    }
+    scrollIntentTarget = e.target;
+    scrollIntentTs = Date.now();
+  }
+
+  /** A press on a bar is over: its last scrolls come within the second. */
+  function endScrollbarPress() {
+    if (!scrollbarPressed) return;
+    scrollbarPressed = false;
+    scrollIntentTs = Date.now();
+  }
+
+  function hideScrollbar(scroller) {
+    scroller.classList.remove('scrolling');
+  }
+
+  /** Show the bar of a scroller the user has just scrolled, for 1.2 s. */
+  function showScrolledScrollbar(e) {
+    const scroller = e.target;
+    // The document's own scroll has no element to mark.
+    if (
+      scroller === document ||
+      (!scrollbarPressed && Date.now() - scrollIntentTs > 1000) ||
+      !(
+        scrollIntentTarget === document.body ||
+        scroller.contains(scrollIntentTarget)
+      )
+    ) {
+      return;
+    }
+    scroller.classList.add('scrolling');
+    clearTimeout(scrollbarHideTimers.get(scroller));
+    scrollbarHideTimers.set(
+      scroller,
+      setTimeout(hideScrollbar, 1200, scroller),
+    );
+  }
+
+  document.documentElement.classList.add('scrollbars-autohide');
+  for (const type of [
+    'wheel',
+    'touchmove',
+    'touchend',
+    'keydown',
+    'pointerdown',
+  ]) {
+    document.addEventListener(type, noteScrollIntent, {
+      capture: true,
+      passive: true,
+    });
+  }
+  for (const type of ['pointerup', 'pointercancel']) {
+    document.addEventListener(type, endScrollbarPress, {
+      capture: true,
+      passive: true,
+    });
+  }
+  document.addEventListener('scroll', showScrolledScrollbar, {
+    capture: true,
+    passive: true,
+  });
+
   function mkEl(tag, cls) {
     const e = document.createElement(tag);
     if (cls) e.className = cls;
@@ -16987,7 +17164,11 @@
    */
   function trajectoryPreviewText(panelEl) {
     const sub = panelEl.querySelector(':scope > .trajectory-sub');
-    const n = sub ? sub.children.length : 0;
+    // A lazily loaded task's panels are still with the daemon, which
+    // said how many they are (markLazyPanel).
+    const n =
+      (sub ? sub.children.length : 0) +
+      (panelEl._lazy ? panelEl._lazy.count : 0);
     return n + (n === 1 ? ' event' : ' events');
   }
 
@@ -17110,6 +17291,7 @@
         // Expanding a fan-out is the way back to it: the sub-agents
         // the user closed open again too (syncRunParallelPanel).
         for (const en of panelEl._rpSubagents || []) en.userClosed = false;
+        loadLazyPanel(panelEl);
       }
       collapsePreview(panelEl);
       syncRunParallelPanel(panelEl);
@@ -17438,6 +17620,12 @@
       rpEventTs(opts ? opts.startTs : 0),
     );
     if (spanning) return spanning;
+    // lazypanel-coverage:start
+    // A lazily loaded transcript has not rendered every call: a replayed
+    // sub-agent that none of them spans waits for its own (the
+    // openSubagentTab case) instead of joining a guessed one.
+    if (!live && rpTranscriptPartial(parentId)) return null;
+    // lazypanel-coverage:end
     for (const p of panels) {
       if (live && p._rpDone) continue;
       const expected = p._rpExpectedCount;
@@ -17656,7 +17844,13 @@
       if (previousPanel) {
         if (livePanels.has(previousPanel)) continue;
         if (previousPanel._rpCallIndex !== panelEl._rpCallIndex) continue;
-      } else if (panelEl !== newest) {
+        // lazypanel-coverage:start
+      } else if (
+        panelEl !== newest ||
+        // One waiting for its own panel is not the newest's.
+        pendingSubagentsOf(parentId).has(tabTaskId(tab))
+      ) {
+        // lazypanel-coverage:end
         continue;
       }
       const previousEntry = previousPanel
@@ -18359,6 +18553,9 @@
     if (panel && panel.classList.contains('collapsed')) {
       panel.classList.remove('collapsed');
       collapsePreview(panel);
+      // A summary panel a lazily loaded transcript left folded and
+      // empty is open now: it asks for what it holds, as on a click.
+      loadLazyPanel(panel);
     }
   }
 
@@ -18527,6 +18724,329 @@
       if (im) img.src = 'data:' + im.mime + ';base64,' + im.b64;
     });
   }
+
+  // lazypanel-coverage:start
+  // ---- Panels a lazily loaded transcript left with the daemon --------
+  // Opening a chat brings only a part of each transcript (see
+  // server/lazy_replay.py): a finished task's Trajectory panel comes
+  // empty, and so does a `summary` panel of the steps it folded.  Such
+  // a panel is marked (markLazyPanel), asked for when the user first
+  // opens it (loadLazyPanel, from the header click of addCollapse) and
+  // filled from the daemon's `taskEventsPiece` reply (fillLazyPanel).
+  //
+  // token -> the panel whose events were asked for.
+  const pendingLazyPanels = new Map();
+  let lazyPanelSeq = 0;
+  // Where such a panel shows its events.
+  const LAZY_PANEL_BODY = ':scope > .summary-sub, :scope > .trajectory-sub';
+
+  /**
+   * Mark *panel* as one whose body the daemon still holds.
+   *
+   * @param {Element} panel A Trajectory or summary panel.
+   * @param {{taskId: string, seg: (number|undefined),
+   *   upto: (number|undefined)}} handle The piece to ask for: its task,
+   *   for a summary the summary's ordinal and, for a task that ended,
+   *   the last event of the transcript the piece is read from (what
+   *   the task is sent later the page shows as it arrives).
+   * @param {number} count How many panels a Trajectory's body holds.
+   * @param {string} workDir The folder the panel's task ran in.
+   */
+  function markLazyPanel(panel, handle, count, workDir) {
+    panel._lazy = {
+      taskId: handle.taskId,
+      upto: handle.upto,
+      count: count,
+      workDir: workDir,
+      token: '',
+    };
+    // On the element, which a copy of the transcript keeps
+    // (fillUnloadedSharePanels).
+    if (handle.seg !== undefined) panel.dataset.lazySeg = handle.seg;
+    panel.classList.add('lazy-unloaded');
+  }
+
+  /** *panel* is no longer one whose body the daemon holds. */
+  function unmarkLazyPanel(panel) {
+    delete panel._lazy;
+    delete panel.dataset.lazySeg;
+    panel.classList.remove('lazy-unloaded');
+    setLazyNote(panel, '');
+  }
+
+  /**
+   * The Trajectory panel of a lazily loaded finished task (a
+   * `trajectory` event): folded, and empty until it is opened.
+   */
+  function lazyTrajectoryPanel(ev, workDir) {
+    const panel = mkTrajectoryPanel();
+    markLazyPanel(panel, ev.lazy, ev.count, workDir);
+    // The messages typed into the task: panels of the body to come.
+    panel._lazy.steers = ev.steers || [];
+    collapsePreview(panel);
+    return panel;
+  }
+
+  /**
+   * The texts of the messages typed into the task on screen that its
+   * Trajectory panel has not loaded yet, read as unackedPrompt reads
+   * the panels of those on the page.
+   */
+  function heldSteerTexts() {
+    const stub = Array.from(
+      O.querySelectorAll('.trajectory.lazy-unloaded'),
+    ).find(p => !p.closest('.adjacent-task'));
+    return stub ? stub._lazy.steers.map(s => String(s.text || '').trim()) : [];
+  }
+
+  /**
+   * Stand in for an event a piece of a lazily loaded transcript left
+   * out (a `lazy_gap`, see Plan._piece in server/lazy_replay.py): do
+   * to the stream of *ctx* what the event did.
+   */
+  function applyLazyGap(ctx, gap, workDir, ownerTabId) {
+    // A fan-out panel is numbered by its place among the transcript's.
+    if (gap.fanouts)
+      ctx.state.runParallelCount =
+        (ctx.state.runParallelCount || 0) + gap.fanouts;
+    if (gap.of === 'tool_call') {
+      streamSealPanel(ctx, gap.ts);
+      ctx.llmPanelState = mkS();
+      closeBashPanel(ctx.state, workDir, ownerTabId);
+      ctx.state.lastToolCallEl = null;
+    } else if (gap.of === 'result' || gap.of === 'stop') {
+      if (gap.of === 'result') {
+        // A result card: the stream left its Thinking panel (streamEnd).
+        if (ctx.llmPanel && ctx.llmPanel._provisional)
+          discardProvisionalPanel(ctx.llmPanel);
+        ctx.llmPanel = null;
+        ctx.pendingPanel = true;
+      }
+      // The card, or a block that is no panel (a tool result with no
+      // call before it, a follow-up bar), ended the reach of the next
+      // summary (the tool_call case of handleOutputEvent);
+      // renderReplayedEvents removes this.
+      ctx.container.appendChild(mkEl('div', 'lazy-stop'));
+    } else {
+      // A tool result: the agent thinks again (streamEnd).
+      streamOpenThoughts(ctx, gap.ts, true);
+    }
+  }
+
+  /** Show *text* in *panel* while its events are away ('': nothing). */
+  function setLazyNote(panel, text) {
+    let note = panel.querySelector(':scope > .lazy-note');
+    if (!text) {
+      if (note) note.remove();
+      return;
+    }
+    if (!note) {
+      note = mkEl('div', 'lazy-note');
+      // Not part of what the panel's copy button copies.
+      note.dataset.rawText = '';
+      panel.appendChild(note);
+    }
+    note.textContent = text;
+  }
+
+  /** The tab whose transcript holds *panel*; '' once it was thrown away. */
+  function lazyPanelOwnerTabId(panel) {
+    if (O.contains(panel)) return activeTabId;
+    return rpOwnerTabIdForContainer(panel.getRootNode());
+  }
+
+  /**
+   * Ask the daemon (or the machine the owning tab is bound to) for the
+   * events of *panel*, once; a panel that holds its events, or is
+   * waiting for them, is left alone, and so is one of a transcript
+   * thrown away (forgetInFlightLazyPanels).
+   */
+  function loadLazyPanel(panel) {
+    const lazy = panel._lazy;
+    if (!lazy || lazy.token) return;
+    const owner = lazyPanelOwnerTabId(panel);
+    if (!owner) return;
+    lazy.token = 'lazy-' + ++lazyPanelSeq;
+    pendingLazyPanels.set(lazy.token, panel);
+    setLazyNote(panel, 'Loading…');
+    const req = {taskId: lazy.taskId, tabId: owner, token: lazy.token};
+    if (lazy.upto !== undefined) req.upto = lazy.upto;
+    if (panel.dataset.lazySeg !== undefined)
+      req.seg = Number(panel.dataset.lazySeg);
+    api.getTaskEvents(onMachine(req, tabBoundMachine(owner)));
+  }
+
+  /**
+   * The daemon's answer to loadLazyPanel: the panel's events, or why
+   * they cannot be read (opening the panel again asks again).  An
+   * answer for a panel whose transcript was replaced meanwhile finds
+   * no tab and is dropped, with the export that waited for it.
+   */
+  function handleTaskEventsPiece(ev) {
+    const panel = pendingLazyPanels.get(ev.token);
+    if (!panel) return;
+    pendingLazyPanels.delete(ev.token);
+    panel._lazy.token = '';
+    const owner = lazyPanelOwnerTabId(panel);
+    if (!owner) {
+      resumeHeldShare(panel, false);
+      return;
+    }
+    if (!Array.isArray(ev.events)) {
+      setLazyNote(panel, ev.error || 'Failed to load the events.');
+      resumeHeldShare(panel, false);
+      return;
+    }
+    fillLazyPanel(panel, ev.events, owner);
+    resumeHeldShare(panel, true);
+  }
+
+  /**
+   * Render the *events* of a lazily loaded panel into its body.  Its
+   * fan-outs are folded, as the fold of the panel left them in a whole
+   * replay (foldTrajectory): the replay's own pass leaves open the one
+   * that shows a picture.  The panels that joined a Trajectory since
+   * the daemon counted (a late event of an ended task, see
+   * foldTrajectory) follow them.
+   */
+  function fillLazyPanel(panel, events, ownerTabId) {
+    const workDir = panel._lazy.workDir;
+    unmarkLazyPanel(panel);
+    const sub = panel.querySelector(LAZY_PANEL_BODY);
+    const late = Array.from(sub.children);
+    late.forEach(el => el.remove());
+    replayEventsInto(sub, events, {
+      ownerTabId: ownerTabId,
+      workDir: workDir,
+      piece: true,
+    });
+    collapseNestedRunParallel(panel);
+    late.forEach(el => sub.appendChild(el));
+    collapsePreview(panel);
+    adoptPendingSubagents(ownerTabId);
+  }
+
+  /**
+   * For the share export: give the panels of *body*, a copy of the
+   * transcript on screen (shareLiveTranscript), that the page never
+   * loaded what they hold.  Each takes the inside of its twin in a
+   * replay of *events*, the daemon's whole transcript of the task: the
+   * task's one Trajectory panel, or the summary panel of the same
+   * place among the transcript's (its `lazy.seg`).
+   */
+  function fillUnloadedSharePanels(body, events) {
+    const unloaded = Array.from(body.querySelectorAll('.lazy-unloaded'));
+    if (!unloaded.length) return;
+    const whole = replayDetachedTranscript(events || [], activeTabId);
+    const summaries = whole.querySelectorAll('.tc-summary');
+    for (const panel of unloaded) {
+      const twin = panel.classList.contains('trajectory')
+        ? whole.querySelector('.trajectory')
+        : summaries[Number(panel.dataset.lazySeg)];
+      unmarkLazyPanel(panel);
+      if (twin)
+        panel
+          .querySelector(LAZY_PANEL_BODY)
+          .replaceChildren(...twin.querySelector(LAZY_PANEL_BODY).children);
+      collapsePreview(panel);
+    }
+  }
+
+  /**
+   * The panels an export of *tasks* (a `share_tasks` reply's) would
+   * save empty: those of the transcript on screen still with the
+   * daemon, when *tasks* does not hold its task (too large for one
+   * reply, or of a chat the daemon has no history of).
+   * buildShareableHtml then copies the screen as it is; a task that
+   * *tasks* holds fills them from its events (fillUnloadedSharePanels).
+   */
+  function shareUnloadedPanels(tasks) {
+    const liveId = currentTaskId ? String(currentTaskId) : '';
+    if (liveId && tasks.some(t => t && String(t.task_id) === liveId)) return [];
+    return Array.from(O.querySelectorAll('.lazy-unloaded')).filter(
+      p => !p.closest('.adjacent-task'),
+    );
+  }
+
+  /**
+   * Go on with the export sendShareExport holds, now that the daemon
+   * answered for *panel* (*loaded*: with its events).  The export is
+   * of the screen it was held on: on another tab or chat, or with a
+   * panel it waits for thrown away (the chat was shown again), it is
+   * dropped, as a late `share_tasks` reply is, and the button works
+   * again.  A panel of that screen that cannot be read fails it: the
+   * saved page would lack what the panel holds.
+   */
+  function resumeHeldShare(panel, loaded) {
+    const held = heldShare;
+    if (!held) return;
+    if (
+      held.tabId !== activeTabId ||
+      held.chatId !== shareChatIdOf(getTab(activeTabId)) ||
+      !held.waits.every(p => O.contains(p))
+    ) {
+      setShareInFlight(false);
+    } else if (loaded) {
+      sendShareExport(held.chatId, held.tasks, held.truncated);
+    } else if (shareUnloadedPanels(held.tasks).includes(panel)) {
+      notifyShareFailed('the transcript on screen could not be loaded');
+      flashShareBtn(false);
+    }
+  }
+
+  /**
+   * Whether tab *parentId*'s own transcript still has panels with the
+   * daemon (markLazyPanel): a fan-out panel of it may be in them.
+   */
+  function rpTranscriptPartial(parentId) {
+    const root = rpTaskDomRootForParent(parentId);
+    if (!root) return false;
+    return Array.from(root.querySelectorAll('.lazy-unloaded')).some(
+      p => !p.closest('.adjacent-task'),
+    );
+  }
+
+  /** The sub-agents of tab *parentId* that wait for their fan-out panel. */
+  function pendingSubagentsOf(parentId) {
+    const parent = getTab(parentId);
+    return parent ? parent.pendingSubagents : new Map();
+  }
+
+  /**
+   * Give the sub-agents of tab *parentId* that waited for their fan-out
+   * panel (the openSubagentTab case) to the panels rendered since: the
+   * one whose call ran when the sub-agent started or, once the whole
+   * transcript is loaded, the one rpPanelForNewSubagent settles on.
+   */
+  function adoptPendingSubagents(parentId) {
+    const pending = pendingSubagentsOf(parentId);
+    for (const [taskId, startTs] of Array.from(pending)) {
+      const panel = rpPanelForNewSubagent(parentId, taskId, {startTs});
+      if (!panel) continue;
+      pending.delete(taskId);
+      const open = openSubagentTabForTask(taskId, '');
+      rpRegisterSubagent(panel, parentId, taskId, open ? open.id : '');
+      // An open tab is a running sub-agent's, or one a user asked for
+      // again: its folded panel unfolds as the asking one did, or the
+      // panel's next sync would close the tab on every surface.
+      if (open) rpReopenSubagent(panel, taskId, open.id, !open.isRunning);
+    }
+  }
+
+  /**
+   * The connection dropped: the events asked for never come, so each
+   * waiting panel asks again.  The request goes out once the daemon
+   * is back, as a picture's does (forgetInFlightReplayImages).
+   */
+  function forgetInFlightLazyPanels() {
+    const waiting = Array.from(pendingLazyPanels.values());
+    pendingLazyPanels.clear();
+    for (const panel of waiting) {
+      panel._lazy.token = '';
+      loadLazyPanel(panel);
+    }
+  }
+  // lazypanel-coverage:end
 
   // ---- Pictures the agent wrote to disk ------------------------------
   // A result (`<img src="tmp/plot.png">`), an answer, a Markdown panel
@@ -19491,6 +20011,9 @@
           c.classList.add('collapsed');
           collapseNestedRunParallel(c);
           syncCollapseAria(c);
+          // A lazily loaded transcript left the steps it folded with
+          // the daemon.
+          if (ev.lazy) markLazyPanel(c, ev.lazy, 0, evWorkDir);
         }
         tState.lastToolCallEl = c;
         // Active (ticking, header pulsing) until the tool_result
@@ -19619,7 +20142,7 @@
           }
         } else {
           const s = mkEl('div', 'ev sys');
-          s.textContent = (ev.text || '').replace(/\n\n+/g, '\n');
+          s.textContent = String(ev.text || '').replace(/\n\n+/g, '\n');
           linkifyFilePaths(s, evWorkDir, evOwnerTab);
           target.appendChild(s);
         }
@@ -19968,12 +20491,22 @@
       ctx.llmPanelState = mkS();
     }
     if (t === 'tool_result' && ctx.lastToolName !== 'finish') {
+      // Words stand in the Thinking panel (the event of their call was
+      // lost): they end here as at a tool call, so that the panel is
+      // sealed and streamEnd opens the next one.
+      if (ctx.llmPanel && !ctx.llmPanel._provisional)
+        streamSealPanel(ctx, ev.ts);
       ctx.pendingPanel = true;
     }
     const opensPanel = t === 'thinking_start' || t === 'text_delta';
     if (ctx.llmPanel && ctx.llmPanel._provisional && opensPanel) {
       streamCountStep(ctx);
       ctx.llmPanel._provisional = false;
+      // The panel opened on spec is the one that was due.  A second
+      // tool result in a row (two calls made at once) armed another:
+      // left armed, the next text_delta would open it and split the
+      // words over two panels wherever the stream happened to cut them.
+      ctx.pendingPanel = false;
     } else if ((ctx.pendingPanel || ctx.stepCount === 0) && opensPanel) {
       streamCountStep(ctx);
       streamOpenThoughts(ctx, ev.ts, false);
@@ -20436,7 +20969,12 @@
     if (taskId === undefined || taskId === null || taskId === '') return;
     adjacentLoading = true;
     showAdjacentLoader(dir);
-    api.getAdjacentTask({tabId: activeTabId, taskId: taskId, direction: dir});
+    api.getAdjacentTask({
+      tabId: activeTabId,
+      taskId: taskId,
+      direction: dir,
+      lazy: true,
+    });
   }
 
   /**
@@ -20465,13 +21003,20 @@
    * transcript, until then fetch the task above the oldest one loaded
    * (a neighbour already on its way is waited for).  Run again by
    * every answer and by the replay that brings the tab's transcript;
-   * the search ends at the chat's first task.
+   * the search ends at the chat's first task.  The task the reader
+   * lands on is the one the tab's next task continues
+   * (`continueTaskId`), unless it is the tab's own: the tab follows
+   * its run, and its next task the chat's last one.
    */
   function seekSoughtTask() {
     const tab = getTab(activeTabId);
     if (!tab || !tab.soughtTaskId) return;
-    if (scrollChatToTask(tab.soughtTaskId)) tab.soughtTaskId = '';
-    else if (adjacentLoading) return;
+    if (scrollChatToTask(tab.soughtTaskId)) {
+      if (tab.soughtTaskId !== String(currentTaskId)) {
+        tab.continueTaskId = tab.soughtTaskId;
+      }
+      tab.soughtTaskId = '';
+    } else if (adjacentLoading) return;
     else if (canLoadNeighbour('prev')) loadNeighbourTask('prev');
     else tab.soughtTaskId = '';
   }
@@ -20940,7 +21485,7 @@
   function startTimer() {
     if (!t0) t0 = Date.now();
     if (timerIv) clearInterval(timerIv);
-    statusText.style.color = 'var(--accent)';
+    statusText.style.color = 'var(--running-fg)';
     _renderTimerTick();
     timerIv = setInterval(_renderTimerTick, 1000);
   }
@@ -22031,6 +22576,7 @@
           forgetInFlightPathChecks();
           forgetInFlightInlineImages();
           forgetInFlightReplayImages();
+          forgetInFlightLazyPanels();
           machineWorkDirsAsked.clear();
           stopSidebarRefreshSpins();
           releaseSidebarFormSaves();
@@ -22273,6 +22819,9 @@
         return;
       case 'replayImage':
         handleReplayImage(ev);
+        return;
+      case 'taskEventsPiece':
+        handleTaskEventsPiece(ev);
         return;
       // Replies of the task-info panel's Explorer / Source Control
       // sections (remote webapp only).  They are matched to the request by token,
@@ -22585,7 +23134,7 @@
           if (statusMachine) statusMachine.textContent = ev.machine;
           // ...and, in bold green, at the top of the chat pane itself,
           // as the first entry of the machine drop-down.
-          localMachineName = ev.machine;
+          setLocalMachineName(ev.machine);
           renderChatMachine();
         }
         applyLocalConfig(ev.config || {});
@@ -22801,8 +23350,10 @@
         if (panelReplyShown(ev)) renderRecommendations(ev);
         break;
       case 'history':
-        // The labels first: the rows' machine chips are built with them.
+        // The labels and this daemon's name first: the rows' machine
+        // chips are built with them.
         adoptMachineLabels(ev.machineLabels || {});
+        if (ev.localMachine) setLocalMachineName(String(ev.localMachine));
         renderHistory(ev.sessions || [], ev.offset || 0, ev.generation || 0);
         if ((ev.generation || 0) === historyGeneration && !(ev.offset || 0)) {
           rememberHistoryPage(ev.sessions || [], ev.machineLabels || {});
@@ -23053,6 +23604,8 @@
           // A new run replaces the tab's task: its settings arrive
           // with the run's own task_settings event.
           clearTab.taskSettings = null;
+          // No sub-agent of the replaced task waits for a panel of it.
+          clearTab.pendingSubagents.clear();
           // Its live events are the transcript now: a transcript the
           // daemon withheld on the last ready (pinned to the replaced
           // task) must not be fetched over them.
@@ -23063,6 +23616,10 @@
           // run, neither opens anything the user asked for.
           clearTab.replayRequested = null;
           // landing-coverage:end
+          // The run that took the task a history click scrolled to is
+          // on (or another surface's run replaced the transcript).
+          clearTab.continueTaskId = '';
+          clearTab.selectionEpoch++;
           // The tab shows no task until the new run's first id-bearing
           // event names it: left on the replaced task, a tab switch in
           // between would bring the new transcript back as that task's
@@ -23276,9 +23833,17 @@
         if (teTab) {
           teTab.statusKnown = true;
           teTab.replayPending = null;
+          // The daemon knows the task this transcript opens with (its
+          // pin): a history click that scrolled the replaced one is
+          // history.
+          teTab.continueTaskId = '';
+          teTab.selectionEpoch++;
           // The sub-agents the daemon announces running below this
           // tab from here on run now (finishedSubagentStands).
           teTab.replayedAt = ++_subagentClock;
+          // It announces again those that waited for a panel of the
+          // transcript replaced.
+          teTab.pendingSubagents.clear();
           settleLostPrompt(teTab, ev);
           notePromptsTaken(teTab, ev.promptsTaken);
         }
@@ -23797,11 +24362,41 @@
           _rpTabPanel.delete(ev.tab_id);
           rpPanel = null;
         }
+        // lazypanel-coverage:start
+        // Parts of a lazily loaded transcript are still with the daemon,
+        // the sub-agent's fan-out panel maybe among them.
+        const partial = !!parentId && rpTranscriptPartial(parentId);
+        // The panel the tab was under went with the transcript the
+        // lazily loaded one replaced.  It is forgotten: remembered, the
+        // panel loaded in its place would take the tab by its number
+        // (rpAdoptOpenSubagents) and, folded, close a tab that waits
+        // for it (adoptPendingSubagents).
+        if (
+          rpPanel &&
+          partial &&
+          !rpDirectPanelsForParent(parentId).includes(rpPanel)
+        ) {
+          _rpTabPanel.delete(ev.tab_id);
+          rpPanel = null;
+        }
+        // lazypanel-coverage:end
         if (!rpPanel && parentId) {
           rpPanel = rpPanelForNewSubagent(parentId, subTaskId, {
             startTs: ev.startTs,
           });
         }
+        // lazypanel-coverage:start
+        // No panel yet: the sub-agent joins its own when that part of
+        // the transcript is loaded (adoptPendingSubagents).  Until then
+        // a finished one stays closed, as its folded panel would keep
+        // it, unless a user asked for it again (below).
+        const pended = !rpPanel && partial;
+        if (pended)
+          pendingSubagentsOf(parentId).set(
+            String(subTaskId),
+            rpEventTs(ev.startTs),
+          );
+        // lazypanel-coverage:end
         let subTab = getTab(ev.tab_id);
         if (ev.reopened || revived)
           rpReopenSubagent(rpPanel, subTaskId, ev.tab_id, subDone);
@@ -23840,7 +24435,12 @@
           _unconfirmedSubagentTabs.delete(subTab) &&
           subDone &&
           !ev.reopened;
-        if (endedUnseen || (subDone && ev.closedHistory)) {
+        // lazypanel-coverage:start
+        if (
+          endedUnseen ||
+          (subDone && (ev.closedHistory || (pended && !ev.reopened)))
+        ) {
+          // lazypanel-coverage:end
           if (rpPanel) rpRegisterSubagent(rpPanel, parentId, subTaskId, '');
           if (subTab) closeFinishedSubagentTab(subTab);
           else rememberClosedSubagentTab(ev.tab_id);
@@ -24679,6 +25279,7 @@
         let metrics = shareTaskMetricsText(t.events, t.metrics);
         if (liveId && tid === liveId) {
           body = shareLiveTranscript();
+          fillUnloadedSharePanels(body, t.events);
           fillUnloadedReplayImages(body, tid, t.events);
           liveUsed = true;
           if (!settings) settings = currentTaskSettings;
@@ -24782,11 +25383,22 @@
    * tab, the direct click path for a sub-agent tab). An empty or
    * oversized export is refused with a visible error instead.
    *
+   * The export waits while the screen it copies has panels still with
+   * the daemon (shareUnloadedPanels): each is asked for, and the
+   * answers bring the export back here (resumeHeldShare).
+   *
    * @param {string} chatId The chat id naming the page's file.
    * @param {Array<object>} tasks The chat's persisted tasks.
    * @param {boolean} truncated Whether the daemon dropped old tasks.
    */
   function sendShareExport(chatId, tasks, truncated) {
+    const waits = shareUnloadedPanels(tasks);
+    if (waits.length) {
+      heldShare = {tabId: activeTabId, chatId, tasks, truncated, waits};
+      for (const panel of waits) loadLazyPanel(panel);
+      return;
+    }
+    heldShare = null;
     const tab = getTab(activeTabId);
     const htmlStr = buildShareableHtml(tasks);
     if (!htmlStr) {
@@ -24821,14 +25433,17 @@
   // reply that never comes cannot wedge the button; every end of an
   // export reaches flashShareBtn, which clears it.
   let shareInFlight = null;
+  // The export sendShareExport holds until the transcript on screen is
+  // loaded, with the panels it waits for (`waits`); dropped whenever
+  // an export starts or ends, the failsafe's end included.
+  let heldShare = null;
   // The chat the export awaiting its `share_done` was made for.
   let shareExportChatId = '';
   function setShareInFlight(pending) {
     if (shareInFlight) clearTimeout(shareInFlight);
+    heldShare = null;
     shareInFlight = pending
-      ? setTimeout(() => {
-          shareInFlight = null;
-        }, 120000)
+      ? setTimeout(setShareInFlight, 120000, false)
       : null;
   }
 
@@ -25101,7 +25716,8 @@
    *
    * @param {Element|DocumentFragment} container Where to render.
    * @param {Array<object>} events The transcript to replay.
-   * @param {object} [opts] ownerTabId / onFollowupClick.
+   * @param {object} [opts] ownerTabId / onFollowupClick; piece and
+   *   workDir for a piece of a lazily loaded transcript (fillLazyPanel).
    * @returns {object} The replay's stream context: its stepCount is the
    *   number of steps the transcript records, and its tail state (the
    *   open tool_call panel, the current thoughts panel, ...) is what a
@@ -25162,9 +25778,15 @@
 
   function renderReplayedEvents(container, events, opts) {
     const ownerTabId = opts ? opts.ownerTabId : undefined;
+    // A piece of a lazily loaded transcript fills a panel's body: it
+    // is no transcript of its own (fillLazyPanel).
+    const piece = !!(opts && opts.piece);
     // The folder the replayed task itself ran in; '' when its
-    // transcript records none (the owning tab's task's is used).
-    const rWorkDir = taskSettingsWorkDir(taskSettingsFromEvents(events));
+    // transcript records none (the owning tab's task's is used).  A
+    // piece is told: the settings came with the transcript's first part.
+    const rWorkDir = piece
+      ? opts.workDir
+      : taskSettingsWorkDir(taskSettingsFromEvents(events));
     const ctx = mkStreamCtx(container, ownerTabId);
     ctx.state.suppressReportOpen = true;
     const prevDefer = _deferHighlight;
@@ -25188,12 +25810,31 @@
           container.appendChild(mkFollowupBar(ev.text, onClick));
           return;
         }
+        // The three events of a lazily loaded transcript's own (see
+        // server/lazy_replay.py).
+        if (t === 'lazy_steps') {
+          // The whole transcript's step count: the events sent do not
+          // show every step.
+          ctx.stepCount = ev.steps;
+          return;
+        }
+        if (t === 'lazy_gap') {
+          applyLazyGap(ctx, ev, rWorkDir, ownerTabId);
+          return;
+        }
+        if (t === 'trajectory') {
+          container.appendChild(lazyTrajectoryPanel(ev, rWorkDir));
+          return;
+        }
         const where = streamBegin(ctx, ev);
         handleOutputEvent(ev, where.target, where.state, rWorkDir, ownerTabId);
         streamEnd(ctx, ev, where.target);
       });
       flushStreamFrames(ctx.state, rWorkDir, ownerTabId);
       flushStreamFrames(ctx.llmPanelState, rWorkDir, ownerTabId);
+      // The stand-ins of the result cards left out (applyLazyGap) have
+      // stopped the summaries rendered after them.
+      container.querySelectorAll('.lazy-stop').forEach(el => el.remove());
     } finally {
       _deferHighlight = prevDefer;
       _replaying = prevReplaying;
@@ -25216,7 +25857,12 @@
     const replayOwnerTab = getTab(ownerTabId);
     const isAdjacentReplay =
       !!container.classList && container.classList.contains('adjacent-task');
-    if (replayOwnerTab && replayOwnerTab.isRunning && !isAdjacentReplay) {
+    // A piece loaded into a neighbour's panel or under a Trajectory
+    // panel belongs to a finished transcript as well.
+    const settled =
+      isAdjacentReplay ||
+      (piece && !!container.closest('.adjacent-task, .trajectory'));
+    if (replayOwnerTab && replayOwnerTab.isRunning && !settled) {
       const open = container.querySelectorAll(
         '[data-start-ts]:not([data-time-done]):not([data-start-ms])',
       );
@@ -25231,7 +25877,9 @@
     // switch that follows repaints the shared status row — a caller
     // that wants the numbers this replay painted must read them now.
     if (opts && opts.onEventsRendered) opts.onEventsRendered();
-    if (replayOwnerTab && !isAdjacentReplay && !_shareExportReplay)
+    // (A piece holds no question: a summary leaves those out of the
+    // panels it folds, and an open one is not under a Trajectory.)
+    if (replayOwnerTab && !isAdjacentReplay && !piece && !_shareExportReplay)
       reconcileReplayedQuestion(container, replayOwnerTab);
     collapseAllExceptResult(container, ownerTabId);
     // trajectory-coverage:start
@@ -25239,7 +25887,11 @@
     // and its result, replayed or live (foldTrajectory).  A running
     // task's replay keeps its panels in the open: they are still the
     // live stream's, and the terminal event folds them when it ends.
-    if (isAdjacentReplay || !(replayOwnerTab && replayOwnerTab.isRunning)) {
+    // A piece is the inside of a panel: nothing to fold it into.
+    if (
+      !piece &&
+      (isAdjacentReplay || !(replayOwnerTab && replayOwnerTab.isRunning))
+    ) {
       foldTrajectory(container);
     }
     // trajectory-coverage:end
@@ -25738,6 +26390,9 @@
       // The daemon answers with its model list: stamped like a
       // getModels, so an answer older than a pick is told apart.
       generation: ++modelsAsked,
+      // The transcripts the daemon replays come in pieces, as those
+      // the page asks for do (requestReplay).
+      lazy: true,
     };
     api.ready(ready);
     reportedChatTabId = chatTabId;
@@ -25868,6 +26523,7 @@
       histIdx = -1;
       syncClearBtn();
     });
+    inp.addEventListener('scroll', syncGhostScroll);
     inp.addEventListener('blur', () => {
       clearGhost();
       hideAC();
@@ -26289,14 +26945,18 @@
      * runs in the bubble phase, after every control that answers
      * Escape itself (a rename box, an inline confirm, a dialog toast,
      * the sheets' capture-phase onSheetEscape) has prevented the
-     * default or stopped the event; then the first open one of the
-     * server-reset confirm, the "..." menu, the phone layout's Task
-     * Info drawer (the docked desktop panel never carries `open`) and
-     * the Chats drawer closes.
+     * default or stopped the event; then the first open one of a
+     * popover, the server-reset confirm, the "..." menu, the
+     * phone layout's Task Info drawer (the docked desktop panel never
+     * carries `open`) and the Chats drawer closes.
      */
     function onPopupEscape(e) {
       if (e.key !== 'Escape' || e.defaultPrevented) return;
       if (e.isComposing || e.keyCode === 229) return;
+      // A popover (a Chats row's menu, the help of a settings box) is
+      // the topmost popup while it is open, and the browser closes it
+      // (a popover answers Escape itself).
+      if (openPopoverIn(document)) return;
       if (isServerResetConfirmOpen()) {
         closeServerResetConfirm();
       } else if (moreMenu && moreMenu.classList.contains('open')) {
@@ -27562,6 +28222,27 @@
     syncClearBtn();
   }
 
+  /**
+   * Whether `text` holds a `<task>...</task>` block that is not empty.
+   * Sent while a task runs, such a message is not a word for that task:
+   * the daemon runs its blocks after it as tasks of their own (the same
+   * rule as contains_task_tags in server/task_runner.py).
+   *
+   * @param {string} text The message.
+   * @returns {boolean} Whether it starts tasks of its own.
+   */
+  function hasTaskBlock(text) {
+    let cursor = 0;
+    for (;;) {
+      const start = text.indexOf('<task>', cursor);
+      if (start === -1) return false;
+      const end = text.indexOf('</task>', start + 6);
+      if (end === -1) return false;
+      if (text.slice(start + 6, end).trim()) return true;
+      cursor = end + 7;
+    }
+  }
+
   async function sendMessage() {
     let prompt = inp.value.trim();
     if (!prompt) return;
@@ -27659,13 +28340,26 @@
     // A message added to a running task carries its files too: the
     // daemon shows them to the running agent with the text.
     if (isRunning) {
-      tab.unackedPrompts.push(unacked);
-      api.appendUserMessage({
+      const followUp = {
         prompt: prompt,
         promptId: unacked.id,
         tabId: activeTabId,
         attachments: wireAttachments,
-      });
+      };
+      // A `<task>` message is a task of its own, run after the one
+      // running: the task a history click scrolled this tab to goes
+      // with it, as with a task sent while none runs (below), and
+      // comes back only if the message does (putPromptBack).  A plain
+      // message is for the running task and leaves the click to the
+      // tab's next task.
+      if (tab.continueTaskId && hasTaskBlock(prompt)) {
+        followUp.continueTaskId = tab.continueTaskId;
+        unacked.continueTaskId = tab.continueTaskId;
+        unacked.selectionEpoch = tab.selectionEpoch;
+        tab.continueTaskId = '';
+      }
+      tab.unackedPrompts.push(unacked);
+      api.appendUserMessage(followUp);
       resetComposerAfterSend();
       return;
     }
@@ -27693,6 +28387,10 @@
     if (webToolsToggleBtn && webToolsStateKnown && !msg.machine) {
       msg.useWebTools = !!webToolsToggleBtn.checked;
     }
+    // The task a history click scrolled this tab to
+    // (resumeExistingChatTab, seekSoughtTask): the new task continues
+    // it in the chat's tree instead of the chat's last task.
+    if (tab.continueTaskId) msg.continueTaskId = tab.continueTaskId;
     // No workDir: the daemon runs every task in its one global working
     // directory (the chat header drop-down's pick on any surface).
     // The run's system prompt names the file open in the editor.
@@ -27748,7 +28446,13 @@
     if (tab.askPendingQuestion === null) return;
     const panels = container.querySelectorAll('.tc-question');
     const last = panels.length ? panels[panels.length - 1] : null;
-    if (last && last.classList.contains('tc-question-answered'))
+    // A lazily loaded finished task keeps its questions in the
+    // Trajectory panel it has not sent; none of them is open, the
+    // task having ended (markTabDone).
+    if (
+      container.querySelector('.trajectory.lazy-unloaded') ||
+      (last && last.classList.contains('tc-question-answered'))
+    )
       clearAskForTab(tab);
   }
 
@@ -27860,9 +28564,12 @@
     // Several at once are the messages a finished task left, refused
     // as the one run the daemon made of them: they go back as that
     // run's prompt, joined as the daemon joined them.
+    const selected = refused.find(p => p.continueTaskId) || {};
     putPromptBack(tab, {
       text: refused.map(p => p.text).join('\n\n'),
       attachments: refused.flatMap(p => p.attachments || []),
+      continueTaskId: selected.continueTaskId,
+      selectionEpoch: selected.selectionEpoch,
     });
   }
 
@@ -27905,7 +28612,7 @@
     tab.lostPrompt = null;
     const taken =
       replay && Array.isArray(replay.promptsTaken) ? replay.promptsTaken : [];
-    const recorded = ((replay && replay.events) || []).some(
+    const recorded = replayedPromptEvents(replay).some(
       e => Array.isArray(e.promptIds) && e.promptIds.includes(lost.id),
     );
     if (recorded || taken.includes(lost.id)) return;
@@ -27917,6 +28624,21 @@
     if (never || lost.transcriptShown) forgetWaitingPrompt(tab, lost);
     putPromptBack(tab, lost);
   }
+
+  // lazypanel-coverage:start
+  /**
+   * The events of `replay` (a `task_events` event, or null) that tell
+   * whether a prompt ran: those it sends and, for a lazily loaded
+   * finished task, the messages typed into it, which its Trajectory
+   * panel holds back (the `steers` of the `trajectory` event, see
+   * Plan.finished in server/lazy_replay.py).
+   */
+  function replayedPromptEvents(replay) {
+    const events = (replay && replay.events) || [];
+    const held = events.find(e => e.type === 'trajectory');
+    return held && held.steers ? events.concat(held.steers) : events;
+  }
+  // lazypanel-coverage:end
 
   /**
    * The recovery copy of a prompt going out from `tab`, the tab on
@@ -27945,13 +28667,14 @@
    * @returns {object} The entry.
    */
   function unackedPrompt(tab, text, files, followUp) {
-    const sameShown = Array.from(
-      O.querySelectorAll('.ev.user-msg:not(.tc-question-answer)'),
-    ).filter(
-      p =>
-        !p.closest('.adjacent-task') &&
-        (p.dataset.rawText || '').trim() === text,
-    ).length;
+    const sameShown =
+      Array.from(
+        O.querySelectorAll('.ev.user-msg:not(.tc-question-answer)'),
+      ).filter(
+        p =>
+          !p.closest('.adjacent-task') &&
+          (p.dataset.rawText || '').trim() === text,
+      ).length + heldSteerTexts().filter(held => held === text).length;
     return {
       id: genTabId(),
       witness: tab.takenPromptId,
@@ -28014,7 +28737,7 @@
       !sameTask &&
       reads(replay.task) &&
       (!lost.followUp || lost.ahead.some(p => !p.followUp));
-    const messages = (replay.events || []).filter(
+    const messages = replayedPromptEvents(replay).filter(
       e =>
         e.type === 'prompt' &&
         e.steer &&
@@ -28032,6 +28755,9 @@
    * into `tab`'s composer, text and attachments, so the user can fix or
    * resend it instead of retyping.  A composer the user has already
    * started a new draft in (any text or attachment) is left alone.
+   * The task a history click had scrolled the tab to, which a `<task>`
+   * message sent while the tab's task ran took with it (sendMessage),
+   * comes back with that message unless a later click picked one.
    */
   function putPromptBack(tab, prompt) {
     const text = prompt.text;
@@ -28047,6 +28773,13 @@
       tab.attachments = files;
     }
     setComposerTextOf(tab, text);
+    if (
+      prompt.continueTaskId &&
+      !tab.continueTaskId &&
+      prompt.selectionEpoch === tab.selectionEpoch
+    ) {
+      tab.continueTaskId = prompt.continueTaskId;
+    }
   }
 
   // Entering answer mode: whatever the user had typed was a prompt, so it
@@ -28519,7 +29252,6 @@
     const cancelBtn = document.createElement('button');
     cancelBtn.type = 'button';
     cancelBtn.className = 'sidebar-confirm-no';
-    cancelBtn.dataset.tooltip = 'Cancel';
     cancelBtn.textContent = 'Cancel';
     cancelBtn.setAttribute('data-inline-cancel', 'true');
     confirmWrap.appendChild(confirmBtn);
@@ -28544,6 +29276,173 @@
       hideSidebarDeleteConfirm(delBtn, confirmWrap);
     });
     return {delBtn: delBtn, confirmWrap: confirmWrap};
+  }
+
+  // The "…" at the right end of a chat panel's header and of a task
+  // panel: it opens the row's menu.
+  const SIDEBAR_MORE_SVG =
+    '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none"><circle cx="5" cy="12" r="1.75"/><circle cx="12" cy="12" r="1.75"/><circle cx="19" cy="12" r="1.75"/></svg>';
+
+  // The menu buttons that answer inside the menu: copy shows its tick
+  // there, and the delete question (the trash, then Delete or Cancel)
+  // is asked and answered there.  Every other button closes the menu.
+  const SIDEBAR_MENU_STAYS_OPEN =
+    '.sidebar-item-copy, .sidebar-item-delete, .sidebar-item-confirm';
+
+  // The row menus are popovers.  A browser without them (one from before
+  // 2024) does not know `:popover-open` and would throw on a query for
+  // it: there no menu ever opens, and main.css leaves the "…" buttons
+  // out.
+  const POPOVERS = typeof HTMLElement.prototype.showPopover === 'function';
+
+  /**
+   * The popover open inside `root` (a Chats row's menu, the help of a
+   * settings box), if any.  While it is open it is the topmost popup,
+   * and the browser closes it on Escape.
+   */
+  function openPopoverIn(root) {
+    return POPOVERS ? root.querySelector(':popover-open') : null;
+  }
+
+  /** The row menu open in the Chats panel, if any. */
+  function historyOpenRowMenu() {
+    return POPOVERS
+      ? historyList.querySelector('.sidebar-item-actions:popover-open')
+      : null;
+  }
+
+  /** Close the Chats panel's open row menu, if any. */
+  function closeHistoryRowMenu() {
+    const menu = historyOpenRowMenu();
+    if (menu) menu.hidePopover();
+  }
+
+  /**
+   * Whether an open row menu holds a changed-rows rebuild of the Chats
+   * panel back: the rebuild would take the menu from under the pointer.
+   * A menu whose delete was confirmed (its Delete is spent) waits for
+   * exactly that rebuild, which removes the deleted row and the menu
+   * with it.
+   */
+  function historyRowMenuParks() {
+    const menu = historyOpenRowMenu();
+    return !!menu && !menu.querySelector('.sidebar-confirm-yes:disabled');
+  }
+
+  // A menu hangs from its row: a list that scrolls, or a window that
+  // changes size, would leave it behind.
+  historyList.addEventListener('scroll', closeHistoryRowMenu, {passive: true});
+  window.addEventListener('resize', closeHistoryRowMenu);
+
+  /**
+   * Place a row menu that is about to open: under its "…" button with
+   * their right edges in line, above the button when the room below is
+   * too short, and inside the window either way.  The menu is still
+   * closed (beforetoggle), so `placing` lays it out, unseen, for the
+   * measurement.
+   *
+   * @param {HTMLElement} menu The row's .sidebar-item-actions strip.
+   * @param {HTMLElement} moreBtn The "…" button that opens it.
+   */
+  function placeSidebarRowMenu(menu, moreBtn) {
+    menu.classList.add('placing');
+    const size = menu.getBoundingClientRect();
+    menu.classList.remove('placing');
+    const btn = moreBtn.getBoundingClientRect();
+    const gap = 4;
+    const edge = 8;
+    const below = btn.bottom + gap;
+    const top =
+      below + size.height + edge <= window.innerHeight
+        ? below
+        : Math.max(edge, btn.top - gap - size.height);
+    const left = Math.max(
+      edge,
+      Math.min(btn.right - size.width, window.innerWidth - edge - size.width),
+    );
+    menu.style.left = left + 'px';
+    menu.style.top = top + 'px';
+  }
+
+  /**
+   * A click in a row menu, seen before the clicked button acts:
+   * choosing an action closes the menu first, so the action finds the
+   * row as it is without the menu (a rename's text box takes the
+   * keyboard, a refresh may rebuild the list).
+   */
+  function onSidebarRowMenuChoice(e) {
+    const btn = e.target.closest('button');
+    if (btn && !btn.closest(SIDEBAR_MENU_STAYS_OPEN)) closeHistoryRowMenu();
+  }
+
+  /**
+   * Up, Down, Home and End walk a row menu's buttons and Tab leaves the
+   * menu, which closes it, as in every menu of the page (menuKeyNav);
+   * Enter and Space are the focused button's own, and Escape is the
+   * browser's (it closes the popover).
+   */
+  function onSidebarRowMenuKey(e) {
+    if (e.key === 'Enter' || e.key === ' ') return;
+    const items = Array.from(
+      e.currentTarget.querySelectorAll('button:not(:disabled)'),
+    ).filter(btn => btn.getClientRects().length > 0);
+    window.ContentContextMenu.menuKeyNav(e, items, null, closeHistoryRowMenu);
+  }
+
+  /**
+   * Turn a row's action strip into the menu its "…" button opens, as
+   * the "…" menu of a session in Claude Code's sidebar: the row keeps
+   * one line (its text and the button), and the strip — the row's
+   * buttons, its "... ago" label and its machine — becomes a popover
+   * that lists every button with its name (main.css draws the names
+   * from the buttons' aria-labels).  The browser opens and closes the
+   * popover (the "…" button, a click elsewhere, Escape) and shows one
+   * at a time, in the top layer, where the sidebar cannot clip it.
+   * Nothing clicked in the menu reaches the row, which would open its
+   * chat.
+   *
+   * @param {HTMLElement} actions The row's .sidebar-item-actions strip.
+   * @param {string} label The accessible name of the button and of the menu.
+   * @returns {HTMLButtonElement} The "…" button, for the row.
+   */
+  function makeSidebarRowMenu(actions, label) {
+    const moreBtn = document.createElement('button');
+    moreBtn.type = 'button';
+    moreBtn.className = 'sidebar-item-more';
+    moreBtn.innerHTML = SIDEBAR_MORE_SVG;
+    moreBtn.setAttribute('aria-label', label);
+    moreBtn.popoverTargetElement = actions;
+    moreBtn.addEventListener('click', e => e.stopPropagation());
+    actions.setAttribute('popover', 'auto');
+    actions.setAttribute('role', 'group');
+    actions.setAttribute('aria-label', label);
+    actions.addEventListener('click', onSidebarRowMenuChoice, true);
+    actions.addEventListener('click', e => e.stopPropagation());
+    actions.addEventListener('keydown', onSidebarRowMenuKey);
+    actions.addEventListener('beforetoggle', e => {
+      if (e.newState !== 'open') return;
+      // A tooltip is drawn under the top layer: it would stick out
+      // from behind the menu.
+      hideTooltip();
+      placeSidebarRowMenu(actions, moreBtn);
+    });
+    actions.addEventListener('toggle', e => {
+      if (e.newState === 'open') {
+        // The keyboard goes into the menu, as into every menu.
+        const first = actions.querySelector('button:not(:disabled)');
+        if (first) first.focus({preventScroll: true});
+        return;
+      }
+      // The delete question does not outlive its menu, the keyboard's
+      // return to the "…" button is no reason for the row's tooltip
+      // (the tooltip of a row opens when something in it takes the
+      // focus), and a refresh that waited for the menu to close lands
+      // now.
+      resetInlineConfirms(actions);
+      hideTooltip();
+      historyMaybeApplyPending();
+    });
+    return moreBtn;
   }
 
   // Expanded-state store for history task panels. Keyed by the row's
@@ -28782,20 +29681,42 @@
   }
 
   /**
-   * The chip naming the remote machine a history row came from; null
-   * for the local daemon's own rows.  A plain label (the machine's
-   * label, machineLabel): the row itself
-   * opens the chat here, in a tab bound to that machine (never the
-   * machine's own web UI).
+   * The chip naming the machine a history row ran on: the remote
+   * machine's label (machineLabel), or this daemon's own machine for
+   * its own rows ("this machine" until the daemon has named it, see
+   * setLocalMachineName).  A plain label: the row itself opens the chat
+   * here, in a tab bound to that machine (never the machine's own web
+   * UI).
    */
   function makeTaskMachineLabel(session) {
     const machine = sessionMachine(session);
-    if (!machine) return null;
     const chip = document.createElement('span');
     chip.className = 'sidebar-item-machine';
-    chip.textContent = machineLabel(machine);
-    chip.title = 'On machine ' + machineLabel(machine);
+    if (machine) {
+      chip.textContent = machineLabel(machine);
+      chip.title = 'On machine ' + machineLabel(machine);
+    } else {
+      chip.classList.add('sidebar-item-machine-local');
+      chip.textContent = localMachineName || 'this machine';
+      chip.title = 'On this machine';
+    }
     return chip;
+  }
+
+  /**
+   * Note this daemon's machine name, and name it on the chips of the
+   * history rows that ran here (those built before the daemon said it
+   * read "this machine").
+   *
+   * @param {string} name The machine's name.
+   */
+  function setLocalMachineName(name) {
+    localMachineName = name;
+    for (const chip of historyList.querySelectorAll(
+      '.sidebar-item-machine-local',
+    )) {
+      chip.textContent = name || 'this machine';
+    }
   }
 
   /**
@@ -29322,32 +30243,23 @@
   }
 
   /**
-   * Show the machine chip on the header of a chat that lives only on a
-   * remote machine (its rows are folded away by default, so the header
-   * is what says where the chat is); a chat with a task on this daemon
-   * carries no chip, as the header opens it here.  The remote-only
-   * chat's rename pencil and delete button act on that machine's
-   * history.db (historyGroupMachine).
+   * Name, in the menu of *group*'s header, the machine the header
+   * opens the chat on: this daemon's for a chat with a task here, else
+   * the machine of its latest row (the chat lives only there, and its
+   * rename pencil and delete button act on that machine's history.db,
+   * historyGroupMachine).
    */
   function syncHistoryGroupMachine(group) {
     const actions = group.querySelector(
       ':scope > .history-chat-header > .history-chat-actions',
     );
+    const label = makeTaskMachineLabel(
+      group._kissLastLocalSession || group._kissLastSession,
+    );
+    label.classList.add('history-chat-machine');
     const chip = actions.querySelector(':scope > .history-chat-machine');
-    const remote = group._kissLastLocalSession ? null : group._kissLastSession;
-    if (
-      chip &&
-      (!remote || chip.textContent !== machineLabel(sessionMachine(remote)))
-    ) {
-      chip.remove();
-    }
-    if (remote && !actions.querySelector(':scope > .history-chat-machine')) {
-      const label = makeTaskMachineLabel(remote);
-      if (label) {
-        label.classList.add('history-chat-machine');
-        actions.appendChild(label);
-      }
-    }
+    if (chip) chip.replaceWith(label);
+    else actions.appendChild(label);
   }
 
   /**
@@ -29559,14 +30471,14 @@
   }
 
   /**
-   * Build the chat panel's header, laid out like a task panel: the
-   * chat's title (behind its last task's status icon) on the first
-   * line, then the action strip with the "Show details" chevron, the
-   * chat's favourite star, the pencil that lets the user retype the
-   * summary, and the "last launched ... ago" label.  Clicking the
-   * header brings the chat on screen (its last task, as a task row
-   * click does); it never folds the panel.  Double-clicking the title
-   * edits it, as the pencil does.
+   * Build the chat panel's header, laid out like a task panel: one
+   * line with the chat's title (behind its last task's status icon)
+   * and the "…" button, whose menu (makeSidebarRowMenu) holds the
+   * "Show details" chevron, the chat's favourite star, the pencil that
+   * lets the user retype the summary, the delete button and the "last
+   * launched ... ago" label.  Clicking the header brings the chat on
+   * screen (its last task, as a task row click does); it never folds
+   * the panel.  Double-clicking the title edits it, as the pencil does.
    */
   function historyGroupHeader(group, chatId) {
     const header = document.createElement('div');
@@ -29636,6 +30548,7 @@
     const launched = document.createElement('span');
     launched.className = 'history-chat-launched';
     actions.appendChild(launched);
+    header.appendChild(makeSidebarRowMenu(actions, 'Chat actions'));
     header.appendChild(actions);
     activateOnEnterSpace(header);
     header.addEventListener('click', e => {
@@ -29834,9 +30747,10 @@
 
   /**
    * Whether a changed-rows rebuild of the Chats panel must wait: a
-   * press is held on it (its click would land on a replaced row) or a
+   * press is held on it (its click would land on a replaced row), a
    * rename box is open (the rebuild would throw the box and the text
-   * typed so far away).  The release, or the rename's end, lands the
+   * typed so far away) or a row menu is open (historyRowMenuParks).
+   * The release, the rename's end or the menu's closing lands the
    * parked page (historyMaybeApplyPending).
    */
   function historyPressHeld() {
@@ -29844,7 +30758,8 @@
       historyMouseHeld ||
       historyHeldKeys.size > 0 ||
       historyActivePointers.size > 0 ||
-      !!historyRenameBox()
+      !!historyRenameBox() ||
+      historyRowMenuParks()
     );
   }
 
@@ -29873,9 +30788,9 @@
     historyMouseHeld = false;
     historyHeldKeys.clear();
     historyActivePointers.clear();
-    // A rename is no stale press: the page stays parked until its box
-    // closes, which lands it.
-    if (historyRenameBox()) return;
+    // A rename or an open row menu is no stale press: the page stays
+    // parked until the box or the menu closes, which lands it.
+    if (historyRenameBox() || historyRowMenuParks()) return;
     applyHistoryPendingRender();
   }
 
@@ -30477,9 +31392,9 @@
       // action stays under Space/Enter after the rebuild (the control
       // is identified by its first class among same-class siblings).
       const active = document.activeElement;
-      // A focused chat-panel header (or its Show details chevron, or
-      // its favourite star) survives the rebuild too: its group is
-      // found again by chat id after the fresh render.
+      // A focused chat-panel header (or its Show details chevron, its
+      // favourite star or its "…" button) survives the rebuild too: its
+      // group is found again by chat id after the fresh render.
       const activeHeader =
         active && active.closest
           ? active.closest('#history-list .history-chat-header')
@@ -30488,9 +31403,11 @@
         const headerGroup = activeHeader.closest('.history-chat-group');
         focusHeaderChatId = (headerGroup && headerGroup.dataset.chatId) || '';
         focusHeaderCtrl =
-          ['.history-chat-collapse', '.history-chat-favorite'].find(sel =>
-            active.matches(sel),
-          ) || '';
+          [
+            '.history-chat-collapse',
+            '.history-chat-favorite',
+            '.sidebar-item-more',
+          ].find(sel => active.matches(sel)) || '';
       }
       const activeRow =
         active && active.closest
@@ -30655,7 +31572,9 @@
           makeCopyButton(itemText, 'sidebar-item-copy', 'task'),
         );
       }
-      // Delete the task from history.db (its sub-tasks go with it).
+      actions.appendChild(makeSidebarCollapseToggle(div, s));
+      // Last of the buttons, as the destructive line of a menu: delete
+      // the task from history.db (its sub-tasks go with it).
       // A running task keeps its row (the daemon refuses anyway); a
       // remote task is deleted by its own machine.  The row is not
       // removed here: the daemon's `tasks_updated` after the delete
@@ -30674,14 +31593,13 @@
         actions.appendChild(del.confirmWrap);
       }
 
-      actions.appendChild(makeSidebarCollapseToggle(div, s));
-      // After the buttons: the task's age, then the machine of a
-      // remote task.  Its tags and SEA are not listed here: the Tag
-      // and SEA filters read them from the row's dataset.
+      // After the buttons: the task's age, then the machine it ran
+      // on.  Its tags and SEA are not listed here: the Tag and SEA
+      // filters read them from the row's dataset.
       const launchedAgo = makeLaunchedAgoLabel(s);
       if (launchedAgo) actions.appendChild(launchedAgo);
-      const machineChip = makeTaskMachineLabel(s);
-      if (machineChip) actions.appendChild(machineChip);
+      actions.appendChild(makeTaskMachineLabel(s));
+      div.appendChild(makeSidebarRowMenu(actions, 'Task actions'));
       div.appendChild(actions);
 
       const info = document.createElement('div');
@@ -31339,6 +32257,8 @@
       sidebarOverlay.classList.remove('open');
       return;
     }
+    // A row's menu hangs from a row of the drawer: it goes with it.
+    closeHistoryRowMenu();
     sidebar.classList.remove('open');
     sidebarOverlay.classList.remove('open');
   }
@@ -31373,8 +32293,11 @@
       } else if (!open && idx >= 0) {
         const {opener} = openSheets.splice(idx, 1)[0];
         // A Delete / Cancel question left open in the sheet must not
-        // still be there, trash icon gone, when the sheet reopens.
+        // still be there, trash icon gone, when the sheet reopens; nor
+        // the help of one of its boxes, a popover.
         resetInlineConfirms(panel);
+        const help = openPopoverIn(panel);
+        if (help) help.hidePopover();
         if (wasOpen) focusSheetOpener(panel, opener);
       }
     }
@@ -31416,10 +32339,12 @@
   /**
    * Whether an inner popup sits on top of the open sheet and owns the
    * Escape key: the date picker, an in-place promptlet editor, the
-   * model dropdown, the server-reset confirm, a confirm/prompt dialog or
-   * an open inline Delete / Cancel confirm inside `panel`.
+   * model dropdown, the server-reset confirm, a confirm/prompt dialog,
+   * a popover (the help of a settings box) or an open inline Delete /
+   * Cancel confirm inside `panel`.
    */
   function sheetHasInnerPopup(panel) {
+    if (openPopoverIn(document)) return true;
     // The promptlet editor counts only while on screen: a search query
     // that filters its row out leaves the draft latched (editingTrickIndex
     // stays set) with nothing for Escape to close before the sheet.
@@ -33015,10 +33940,7 @@
     'OPENAI_API_KEY',
     'ANTHROPIC_API_KEY',
     'ANTHROPIC_WORKSPACE_ID',
-    'TOGETHER_API_KEY',
     'OPENROUTER_API_KEY',
-    'ZAI_API_KEY',
-    'MOONSHOT_API_KEY',
     // Amazon Bedrock (bedrock/ Claude models): bearer token OR access
     // key pair, plus the region.  The daemon stores all five in the
     // same key store (``API_KEY_ENV_VARS``).

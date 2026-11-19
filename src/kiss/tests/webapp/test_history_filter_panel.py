@@ -9,7 +9,7 @@ box and the history list with:
 
 * four status filter chips (labels wrapping hidden checkboxes) —
   ``Running`` / ``Errored`` / ``Succeeded`` / ``Favorites``
-* a date-range pill with two date inputs — ``From`` / ``To``
+* a date-range field with two date inputs — ``From`` / ``To``
 
 This test asserts the HTML, CSS, and JS surfaces all line up: the
 served page contains the form controls with the expected IDs in

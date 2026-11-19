@@ -594,7 +594,7 @@ def _unregister_bridge_state(agent: Any, key: str) -> bool:
 
 
 class IdentifiedPrompt(str):
-    """A user's prompt that remembers the ids its page sent it under.
+    """A user's prompt that remembers what its page stamped it with.
 
     The chat page stamps every prompt it sends (``submit``,
     ``appendUserMessage``) with a ``promptId`` and the daemon names it
@@ -604,25 +604,46 @@ class IdentifiedPrompt(str):
     queued on a run (``AgentState.pending_user_messages``, and
     ``unattributed_prompt_echoes`` while its echo is owed) keeps its id
     by being one of these, and the re-run of several messages a
-    finished run left undrained carries all of theirs.  Only the
-    command handlers and those two queues hold one: what goes on to an
-    agent or into an event is the plain text (``str(prompt)``), which
-    every serializer takes.
+    finished run left undrained carries all of theirs.
+
+    A ``<task>`` message sent while a task runs is a task of its own,
+    run after that one, and its page may name the task its sender had
+    loaded (``continueTaskId``, see ``TaskRunner._take_continued_task``).
+    The task it starts remembers that one the same way
+    (:func:`continued_task_of`): the first of its blocks, queued on
+    ``AgentState.queued_followup_tasks``, or the whole message where
+    it waits among the tab's messages to be the tab's next run.
+
+    Only the command handlers and those queues hold one: what goes on
+    to an agent or into an event is the plain text (``str(prompt)``),
+    which every serializer takes.
     """
 
-    __slots__ = ("prompt_ids",)
+    __slots__ = ("continued_task_id", "prompt_ids")
     prompt_ids: tuple[str, ...]
+    continued_task_id: str
 
-    def __new__(cls, text: str = "", prompt_ids: tuple[str, ...] = ()) -> Self:
-        """Return *text* as a prompt sent under *prompt_ids*."""
+    def __new__(
+        cls,
+        text: str = "",
+        prompt_ids: tuple[str, ...] = (),
+        continued_task_id: str = "",
+    ) -> Self:
+        """Return *text* as a prompt sent under *prompt_ids* to continue *continued_task_id*."""
         prompt = super().__new__(cls, text)
         prompt.prompt_ids = prompt_ids
+        prompt.continued_task_id = continued_task_id
         return prompt
 
 
 def prompt_ids_of(prompt: object) -> list[str]:
     """Return the ids *prompt* was sent under ([] for a prompt sent without one)."""
     return list(prompt.prompt_ids) if isinstance(prompt, IdentifiedPrompt) else []
+
+
+def continued_task_of(prompt: object) -> str:
+    """Return the task *prompt* was sent to continue ("" for a prompt that names none)."""
+    return prompt.continued_task_id if isinstance(prompt, IdentifiedPrompt) else ""
 
 
 def name_prompts(event: dict[str, Any], prompt: object) -> dict[str, Any]:

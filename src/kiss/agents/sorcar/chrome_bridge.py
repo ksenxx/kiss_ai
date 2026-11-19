@@ -87,6 +87,9 @@ _EXTENSION_SOURCE = Path(__file__).resolve().parent / "chrome_extension"
 _PROBE_TIMEOUT_SECS = 1.0
 _CONFIG_LOCK_TIMEOUT_SECS = 5.0
 _REPLY_MARGIN_SECS = 1.0  # the extension's deadline runs at most this much short of ours
+# ... and at least this much: Chrome on macOS fires the timer of an extension's
+# service worker up to 0.15 s late (Linux 1 ms, Windows 8 ms).
+_REPLY_MARGIN_MIN_SECS = 0.3
 _PONG_TIMEOUT_SECS = 5.0  # a pong not written by then: the extension stopped reading
 _SERVER_EXIT_SECS = 5.0  # a shut-down server's thread leaves its accept loop within moments
 
@@ -616,17 +619,19 @@ class ChromeBridge:
     ) -> None:
         """Write the command frame to *conn* (its send lock held) before *deadline*.
 
-        The extension's deadline runs a little short of ours (a tenth, at
-        most _REPLY_MARGIN_SECS): its "deadline exceeded" reply arrives
-        while we still wait, instead of our timeout dropping the connection
-        and every other command in flight.
+        The extension's deadline runs a little short of ours (a tenth,
+        _REPLY_MARGIN_MIN_SECS at least and _REPLY_MARGIN_SECS at most,
+        never more than half of what is left): its "deadline exceeded"
+        reply arrives while we still wait, instead of our timeout dropping
+        the connection and every other command in flight.
 
         Raises:
             ChromeBridgeError: the frame could not be written; the
                 connection is dropped.
         """
         budget = max(deadline - time.monotonic(), 0.0)
-        timeout_ms = round((budget - min(budget / 10, _REPLY_MARGIN_SECS)) * 1000)
+        margin = min(max(budget / 10, _REPLY_MARGIN_MIN_SECS), _REPLY_MARGIN_SECS, budget / 2)
+        timeout_ms = round((budget - margin) * 1000)
         frame = json.dumps({"id": msg_id, "cmd": cmd, "args": args or {}, "timeout_ms": timeout_ms})
         self._write(conn, frame, budget, f"'{cmd}'")
 

@@ -4,9 +4,9 @@
 # add your name here
 """Eyes for text-only models: a vision model describes what a tool returned.
 
-The model under test is ``deepseek-ai/DeepSeek-V4-Pro`` (a text-only name)
-played by the scripted local chat-completions server; the description is
-a real call to the first configured model of ``VISION_MODELS`` and is
+The model under test is ``openrouter/deepseek/deepseek-v4-pro`` (a text-only
+name) played by the scripted local chat-completions server; the description
+is a real call to the first configured model of ``VISION_MODELS`` and is
 skipped when none is configured.  The other tests need no network.
 """
 
@@ -44,7 +44,7 @@ from kiss.tests.cli_locator_stub import stub_cli_locators  # noqa: F401
 from kiss.tests.core.models.anthropic_sse_harness import ScriptedAnthropicServer, sse
 from kiss.tests.core.test_audit1018_codex_bridge_stop import _call, _reply
 
-TEXT_ONLY_MODEL = "deepseek-ai/DeepSeek-V4-Pro"
+TEXT_ONLY_MODEL = "openrouter/deepseek/deepseek-v4-pro"
 """A catalog name of a model that cannot see; the local server answers for it."""
 
 LOCAL_VISION_MODEL = "claude-sonnet-5-5"

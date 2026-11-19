@@ -49,16 +49,16 @@ class TestD2SourceShellEnvRcExitStatus:
         home = tmp_path / "home"
         home.mkdir()
         (home / ".bashrc").write_text(
-            "export TOGETHER_API_KEY=wave3-d2-happy\n"
+            "export OPENAI_API_KEY=wave3-d2-happy\n"
             "true\n"
         )
         monkeypatch.setenv("HOME", str(home))
         monkeypatch.setenv("SHELL", "/bin/bash")
-        monkeypatch.delenv("TOGETHER_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
         vc.load_api_keys()
 
-        assert os.environ.get("TOGETHER_API_KEY") == "wave3-d2-happy"
+        assert os.environ.get("OPENAI_API_KEY") == "wave3-d2-happy"
 
 
 class TestD3TempFileLeaks:

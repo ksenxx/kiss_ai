@@ -31,6 +31,7 @@ import os
 import platform
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -81,8 +82,8 @@ case "$outcome" in
 esac
 """
 
-TOOLS = ["bash", "date", "dirname", "basename", "sed", "id", "mkdir", "grep", "sleep", "ps",
-         "tr", "env", "head", "tail", "mv", "wc", "cat", "nohup"]
+TOOLS = ["bash", "date", "dirname", "basename", "sed", "id", "mkdir", "ls", "chmod", "grep",
+         "sleep", "ps", "tr", "env", "head", "tail", "mv", "wc", "cat", "nohup"]
 
 
 async def _busy_daemon(ws: ServerConnection) -> None:
@@ -111,11 +112,16 @@ class ReinstallWhenIdleTest(unittest.TestCase):
         self.kiss_endpoint = self.endpoint(self.home / ".kiss")
         self.label = f"kiss-reinstall-test-{os.getpid()}-{time.time_ns()}"
         self.script = self.checkout / "scripts" / SCRIPT.name
-        self.logdir = self.checkout / "tmp" / "reinstall-kiss-web"
+        # The helper's temp directory: it logs in the agents' temp directory
+        # there (kiss-tmp), never in the checkout.
+        self.tmp = self.root / "temp"
+        self.tmp.mkdir()
+        self.logdir = self.tmp / "kiss-tmp" / "reinstall-kiss-web"
         self.log = self.logdir / f"{self.label}.log"
         self.env = {
             "HOME": str(self.home),
             "PATH": os.environ["PATH"],
+            "TMPDIR": str(self.tmp),
             "KISS_REINSTALL_LABEL": self.label,
             "KISS_REINSTALL_POLL_SECONDS": "0.1",
         }
@@ -198,6 +204,93 @@ class ReinstallWhenIdleTest(unittest.TestCase):
         self.assertEqual(self.probes(), 9)
         transcript = (self.logdir / f"{self.label}.install-1.log").read_text()
         self.assertIn("args: --non-interactive", transcript)
+        # The agents' temp directory is the user's alone, as kiss.core.kiss_tmp
+        # makes it, and nothing was written into the checkout's tmp/.
+        self.assertEqual(stat.S_IMODE((self.tmp / "kiss-tmp").stat().st_mode), 0o700)
+        self.assertFalse((self.checkout / "tmp").exists())
+
+    def test_log_directory_avoids_a_kiss_tmp_that_is_not_the_users_own(self):
+        """A link planted as ``kiss-tmp`` (a ``/tmp`` several users share) is not written through.
+
+        The log directory is then in ``kiss-tmp-<uid>``, as ``kiss.core.kiss_tmp`` has it;
+        with that name taken as well, the helper refuses.  (Another user's real directory
+        takes the same branch; making one needs a second user.)
+        """
+        elsewhere = self.root / "elsewhere"
+        elsewhere.mkdir()
+        (self.tmp / "kiss-tmp").symlink_to(elsewhere)
+        self.arrange(busy_probes=[], outcomes=["kiss-web is up (1s): http://localhost:8787"])
+        result = self.run_worker()
+        own = self.tmp / f"kiss-tmp-{os.getuid()}"
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("done.", (own / "reinstall-kiss-web" / f"{self.label}.log").read_text())
+        shutil.rmtree(own)
+        own.symlink_to(elsewhere)
+        result = self.run_worker()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(f"{own} is not a directory of your own; point TMPDIR at one", result.stderr)
+        self.assertEqual(list(elsewhere.iterdir()), [])
+        self.assertEqual(self.probes(), 3, "the refused worker asked no daemon")
+
+    def test_log_directory_avoids_a_kiss_tmp_that_others_can_write_to(self):
+        """What is in such a directory may be theirs; one they could only enter is closed."""
+        (self.tmp / "kiss-tmp").mkdir()
+        (self.tmp / "kiss-tmp").chmod(0o777)
+        own = self.tmp / f"kiss-tmp-{os.getuid()}"
+        own.mkdir()
+        own.chmod(0o755)
+        self.arrange(busy_probes=[], outcomes=["kiss-web is up (1s): http://localhost:8787"])
+        result = self.run_worker()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("done.", (own / "reinstall-kiss-web" / f"{self.label}.log").read_text())
+        self.assertEqual(stat.S_IMODE(own.stat().st_mode), 0o700)
+        self.assertEqual(list((self.tmp / "kiss-tmp").iterdir()), [])
+
+    def test_worker_of_a_sub_agent_logs_in_the_directory_its_private_folder_is_in(self):
+        """Its ``TMPDIR`` is that folder, which goes with the sub-agent; the log stays."""
+        # The agents' directory is the user's alone, as kiss.core.kiss_tmp makes it: left to
+        # a umask of 002 it is group-writable and the worker logs in kiss-tmp-<uid> instead.
+        (self.tmp / "kiss-tmp").mkdir(mode=0o700)
+        private = self.tmp / "kiss-tmp" / "kiss-sub-ab12cd34"
+        private.mkdir()
+        self.arrange(busy_probes=[], outcomes=["kiss-web is up (1s): http://localhost:8787"])
+        result = self.run_worker(TMPDIR=str(private))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("done.", self.log.read_text())
+        self.assertEqual(list(private.iterdir()), [])
+
+    def empty_temp_dir_under_a_waiting_worker(self, link_to=None):
+        """Empty the temp directory of a worker that waits for an idle daemon (a link to
+        *link_to* takes its place), let the daemon go idle and return the worker's exit code."""
+        self.arrange(busy_probes="all", outcomes=["kiss-web is up (1s): http://localhost:8787"])
+        worker = subprocess.Popen(["/bin/bash", str(self.script), "--worker"], env=self.env)
+        try:
+            self.wait_for_log("worker started")
+            shutil.rmtree(self.tmp / "kiss-tmp")
+            if link_to is not None:
+                (self.tmp / "kiss-tmp").symlink_to(link_to)
+            (self.checkout / "busy-probes").write_text("")
+            return worker.wait(timeout=60)
+        finally:
+            worker.kill()
+
+    def test_worker_makes_its_log_directory_again_when_the_temp_directory_was_emptied(self):
+        """The job waits for hours, and a temp directory can be emptied meanwhile.
+
+        The install transcript could then not be written, which read as an install
+        without a restart status, and the worker gave up without a trace.
+        """
+        self.assertEqual(self.empty_temp_dir_under_a_waiting_worker(), 0)
+        self.assertIn("kiss-web restarted on the new code; done.", self.log.read_text())
+        self.assertEqual(self.transcripts(), [f"{self.label}.install-1.log"])
+        self.assertEqual(stat.S_IMODE((self.tmp / "kiss-tmp").stat().st_mode), 0o700)
+
+    def test_worker_does_not_write_through_a_link_that_took_its_temp_directory(self):
+        """In a ``/tmp`` several users share, the emptied name can be taken by anyone."""
+        elsewhere = self.root / "elsewhere"
+        elsewhere.mkdir()
+        self.assertEqual(self.empty_temp_dir_under_a_waiting_worker(link_to=elsewhere), 1)
+        self.assertEqual(list(elsewhere.iterdir()), [])
 
     def test_worker_accepts_an_unchanged_runtime_as_success(self):
         self.arrange(busy_probes=[],
@@ -365,6 +458,9 @@ class ReinstallWhenIdleTest(unittest.TestCase):
         self.assertIn(f"--setenv=HOME={self.home}", args)
         self.assertIn(f"--setenv=KISS_HOME={elsewhere}", args)
         self.assertIn(f"--setenv=KISS_REINSTALL_LABEL={self.label}", args)
+        # The unit has no temp directory of the caller's to find the log directory by.
+        self.assertIn(f"--setenv=KISS_REINSTALL_LOGDIR={self.logdir}", args)
+        self.assertIn(f"--setenv=KISS_REINSTALL_LOGROOT={self.logdir.parent}", args)
         self.assertIn("--setenv=KISS_REINSTALL_POLL_SECONDS=0.1", args)
         self.assertEqual(args[-3:], ["/bin/bash", str(self.script), "--worker"])
         self.assertTrue(os.path.isabs(args[-2]), "a transient unit starts in $HOME: absolute path")

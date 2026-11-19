@@ -130,6 +130,7 @@ class TestC1AdjacentTaskNoGlobalFallback(unittest.TestCase):
             *,
             view: tuple[str, str] | None = None,
             conn_id: str = "",
+            lazy: bool = False,
         ) -> None:
             captured.append((chat_id, task_id, direction, tab_id, view))
 

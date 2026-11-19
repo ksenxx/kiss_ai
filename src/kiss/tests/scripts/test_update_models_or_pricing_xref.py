@@ -70,7 +70,7 @@ def test_lookup_returns_none_when_no_variant_matches() -> None:
 def test_new_anthropic_model_with_minor_version_gets_openrouter_pricing() -> None:
     """A new hyphen-versioned Anthropic model is priced from OpenRouter, not $0/$0."""
     anthropic = {"claude-fable-5-1": {"source": "anthropic"}}
-    _, new_models = compute_changes({}, _OR_FABLE_5_1, {}, {}, anthropic, {})
+    _, new_models = compute_changes({}, _OR_FABLE_5_1, {}, anthropic, {})
     entry = next(m for m in new_models if m["name"] == "claude-fable-5-1")
     assert entry["input_price_per_1M"] == 10.0
     assert entry["output_price_per_1M"] == 50.0
@@ -91,7 +91,7 @@ def test_existing_zero_priced_entry_is_backfilled_from_openrouter() -> None:
         }
     }
     anthropic = {"claude-fable-5-1": {"source": "anthropic"}}
-    updates, _ = compute_changes(current, _OR_FABLE_5_1, {}, {}, anthropic, {})
+    updates, _ = compute_changes(current, _OR_FABLE_5_1, {}, anthropic, {})
     upd = next(u for u in updates if u["name"] == "claude-fable-5-1")
     assert upd["changes"]["input_price_per_1M"] == 10.0
     assert upd["changes"]["output_price_per_1M"] == 50.0
@@ -125,7 +125,7 @@ def test_pricing_backfill_clears_stale_needs_pricing_comment(
     monkeypatch.setattr(mod, "MODEL_INFO_PATH", catalog)
 
     anthropic = {"claude-fable-5-1": {"source": "anthropic"}}
-    updates, new_models = compute_changes(current, _OR_FABLE_5_1, {}, {}, anthropic, {})
+    updates, new_models = compute_changes(current, _OR_FABLE_5_1, {}, anthropic, {})
     mod.apply_updates_to_file(updates, new_models, [], current)
 
     written = json.loads(catalog.read_text())

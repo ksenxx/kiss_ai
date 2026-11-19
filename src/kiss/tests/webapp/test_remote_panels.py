@@ -17,9 +17,14 @@ rows, settings, modals), never the panels.
 * Live test: the production ``RemoteAccessServer`` page renders a
   transcript with one instance of every panel type in headless
   Chromium, on a desktop and a phone-sized viewport; every probed panel
-  must be present and the task panel / event panels must keep their
-  width share of the chat.  Screenshots are saved for visual
-  validation.
+  must be present, the task panel must stay the user's bubble against
+  the chat column's right edge (as wide as its text, at most 85% of the
+  column) and the event panels must run the column's full width.  An
+  open panel's card starts under its header, also under one that wraps
+  (a long tool name, the question of an /ask answer).  The
+  phone page is a touch screen: a panel's Copy button, hidden until
+  hover with a mouse, shows there in full.
+  Screenshots are saved for visual validation.
 """
 
 from __future__ import annotations
@@ -218,6 +223,22 @@ _INJECT_PAGE_JS = r"""
   window._testApi.processEvent({
     type: 'autocommit_done', success: false, message: 'Commit failed.',
   });
+  // Two open panels whose header wraps on a phone: a tool call with a
+  // long name, and a finished /ask answer (its header holds the question).
+  window._testApi.processEvent({
+    type: 'tool_call',
+    name: 'mcp__github-enterprise-server__create-or-update-file-contents-in-repository',
+    description: 'Write the release notes.',
+  });
+  out.lastElementChild.querySelector('.tc-h').click();
+  window._testApi.processEvent({
+    type: 'ask_answer',
+    question: 'Could you explain the difference between the new scheduling ' +
+      'options and the old scheduling options, including the behavior of ' +
+      'each on a remote machine?',
+    text: 'The scheduling options differ in scope.',
+    success: true,
+  });
   window._testApi.processEvent({
     type: 'result',
     success: false,
@@ -324,30 +345,57 @@ _PROBE_STYLES_JS = (
   const outRect = out.getBoundingClientRect();
   const tpRect = tp.getBoundingClientRect();
   const tcRect = tc.getBoundingClientRect();
-  const tpText = getComputedStyle(tp.querySelector('.task-panel-text'));
-  const contentWidth =
-    outRect.width -
-    parseFloat(getComputedStyle(out).paddingLeft) -
-    parseFloat(getComputedStyle(out).paddingRight);
+  const tpTextEl = tp.querySelector('.task-panel-text');
+  const tpText = getComputedStyle(tpTextEl);
+  const padLeft = parseFloat(getComputedStyle(out).paddingLeft);
+  const padRight = parseFloat(getComputedStyle(out).paddingRight);
+  const contentWidth = outRect.width - padLeft - padRight;
+  // The width the task's text takes on one line, with its own padding.
+  const textRange = document.createRange();
+  textRange.selectNodeContents(tpTextEl);
+  tpTextEl.style.whiteSpace = 'pre';
+  const textWidth = textRange.getBoundingClientRect().width +
+    parseFloat(tpText.paddingLeft) + parseFloat(tpText.paddingRight);
+  tpTextEl.style.whiteSpace = '';
   // Folded state: toggle, measure, restore (probes run after the
   // screenshot, so the toggle never shows up in it).
   tp.classList.add('collapsed');
   const collapsedTextDisplay =
     getComputedStyle(tp.querySelector('.task-panel-text')).display;
   tp.classList.remove('collapsed');
+  // Every open panel that shows a card (main.css: the panel's ::before):
+  // where the card starts and where the header ends with its margin,
+  // both from the panel's top, and whether the header wraps.
+  const cards = Array.from(out.querySelectorAll(
+    ':is(.tc, .system-prompt, .prompt, .ask-answer):not(.collapsed)'
+  )).map(panel => {
+    const header = panel.firstElementChild;
+    const headerStyle = getComputedStyle(header);
+    const headerRect = header.getBoundingClientRect();
+    return {
+      panel: panel.className,
+      cardTop: parseFloat(getComputedStyle(panel, '::before').top),
+      headerEnd: headerRect.bottom - panel.getBoundingClientRect().top +
+        parseFloat(headerStyle.marginBottom),
+      wrapped: headerRect.height > 1.5 * parseFloat(headerStyle.lineHeight),
+    };
+  });
   return {
     styles,
+    cards,
     taskPanelCollapsedTextDisplay: collapsedTextDisplay,
     taskPanelTextMaxHeight: tpText.maxHeight,
-    // The user's task panel sits against the right edge at 9/10 of the
-    // chat's content width and every other event against the left edge
-    // at 19/20 of it (main.css).  The gap on the anchored side is the
-    // chat's padding on both surfaces; the gap on the open side is a
-    // share of the content width, which differs between the two pages,
-    // so that side is checked as the width share instead.
-    taskPanelGapRight: outRect.right - tpRect.right,
-    taskPanelWidthShare: tpRect.width / contentWidth,
-    eventGapLeft: tcRect.left - outRect.left,
+    taskPanelCopyOpacity: getComputedStyle(tp.querySelector('.panel-copy-btn')).opacity,
+    // The user's task panel is a bubble against the right edge of the
+    // chat column (#output less its padding), as wide as its text
+    // between 120px and 85% of the column, and every other event runs
+    // the column's full width from its left edge (main.css).  The gaps
+    // are measured from the column's edges.
+    taskPanelGapRight: outRect.right - padRight - tpRect.right,
+    taskPanelWidth: tpRect.width,
+    taskPanelTextWidth: textWidth,
+    contentWidth,
+    eventGapLeft: tcRect.left - outRect.left - padLeft,
     eventWidthShare: tcRect.width / contentWidth,
   };
 })()"""
@@ -518,14 +566,34 @@ def _assert_probes(probes: dict[str, Any], label: str) -> None:
     assert probes["taskPanelTextMaxHeight"] == "540px", (
         f"[{label}] the task panel text must be capped at 60vh"
     )
-    for key, share, words in (
-        ("taskPanelWidthShare", 0.9, "the task panel is 9/10"),
-        ("eventWidthShare", 0.95, "an event panel is 19/20"),
-    ):
-        actual = float(probes[key])
-        assert abs(actual - share) <= 0.01, (
-            f"[{label}] {words} of the chat wide ({actual:.3f})"
-        )
+    # main.css: the task panel is the user's bubble (width: fit-content;
+    # min-width: 120px; max-width: 85%) against the column's right edge.
+    column = float(probes["contentWidth"])
+    bubble = max(120.0, min(float(probes["taskPanelTextWidth"]), 0.85 * column))
+    assert abs(float(probes["taskPanelWidth"]) - bubble) <= 1, (
+        f"[{label}] the task panel is as wide as its text, between 120px and "
+        f"85% of the chat column ({probes['taskPanelWidth']:.1f}px, expected "
+        f"{bubble:.1f}px of {column:.1f}px)"
+    )
+    assert abs(float(probes["taskPanelGapRight"])) <= 1, (
+        f"[{label}] the task panel sits against the chat column's right edge "
+        f"({probes['taskPanelGapRight']:.1f}px off)"
+    )
+    # Every other event runs the column's full width from its left edge.
+    assert abs(float(probes["eventWidthShare"]) - 1) <= 0.01, (
+        f"[{label}] an event panel is as wide as the chat column "
+        f"({probes['eventWidthShare']:.3f})"
+    )
+    assert abs(float(probes["eventGapLeft"])) <= 1, (
+        f"[{label}] an event panel starts at the chat column's left edge "
+        f"({probes['eventGapLeft']:.1f}px off)"
+    )
+    # main.css: an open panel's card starts right under its header,
+    # however many lines the header takes.
+    overlapped = [
+        card for card in probes["cards"] if abs(card["cardTop"] - card["headerEnd"]) > 0.5
+    ]
+    assert not overlapped, f"[{label}] cards that do not start under their header: {overlapped}"
 
 
 @pytest.mark.timeout(240)
@@ -559,7 +627,9 @@ def test_live_remote_panels_render(tmp_path: Path) -> None:
             try:
                 for label, viewport in VIEWPORTS.items():
                     page = browser.new_page(
-                        ignore_https_errors=True, viewport=viewport
+                        ignore_https_errors=True,
+                        viewport=viewport,
+                        has_touch=label == "mobile",
                     )
                     probes[label] = _capture_page(
                         page,
@@ -579,6 +649,22 @@ def test_live_remote_panels_render(tmp_path: Path) -> None:
 
     for label in VIEWPORTS:
         _assert_probes(probes[label], label)
+    # The two viewports cover both sides of the bubble's width rule: the
+    # desktop column leaves the one-line task its natural width, the
+    # phone column caps it at 85%.
+    desktop, mobile = probes["desktop"], probes["mobile"]
+    assert desktop["taskPanelWidth"] < 0.84 * desktop["contentWidth"], desktop
+    assert mobile["taskPanelWidth"] == pytest.approx(
+        0.85 * mobile["contentWidth"], abs=1
+    ), mobile
+    # A touch screen has no hover to reveal a panel's Copy button, so it
+    # shows in full there; with a mouse it waits for the hover.
+    assert mobile["taskPanelCopyOpacity"] == "1", mobile
+    assert desktop["taskPanelCopyOpacity"] == "0", desktop
+    # The phone covers the card under a wrapped header: the long tool
+    # name and the /ask question both take more than one line there.
+    wrapped = {card["panel"].split()[1] for card in mobile["cards"] if card["wrapped"]}
+    assert wrapped == {"tc", "ask-answer"}, mobile["cards"]
 
 
 # --------------------------------------------------------------------------

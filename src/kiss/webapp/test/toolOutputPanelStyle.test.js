@@ -6,13 +6,14 @@
 // End-to-end tests for two styling requirements of the chat page:
 //
 // 1. Panels showing tool call output (.bash-panel) paint the shared
-//    neutral panel tint: the translucent --panel-tint standalone, and
-//    the same tint pre-mixed over --bg (--panel-tint-solid) when nested
-//    inside a .tc card (whose opaque --surface would otherwise make the
-//    translucent tint render lighter).  (The thinking tokens being
-//    plain italic text inside the Thoughts panel is pinned by
+//    neutral panel tint (the translucent --panel-tint) standalone;
+//    nested inside a .tc they are a section of the open call's card,
+//    which paints that tint once behind all its sections, so the
+//    nested panel has no fill of its own (two layers of the
+//    translucent tint would render darker).  (The thinking tokens
+//    being plain italic text inside the Thoughts panel is pinned by
 //    transcriptPanelAlignment.test.js.)
-// 2. The model picker pill (#model-btn) width caps at
+// 2. The model picker button (#model-btn) width caps at
 //    clamp(72px, 21vw, 220px).
 
 'use strict';
@@ -66,13 +67,27 @@ function testToolOutputPaintsThePanelTint() {
 
   const nested = d.querySelector('.tc > .bash-panel');
   assert.ok(nested, 'the Bash tool call must nest an output panel in its .tc');
-  // The .tc card paints the opaque --surface behind its children, so the
-  // nested panel paints the same tint pre-mixed over --bg (what a
-  // standalone panel sits on) instead of relying on transparency.
+  // The open .tc paints the tint behind its sections (its ::before, a
+  // pseudo-element jsdom cannot compute, so that rule is read from the
+  // parsed stylesheet); the nested panel adds no second layer.
   assert.strictEqual(
-    win.getComputedStyle(nested).background,
-    tint.replace('transparent', 'var(--bg)'),
-    'a nested tool output panel paints the standalone tint mixed over --bg',
+    win.getComputedStyle(nested).backgroundColor,
+    'rgba(0, 0, 0, 0)',
+    'a nested tool output panel has no fill of its own',
+  );
+  let card = null;
+  for (const sheet of d.styleSheets) {
+    for (const rule of sheet.cssRules) {
+      const selectors = (rule.selectorText || '').split(',');
+      if (selectors.some(s => s.trim() === '.tc:not(.collapsed)::before'))
+        card = rule;
+    }
+  }
+  assert.ok(card, 'main.css declares the open tool call card');
+  assert.strictEqual(
+    card.style.background,
+    tint,
+    'the open tool call card paints the standalone tint',
   );
   win.close();
 }

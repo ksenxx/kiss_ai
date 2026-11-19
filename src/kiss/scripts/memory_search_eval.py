@@ -20,6 +20,8 @@ Run::
     uv run python -m kiss.scripts.memory_search_eval ~/.kiss/memories/kiss
     # force the offline embedder:
     uv run python -m kiss.scripts.memory_search_eval ~/.kiss/memories/kiss --hashed
+    # the ranking without statement vectors, to compare with:
+    uv run python -m kiss.scripts.memory_search_eval ~/.kiss/memories/kiss --page-vectors
 """
 
 import argparse
@@ -63,6 +65,10 @@ def main(argv: list[str] | None = None) -> int:
         help="question set; default <dir>/eval/questions.yaml",
     )
     parser.add_argument("--hashed", action="store_true", help="use the offline embedder")
+    parser.add_argument(
+        "--page-vectors", action="store_true",
+        help="rank by one vector per page, without the statement vectors",
+    )
     parser.add_argument("--min-recall5", type=float, default=0.0)
     args = parser.parse_args(argv)
     questions_file = args.questions or args.dir / "eval" / "questions.yaml"
@@ -77,10 +83,16 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     memory = MemoryDir(args.dir)
+    statements = not args.page_vectors
     if args.hashed:
-        index = VectorIndex(memory, embed=hashed_embedding, model_code=HASHED_EMBEDDING_MODEL_CODE)
+        index = VectorIndex(
+            memory,
+            embed=hashed_embedding,
+            model_code=HASHED_EMBEDDING_MODEL_CODE,
+            statements=statements,
+        )
     else:
-        index = VectorIndex(memory)
+        index = VectorIndex(memory, statements=statements)
     index.sync()
     unknown = sorted({g for q in questions for g in q["gold"]} - set(memory.page_names()))
     if unknown:
@@ -99,8 +111,10 @@ def main(argv: list[str] | None = None) -> int:
     n = len(ranks)
     recall = {k: sum(1 for r in ranks if 0 < r <= k) / n for k in (1, 3, 5)}
     mrr = sum(1 / r for r in ranks if r) / n
+    ranking = "page and best statement" if statements else "page vector"
     print(
-        f"\n{n} questions, {len(memory.page_names())} pages, embedder {index.model_code}: "
+        f"\n{n} questions, {len(memory.page_names())} pages, embedder {index.model_code}, "
+        f"ranked by {ranking}: "
         f"R@1 {recall[1]:.2f}  R@3 {recall[3]:.2f}  R@5 {recall[5]:.2f}  MRR {mrr:.2f}"
     )
     return 0 if recall[5] >= args.min_recall5 else 1

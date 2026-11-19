@@ -240,7 +240,7 @@ class TestVictorySoundLive(RemoteTabsHarness):
                 #    still sounds the finish.
                 await page.click("#more-btn")
                 await page.click("#settings-btn")
-                await page.click("#cfg-victory-sound")
+                await page.get_by_label("Play a sound when a task finishes", exact=True).uncheck()
                 self.assertEqual(
                     await page.evaluate("localStorage.getItem('kissVictorySound')"), "off",
                 )

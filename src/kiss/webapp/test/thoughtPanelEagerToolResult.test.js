@@ -284,6 +284,93 @@ function testTextDeltaFillsEagerPanel() {
   win.close();
 }
 
+// Two calls made at once report in a row: the second result arms a
+// panel while the eager one of the first is still empty.  The words
+// that follow belong in that one panel, however the stream cuts them.
+function testWordsAfterTwoResultsStayInOnePanel() {
+  const {win} = makePage({beforeScripts: stubRaf});
+  const TAB = win._testApi.getActiveTabId();
+  const output = win.document.getElementById('output');
+
+  send(win, {type: 'clear', chat_id: 'chat-two', tabId: TAB});
+  send(win, {type: 'status', running: true, tabId: TAB, startTs: Date.now()});
+  send(win, {type: 'text_delta', text: 'first turn text', tabId: TAB});
+  send(win, {type: 'text_end', tabId: TAB});
+
+  send(win, {type: 'tool_call', name: 'Read', path: '/w/a', tabId: TAB});
+  send(win, {type: 'tool_call', name: 'Read', path: '/w/b', tabId: TAB});
+  send(win, {type: 'tool_result', content: 'a\n', tabId: TAB});
+  send(win, {type: 'tool_result', content: 'b\n', tabId: TAB});
+  assert.strictEqual(llmPanels(output).length, 2);
+
+  send(win, {type: 'thinking_start', tabId: TAB});
+  send(win, {type: 'thinking_delta', text: 'BOTH-READ', tabId: TAB});
+  send(win, {type: 'thinking_end', tabId: TAB});
+  send(win, {type: 'text_delta', text: 'FIRST-CHUNK ', tabId: TAB});
+  send(win, {type: 'text_delta', text: 'SECOND-CHUNK', tabId: TAB});
+  send(win, {type: 'text_end', tabId: TAB});
+  const panels = llmPanels(output);
+  assert.strictEqual(
+    panels.length,
+    2,
+    'BUG: the words after two results in a row were split over ' +
+      panels.length +
+      ' Thoughts panels',
+  );
+  for (const said of ['BOTH-READ', 'FIRST-CHUNK', 'SECOND-CHUNK'])
+    assert.ok(panels[1].textContent.includes(said), said + ' is in the panel');
+  assert.strictEqual(stepsText(win), 'Steps: 2');
+
+  // The next call's result opens the next panel as ever.
+  send(win, {type: 'tool_call', name: 'Bash', command: 'ls', tabId: TAB});
+  send(win, {type: 'tool_result', content: 'c\n', tabId: TAB});
+  send(win, {type: 'text_delta', text: 'third turn', tabId: TAB});
+  assert.strictEqual(llmPanels(output).length, 3);
+  assert.strictEqual(stepsText(win), 'Steps: 3');
+  win.close();
+}
+
+// A result whose call was never recorded finds the agent's words still
+// in the Thinking panel: it ends them as the call would have, so the
+// panel's time stops and the next words get a panel of their own.
+function testResultOverWordsSealsThePanel() {
+  const {win} = makePage({beforeScripts: stubRaf});
+  const TAB = win._testApi.getActiveTabId();
+  const output = win.document.getElementById('output');
+
+  send(win, {type: 'clear', chat_id: 'chat-lost', tabId: TAB});
+  send(win, {type: 'status', running: true, tabId: TAB, startTs: Date.now()});
+  send(win, {type: 'tool_call', name: 'Bash', command: 'ls', tabId: TAB});
+  send(win, {type: 'tool_result', content: 'a\n', tabId: TAB});
+  send(win, {type: 'text_delta', text: 'BEFORE-THE-LOST-CALL', tabId: TAB});
+  send(win, {type: 'text_end', tabId: TAB});
+  let panels = llmPanels(output);
+  assert.strictEqual(panels.length, 1);
+  assert.ok(!panels[0].dataset.timeDone, 'the panel is still open');
+
+  send(win, {type: 'tool_result', content: 'b\n', tabId: TAB});
+  panels = llmPanels(output);
+  assert.strictEqual(
+    panels.length,
+    2,
+    'BUG: a result over words in the Thoughts panel must open the next panel',
+  );
+  assert.strictEqual(
+    panels[0].dataset.timeDone,
+    '1',
+    'BUG: the Thoughts panel the result found words in was never sealed',
+  );
+
+  send(win, {type: 'text_delta', text: 'AFTER-IT', tabId: TAB});
+  panels = llmPanels(output);
+  assert.strictEqual(panels.length, 2);
+  assert.ok(panels[0].textContent.includes('BEFORE-THE-LOST-CALL'));
+  assert.ok(!panels[0].textContent.includes('AFTER-IT'));
+  assert.ok(panels[1].textContent.includes('AFTER-IT'));
+  assert.strictEqual(stepsText(win), 'Steps: 2');
+  win.close();
+}
+
 function testEagerPanelBackgroundTab() {
   const wv = makePage({beforeScripts: stubRaf});
   const win = wv.win;
@@ -537,6 +624,8 @@ const TESTS = [
   testEagerPanelAfterToolResult,
   testProvisionalPanelRemovedOnNextToolCall,
   testTextDeltaFillsEagerPanel,
+  testWordsAfterTwoResultsStayInOnePanel,
+  testResultOverWordsSealsThePanel,
   testEagerPanelBackgroundTab,
   testEagerPanelSurvivesTabSwitch,
   testEagerPanelFooterTicksAfterTabRestore,

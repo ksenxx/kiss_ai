@@ -40,7 +40,6 @@ from kiss.agents.sorcar.edit_guards import (
     rewrite_guard,
     shadow_command,
 )
-from kiss.agents.sorcar.fanout_guard import SUBAGENT_DIR_PREFIX
 from kiss.agents.sorcar.shell_guards import refuse_or_lift
 from kiss.agents.sorcar.useful_tools import (
     _MAX_BINARY_READ_BYTES,
@@ -61,6 +60,7 @@ from kiss.agents.sorcar.useful_tools import (
 from kiss.core import tool_interrupt
 from kiss.core.config import DEFAULT_CONFIG
 from kiss.core.kiss_error import KISSError
+from kiss.core.kiss_tmp import CONTAINER_TMP_DIR, SUBAGENT_DIR_PREFIX
 from kiss.core.locked import _race_delay, locked_call
 from kiss.core.secret_redaction import StreamRedactor
 
@@ -1874,18 +1874,21 @@ class DockerManager:
     def make_private_dir(self) -> str | None:
         """Make a sub-agent's private folder in the container and run every later exec in its name.
 
-        The folder is the sub-agent's scratch dir.  Every exec from now
-        on has it as its temp directory (``TMPDIR``, ``TMP``, ``TEMP``)
-        and names it in :data:`SUBAGENT_DIR_ENV`, the mark
+        The folder is the sub-agent's scratch dir, in the container's
+        :data:`~kiss.core.kiss_tmp.CONTAINER_TMP_DIR`.  Every exec from
+        now on has it as its temp directory (``TMPDIR``, ``TMP``,
+        ``TEMP``) and names it in :data:`SUBAGENT_DIR_ENV`, the mark
         :meth:`remove_private_dir` finds the sub-agent's processes by.
 
         Returns:
             The folder's path in the container, or ``None`` when it could
-            not be made (the sub-agent then scratches in the work tree).
+            not be made (the sub-agent then scratches in the folder a
+            task gets there).
         """
-        folder = f"/tmp/{SUBAGENT_DIR_PREFIX}{uuid.uuid4().hex[:8]}"
+        folder = f"{CONTAINER_TMP_DIR}/{SUBAGENT_DIR_PREFIX}{uuid.uuid4().hex[:8]}"
         exit_code, _, _ = self._exec(
-            self._open_container(), f"mkdir -m 700 {folder}", 30, self.stop_event,
+            self._open_container(),
+            f"mkdir -p {CONTAINER_TMP_DIR} && mkdir -m 700 {folder}", 30, self.stop_event,
         )
         tool_interrupt.raise_if_interrupted()
         if exit_code != 0:

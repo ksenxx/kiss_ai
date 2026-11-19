@@ -33,8 +33,8 @@ from kiss.agents.sorcar.persistence import (
     _allocate_chat_id,
     _append_chat_event,
     _current_db_path,
-    _load_chat_context,
-    _load_task_chain_context,
+    _load_task_lineage,
+    _next_task_parent,
     _save_task_extra,
     _save_task_result,
     _task_has_transcript_events,
@@ -322,6 +322,10 @@ class ChatSorcarAgent(SorcarAgent):
         super().__init__(name)
         self._chat_id: str = ""
         self._context_task_id: str = ""
+        # The task the current run continues in its chat's tree ("" for
+        # a chat's first task): resolved by build_chat_prompt, whose
+        # prompt carries the path to it, and recorded in the run's row.
+        self._chat_parent_id: str = ""
         # File stem of the SEA (SEA, wire field ``seaPath``)
         # this run executes on behalf of, e.g. ``write_paper_sea`` or
         # ``cron_agent``; set by the task runner and persisted in the
@@ -394,7 +398,7 @@ class ChatSorcarAgent(SorcarAgent):
         any pending worktree first (``SorcarAgent.new_chat``), and drops
         any pending one-shot :meth:`resume_from_task_id` seed: a
         brand-new chat must never have its first prompt augmented with
-        the previous task's parent-chain context.
+        the path to a task loaded before it.
         """
         super().new_chat()
         self._chat_id = ""
@@ -414,26 +418,33 @@ class ChatSorcarAgent(SorcarAgent):
             self._chat_id = chat_id
 
     def resume_from_task_id(self, task_id: str) -> None:
-        """Seed the next prompt's context from a task's parent chain.
+        """Make the next task continue *task_id* instead of the chat's last task.
 
-        Called when the tab that owns this agent was opened by a
-        specific task id (history click / ``resumeSession`` with
-        ``taskId``) and no task has been run in the tab since: the
-        first :meth:`build_chat_prompt` after this call traverses the
-        ``parent_task_id`` links starting at *task_id* (via
-        :func:`_load_task_chain_context`) instead of loading the whole
-        chat.  The seed is one-shot — subsequent prompts fall back to
-        the normal chat-context path.
+        Called when the user loaded a task before running the next one
+        (a CHATS click: ``resumeSession`` with ``taskId``, or the
+        ``continueTaskId`` of the run): the first
+        :meth:`build_chat_prompt` after this call makes that task the
+        parent of the new one in the chat's tree.  The load is one-shot
+        — later tasks continue the chat's last task again, which is
+        then the one that continued *task_id*.
 
         Args:
-            task_id: The ``task_history.id`` the tab was opened with.
+            task_id: The ``task_history.id`` the user loaded.
                 Empty strings are ignored.
         """
         if task_id:
             self._context_task_id = task_id
 
     def build_chat_prompt(self, prompt: str, name_commands: bool = False) -> str:
-        """Load chat context and augment prompt with previous tasks/results.
+        """Augment *prompt* with the tasks and results it continues.
+
+        The tasks of a chat form a tree rooted at the chat's first
+        task.  The new task's parent is the task loaded with
+        :meth:`resume_from_task_id` (taken here, once), else the chat's
+        last task; the prompt carries the tasks on the path from the
+        root to that parent (:func:`_load_task_lineage`), the first 2
+        and the last ``MAX_TASKS - 2`` of them when there are more than
+        :data:`MAX_TASKS`.
 
         Args:
             prompt: The original task prompt.
@@ -449,12 +460,9 @@ class ChatSorcarAgent(SorcarAgent):
             The augmented prompt with chat history prepended, or the
             original prompt if no prior context exists.
         """
-        chat_context: list[dict[str, object]] = []
-        if self._context_task_id:
-            chat_context = _load_task_chain_context(self._context_task_id)
-            self._context_task_id = ""
-        if not chat_context:
-            chat_context = _load_chat_context(self._chat_id)
+        self._chat_parent_id = _next_task_parent(self._chat_id, self._context_task_id)
+        self._context_task_id = ""
+        chat_context = _load_task_lineage(self._chat_parent_id)
         if not chat_context:
             augmented = "# Task\n" + prompt
         else:
@@ -654,14 +662,14 @@ class ChatSorcarAgent(SorcarAgent):
             settings["Parent task id"] = parent_id
         return settings
 
-    def _tree_scratch_dir(self) -> str:
-        """One scratch directory per task, ``./tmp/<task-id>/``.
+    def _scratch_name(self) -> str:
+        """One scratch directory per task, ``<task-id>/`` in the agents' temp directory.
 
-        Concurrent siblings in the same work dir then never share a file
-        name (P12 of the 2026-10-24 trajectory audit: two reviews read
-        each other's tmp/paper.pdf).
+        Concurrent tasks then never share a file name (P12 of the
+        2026-10-24 trajectory audit: two reviews read each other's
+        ``paper.pdf`` in a scratch directory they shared).
         """
-        return f"./tmp/{self.last_task_id}/"
+        return f"{self.last_task_id}/"
 
     def _task_settings_payload(
         self,
@@ -1056,6 +1064,7 @@ class ChatSorcarAgent(SorcarAgent):
             max_budget=resolved_budget,
         )
         early_extra["startTs"] = start_ts_ms
+        early_extra["chat_parent_id"] = self._chat_parent_id
 
         # This run's usage epoch starts BEFORE its row exists: once the
         # row is visible a ``/update`` or ``/ask`` side channel may

@@ -32,6 +32,7 @@ from playwright.sync_api import expect, sync_playwright
 
 from kiss.agents.sorcar import persistence
 from kiss.agents.sorcar.daemon_client import run
+from kiss.tests.conftest import click_row_menu_item
 from kiss.tests.server.parallel_agent_harness import (
     STANDIN_MODEL,
     StandInModelServer,
@@ -214,9 +215,10 @@ def test_running_history_section_lifecycle(flat: bool) -> None:
                 # Expand the completed chat so grouped mode has enough visible
                 # rows to scroll and request its next real page.
                 if not flat:
-                    page.locator(
-                        '[data-chat-id="other-chat"] .history-chat-collapse'
-                    ).click()
+                    click_row_menu_item(
+                        page.locator('[data-chat-id="other-chat"] > .history-chat-header'),
+                        ".history-chat-collapse",
+                    )
                 _load_more(page, 56)
                 ids = page.locator("#history-list .ids-copy-task").evaluate_all(
                     "els => els.map(el => el.parentElement.textContent)",

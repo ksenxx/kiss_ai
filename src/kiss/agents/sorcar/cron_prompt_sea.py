@@ -35,9 +35,9 @@ and the tail of its result. Use it instead of running `date` or reading the job'
 - Your final finish(summary_in_html=...) is delivered verbatim to the job's targets and \
 appended to the job's log by the runner; reply with exactly [SILENT] when there is nothing \
 worth reporting.
-- Tools: Read a file before you Edit or Write it; keep scratch files under ./tmp/; batch \
-independent shell commands into one Bash call; a command expected to run longer than a \
-minute goes to Bash(background=true) + bash_job(wait).
+- Tools: Read a file before you Edit or Write it; keep scratch files in the Scratch dir of \
+Task Settings; batch independent shell commands into one Bash call; a command expected to \
+run longer than a minute goes to Bash(background=true) + bash_job(wait).
 - Do not create, modify or remove scheduled jobs.
 
 </scheduled_run>

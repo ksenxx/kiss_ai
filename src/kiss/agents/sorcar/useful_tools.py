@@ -64,7 +64,7 @@ from kiss.agents.sorcar.edit_matching import (
     split_lines,
     tolerant_matches,
 )
-from kiss.agents.sorcar.fanout_guard import SUBAGENT_DIR_PREFIX, parse_tasks_json
+from kiss.agents.sorcar.fanout_guard import parse_tasks_json
 from kiss.agents.sorcar.git_worktree import (
     _WORKTREE_SLUG_PREFIX,
     _WORKTREE_SUBDIR,
@@ -82,6 +82,7 @@ from kiss.agents.sorcar.shell_scan import (
 )
 from kiss.core import tool_interrupt
 from kiss.core.config import DEFAULT_CONFIG, kiss_home
+from kiss.core.kiss_tmp import kiss_tmp_dir
 from kiss.core.locked import locked_call
 from kiss.core.models.model import (
     READ_TOOL_BINARY_MIME_TYPES,
@@ -250,8 +251,8 @@ def _active_worktree_remap(resolved: Path, work_dir: str | None) -> Path | None:
     Returns:
         The remapped worktree-internal path, or ``None`` when no remap
         applies (no active worktree in *work_dir*, *resolved* is not
-        under the parent repo, or *resolved* is already inside a
-        worktree).
+        under the parent repo, is already inside a worktree, or is a
+        scratch file: the OS temp directory may lie in the parent repo).
     """
     if not work_dir:
         return None
@@ -267,6 +268,7 @@ def _active_worktree_remap(resolved: Path, work_dir: str | None) -> Path | None:
     if (
         len(res_parts) <= len(main_repo_parts)
         or res_parts[: len(main_repo_parts)] != main_repo_parts
+        or _is_scratch_path(resolved, str(Path(*main_repo_parts)))
     ):
         return None
     tail = res_parts[len(main_repo_parts) :]
@@ -279,31 +281,27 @@ def _active_worktree_remap(resolved: Path, work_dir: str | None) -> Path | None:
 
 
 def _is_scratch_path(resolved: Path, work_dir: str | None) -> bool:
-    """True when *resolved* is an agent scratch file: under a ``tmp`` directory
-    inside *work_dir*, anywhere under the cron work directory, or in a
-    sub-agent's private folder (:data:`SUBAGENT_DIR_PREFIX`).
+    """True when *resolved* is an agent scratch file: in the agents' temp directory
+    (:func:`~kiss.core.kiss_tmp.kiss_tmp_dir`) or under the cron work directory.
 
-    The system prompt sends every scratch file to ``./tmp/`` and cron runs
-    keep their notes under ``$KISS_HOME/cron/work``.  Such files are
+    The system prompt sends every scratch file to the task's folder of that
+    temp directory (a sub-agent's private folder is one of them) and cron
+    runs keep their notes under ``$KISS_HOME/cron/work``.  Such files are
     rewritten from scratch by each session, so requiring a ``Read`` before
     overwriting one only costs a wasted step: all eleven read-before-write
-    refusals in a 24 h audit were on such files.  The ``tmp`` component
-    must lie *inside* the work directory: a checkout that itself sits under
-    ``/tmp`` or ``~/tmp`` is not scratch, and neither is any path outside
-    the work directory.
+    refusals in a 24 h audit were on such files.  No other path is scratch:
+    a ``tmp`` directory of the work tree holds files like any other, and
+    so does a *work_dir* that itself lies in the agents' temp directory (a
+    clone a task made in its scratch dir and works in): its files are the
+    work.
     """
     if resolved.is_relative_to((kiss_home() / "cron" / "work").resolve()):
         return True
-    temp_dir = Path(tempfile.gettempdir()).resolve()
-    if resolved.is_relative_to(temp_dir) and "".join(
-            resolved.relative_to(temp_dir).parts[:1]).startswith(SUBAGENT_DIR_PREFIX):
-        return True
-    if not work_dir:
+    temp_dir = kiss_tmp_dir()
+    if not resolved.is_relative_to(temp_dir):
         return False
-    root = Path(work_dir).resolve()
-    if not resolved.is_relative_to(root):
-        return False
-    return "tmp" in resolved.relative_to(root).parts[:-1]
+    root = Path(work_dir).resolve() if work_dir else None
+    return root is None or not (root.is_relative_to(temp_dir) and resolved.is_relative_to(root))
 
 
 def _absolutize(file_path: str, work_dir: str | None) -> str:
@@ -402,7 +400,9 @@ def _bash_parent_repo_guard(command: str, work_dir: str | None) -> str | None:
       prefix (not the worktree's prefix — that's a legitimate write
       inside the worktree), outside its ``.venv``: the shared
       environment's binaries (``<repo>/.venv/bin/pytest``) are how a
-      worktree runs the project's tools (:func:`uv_in_worktree`).
+      worktree runs the project's tools (:func:`uv_in_worktree`).  A
+      scratch file is not the repo's either (:func:`_is_scratch_path`;
+      the OS temp directory may lie in the parent repo).
 
     Args:
         command: The Bash command line the model wants to run.
@@ -416,12 +416,12 @@ def _bash_parent_repo_guard(command: str, work_dir: str | None) -> str | None:
     for main_repo, wt_root in _worktree_roots(work_dir):
         pattern = re.escape(main_repo) + rf"(?={_PATH_SEPARATOR_CLASS}|{_PATH_END}|$)"
         for m in re.finditer(pattern, command, flags=_PATH_RE_FLAGS):
-            end = m.end()
-            while end < len(command) and not re.match(_PATH_END, command[end]):
-                end += 1
-            hit = command[m.start() : end]
-            if Path(hit).is_relative_to(wt_root) or Path(hit).is_relative_to(
-                    Path(main_repo) / ".venv"):
+            hit = _path_at(m)
+            if (
+                Path(hit).is_relative_to(wt_root)
+                or Path(hit).is_relative_to(Path(main_repo) / ".venv")
+                or _is_scratch_path(Path(hit).resolve(), main_repo)
+            ):
                 continue
             if _worktree_index(Path(hit).parts[len(Path(main_repo).parts) :]) is not None:
                 # The worktree of a repository nested under the parent
@@ -438,6 +438,14 @@ def _bash_parent_repo_guard(command: str, work_dir: str | None) -> str | None:
                 f"Copy this rewritten command as is: {suggested[:20000]}"
             )
     return None
+
+
+def _path_at(match: re.Match[str]) -> str:
+    """Return the whole path that starts with the repo root *match* found in a text."""
+    text, end = match.string, match.end()
+    while end < len(text) and not re.match(_PATH_END, text[end]):
+        end += 1
+    return text[match.start() : end]
 
 
 def _worktree_roots(work_dir: str | None) -> list[tuple[str, str]]:
@@ -688,7 +696,9 @@ def rewrite_parent_repo_paths(text: str, work_dir: str | None) -> str:
     none, and a brief that names its ``bin/pytest`` or its Python must
     reach the sub-agent as written (on 2026-11-12 six reviewers' briefs
     were rewritten onto a stray environment in the worktree, on another
-    Python).
+    Python).  A scratch file stays too (:func:`_is_scratch_path`): the
+    OS temp directory may lie in the repo, and a file the brief names
+    in the caller's scratch dir is not in the worktree.
 
     The rewrite is textual: prose that deliberately names the parent
     repository ("do not touch <main_repo>") is rewritten too.  A parent
@@ -713,9 +723,12 @@ def rewrite_parent_repo_paths(text: str, work_dir: str | None) -> str:
 
 
 def _swap_root(match: re.Match[str], wt_root: str) -> str:
-    """Replace one matched repo root unless it names a worktree or the shared environment."""
+    """Replace one matched repo root unless it names a worktree, the shared environment
+    or a scratch file."""
     rest = match.string[match.end() :]
     if rest[:1] in ("/", "\\") and re.match(_KEPT_UNDER_REPO, rest[1:], flags=_PATH_RE_FLAGS):
+        return match.group(0)
+    if _is_scratch_path(Path(_path_at(match)).resolve(), match.group(0)):
         return match.group(0)
     return wt_root
 
@@ -956,23 +969,6 @@ class _Capture:
         except OSError:
             self.close()
             self.spilled_to = ""
-
-
-def _make_dirs_under(root: str, relative: str) -> Path:
-    """Create the directories of the relative path *relative* under *root*; return the last.
-
-    Unlike ``mkdir(parents=True)`` this never creates *root* itself: a
-    worktree that vanished after :meth:`UsefulTools._resolve_cwd` chose
-    it is not brought back as an empty directory.
-
-    Raises:
-        OSError: When *root* is gone or a directory cannot be made.
-    """
-    path = Path(root)
-    for part in Path(relative).parts:
-        path /= part
-        path.mkdir(exist_ok=True)
-    return path
 
 
 def _drain_stdout(
@@ -1768,18 +1764,14 @@ def _lines_within_budget(lines: list[str], budget: int) -> list[str]:
     return kept
 
 
-SPILL_DIR = "tmp/tool-out"
-"""Where a truncated tool output is written in full, under the work dir.
-
-POSIX form on every OS: the path is shown to the model for the Bash tool,
-which is bash on Windows too, where a backslash would be eaten.
-"""
-JOB_LOG_DIR = "tmp/bash_jobs"
-"""Where a background job's log is written, under the directory it runs in."""
+SPILL_DIR = "tool-out"
+"""The folder of an agent's scratch dir a truncated tool output is written to in full."""
+JOB_LOG_DIR = "bash_jobs"
+"""The folder of an agent's scratch dir that holds the logs of its background jobs."""
 SUBAGENT_DIR_ENV = "KISS_SUBAGENT_DIR"
 """The variable naming a sub-agent's private folder in the environment of its commands.
 
-The folder (:data:`~kiss.agents.sorcar.fanout_guard.SUBAGENT_DIR_PREFIX`)
+The folder (:data:`~kiss.core.kiss_tmp.SUBAGENT_DIR_PREFIX`)
 holds the sub-agent's job logs and spilled output (:func:`_tools_dir`)
 and is the temp directory of every command its tools start
 (:func:`_clean_env`).  What still carries the variable when the
@@ -1787,21 +1779,24 @@ sub-agent ends is killed (:func:`~kiss.core.processes.kill_env_marked`).
 """
 
 
-def _tools_dir(private_dir: str | None, cwd: str, relative: str) -> tuple[str, str, str]:
-    """Where the tools keep the files of their own in *relative* (job logs, spilled output).
+def _tools_dir(scratch_dir: str | None, name: str) -> Path:
+    """Make the folder *name* the tools keep files of their own in (job logs, spilled output).
 
-    Under *cwd*, the directory the commands run in; a sub-agent's
-    *private_dir* holds the directory by its last name instead, so that
-    nothing of it is left in the work tree.
+    It is in the agent's *scratch_dir* (a task's folder of the agents'
+    temp directory, a sub-agent's private folder), so that nothing of it
+    is left in the work tree; an agent without one (a run with no task
+    id) keeps it in the temp directory itself
+    (:func:`~kiss.core.kiss_tmp.kiss_tmp_dir`).  The model is shown the
+    folder's files in POSIX form (``as_posix``): it pastes them into the
+    Bash tool, which is bash on Windows too, where a backslash would be
+    eaten.
 
-    Returns:
-        ``(root, path under root, the directory as shown to the model)``:
-        the last is relative to *cwd*, or absolute in a private folder.
+    Raises:
+        OSError: When the folder cannot be made.
     """
-    if not private_dir:
-        return cwd, relative, relative
-    name = Path(relative).name
-    return private_dir, name, Path(private_dir, name).as_posix()
+    path = Path(scratch_dir or kiss_tmp_dir(), name)
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 def _output_budget(max_output_chars: int) -> int:
@@ -1948,10 +1943,10 @@ def _host_lexists(path: str) -> bool:
 def _host_guarded(work_dir: str | None, path: str) -> bool:
     """Return whether a shell rewrite of the absolute bash *path* is refused on this host.
 
-    It is when the file exists and is not a scratch file of *work_dir*
-    (:func:`_is_scratch_path`): a scratch file is rewritten from scratch
-    by every session and never reviewed, so a here-document, a
-    ``sed -i`` or a python rewrite of one may run as written, as
+    It is when the file exists and is not a scratch file of a task in
+    *work_dir* (:func:`_is_scratch_path`): a scratch file is rewritten
+    from scratch by every session and never reviewed, so a here-document,
+    a ``sed -i`` or a python rewrite of one may run as written, as
     ``Write`` overwrites one unread.  Bound to *work_dir* with
     :func:`functools.partial` for the guards (:func:`rewrite_guard`,
     :func:`heredoc_guard`).
@@ -2281,33 +2276,24 @@ def digest_parallel_report(
     return "\n".join(lines)
 
 
-def spill_report(
-    root: str | None, kind: str, text: str, private_dir: str | None = None,
-) -> str | None:
-    """Write *text* under ``tmp/tool-out/`` of *root* and return the path to show, or ``None``.
+def spill_report(scratch_dir: str | None, kind: str, text: str) -> str | None:
+    """Write *text* to ``tool-out/`` of *scratch_dir* and return the path to show, or ``None``.
 
-    The file is ``tmp/tool-out/<tag>-<kind>.txt``, *tag* six random hex
-    digits, the shown path relative to *root* (where the model's shell
-    commands run); ``None`` when *root* is unknown or the directory
-    cannot be made or written.
+    The file is ``tool-out/<tag>-<kind>.txt``, *tag* six random hex
+    digits, shown by its absolute path (:func:`_tools_dir`); ``None``
+    when the folder cannot be made or written.
 
     Args:
-        root: The directory the tool's commands run in.
+        scratch_dir: The scratch dir of the agent the report is for.
         kind: What the file holds, for its name (``parallel``, ``agents``).
         text: The whole report.
-        private_dir: The private folder of the sub-agent the report is
-            for, which then holds the file, shown by its absolute path
-            (:func:`_tools_dir`).
     """
-    if root is None:
-        return None
-    root, relative, shown = _tools_dir(private_dir, root, SPILL_DIR)
-    name = f"{uuid.uuid4().hex[:6]}-{kind}.txt"
     try:
-        (_make_dirs_under(root, relative) / name).write_text(text, encoding="utf-8")
+        path = _tools_dir(scratch_dir, SPILL_DIR) / f"{uuid.uuid4().hex[:6]}-{kind}.txt"
+        path.write_text(text, encoding="utf-8")
     except OSError:
         return None
-    return f"{shown}/{name}"
+    return path.as_posix()
 
 
 def _format_parallel_report(
@@ -2432,7 +2418,7 @@ def _format_job_report(job: BackgroundJob, tail_lines: int, max_output_chars: in
     budget = max(max_output_chars - len(status), 0)
     report = (
         f"Command: {job.command}\n"
-        f"Log: {job.log_path}\n"
+        f"Log: {job.log_path.as_posix()}\n"
         f"--- last {tail_lines} log lines ---\n"
     )
     tail = _tail_lines(job.log_path, tail_lines, budget - len(report))
@@ -2963,6 +2949,7 @@ class UsefulTools:
         work_dir: str | None = None,
         jobs: dict[str, BackgroundJob] | None = None,
         private_dir: str | None = None,
+        scratch_dir: str | None = None,
     ) -> None:
         """Initialise the tools.
 
@@ -2983,13 +2970,18 @@ class UsefulTools:
                 through ``bash_job``.  A fresh private registry when
                 ``None``.
             private_dir: A sub-agent's private folder
-                (:data:`SUBAGENT_DIR_PREFIX`): the temp directory of its
-                commands and the home of its job logs and spilled output.
+                (:data:`~kiss.core.kiss_tmp.SUBAGENT_DIR_PREFIX`):
+                its scratch dir and the temp directory of its commands.
+            scratch_dir: The scratch dir of a task that is no sub-agent
+                (its folder of the agents' temp directory).  The tools
+                keep their job logs and spilled output in the scratch
+                dir (:func:`_tools_dir`).
         """
         self.stream_callback = stream_callback
         self.stop_event = stop_event
         self.work_dir = work_dir
         self.private_dir = private_dir
+        self.scratch_dir = private_dir or scratch_dir
         # Background jobs started by ``Bash(background=True)``, by job id.
         self._jobs: dict[str, BackgroundJob] = {} if jobs is None else jobs
         # Read dedupe: sha256 of a window's text the model was shown ->
@@ -3007,9 +2999,9 @@ class UsefulTools:
         # leave behind, and its result says what it did instead.
         self.idle_children: Callable[[], str] | None = None
         self._read_calls = 0
-        # Outputs spilled to tmp/tool-out/ by this instance (see _spill);
-        # the tag keeps instances sharing a work dir (a parent and its
-        # reviewer, parallel siblings) from overwriting each other's files.
+        # Outputs spilled to tool-out/ by this instance (see _spill); the
+        # tag keeps instances sharing a scratch dir (runs with no task id
+        # share the temp directory itself) from overwriting each other's files.
         self._spill_count = 0
         self._spill_tag = uuid.uuid4().hex[:6]
         # Files this instance has shown the model (Read) or written itself
@@ -3174,8 +3166,8 @@ class UsefulTools:
         Equivalent to ``nohup command > log 2>&1 < /dev/null &``: the
         child runs in its own session (so no terminal SIGHUP can reach
         it), reads stdin from ``/dev/null`` and writes stdout and stderr
-        to ``<cwd>/tmp/bash_jobs/<job_id>.log`` (a sub-agent's: to
-        ``bash_jobs/`` in its private folder).  Unlike a shell ``&``
+        to ``bash_jobs/<job_id>.log`` in the scratch dir
+        (:func:`_tools_dir`).  Unlike a shell ``&``
         the tool keeps the ``Popen`` handle, so :meth:`bash_job` can
         report the exit code and a task Stop kills the job's process
         group like it kills a foreground command.
@@ -3189,8 +3181,7 @@ class UsefulTools:
         Args:
             command: The shell command to run.
             cwd: The directory :meth:`_resolve_cwd` chose before the
-                command's guards ran (see :meth:`_spawn`); it also holds
-                the log.
+                command's guards ran (see :meth:`_spawn`).
             machine: Name or address of a registered SSH machine to run
                 on; empty runs locally.
 
@@ -3200,8 +3191,6 @@ class UsefulTools:
             starting with ``Error:`` when it could not be started.
         """
         job_id = "j" + uuid.uuid4().hex[:8]
-        root, logs, _ = _tools_dir(self.private_dir, cwd or os.getcwd(), JOB_LOG_DIR)
-        log_path = Path(root, logs, f"{job_id}.log")
         popen_kwargs = _popen_kwargs(command)
         if machine:
             from kiss.agents.sorcar.machines import find_machine, ssh_command
@@ -3224,7 +3213,7 @@ class UsefulTools:
         settled, registered, kill, released = (threading.Event() for _ in range(4))
         try:
             try:
-                _make_dirs_under(root, logs)
+                log_path = _tools_dir(self.scratch_dir, JOB_LOG_DIR) / f"{job_id}.log"
                 process, ended = _spawn_owned(
                     functools.partial(_spawn_job, popen_kwargs, log_path, cwd, self.private_dir),
                     functools.partial(
@@ -3254,7 +3243,7 @@ class UsefulTools:
         where = f" on {machine}" if machine else ""
         return job, (
             f"Started background job {job_id}{where} (pid {process.pid}).\n"
-            f"Log: {log_path}\n"
+            f"Log: {log_path.as_posix()}\n"
             f'Follow it with bash_job({job_id!r}, action="tail") or block on it with '
             f'bash_job({job_id!r}, action="wait", timeout_seconds=...); '
             f'bash_job({job_id!r}, action="kill") stops it.'
@@ -3973,8 +3962,8 @@ class UsefulTools:
                 when ``background`` is true; put the deadline on the
                 ``bash_job`` wait instead.
             max_output_chars: Characters of output kept in the result
-                (head and tail); the rest is written to tmp/tool-out/
-                and the result names the file.  Raise it for a result
+                (head and tail); the rest is written to tool-out/ in the
+                scratch dir and the result names the file.  Raise it for a result
                 you need whole, up to the configured ceiling (50,000).
             background: Start the command in the background and return a
                 job id immediately instead of waiting for it.
@@ -4206,29 +4195,22 @@ class UsefulTools:
     def _new_spill(self) -> tuple[str, Path] | None:
         """Name the next file an output over its budget is written to in full.
 
-        The shown path is relative to the directory Bash commands run in
-        (:meth:`_resolve_cwd`: the work dir, or the parent repository of
-        a vanished worktree, which is not recreated):
-        ``tmp/tool-out/<tag>-<n>-bash.txt``, ``tag`` naming this instance
-        and ``n`` counting its spills, so the model can ``grep`` it.  A
-        sub-agent's is in its private folder, shown by its absolute path
-        (:func:`_tools_dir`).
+        The file is ``tool-out/<tag>-<n>-bash.txt`` in the scratch dir
+        (:func:`_tools_dir`), ``tag`` naming this instance and ``n``
+        counting its spills, shown by its absolute path so the model can
+        ``grep`` it.
 
         Returns:
-            The shown path and the real one, ``None`` when there is no
-            such directory or ``tmp/tool-out`` cannot be made in it.
+            The shown path and the real one, ``None`` when ``tool-out``
+            cannot be made.
         """
-        root = self._resolve_cwd()
-        if root is None:
-            return None
-        root, relative, shown = _tools_dir(self.private_dir, root, SPILL_DIR)
         try:
-            spill_dir = _make_dirs_under(root, relative)
+            spill_dir = _tools_dir(self.scratch_dir, SPILL_DIR)
         except OSError:
             return None
         self._spill_count += 1
         name = f"{self._spill_tag}-{self._spill_count}-bash.txt"
-        return f"{shown}/{name}", spill_dir / name
+        return f"{spill_dir.as_posix()}/{name}", spill_dir / name
 
     def _run_then_detach(
         self,
@@ -4292,7 +4274,7 @@ class UsefulTools:
             remaining = timeout_seconds - grace_seconds if grace_seconds else timeout_seconds
             return (
                 f"Still running after {wait_seconds:g}s; left running as background job "
-                f"{job.job_id} (pid {job.process.pid}). Log: {job.log_path}\n"
+                f"{job.job_id} (pid {job.process.pid}). Log: {job.log_path.as_posix()}\n"
                 f'Follow it with bash_job({job.job_id!r}, action="wait", until=<regex>, '
                 f"timeout_seconds={remaining:g}).\nOutput so far:\n"
                 + _truncate_output(output, max_output_chars, capture.spilled_to, capture.dropped)
@@ -4528,8 +4510,8 @@ class UsefulTools:
             (``N commands: K succeeded, F failed, T timed out``) followed by
             one section per command, in input order, giving its exit code,
             wall time and (truncated) output.  A report too long for the
-            conversation is written whole to ``tmp/tool-out/`` and its
-            digest returned instead: the tally, one status line per
+            conversation is written whole to ``tool-out/`` of the
+            scratch dir and its digest returned instead: the tally, one status line per
             command, the tail of each command that did not succeed, and
             the file's path.  A string starting with ``Error:`` when the
             arguments were invalid.
@@ -4541,8 +4523,7 @@ class UsefulTools:
             timeout_seconds=timeout_seconds,
             max_output_chars=max_output_chars,
         )
-        spill = functools.partial(
-            spill_report, self._resolve_cwd(), "parallel", private_dir=self.private_dir)
+        spill = functools.partial(spill_report, self.scratch_dir, "parallel")
         return run_commands_pool(
             commands, run_one, max_workers, self.stop_event, max_output_chars, spill,
         )

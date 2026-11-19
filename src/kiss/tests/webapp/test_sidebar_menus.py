@@ -38,6 +38,7 @@ from playwright.sync_api import sync_playwright
 
 from kiss.tests.conftest import (
     TRANSIENT_REPLACE_READ_ERRORS,
+    click_row_menu_item,
     goto_retrying_network_change,
 )
 from kiss.tests.server.test_scm_worktrees_and_actions import (
@@ -1132,16 +1133,26 @@ def _diff_tab_texts(page) -> dict:
 
 
 def _wait_diff_tab(page, modified_text: str) -> dict:
+    """Wait for the diff editor on screen to hold *modified_text*; return its texts.
+
+    Monaco comes from a CDN with a 10 s load timeout in main.js.  When a
+    loaded machine misses it, the tab shows the diff as plain text for
+    good (``.content-code-fallback``) and there is no editor to test:
+    the test skips, like the editor tests of ``test_content_tab_menus.py``.
+    """
     page.wait_for_function(
         """text => {
+             if (document.querySelector('.content-tab-view .content-code-fallback')) return true;
              if (!window.monaco) return false;
              const ed = """ + _VISIBLE_DIFF + """;
              const m = ed ? ed.getModel() : null;
              return !!m && m.modified.getValue().includes(text);
            }""",
         arg=modified_text,
-        timeout=20000,
+        timeout=30000,
     )
+    if page.locator(".content-tab-view .content-code-fallback").count() > 0:
+        pytest.skip("Monaco CDN unreachable: no editor to test")
     return _diff_tab_texts(page)
 
 
@@ -1277,6 +1288,10 @@ def test_graph_file_diff_without_monaco_is_a_unified_diff(browser, harness, work
         )
         assert text == "-# readme\n+# readme changed\n "
         assert page.locator(".content-menubar").count() == 0
+        # A test of the diff editor has nothing to test on this page: its wait skips
+        # the test instead of timing out.
+        with pytest.raises(pytest.skip.Exception, match="Monaco CDN unreachable"):
+            _wait_diff_tab(page, "# readme changed")
     finally:
         context.close()
 
@@ -2578,12 +2593,12 @@ def test_history_groups_tasks_by_chat_with_day_separators(browser, harness, work
         pre_tab_ids = page.evaluate("window._testApi.openTabs().map(t => t.id)")
         # Chat panels are collapsed by default (nothing is running):
         # the header of a chat not yet summarised shows the chat's FIRST
-        # task; its "Show details" chevron opens the panel.
+        # task; the "Show details" line of its "…" menu opens the panel.
         group_a = page.locator(f".history-chat-group[data-chat-id='{chat_a}']")
         assert "collapsed" in (group_a.get_attribute("class") or "")
         header_a = group_a.locator(".history-chat-header")
         assert header_a.locator(".history-chat-title").inner_text() == "alpha one"
-        header_a.locator(".history-chat-collapse").click()
+        click_row_menu_item(header_a, ".history-chat-collapse")
         assert "collapsed" not in (group_a.get_attribute("class") or "")
         page.locator(".sidebar-item", has_text="alpha one").click()
         # Opening a history task creates a fresh REGISTERED tab; the
@@ -2670,9 +2685,12 @@ def test_history_click_survives_mid_press_refresh(browser, harness, worktree):
         page.wait_for_selector("#history-list .history-chat-group", timeout=15000)
         # Open the collapsed chat panel so its row can be pressed; the
         # explicit expand survives the parked rebuild below.
-        page.locator(
-            f".history-chat-group[data-chat-id='{chat_a}'] .history-chat-collapse"
-        ).click()
+        click_row_menu_item(
+            page.locator(
+                f".history-chat-group[data-chat-id='{chat_a}'] .history-chat-header"
+            ),
+            ".history-chat-collapse",
+        )
         row = page.locator(".sidebar-item", has_text="hold target")
         row.scroll_into_view_if_needed()
         box = row.bounding_box()

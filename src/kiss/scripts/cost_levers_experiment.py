@@ -18,6 +18,9 @@ Usage::
     uv run python -m kiss.scripts.cost_levers_experiment \\
         [--model claude-haiku-4-5] [--repeats 2] [--only E1,E3] [--out PATH]
 
+The results are written to ``PATH``, by default ``experiments/results.json``
+in the agents' temp directory (``<OS temp dir>/kiss-tmp``).
+
 Experiments:
 
 * **E1 read-hygiene** — a Read-heavy exploration task with the Read
@@ -56,6 +59,7 @@ from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.persistence import _add_task, _save_task_result
 from kiss.core.base import SYSTEM_PROMPT
 from kiss.core.config import DEFAULT_CONFIG
+from kiss.core.kiss_tmp import kiss_tmp_dir
 from kiss.core.printer import Printer, parse_result_yaml
 
 
@@ -357,7 +361,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--model", default="claude-haiku-4-5")
     parser.add_argument("--repeats", type=int, default=2)
     parser.add_argument("--only", default="", help="comma-separated experiment ids")
-    parser.add_argument("--out", default="tmp/experiments/results.json")
+    parser.add_argument("--out", default=str(kiss_tmp_dir() / "experiments" / "results.json"))
     args = parser.parse_args(argv)
     selected = [e.strip() for e in args.only.split(",") if e.strip()] or list(EXPERIMENTS)
     unknown = sorted(set(selected) - set(EXPERIMENTS))

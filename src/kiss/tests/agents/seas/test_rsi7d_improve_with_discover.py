@@ -9,7 +9,7 @@ over the local WSS endpoint) against a daemon stand-in that, in place
 of the ``/discover`` child, edits the worktree the tool checked out
 (committing and resetting as the discovery loop does) and answers a
 scripted result.  Everything around it is the real code: the worktree
-under ``tmp/rsi7d/discover/<name>`` seeded with the checkout's current
+under ``<scratch dir>/rsi7d/discover/<name>`` seeded with the checkout's current
 script and test file, the clone of the past run's repository at its
 base commit, the baseline figures from the persisted run, the task the
 child receives, the guard that confines the child's changes to the
@@ -39,7 +39,10 @@ import pytest
 
 from kiss.agents.seas.discover import discover_sea
 from kiss.agents.seas.rsi7d import rsi7d_sea as sea
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
+from kiss.core.kiss_tmp import kiss_tmp_dir
 from kiss.core.tool_interrupt import ToolCallInterrupted
+from kiss.core.utils import rmtree_force
 from kiss.tests.agents.seas.conftest import (
     add_extra,
     commit,
@@ -47,6 +50,7 @@ from kiss.tests.agents.seas.conftest import (
     git,
     init_repo,
     persist_task,
+    registered,
 )
 from kiss.tests.agents.third_party_agents.recording_daemon import RecordingDaemon
 from kiss.tests.conftest import is_root
@@ -79,6 +83,12 @@ REL_SEA = f"{REL_SEAS_DIR}/tunedemo/tunedemo_sea.py"
 REL_TEST = "src/kiss/tests/agents/seas/test_tunedemo_sea.py"
 WORKTREE = sea.DISCOVER_DIR / "tunedemo"
 
+
+def _scratch() -> Path:
+    """rsi7d's folder of the scratch dir its tools use outside a task: ``<kiss-tmp>/rsi7d``."""
+    return kiss_tmp_dir() / "rsi7d"
+
+
 # A script that raises the task's Stop while the gate loads it: the loader re-raises a Stop
 # unchanged (``sea_settings.is_stop``), as when the user stops the sweep during the gate.
 STOPPED_SEA = (
@@ -106,19 +116,23 @@ def writes(files: dict[str, str], extra: bool = False) -> Callable[[Path], None]
 
 
 @pytest.fixture
-def root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_history: None) -> Path:
+def root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_history: None, own_temp_dir: Path
+) -> Path:
     """A fake KISS checkout (a git repository) holding the editable ``tunedemo`` SEA and its test.
 
     The sweep's tools find the checkout through the cwd; the past run
     the child replays is persisted with this repository as its work dir,
     so ``prepare_replay_clone`` clones it at the commit before the run.
+    The repository ignores nothing: whatever the tools leave in it shows
+    in its ``git status``.  The test starts with no rsi7d files: its
+    temp directory is its own (``own_temp_dir``).
     """
     root = tmp_path.resolve()
     seas = fake_checkout(root, {"tunedemo": DEMO_SEA})
     (seas.parents[1] / "SYSTEM.md").write_text("You are a test Sorcar.\n", encoding="utf-8")
     (root / REL_TEST).parent.mkdir(parents=True)
     (root / REL_TEST).write_text(DEMO_TEST, encoding="utf-8")
-    (root / ".gitignore").write_text("tmp/\n", encoding="utf-8")
     init_repo(root)
     commit(root, "baseline", when=int(time.time()) - 600)
     monkeypatch.chdir(root)
@@ -153,16 +167,19 @@ class _DiscoverDaemon(RecordingDaemon):
     ``improve_sea_with_discover`` dispatches the ``/discover`` SEA through
     the real ``daemon_client.run``; the stand-in records the command and,
     in place of the child, runs :attr:`act` on the worktree the tool
-    checked out (:data:`WORKTREE` under *root*) before the scripted
-    result is sent.  :attr:`seen` keeps the script the child found there.
+    checked out (:data:`WORKTREE` under *scratch*, rsi7d's folder of the
+    calling task's scratch dir) before the scripted result is sent.
+    :attr:`seen` keeps the script the child found there.
     """
 
-    def __init__(self, root: Path, text: str = "best point found", success: bool = True) -> None:
+    def __init__(
+        self, scratch: Path, text: str = "best point found", success: bool = True
+    ) -> None:
         super().__init__(text=text, cost=3.5, steps=40)
         # A real child's id is a task_history UUID; its replays name it as their parent.
         self.child_id = self.result["taskId"] = uuid.uuid4().hex
         self.result["success"] = success
-        self.worktree = root / WORKTREE
+        self.worktree = scratch / WORKTREE
         self.act: Callable[[Path], object] | None = None
         self.seen = ""
 
@@ -183,10 +200,11 @@ def _improve(run_id: str, heldout_id: str = "", **kwargs: Any) -> dict[str, Any]
 
 
 def _assert_untouched(root: Path, test: str | None = DEMO_TEST) -> None:
-    """The checkout holds the demo SEA (and *test*, or no test file) and no worktree is left."""
+    """The checkout holds the demo SEA (and *test*, or no test file), no worktree is left and
+    the tools made no ``tmp`` folder in the checkout."""
     assert (root / REL_SEA).read_text() == DEMO_SEA
     assert ((root / REL_TEST).read_text() if (root / REL_TEST).exists() else None) == test
-    assert not (root / WORKTREE).exists()
+    assert not (_scratch() / WORKTREE).exists() and not (root / "tmp").exists()
     assert len(git(root, "worktree", "list").splitlines()) == 1  # the checkout itself
     assert git(root, "status", "--porcelain") == ""
 
@@ -222,7 +240,7 @@ def test_child_task_worktree_gate_replays_and_revert(
     commit(root, "add the discover SEA")
     patched = DEMO_SEA.replace("Report the exit code.", "Report the exit code first.")
     (root / REL_SEA).write_text(patched, encoding="utf-8")  # an earlier, uncommitted edit
-    daemon = _DiscoverDaemon(root)
+    daemon = _DiscoverDaemon(_scratch())
     try:
         monkeypatch.setenv("KISS_SORCAR_LOCAL", str(daemon.endpoint_file))
         daemon.act = loop(
@@ -251,7 +269,8 @@ def test_child_task_worktree_gate_replays_and_revert(
     assert report["refs"] == f"refs/discover/{daemon.child_id}/"
     refs = git(root, "for-each-ref", "--format=%(refname)", report["refs"]).splitlines()
     assert refs == [report["refs"] + name for name in ("B", "P1", "P2")]
-    assert not (root / WORKTREE).exists()
+    worktree = _scratch() / WORKTREE
+    assert not worktree.exists()
     assert len(git(root, "worktree", "list").splitlines()) == 1
     (replay,) = report["replays"]
     assert replay["task_id"] == replay_id and replay["status"] == "success"
@@ -260,24 +279,22 @@ def test_child_task_worktree_gate_replays_and_revert(
 
     (command,) = daemon.run_commands
     assert command["seaPath"] == str(discover_dir / "discover_sea.py")
-    assert command["workDir"] == str(root / WORKTREE)
+    assert command["workDir"] == str(worktree)
     prompt = command["prompt"]
     assert prompt.startswith("Improve the Sorcar Extension Agent (SEA) `tunedemo` by AI discovery.")
     assert "Idea 1: state the exit code first (evidence: run X [3])." in prompt
-    assert f"Your work dir `{root / WORKTREE}`\nis a git worktree of the checkout `{root}`" in (
-        prompt
-    )
+    assert f"Your work dir `{worktree}`\nis a git worktree of the checkout `{root}`" in prompt
     assert "call\n`create_worktree()` once before your first edit" in prompt
-    script = root / WORKTREE / REL_SEA
+    script = worktree / REL_SEA
     assert (
         f"Edit the script `{script}` and, when a change needs\none, its test file "
-        f"`{root / WORKTREE / REL_TEST}`, and nothing else"
+        f"`{worktree / REL_TEST}`, and nothing else"
     ) in prompt
     assert f"Run `uv run ...` commands from `{root}` (`cd {root} &&\nuv run ...`)" in prompt
     assert f"`uv run sea lint {script}` is FAILED before any replay. Round limit: 3." in prompt
     dev_clone, heldout_clone = report["clones"]
-    assert dev_clone == str(root / sea.REPLAY_DIR / f"tunedemo-{run_id[:8]}")
-    assert heldout_clone == str(root / sea.REPLAY_DIR / f"tunedemo-{heldout_id[:8]}")
+    assert dev_clone == str(_scratch() / sea.REPLAY_DIR / f"tunedemo-{run_id[:8]}")
+    assert heldout_clone == str(_scratch() / sea.REPLAY_DIR / f"tunedemo-{heldout_id[:8]}")
     assert Path(dev_clone).is_dir() and Path(heldout_clone).is_dir()
     assert f"past run {run_id} on `model-a`: success, $4.00, 7 steps, 0 mistake signals." in prompt
     # The reset command names the base commit the clone was checked out at.
@@ -308,6 +325,7 @@ def test_child_task_worktree_gate_replays_and_revert(
     assert heldout_task_file.read_text(encoding="utf-8") == f"Run the demo in {heldout_clone}"
 
     snapshot = Path(report["snapshot"])
+    assert snapshot == _scratch() / sea.SNAPSHOT_DIR / "tunedemo"
     assert (snapshot / "tunedemo_sea.py").read_text() == patched
     folder = root / "src" / "kiss" / "agents" / "seas" / "tunedemo"
     assert sea.revert_sea_code("tunedemo") == f"Restored {folder} from {snapshot}"
@@ -324,7 +342,7 @@ def test_default_held_out_and_an_uncommitted_point(
     file is dispatched when this checkout has none; an edit the child left uncommitted in
     the worktree is kept like a committed one."""
     run_id = _past_run(root, model="")
-    daemon = _DiscoverDaemon(root)
+    daemon = _DiscoverDaemon(_scratch())
     try:
         monkeypatch.setenv("KISS_SORCAR_LOCAL", str(daemon.endpoint_file))
         daemon.act = writes({}, extra=True)
@@ -333,8 +351,8 @@ def test_default_held_out_and_an_uncommitted_point(
         daemon.close()
     assert "error" not in report and report["applied"] == [REL_SEA], report
     assert "def extra" in (root / REL_SEA).read_text()
-    assert report["clones"] == [str(root / sea.REPLAY_DIR / f"tunedemo-{run_id[:8]}")]
-    assert report["replays"] == [] and not (root / WORKTREE).exists()
+    assert report["clones"] == [str(_scratch() / sea.REPLAY_DIR / f"tunedemo-{run_id[:8]}")]
+    assert report["replays"] == [] and not (_scratch() / WORKTREE).exists()
     (command,) = daemon.run_commands
     assert command["seaPath"] == str(Path(discover_sea.__file__).resolve())
     prompt = command["prompt"]
@@ -345,6 +363,44 @@ def test_default_held_out_and_an_uncommitted_point(
     ) in prompt
     assert "on `the default model`: success, $4.00" in prompt and "task text in" not in prompt
     assert 'model="' not in prompt and 'verbatim>, max_budget="8",' in prompt
+
+
+def test_a_tasks_working_files_are_in_its_scratch_dir_and_not_in_the_work_tree(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Called on a task's thread, the tool makes the worktree, the clone and the snapshot in
+    rsi7d's folder of that task's scratch dir (``<kiss-tmp>/<task id>/rsi7d``, under the names
+    the prompt gives): the work tree gets no ``tmp`` folder, and its ``git status`` (nothing
+    is ignored) shows the applied script alone.  A scratch dir does not outlive a reboot: the
+    registrations interrupted sweeps left in the checkout for worktrees whose scratch dir is
+    gone (this task's path, an earlier task's) do not stand in the way and are pruned."""
+    run_id = _past_run(root)
+    agent = ChatSorcarAgent("rsi7d-discover-scratch")
+    agent.work_dir = str(root)
+    agent._last_task_id = uuid.uuid4().hex
+    scratch = kiss_tmp_dir() / agent.last_task_id / "rsi7d"
+    for gone in (scratch, kiss_tmp_dir() / "an-earlier-task" / "rsi7d"):
+        git(root, "worktree", "add", "-q", "--detach", str(gone / WORKTREE), "HEAD")
+        rmtree_force(gone)
+    assert len(git(root, "worktree", "list").splitlines()) == 3
+    daemon = _DiscoverDaemon(scratch)
+    try:
+        monkeypatch.setenv("KISS_SORCAR_LOCAL", str(daemon.endpoint_file))
+        daemon.act = writes({}, extra=True)
+        with registered(agent, agent.last_task_id, is_task_active=True):
+            report = _improve(run_id)
+    finally:
+        daemon.close()
+    assert "error" not in report and report["applied"] == [REL_SEA], report
+    (command,) = daemon.run_commands
+    assert command["workDir"] == str(scratch / "discover" / "tunedemo")
+    assert report["clones"] == [str(scratch / "replays" / f"tunedemo-{run_id[:8]}")]
+    assert report["snapshot"] == str(scratch / "snapshots" / "tunedemo")
+    assert Path(report["clones"][0]).is_dir() and Path(report["snapshot"]).is_dir()
+    assert not Path(command["workDir"]).exists()  # the worktree is removed after the child
+    assert len(git(root, "worktree", "list").splitlines()) == 1
+    assert not (root / "tmp").exists() and not _scratch().exists()
+    assert git(root, "status", "--porcelain") == f"M {REL_SEA}"
 
 
 def test_failed_children_leave_the_folder_as_it_was(
@@ -358,7 +414,7 @@ def test_failed_children_leave_the_folder_as_it_was(
     run_id = _past_run(root)
     system_md = root / "src" / "kiss" / "SYSTEM.md"
     refused = "the child changed files other than the SEA's script and test: "
-    daemon = _DiscoverDaemon(root, success=False)
+    daemon = _DiscoverDaemon(_scratch(), success=False)
     monkeypatch.setenv("KISS_SORCAR_LOCAL", str(daemon.endpoint_file))
     try:
         daemon.act = writes({}, extra=True)
@@ -418,7 +474,7 @@ def test_failed_children_leave_the_folder_as_it_was(
     finally:
         daemon.close()
     assert len(daemon.run_commands) == 9
-    assert all(c["workDir"] == str(root / WORKTREE) for c in daemon.run_commands)
+    assert all(c["workDir"] == str(_scratch() / WORKTREE) for c in daemon.run_commands)
     assert report["refs"] == f"refs/discover/{daemon.child_id}/"
     assert git(root, "for-each-ref", "--format=%(refname)", report["refs"]).splitlines()
 
@@ -435,7 +491,7 @@ def test_an_unreachable_daemon(root: Path, monkeypatch: pytest.MonkeyPatch) -> N
 
 
 def test_a_sea_folder_outside_git_gets_no_worktree(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_history: None
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_history: None, own_temp_dir: Path
 ) -> None:
     """A SEA whose folder is in no git repository is refused before any dispatch: the child
     has no worktree to edit it in (the past run's own repository is still cloned)."""
@@ -452,8 +508,8 @@ def test_a_sea_folder_outside_git_gets_no_worktree(
     assert sea.improve_sea_with_discover("tunedemo", "x", 30.0, run_id, 8.0).startswith(
         "Error: git worktree add failed: fatal: not a git repository"
     )
-    assert (root / sea.REPLAY_DIR / f"tunedemo-{run_id[:8]}").is_dir()
-    assert (root / REL_SEA).read_text() == DEMO_SEA and not (root / WORKTREE).exists()
+    assert (_scratch() / sea.REPLAY_DIR / f"tunedemo-{run_id[:8]}").is_dir()
+    assert (root / REL_SEA).read_text() == DEMO_SEA and not (_scratch() / WORKTREE).exists()
 
 
 def test_created_test_file_held_out_cap_and_an_interrupted_gate(
@@ -467,7 +523,7 @@ def test_created_test_file_held_out_cap_and_an_interrupted_gate(
     commit(root, "no test yet")
     run_id = _past_run(root)
     heldout_id = _past_run(root, cost=2.0)
-    daemon = _DiscoverDaemon(root)
+    daemon = _DiscoverDaemon(_scratch())
     try:
         monkeypatch.setenv("KISS_SORCAR_LOCAL", str(daemon.endpoint_file))
         daemon.act = loop(daemon.child_id, writes({REL_TEST: DEMO_TEST}, extra=True))
@@ -479,7 +535,7 @@ def test_created_test_file_held_out_cap_and_an_interrupted_gate(
         assert report["diff_stat"].endswith("1 file changed, 4 insertions(+)")
         assert report["other_changes"] == []
         prompt = daemon.run_commands[0]["prompt"]
-        assert f"its test file `{root / WORKTREE / REL_TEST}`, and nothing else" in prompt
+        assert f"its test file `{_scratch() / WORKTREE / REL_TEST}`, and nothing else" in prompt
         assert 'max_budget="8",\n  timeout="3600"' in prompt  # the dev cap
         assert 'max_budget="12.5"; run it on the point that meets the goal' in prompt
         assert sea.revert_sea_code("tunedemo").startswith("Restored ")
@@ -502,7 +558,7 @@ def test_a_failed_test_file_copy_puts_the_script_back(
     propagates with the checkout's script and test file as they were (never the new script
     with the old test) and the worktree removed."""
     run_id = _past_run(root)
-    daemon = _DiscoverDaemon(root)
+    daemon = _DiscoverDaemon(_scratch())
     try:
         monkeypatch.setenv("KISS_SORCAR_LOCAL", str(daemon.endpoint_file))
         daemon.act = loop(daemon.child_id, writes({REL_TEST: DEMO_TEST + "\n# x\n"}, extra=True))

@@ -867,6 +867,15 @@ def _wait_for(condition: Callable[[], bool], timeout: float = 10.0) -> None:
         time.sleep(0.02)
 
 
+def _logged(log: Path) -> Callable[[], bool]:
+    """Return a condition true once *log* holds a whole line.
+
+    A hook's ``open(log, 'a')`` creates the file before its ``with`` block
+    writes and closes it, so the file can exist and still be empty.
+    """
+    return lambda: log.exists() and log.read_text().endswith("\n")
+
+
 _CROSS_LOADING_SEA = '''\
 """SEA that derives from another SEA file, which in turn derives from this one."""
 
@@ -1492,7 +1501,7 @@ def test_a_pick_shares_the_hook_run_under_way_instead_of_starting_another(tmp_pa
     sea_commands.run_picked_hook("gated", str(work), wait=False, sea=loaded)
     sea_commands.run_picked_hook("gated", str(work), wait=False)
     assert len(_picked_hook_threads(before)) == 1
-    _wait_for(log.exists)
+    _wait_for(_logged(log))
     waiter = threading.Thread(
         target=sea_commands.run_picked_hook, args=("gated", str(work)), kwargs={"sea": loaded}
     )
@@ -1550,7 +1559,7 @@ def test_a_stop_landing_in_the_start_of_the_hook_thread_leaves_one_run(tmp_path:
         sys.setprofile(profile)
     sea_commands.run_picked_hook("gated", str(work), wait=False, sea=loaded)
     sea_commands.run_picked_hook("gated", str(work), wait=False, sea=loaded)
-    _wait_for((work / "picked.log").exists)
+    _wait_for(_logged(work / "picked.log"))
     _wait_for(lambda: len(_picked_hook_threads(before)) == 1)
     assert (work / "picked.log").read_text() == "first\n"
     (work / "release").touch()
@@ -1573,7 +1582,7 @@ def test_a_loaded_sea_is_picked_under_the_revision_it_was_loaded_from(tmp_path: 
     router.write_bytes(_GATED_PICKER.replace("LABEL", "second").encode("utf-8"))
     new = sea_commands.load_sea(router)
     sea_commands.run_picked_hook("gated", str(work), wait=False, sea=old)
-    _wait_for(log.exists)
+    _wait_for(_logged(log))
     sea_commands.run_picked_hook("gated", str(work), wait=False, sea=new)
     _wait_for(lambda: log.read_text() == "first\nsecond\n")
     sea_commands.run_picked_hook("gated", str(work), wait=False, sea=old)
@@ -1610,7 +1619,7 @@ def test_a_load_that_waited_for_another_is_picked_under_the_text_it_ran(tmp_path
     before = set(threading.enumerate())
     loaded.touch()
     sea_commands.run_picked_hook("gated", str(work), wait=False, sea=sea_commands.load_sea(router))
-    _wait_for(log.exists)
+    _wait_for(_logged(log))
     loaded.unlink()
     loading.unlink()
     with ThreadPoolExecutor(max_workers=2) as pool:
@@ -1649,7 +1658,7 @@ def test_an_edit_that_keeps_the_stamp_of_the_file_runs_its_own_hook(tmp_path: Pa
     before = set(threading.enumerate())
     stat = router.stat()
     sea_commands.run_picked_hook("gated", str(work), wait=False)
-    _wait_for(log.exists)
+    _wait_for(_logged(log))
     router.write_bytes(_GATED_PICKER.replace("LABEL", "two").encode("utf-8"))
     os.utime(router, ns=(stat.st_atime_ns, stat.st_mtime_ns))
     assert sea_settings.file_stamp(router) == (stat.st_mtime_ns, stat.st_size, stat.st_ino)
@@ -1694,7 +1703,7 @@ def test_a_pick_by_name_runs_under_the_revision_its_thread_loads(tmp_path: Path)
     log, release = work / "picked.log", work / "release"
     before = set(threading.enumerate())
     sea_commands.run_picked_hook("gated", str(work), wait=False)
-    _wait_for(log.exists)
+    _wait_for(_logged(log))
     sea_commands.run_picked_hook("gated", str(work), wait=False)
     assert len(_picked_hook_threads(before)) == 1
     release.touch()

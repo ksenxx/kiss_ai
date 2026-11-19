@@ -290,6 +290,7 @@ API: dict[str, ApiCommand] = {c.name: c for c in (
     ApiCommand(
         "getReplayImage", required=("taskId", "index"), handler="get_replay_image"
     ),
+    ApiCommand("getTaskEvents", required=("taskId",), handler="get_task_events"),
     ApiCommand("getTaskUpdate", handler="get_task_update"),
     ApiCommand("getCronJobs", handler="get_cron_jobs"),
     ApiCommand("cronAction", required=("action",), handler="cron_action"),
@@ -655,6 +656,10 @@ class ServerBackend(Protocol):
         self, cmd: dict[str, Any], endpoint: Any,
     ) -> None: ...
 
+    async def _handle_get_task_events(
+        self, cmd: dict[str, Any], endpoint: Any,
+    ) -> None: ...
+
     async def _handle_list_dir(
         self, cmd: dict[str, Any], endpoint: Any,
     ) -> None: ...
@@ -814,6 +819,10 @@ class ServerApi:
         # (connection, machine) (see ``dispatch``): the next one with
         # the same key runs after it.
         self._pending_actions: dict[tuple[str, str], asyncio.Task[None]] = {}
+        # The latest read forwarded to a machine per (connection,
+        # machine, queue of ``MACHINE_READ_QUEUES``) (see ``dispatch``):
+        # the next one with the same key is answered after it.
+        self._pending_reads: dict[tuple[str, str, str], asyncio.Task[None]] = {}
         # The brand's running ``signin login`` (see ``signin_login``).
         self.signin = SigninLogin()
         # The ids of the notices this daemon was told to retire (see
@@ -909,6 +918,7 @@ class ServerApi:
         if tab_id:
             self._record_tab(tab_id, ctx)
         cmd["connId"] = ctx.conn_state["conn_id"]
+        self._settle_lazy(cmd)
         raw_wd = cmd.get("workDir")
         if isinstance(raw_wd, str) and is_root_dir(raw_wd):
             # A filesystem root is never a real workspace: it arrives
@@ -1021,8 +1031,17 @@ class ServerApi:
                 # per connection and machine in the order sent, as
                 # inline: a paste then a delete apply in that order.
                 self._spawn_after(self._pending_actions, (cmd["connId"], machine), forwarded)
+            elif name in sidebar_panels.MACHINE_READ_QUEUES:
+                # A read of the machine's workspace or transcript, a
+                # round trip each, and opening a machine's chat sends
+                # dozens: in the background, so none of the sender's
+                # later commands (the chat's earlier tasks first) is
+                # held up behind them, and one after another per
+                # connection, machine and queue in the order asked.
+                key = (cmd["connId"], machine, sidebar_panels.MACHINE_READ_QUEUES[name])
+                self._spawn_after(self._pending_reads, key, forwarded)
             else:
-                # A settings command, a model pick or a workspace read
+                # A settings command, a model pick or a file save
                 # (REQUEST_TIMEOUT at most): in order with the sender's
                 # later commands, so two quick picks land in the order
                 # made and a list asked after a pick shows it.
@@ -1034,6 +1053,7 @@ class ServerApi:
             # those running on remote machines to it, offer the others.
             await asyncio.to_thread(
                 self.remote_tabs.replay_to, cmd["connId"], str(cmd.get("tabId") or ""),
+                cmd.get("lazy") is True,
             )
             await asyncio.to_thread(self.remote_views.replay_to, cmd["connId"])
 
@@ -1173,6 +1193,13 @@ class ServerApi:
         same tab, whose commands never waited for this connection's
         (the registry orders the two, see :mod:`kiss.server.remote_tabs`).
 
+        The machine's view stream is kept open for the bind from here,
+        before the connection's next command is taken
+        (:meth:`RemoteViews.expect`): a page that switches to another
+        chat of the machine sends the ``closeTab`` of the chat it left
+        right after the bind, and that close must not take the stream
+        the bind is about to use.
+
         Args:
             cmd: The validated, stamped command.
             tab_id: The command's canonical tab id as :meth:`dispatch`
@@ -1189,6 +1216,8 @@ class ServerApi:
         binds = cmd["type"] in ("submit", "run", "resumeSession") and cmd.get("machine")
         if not tab_id or not (binds or key in self._pending_routes):
             return False
+        if binds:
+            self.remote_views.expect(str(cmd["machine"]))
         self._spawn_after(
             self._pending_routes, key, self._dispatch_logged(cmd, ctx, tab_id if binds else ""),
         )
@@ -1204,6 +1233,11 @@ class ServerApi:
         commands for the tab, and not from the moment its thread runs:
         a close of the tab by another connection that lands in between
         stands the bind down too (:meth:`RemoteTabs.expect_bind`).
+        Once it is done, the machine's view stream is no longer kept
+        for it (:meth:`RemoteViews.settled`, noted by
+        :meth:`_dispatch_detached`) and is closed when nothing else
+        uses it, in the background: the tab's next command does not
+        wait for the close.
         """
         if binds_tab:
             self.remote_tabs.expect_bind(binds_tab, cmd)
@@ -1214,6 +1248,9 @@ class ServerApi:
         finally:
             if binds_tab:
                 self.remote_tabs.bind_settled(cmd)
+                machine = str(cmd["machine"])
+                self.remote_views.settled(machine)
+                self._spawn_reply(asyncio.to_thread(self.remote_views.release, machine))
 
     def _spawn_panel_reply(
         self, key: tuple[str, str, str], reply: Coroutine[Any, Any, None],
@@ -1292,6 +1329,31 @@ class ServerApi:
             logger.warning("forwarding %s to %s failed", cmd.get("type"), machine, exc_info=True)
         if refetch_history:
             self._backend._printer.broadcast({"type": "tasks_updated"})
+
+    def _settle_lazy(self, cmd: dict[str, Any]) -> None:
+        """Settle whether *cmd* gets the transcript in pieces it asks for (``lazy``).
+
+        A chat page says with its ``ready`` how it loads transcripts,
+        which the printer notes.  The replay of a ``resumeSession``
+        that is not ``scoped`` (a history click) is one frame for every
+        page showing the tab, whether this daemon replays it or the
+        machine the command is forwarded to: it comes in pieces only
+        when every other page connected loads transcripts that way
+        (``WebPrinter.others_load_lazily``), else whole, as each of
+        them can show it.
+
+        Args:
+            cmd: The validated command, stamped with its ``connId``.
+        """
+        if cmd["type"] == "ready":
+            self._backend._printer.note_page(cmd["connId"], cmd.get("lazy") is True)
+        elif (
+            cmd["type"] == "resumeSession"
+            and cmd.get("lazy") is True
+            and not cmd.get("scoped")
+            and not self._backend._printer.others_load_lazily(cmd["connId"])
+        ):
+            del cmd["lazy"]
 
     def _record_tab(self, tab_id: str, ctx: ApiContext) -> None:
         """Record *tab_id* as touched by this connection.
@@ -1927,6 +1989,25 @@ class ServerApi:
             ctx: The transport context of the current call.
         """
         await self._backend._handle_get_replay_image(cmd, ctx.endpoint)
+
+    async def get_task_events(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
+        """Serve a piece of a lazily loaded transcript, to the asking client.
+
+        A page that loads transcripts in pieces (``lazy`` on its
+        ``ready`` and ``resumeSession``) is sent a task's folded panels
+        only when the reader opens them: it asks with the handle the
+        folded panel carries.  A request stamped ``machine`` (the tab
+        is bound to a registered machine, whose transcript it is) never
+        reaches this handler: :meth:`dispatch` forwards it to the
+        machine's daemon and relays its reply
+        (:func:`~kiss.server.sidebar_panels.machine_task_events_reply`).
+
+        Args:
+            cmd: The ``getTaskEvents`` command (``taskId``, optional
+                ``seg``, ``upto``, ``token`` and ``machine``).
+            ctx: The transport context of the current call.
+        """
+        await self._backend._handle_get_task_events(cmd, ctx.endpoint)
 
     async def get_task_update(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
         """Report the ``/ask`` agent's task update to a task-info panel.

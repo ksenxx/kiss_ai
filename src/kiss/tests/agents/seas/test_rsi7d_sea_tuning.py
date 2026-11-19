@@ -25,6 +25,7 @@ import pytest
 from kiss.agents.seas.rsi7d import rsi7d_sea as sea
 from kiss.agents.seas.rsi7d import sea_tuning
 from kiss.agents.sorcar import sea_commands
+from kiss.core.kiss_tmp import kiss_tmp_dir
 from kiss.core.tool_verdict import ALLOW, refuse
 from kiss.tests.agents.seas.conftest import add_extra, fake_checkout, git, persist_task, registered
 from kiss.tests.agents.third_party_agents.recording_daemon import RecordingDaemon
@@ -84,11 +85,14 @@ def count_words(text: str) -> str:
 
 
 @pytest.fixture
-def checkout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_history: None) -> Path:
+def checkout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_history: None, own_temp_dir: Path
+) -> Path:
     """A fake KISS checkout whose ``seas/`` folder holds the editable ``tunedemo`` SEA.
 
     ``export_sea_evals`` and the acceptance test read every persisted
-    ``tunedemo`` run, so the test starts with none (``empty_history``).
+    ``tunedemo`` run, so the test starts with none (``empty_history``),
+    and with no snapshot: its temp directory is its own (``own_temp_dir``).
     """
     seas = fake_checkout(tmp_path, {"tunedemo": DEMO_SEA})
     (seas.parents[1] / "SYSTEM.md").write_text("You are a test Sorcar.\n", encoding="utf-8")
@@ -487,7 +491,7 @@ def test_tune_patch_settings_and_export_evals_use_the_persisted_runs(checkout: P
     # Settled without a replay: reverted, and the added key is removed again.
     assert sea.settle_sea_settings("tunedemo") == (
         "Reverted settings()['max_budget'] of tunedemo to None (no replay given); record why "
-        "in ./tmp/rsi7d/explored-ideas.md"
+        f"in {(kiss_tmp_dir() / 'rsi7d' / 'explored-ideas.md').as_posix()}"
     )
     assert "max_budget" not in sea_commands.sea_settings(path)
     assert sea.patch_sea_settings("tunedemo", "max_budget", "3.0").startswith("Patched")
@@ -758,9 +762,9 @@ def test_improve_and_revert_sea_code_snapshot_and_gate(
     """
     path = checkout / "tunedemo" / "tunedemo_sea.py"
     assert sea.improve_sea_code("slack", "x", 1.0).startswith("Error:")
+    snapshot = kiss_tmp_dir() / "rsi7d" / sea.SNAPSHOT_DIR / "tunedemo"
     assert sea.revert_sea_code("tunedemo") == (
-        f"Error: no snapshot of tunedemo in {checkout.parents[3] / sea.SNAPSHOT_DIR / 'tunedemo'}"
-        "; nothing to revert"
+        f"Error: no snapshot of tunedemo in {snapshot}; nothing to revert"
     )
     # An unreachable daemon (the endpoint file does not exist) is a
     # reported failure, not an exception: no task id, and the gate still
@@ -788,7 +792,8 @@ def test_improve_and_revert_sea_code_snapshot_and_gate(
         assert command["seaPath"] == "" and command["workDir"] == str(root.resolve())
         assert "error" not in report and "def extra" in path.read_text()
         assert report["other_changes"] == []
-        snapshot = Path(report["snapshot"])
+        assert Path(report["snapshot"]) == snapshot
+        assert not (root / "tmp").exists()  # the snapshot is not kept in the work tree
         assert "def extra" not in (snapshot / "tunedemo_sea.py").read_text()
         assert sea.revert_sea_code("tunedemo") == f"Restored {path.parent} from {snapshot}"
         assert "def extra" not in path.read_text()
@@ -846,7 +851,7 @@ def test_revert_removes_a_key_that_was_absent_even_when_the_base_gave_it_a_value
     assert sea_commands.sea_settings(path)["use_web_tools"] is True
     assert sea.settle_sea_settings("tunedemo") == (
         "Reverted settings()['use_web_tools'] of tunedemo to None (no replay given); record "
-        "why in ./tmp/rsi7d/explored-ideas.md"
+        f"why in {(kiss_tmp_dir() / 'rsi7d' / 'explored-ideas.md').as_posix()}"
     )
     assert path.read_text(encoding="utf-8") == DEMO_SEA
     assert sea_tuning.pending_change(sea_tuning.load_changes(sea._change_log(), "tunedemo")) is None

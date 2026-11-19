@@ -25,11 +25,13 @@ FIFO, ``fork`` and ``SIGKILL``, so they are skipped where it is taken.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -40,6 +42,7 @@ from pathlib import Path
 
 import pytest
 
+from kiss.core.kiss_tmp import kiss_tmp_dir
 from kiss.scripts import check
 from kiss.scripts.check import (
     MAX_DIGEST_LINES,
@@ -364,9 +367,11 @@ def test_tree_fingerprint_follows_every_file_sea_lint_reads(tmp_path: Path) -> N
 def test_cached_verdict_ignores_a_cache_that_is_not_an_object(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(check, "CACHE_FILE", tmp_path / "tmp" / "check-cache.json")
-    (tmp_path / "tmp").mkdir()
-    (tmp_path / "tmp" / "check-cache.json").write_text("[1, 2]")
+    monkeypatch.setattr(check, "CACHE_FILE", tmp_path / "kiss-tmp" / "check-cache.json")
+    # Private like the directory save_verdict makes: under a umask of 002 a plain mkdir()
+    # leaves it group-writable, where the check keeps no cache.
+    (tmp_path / "kiss-tmp").mkdir(mode=0o700)
+    (tmp_path / "kiss-tmp" / "check-cache.json").write_text("[1, 2]")
     assert check.cached_verdict("f1", True) is None
     check.save_verdict("f1", True, 0, "")
     cached = check.cached_verdict("f1", True)
@@ -376,14 +381,14 @@ def test_cached_verdict_ignores_a_cache_that_is_not_an_object(
 def test_cached_verdict_round_trips_per_tree_and_mode(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(check, "CACHE_FILE", tmp_path / "tmp" / "check-cache.json")
+    monkeypatch.setattr(check, "CACHE_FILE", tmp_path / "kiss-tmp" / "check-cache.json")
     assert check.cached_verdict("f1", True) is None
     check.save_verdict("f1", True, 1, "the log\n")
     cached = check.cached_verdict("f1", True)
     assert cached is not None and cached["exit_code"] == 1 and cached["log"] == "the log\n"
     assert check.cached_verdict("f2", True) is None, "another tree"
     assert check.cached_verdict("f1", False) is None, "another mode"
-    (tmp_path / "tmp" / "check-cache.json").write_text("not json")
+    (tmp_path / "kiss-tmp" / "check-cache.json").write_text("not json")
     assert check.cached_verdict("f1", True) is None
 
 
@@ -401,7 +406,7 @@ def test_checks_ending_together_each_publish_a_whole_verdict(
     its open and its write (no JSON: the next run checked the unchanged tree again), and a
     reader found the cache empty in between.  Each save renames a file of its own over the
     cache: the hard link goes on naming the whole verdict of the save before."""
-    cache = tmp_path / "tmp" / "check-cache.json"
+    cache = tmp_path / "kiss-tmp" / "check-cache.json"
     monkeypatch.setattr(check, "CACHE_FILE", cache)
     logs = ["", "a failed stage\n" * 2000]
     check.save_verdict("f1", True, 1, logs[1])
@@ -422,6 +427,101 @@ def test_checks_ending_together_each_publish_a_whole_verdict(
     check.save_verdict("f1", True, 0, "")
     assert [entry.name for entry in cache.parent.iterdir()] == [cache.name], "staging files left"
     assert check.cached_verdict("f1", True) is None
+
+
+def _scratch_project(root: Path) -> Path:
+    """Make *root* a project whose sync fails at once, and return its copy of the script.
+
+    Its ``pyproject.toml`` is one uv cannot parse, for the reason given in
+    :func:`test_failed_uv_sync_stops_the_run`.
+    """
+    script = root / "src" / "kiss" / "scripts" / "check.py"
+    script.parent.mkdir(parents=True)
+    shutil.copy(check.__file__, script)
+    (root / "pyproject.toml").write_text("[project\n")
+    return script
+
+
+def _fix_run(script: Path, temp: Path) -> subprocess.CompletedProcess[str]:
+    """Run ``check --fix`` as the program *script*, with *temp* as its temp directory."""
+    return subprocess.run(
+        [sys.executable, str(script), "--fix", "--no-clean"],
+        env={**os.environ, "TMPDIR": str(temp), "TEMP": str(temp), "TMP": str(temp)},
+        capture_output=True, text=True, timeout=300, check=False,
+    )
+
+
+REPLAYED = "(unchanged tree: the verdict of the previous run follows)"
+
+
+@pytest.mark.skipif(shutil.which("uv") is None, reason="needs uv")
+def test_the_verdict_is_kept_in_the_temp_directory_one_file_per_checkout(tmp_path: Path) -> None:
+    """``check --fix`` keeps its verdict in ``<OS temp dir>/kiss-tmp``, never in the checkout.
+
+    The real script runs as the program of two scratch projects: the dependency sync
+    fails at once, and a repeat run on the unchanged tree replays that verdict.
+    """
+    temp, roots = tmp_path / "temp", [tmp_path / "checkout", tmp_path / "worktree"]
+    temp.mkdir()
+    scripts = [_scratch_project(root) for root in roots]
+    first = _fix_run(scripts[0], temp)
+    other = _fix_run(scripts[1], temp)
+    again = _fix_run(scripts[0], temp)
+    assert [run.returncode for run in (first, other, again)] == [1, 1, 1], first.stderr
+    assert REPLAYED not in first.stdout + other.stdout
+    names = [
+        f"check-cache-{hashlib.sha256(os.fsencode(root.resolve())).hexdigest()[:12]}.json"
+        for root in roots
+    ]
+    kiss_tmp = temp / "kiss-tmp"
+    assert sorted(entry.name for entry in kiss_tmp.iterdir()) == sorted(names)
+    if os.name == "posix":
+        assert stat.S_IMODE(kiss_tmp.stat().st_mode) == 0o700
+    kept = json.loads((kiss_tmp / names[0]).read_text())
+    assert kept["exit_code"] == 1 and "--- Install dependencies (uv sync) ---" in kept["log"]
+    # The other checkout's verdict did not replace this one's: the repeat run replays it.
+    assert again.stdout.endswith(f"{REPLAYED}\n{kept['log']}")
+    assert not (roots[0] / "tmp").exists()
+    # The script spells the agents' temp directory itself (it imports nothing of the
+    # tree it checks): for this checkout it names the one the agents use.
+    assert check.CACHE_FILE.parent == kiss_tmp_dir()
+
+
+@pytest.mark.skipif(shutil.which("uv") is None, reason="needs uv")
+@posix_only("a link planted in a temp directory that users share")
+def test_a_kiss_tmp_that_is_not_the_users_own_directory_keeps_no_verdict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """In a ``/tmp`` several users share, ``kiss-tmp`` may be a link someone planted (or
+    another user's directory, which takes the same branch and needs a second user to
+    make): no verdict is read through it, where it could be forged, nor written there."""
+    temp, planted = tmp_path / "temp", tmp_path / "planted"
+    temp.mkdir()
+    script = _scratch_project(tmp_path / "checkout")
+    assert _fix_run(script, temp).returncode == 1
+    (temp / "kiss-tmp").rename(planted)
+    (temp / "kiss-tmp").symlink_to(planted)
+    (cache,) = planted.iterdir()
+    inode = cache.stat().st_ino
+    again = _fix_run(script, temp)
+    assert again.returncode == 1 and REPLAYED not in again.stdout, again.stdout
+    assert [entry.name for entry in planted.iterdir()] == [cache.name]
+    assert cache.stat().st_ino == inode, "a verdict was written through the link"
+    # The same of the two functions in this process: the verdict behind the link is the
+    # one asked for (its real directory gives it), and it is neither taken nor replaced.
+    kept = json.loads(cache.read_text())
+    monkeypatch.setattr(check, "CACHE_FILE", cache)
+    assert check.cached_verdict(kept["fingerprint"], kept["full"]) is not None
+    monkeypatch.setattr(check, "CACHE_FILE", temp / "kiss-tmp" / cache.name)
+    assert check.cached_verdict(kept["fingerprint"], kept["full"]) is None
+    check.save_verdict(kept["fingerprint"], kept["full"], 0, "")
+    assert json.loads(cache.read_text()) == kept
+    # Nor in a directory of the user's that others can write to: what is in it may be theirs.
+    planted.chmod(0o777)
+    monkeypatch.setattr(check, "CACHE_FILE", cache)
+    assert check.cached_verdict(kept["fingerprint"], kept["full"]) is None
+    check.save_verdict(kept["fingerprint"], kept["full"], 0, "")
+    assert json.loads(cache.read_text()) == kept
 
 
 def test_the_sync_inside_a_worktree_leaves_the_shared_editable_install_alone(

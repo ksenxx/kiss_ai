@@ -97,8 +97,8 @@ function assertMirrors(win, chatId, taskId, where) {
     r.getAttribute('aria-label'),
     'same label ' + where,
   );
-  // Before the title; the action strip (Show details, last launched)
-  // comes last.
+  // Before the title; then the "…" button and the menu it opens (the
+  // action strip: Show details, last launched).
   const btn = header(win, chatId);
   assert.strictEqual(btn.children[0], h, 'icon first ' + where);
   assert.strictEqual(
@@ -107,9 +107,14 @@ function assertMirrors(win, chatId, taskId, where) {
     'title second ' + where,
   );
   assert.strictEqual(
-    btn.children[2].classList.contains('history-chat-actions'),
+    btn.children[2].classList.contains('sidebar-item-more'),
     true,
-    'action strip third ' + where,
+    '"…" button third ' + where,
+  );
+  assert.strictEqual(
+    btn.children[3].classList.contains('history-chat-actions'),
+    true,
+    'its menu, the action strip, last ' + where,
   );
   assert.strictEqual(
     win.getComputedStyle(h).marginRight,
@@ -161,8 +166,8 @@ function testHeaderShowsLastTaskIcon() {
   assert.ok(rowMark(win, 7), 'the older failed row keeps its cross');
   assert.strictEqual(
     header(win, 'D').children.length,
-    2,
-    'title and action strip only when there is no icon',
+    3,
+    'title, "…" button and its menu only when there is no icon',
   );
   // Clicking the icon (part of the header) opens the chat, as the rest
   // of the header does; only the Show details chevron folds the panel.
@@ -652,12 +657,23 @@ function testPencilEditsTheChatSummary() {
     pencil.getAttribute('aria-label'),
     'Edit the chat summary',
   );
-  // The pencil is on show without the pointer over the header (a touch
-  // screen never hovers), at the muted level of every row action.
+  // The pencil is a line of the header's "…" menu, on show there
+  // without the pointer over it (a touch screen never hovers), its icon
+  // in the secondary text step of every menu line.
+  assert.strictEqual(
+    pencil.parentElement,
+    header(win, 'A').querySelector(':scope > .sidebar-item-actions[popover]'),
+    'the pencil is in the menu of the header',
+  );
   assert.strictEqual(
     win.getComputedStyle(pencil).opacity,
-    '0.45',
-    'the pencil is visible while the header is not hovered',
+    '1',
+    'the pencil is visible in the menu while it is not hovered',
+  );
+  assert.strictEqual(
+    win.getComputedStyle(pencil).color,
+    'var(--dim)',
+    'the pencil is as dim as every menu icon at rest',
   );
 
   const activeBefore = win._testApi.getActiveTabId();

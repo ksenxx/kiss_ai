@@ -7,8 +7,8 @@
 Two regressions on the remote webapp at phone widths, driven against
 the production ``RemoteAccessServer`` + a real headless Chromium:
 
-* ``#model-dropdown`` anchors to the model pill's right edge (CSS
-  ``right: 0``). On a narrow phone the pill sits mid-row, so a 280px+
+* ``#model-dropdown`` anchors to the model button's right edge (CSS
+  ``right: 0``). On a narrow phone the button sits mid-row, so a 280px+
   dropdown used to poke past the LEFT viewport edge (185px off screen
   at 320px width) and the model list was clipped.  ``positionModelDD``
   in main.js now shifts the open dropdown right just enough to keep it
@@ -16,13 +16,14 @@ the production ``RemoteAccessServer`` + a real headless Chromium:
   filtering, ``models`` refreshes).
 
 * ``#model-name`` used to truncate from the END, hiding exactly the
-  distinctive part of a long model name (variant/size/date). The pill
+  distinctive part of a long model name (variant/size/date). The label
   now renders as an RTL line with LRM-pinned LTR text, so a truncated
-  name keeps its END visible and the ellipsis sits at the START.
+  name keeps its END visible and the ellipsis sits at the START.  The
+  name is all the button shows: no icon stands before it.
 
 Both tests inject the model list the way production does — a
 ``models`` message through ``window.postMessage`` (the WebSocket shim
-delivers daemon events exactly like that) — and click the real pill.
+delivers daemon events exactly like that) — and click the real button.
 """
 
 from __future__ import annotations
@@ -110,6 +111,33 @@ _DROPDOWN_GEOMETRY_JS = """
     left: r.left, right: r.right, top: r.top, bottom: r.bottom,
     vw: window.innerWidth, vh: window.innerHeight,
     items: document.querySelectorAll('#model-list .model-item').length,
+    // Touch targets: the shortest model row, the search field, and the
+    // height floor of the "..." menu's rows (that menu is closed here).
+    rowHeight: Math.min(...Array.from(
+      document.querySelectorAll('#model-list .model-item'),
+      row => row.getBoundingClientRect().height)),
+    searchHeight: document.getElementById('model-search')
+      .getBoundingClientRect().height,
+    menuRowFloor: getComputedStyle(
+      document.querySelector('.more-menu-item')).minHeight,
+  };
+}
+"""
+
+# The price's colour on the keyboard-selected row and on a row at rest,
+# next to the colour of the icon text step.
+_PRICE_COLOURS_JS = """
+() => {
+  const colour = (sel) => getComputedStyle(document.querySelector(sel)).color;
+  const probe = document.createElement('i');
+  probe.style.color = 'var(--icon)';
+  document.getElementById('model-list').appendChild(probe);
+  const icon = getComputedStyle(probe).color;
+  probe.remove();
+  return {
+    selected: colour('#model-list .model-item.sel .model-cost'),
+    rest: colour('#model-list .model-item:not(.sel) .model-cost'),
+    icon: icon,
   };
 }
 """
@@ -151,15 +179,20 @@ _LIST_GEOMETRY_JS = """
 }
 """
 
-# Character-level geometry of the pill label: which end of the name
+# Character-level geometry of the model button's label: which end of the name
 # survives the truncation. The label text is wrapped in two U+200E
 # marks, so the first/last name characters sit at offsets 1 and
-# length-2 of the text node.
-_PILL_GEOMETRY_JS = """
+# length-2 of the text node.  `lead` is the room between the button's
+# left padding and the name: what an icon before the name would take.
+_LABEL_GEOMETRY_JS = """
 () => {
   const name = document.getElementById('model-name');
   const tn = name.firstChild;
   const box = name.getBoundingClientRect();
+  const button = document.getElementById('model-btn');
+  const bs = getComputedStyle(button);
+  const contentLeft = button.getBoundingClientRect().left
+    + parseFloat(bs.borderLeftWidth) + parseFloat(bs.paddingLeft);
   const at = (i) => {
     const r = document.createRange();
     r.setStart(tn, i); r.setEnd(tn, i + 1);
@@ -169,6 +202,7 @@ _PILL_GEOMETRY_JS = """
   const last = at(tn.length - 2);
   return {
     text: tn.textContent.replace(/\\u200e/g, ''),
+    lead: box.left - contentLeft,
     boxLeft: box.left, boxRight: box.right,
     firstLeft: first.left, firstRight: first.right,
     lastLeft: last.left, lastRight: last.right,
@@ -243,7 +277,7 @@ def _open_page(browser, port: int, width: int, height: int):
 
 
 def _open_dropdown(page) -> None:
-    """Deliver the model list and open the dropdown via the real pill."""
+    """Deliver the model list and open the dropdown via the real button."""
     page.wait_for_selector("#model-btn", state="attached")
     page.evaluate(_REVEAL_APP_JS)
     page.wait_for_timeout(200)
@@ -275,7 +309,9 @@ def _assert_on_screen(
 def test_mobile_model_dropdown_fully_visible(tmp_path: Path) -> None:
     """Served page + real Chromium at phone widths: the opened model
     dropdown sits fully inside the viewport (no clipping), including
-    after a search-driven re-render, at 390px and at a cramped 320px."""
+    after a search-driven re-render, at 390px and at a cramped 320px;
+    its rows and search field, like the "..." menu's rows, are 36px
+    touch targets."""
     ready = threading.Event()
     done = threading.Event()
     state: dict[str, object] = {}
@@ -320,6 +356,9 @@ def test_mobile_model_dropdown_fully_visible(tmp_path: Path) -> None:
     claude_rows = sum("claude" in n for n in _MODEL_NAMES)
     for label in ("390px", "320px"):
         _assert_on_screen(geos[label], label, items=len(_MODEL_NAMES))
+        assert geos[label]["rowHeight"] >= 36, f"{label}: {geos[label]!r}"
+        assert geos[label]["searchHeight"] >= 36, f"{label}: {geos[label]!r}"
+        assert geos[label]["menuRowFloor"] == "36px", f"{label}: {geos[label]!r}"
         _assert_on_screen(
             geos[f"{label} filtered"],
             f"{label} after search re-render",
@@ -328,8 +367,8 @@ def test_mobile_model_dropdown_fully_visible(tmp_path: Path) -> None:
 
 
 @pytest.mark.timeout(180)
-def test_model_pill_truncates_from_start(tmp_path: Path) -> None:
-    """A pill label too long for the capped mobile pill keeps the END
+def test_model_button_label_truncates_from_start(tmp_path: Path) -> None:
+    """A label too long for the capped mobile model button keeps the END
     of the model name visible and hides the START (leading ellipsis);
     a digit-ending name keeps left-to-right character order."""
     ready = threading.Event()
@@ -360,7 +399,7 @@ def test_model_pill_truncates_from_start(tmp_path: Path) -> None:
                 page.wait_for_timeout(200)
                 page.evaluate(_INJECT_MODELS_JS)
                 page.wait_for_timeout(200)
-                overflowing = page.evaluate(_PILL_GEOMETRY_JS)
+                overflowing = page.evaluate(_LABEL_GEOMETRY_JS)
 
                 # Pick a short, digit-ending name through the real
                 # dropdown: no truncation, and — the bidi trap of the
@@ -373,12 +412,12 @@ def test_model_pill_truncates_from_start(tmp_path: Path) -> None:
                 )
                 page.click(".model-item:has-text('claude-fable-5')")
                 page.wait_for_timeout(100)
-                # The 390px pill caps at ~34px of text, so even this
+                # At 390px the button caps at ~34px of text, so even this
                 # short name truncates there; widen the window until
-                # the pill fits it whole for the character-order check.
+                # the button fits it whole for the character-order check.
                 page.set_viewport_size({"width": 800, "height": 844})
                 page.wait_for_timeout(100)
-                digits = page.evaluate(_PILL_GEOMETRY_JS)
+                digits = page.evaluate(_LABEL_GEOMETRY_JS)
             finally:
                 browser.close()
     finally:
@@ -388,7 +427,7 @@ def test_model_pill_truncates_from_start(tmp_path: Path) -> None:
 
     assert overflowing["text"] == _LONG_SELECTED
     assert overflowing["scrollWidth"] > overflowing["clientWidth"], (
-        f"the long name must overflow the capped pill: {overflowing!r}"
+        f"the long name must overflow the capped button: {overflowing!r}"
     )
     assert overflowing["lastRight"] <= overflowing["boxRight"] + 1, (
         f"the END of a truncated model name must stay visible: "
@@ -398,14 +437,18 @@ def test_model_pill_truncates_from_start(tmp_path: Path) -> None:
         f"the START of a truncated model name must be the clipped "
         f"part (leading ellipsis): {overflowing!r}"
     )
+    for shot in (overflowing, digits):
+        assert shot["lead"] == pytest.approx(0, abs=0.5), (
+            f"the model name must be all the button shows: {shot!r}"
+        )
 
     assert digits["text"] == "claude-fable-5"
     assert digits["scrollWidth"] <= digits["clientWidth"] + 1, (
-        f"'claude-fable-5' must fit the pill untruncated: {digits!r}"
+        f"'claude-fable-5' must fit the button untruncated: {digits!r}"
     )
     assert digits["firstLeft"] < digits["lastLeft"], (
         f"bidi reorder: the trailing digit of 'claude-fable-5' must "
-        f"render at the RIGHT end of the pill: {digits!r}"
+        f"render at the RIGHT end of the button: {digits!r}"
     )
 
 
@@ -415,7 +458,9 @@ def test_mobile_model_list_never_scrolls_horizontally(
 ) -> None:
     """At phone widths the open model list is never horizontally
     scrollable: rows shrink long names (start-ellipsis) instead of
-    widening the scroller, and the price stays inside the dropdown."""
+    widening the scroller, and the price stays inside the dropdown; on
+    the fill of the keyboard-selected row the price takes the icon text
+    step, stronger than the faint step of a row at rest."""
     ready = threading.Event()
     done = threading.Event()
     state: dict[str, object] = {}
@@ -426,6 +471,7 @@ def test_mobile_model_list_never_scrolls_horizontally(
     )
     thread.start()
     geos: dict[str, dict] = {}
+    prices: dict[str, dict] = {}
     try:
         assert ready.wait(30), "RemoteAccessServer failed to start"
         startup_error = state.get("error")
@@ -443,6 +489,9 @@ def test_mobile_model_list_never_scrolls_horizontally(
                     page = _open_page(browser, port, width, height)
                     _open_dropdown(page)
                     geos[f"{width}px"] = page.evaluate(_LIST_GEOMETRY_JS)
+                    page.focus("#model-search")
+                    page.keyboard.press("ArrowDown")
+                    prices[f"{width}px"] = page.evaluate(_PRICE_COLOURS_JS)
                     page.close()
             finally:
                 browser.close()
@@ -451,6 +500,11 @@ def test_mobile_model_list_never_scrolls_horizontally(
         thread.join(timeout=30)
     assert not thread.is_alive(), "RemoteAccessServer failed to stop"
 
+    for label, price in prices.items():
+        assert price["selected"] == price["icon"] != price["rest"], (
+            f"{label}: the selected row's price is not the icon step: "
+            f"{price!r}"
+        )
     for label, geo in geos.items():
         assert geo["listOverflowX"] == "hidden", f"{label}: {geo!r}"
         assert geo["listScrollWidth"] <= geo["listClientWidth"], (

@@ -95,7 +95,7 @@ def _responder(request: Request) -> Reply:
 def effort_wire(
     monkeypatch: pytest.MonkeyPatch,
 ) -> Generator[ScriptedOpenAIServer]:
-    """Route the openrouter and together vendors at an in-process emulator."""
+    """Route the openrouter vendor at an in-process emulator."""
     import dataclasses
 
     from kiss.core import config as config_module
@@ -104,16 +104,13 @@ def effort_wire(
     server = ScriptedOpenAIServer(_responder)
     providers = tuple(
         dataclasses.replace(p, base_url=server.base_url)
-        if p.name in ("openrouter", "together")
+        if p.name == "openrouter"
         else p
         for p in model_info.OPENAI_COMPATIBLE_PROVIDERS
     )
     monkeypatch.setattr(model_info, "OPENAI_COMPATIBLE_PROVIDERS", providers)
     monkeypatch.setattr(
         config_module.DEFAULT_CONFIG, "OPENROUTER_API_KEY", "test-key", raising=False
-    )
-    monkeypatch.setattr(
-        config_module.DEFAULT_CONFIG, "TOGETHER_API_KEY", "test-key", raising=False
     )
     try:
         yield server
@@ -159,14 +156,6 @@ class TestWireShapePerVendorRoute:
         assert req.body["model"] == "x-ai/grok-4.5", "Wire id must be the base model"
         assert _wire_effort(req) == "high"
 
-    def test_glm_5_2_max_via_together(
-        self, effort_wire: ScriptedOpenAIServer
-    ) -> None:
-        """zai-org/GLM-5.2-max → model=zai-org/GLM-5.2, effort=max."""
-        req = _generate_and_capture(effort_wire, "zai-org/GLM-5.2-max")
-        assert req.body["model"] == "zai-org/GLM-5.2", "Wire id must be the base model"
-        assert _wire_effort(req) == "max"
-
     def test_glm_5_2_max_via_openrouter(
         self, effort_wire: ScriptedOpenAIServer
     ) -> None:
@@ -174,16 +163,6 @@ class TestWireShapePerVendorRoute:
         req = _generate_and_capture(effort_wire, "openrouter/z-ai/glm-5.2-max")
         assert req.body["model"] == "z-ai/glm-5.2", "Wire id must be the base model"
         assert _wire_effort(req) == "max"
-
-    def test_gpt_oss_120b_medium_via_together(
-        self, effort_wire: ScriptedOpenAIServer
-    ) -> None:
-        """openai/gpt-oss-120b-medium → model=openai/gpt-oss-120b, effort=medium."""
-        req = _generate_and_capture(effort_wire, "openai/gpt-oss-120b-medium")
-        assert req.body["model"] == "openai/gpt-oss-120b", (
-            "Wire id must be the base model"
-        )
-        assert _wire_effort(req) == "medium"
 
     def test_gpt_oss_20b_low_via_openrouter(
         self, effort_wire: ScriptedOpenAIServer

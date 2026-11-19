@@ -96,12 +96,13 @@ def test_xhigh_alias_calculate_cost_matches_base(
 
 
 # The rolling OpenRouter ``~openai`` latest aliases track GPT-5.6/GPT-6
-# snapshots (astra -> gpt-6-astra, luna -> gpt-6-luna, sol -> gpt-6.1-sol,
-# terra -> gpt-6.1-terra since the 2026-10-26 refresh) and must therefore
-# share the snapshot families' absolute pricing rules: the cache-read
-# discount (0.10x, except the GPT-6.1 family which OpenRouter bills at
-# 0.05x: $0.10 cache read on a $2.00 input for gpt-6.1-sol, $0.05 on $1.00
-# for gpt-6.1-terra), the 1.25x
+# snapshots (luna -> gpt-6-luna, sol -> gpt-6.1-sol, terra -> gpt-6.1-terra
+# since the 2026-10-26 refresh, astra -> gpt-6.2-astra since the 2026-11-18
+# refresh) and must therefore share the snapshot families' absolute pricing
+# rules: the cache-read discount (0.10x, except the GPT-6.1 family and
+# gpt-6.2-astra which OpenRouter bills at 0.05x: $0.10 cache read on a
+# $2.00 input for gpt-6.1-sol, $0.05 on $1.00 for gpt-6.1-terra, $0.40 on
+# $8.00 for gpt-6.2-astra), the 1.25x
 # billed cache writes, and the 2x/1.5x long-context uplift above 272k
 # prompt tokens.  Alias/base parity tests above cannot catch an absolute
 # error when base and alias are BOTH wrong, so these checks pin the
@@ -110,7 +111,7 @@ def test_xhigh_alias_calculate_cost_matches_base(
 # ``update_models.openrouter_cache_prices``); re-check it there when a
 # discount here needs changing.
 _ROLLING_LATEST_CACHE_READ_DISCOUNT = {
-    "openrouter/~openai/gpt-astra-latest": 0.10,
+    "openrouter/~openai/gpt-astra-latest": 0.05,
     "openrouter/~openai/gpt-luna-latest": 0.10,
     "openrouter/~openai/gpt-sol-latest": 0.05,
     "openrouter/~openai/gpt-terra-latest": 0.05,
@@ -121,7 +122,8 @@ _ROLLING_LATEST_BASES = tuple(_ROLLING_LATEST_CACHE_READ_DISCOUNT)
 @pytest.mark.parametrize("base", _ROLLING_LATEST_BASES)
 def test_rolling_latest_cache_read_uses_openai_gpt5_discount(base: str) -> None:
     """Rolling latest entries and their -xhigh aliases read cache at the
-    tracked snapshot's discount (0.10x, or 0.05x for gpt-6.1-sol/-terra).
+    tracked snapshot's discount (0.10x, or 0.05x for gpt-6.1-sol/-terra
+    and gpt-6.2-astra).
 
     Regression: before the September 2026 catalog rename these fell
     through to the default 0.50x multiplier, billing 5x too much for

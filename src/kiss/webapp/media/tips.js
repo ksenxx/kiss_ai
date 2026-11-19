@@ -13,7 +13,7 @@
   // theme-dependent ones on body.remote-chat, so the light theme of the
   // remote page flows through as well).  Custom properties inherit into
   // the shadow root, so this one stylesheet follows both page themes.
-  // The fallbacks are VS Code Dark Modern.
+  // The fallbacks are the dark palette's values.
   const PANEL_CSS =
     '.tips-overlay {' +
     '  position: fixed;' +
@@ -27,6 +27,8 @@
     '}' +
     '@keyframes tips-fade { from { opacity: 0; } }' +
     '@keyframes tips-rise { from { opacity: 0; transform: translateY(8px); } }' +
+    // The dialog is a raised card: a hairline, a 12px corner and one
+    // wide soft shadow.
     '.tips-panel {' +
     '  display: flex;' +
     '  flex-direction: column;' +
@@ -34,14 +36,15 @@
     '  width: min(560px, 90vw);' +
     '  height: min(520px, 82vh);' +
     '  overflow: hidden;' +
-    '  border: 1px solid var(--settings-border, var(--border, #2b2b2b));' +
-    '  border-radius: var(--radius-xl, 10px);' +
-    '  background: var(--bg2, #181818);' +
-    '  color: var(--fg, #ccc);' +
-    '  font-family: var(--theme-font-family, sans-serif);' +
+    '  border: 1px solid var(--settings-border, var(--border, #ffffff1a));' +
+    '  border-radius: var(--radius-2xl, 12px);' +
+    '  background: var(--menu-bg, #1f1f1f);' +
+    '  color: var(--fg, #f0efec);' +
+    '  font-family: var(--font-ui, system-ui, -apple-system, "Segoe UI",' +
+    '    Roboto, Helvetica, Arial, sans-serif);' +
     '  font-size: var(--theme-font-size, 13px);' +
     '  line-height: 1.5;' +
-    '  box-shadow: var(--shadow-lg, 0 8px 24px rgb(0 0 0 / 36%));' +
+    '  box-shadow: var(--shadow-lg, 0 12px 40px #00000073);' +
     '  animation: tips-rise var(--dur-slow, 0.2s) var(--ease, ease-out) both;' +
     '}' +
     '.tips-header {' +
@@ -58,24 +61,23 @@
     '  justify-content: center;' +
     '  width: 26px;' +
     '  height: 26px;' +
-    '  border-radius: var(--radius-sm, 4px);' +
-    '  color: var(--accent, #4daafc);' +
-    '  background: var(--accent-tint, rgb(77 170 252 / 8%));' +
+    '  border-radius: var(--radius-md, 6px);' +
+    '  color: var(--icon, #c3c2b7);' +
+    '  background: var(--hover-strong, #ffffff1a);' +
     '}' +
     '.tips-icon svg { width: 16px; height: 16px; }' +
     '.tips-title {' +
     '  flex: 1;' +
     '  font-weight: 600;' +
     '  font-size: var(--fs-lg, 1.1em);' +
-    '  letter-spacing: 0.01em;' +
     '}' +
     '.tips-counter {' +
-    '  padding: 1px var(--space-2, 8px);' +
-    '  border: 1px solid var(--panel-line, rgb(255 255 255 / 10%));' +
-    '  border-radius: var(--radius-pill, 999px);' +
-    '  background: var(--panel-tint, rgb(255 255 255 / 4%));' +
-    '  color: var(--dim, #9d9d9d);' +
+    '  padding: 1px var(--space-1-5, 6px);' +
+    '  border-radius: var(--radius-sm, 4px);' +
+    '  background: var(--hover-strong, #ffffff1a);' +
+    '  color: var(--dim, #9c9a92);' +
     '  font-size: var(--fs-sm, 0.85em);' +
+    '  font-weight: 500;' +
     '  font-variant-numeric: tabular-nums;' +
     '}' +
     '.tips-close {' +
@@ -86,27 +88,27 @@
     '  height: 30px;' +
     '  padding: 0;' +
     '  border: none;' +
-    '  border-radius: var(--radius-sm, 4px);' +
-    '  background: transparent;' +
-    '  color: color-mix(in srgb, var(--fg, #ccc) 55%, transparent);' +
+    '  border-radius: var(--radius-md, 6px);' +
+    '  background: none;' +
+    '  color: var(--dim, #9c9a92);' +
     '  font-size: 26px;' +
     '  line-height: 1;' +
     '  cursor: pointer;' +
     '}' +
     '.tips-close:hover {' +
-    '  color: var(--fg, #ccc);' +
-    '  background: color-mix(in srgb, var(--fg, #ccc) 8%, transparent);' +
+    '  color: var(--fg, #f0efec);' +
+    '  background: var(--hover-strong, #ffffff1a);' +
     '}' +
     // A hairline under the header doubles as the reading progress:
-    // the accent bar grows with the tip index.
+    // the bar, in the text colour, grows with the tip index.
     '.tips-progress {' +
     '  flex: none;' +
     '  height: 2px;' +
-    '  background: var(--panel-line, rgb(255 255 255 / 10%));' +
+    '  background: var(--border, #ffffff1a);' +
     '}' +
     '.tips-progress-bar {' +
     '  height: 100%;' +
-    '  background: var(--accent, #4daafc);' +
+    '  background: var(--fg, #f0efec);' +
     '  transition: width var(--dur-slow, 0.2s) var(--ease, ease-out);' +
     '}' +
     '.tips-body {' +
@@ -115,12 +117,13 @@
     '  padding: var(--space-4, 16px) var(--space-5, 20px);' +
     '  overflow: auto;' +
     '  overflow-wrap: anywhere;' +
+    '  font-size: var(--fs-lg, 1.1em);' +
     '}' +
     '.tips-body > :first-child { margin-top: 0; }' +
     '.tips-body > :last-child { margin-bottom: 0; }' +
     '.tips-body h1, .tips-body h2, .tips-body h3, .tips-body h4 {' +
     '  margin: 0 0 var(--space-2, 8px);' +
-    '  color: var(--fg, #ccc);' +
+    '  color: var(--fg, #f0efec);' +
     '  font-weight: 600;' +
     '  line-height: 1.3;' +
     '}' +
@@ -131,52 +134,71 @@
     '}' +
     '.tips-body ul, .tips-body ol { padding-left: var(--space-5, 20px); }' +
     '.tips-body li { margin: var(--space-0-5, 2px) 0; }' +
-    '.tips-body a { color: var(--accent, #4daafc); text-decoration: none; }' +
+    '.tips-body a { color: var(--accent, #4d9fff); text-decoration: none; }' +
     '.tips-body a:hover { text-decoration: underline; }' +
-    '.tips-body strong { color: var(--fg, #ccc); font-weight: 600; }' +
+    '.tips-body strong { color: var(--fg, #f0efec); font-weight: 600; }' +
     '.tips-body blockquote {' +
     '  margin: var(--space-2, 8px) 0;' +
     '  padding: var(--space-1, 4px) 0 var(--space-1, 4px) var(--space-3, 12px);' +
-    '  border-left: 3px solid var(--accent-line, var(--accent, #4daafc));' +
-    '  color: var(--dim, #9d9d9d);' +
+    '  border-left: 2px solid var(--border-input, #ffffff26);' +
+    '  color: var(--dim, #9c9a92);' +
+    '}' +
+    // Code as the transcript sets it: a block on the code surface with
+    // a hairline and a 10px corner, inline code a small chip in the
+    // palette's code colour.
+    '.tips-body pre, .tips-body code {' +
+    '  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo,' +
+    '    Monaco, Consolas, "Liberation Mono", "Courier New", monospace);' +
     '}' +
     '.tips-body pre {' +
     '  margin: var(--space-2, 8px) 0;' +
     '  padding: var(--space-2-5, 10px) var(--space-3, 12px);' +
-    '  border: 1px solid var(--panel-line, rgb(255 255 255 / 10%));' +
-    '  border-radius: var(--radius-md, 6px);' +
-    '  background: var(--theme-textCodeBlock-background, #2b2b2b);' +
+    '  border: 1px solid var(--border, #ffffff1a);' +
+    '  border-radius: var(--radius-xl, 10px);' +
+    '  background: var(--code-bg, #151515);' +
     '  overflow-x: auto;' +
     '  white-space: pre-wrap;' +
-    '  font-family: var(--font-mono, monospace);' +
-    '  font-size: var(--fs-sm, 0.85em);' +
+    '  font-size: var(--fs-md, 0.9em);' +
     '  line-height: 1.45;' +
     '}' +
     '.tips-body code {' +
     '  padding: 1px var(--space-1, 4px);' +
+    '  border: 1px solid var(--border-soft, #ffffff14);' +
     '  border-radius: var(--radius-sm, 4px);' +
-    '  background: var(--theme-textCodeBlock-background, #2b2b2b);' +
-    '  color: var(--theme-textPreformat-foreground, var(--fg, #ccc));' +
-    '  font-family: var(--font-mono, monospace);' +
-    '  font-size: 0.92em;' +
+    '  background: var(--hover, #ffffff13);' +
+    '  color: var(--code-inline-fg, #fa8080);' +
+    '  font-size: var(--fs-inline-code, 0.9em);' +
     '}' +
     '.tips-body pre code {' +
     '  padding: 0;' +
-    '  background: transparent;' +
+    '  border: none;' +
+    '  background: none;' +
     '  color: inherit;' +
     '  font-size: inherit;' +
     '}' +
-    '.tips-body table { margin: var(--space-2, 8px) 0; border-collapse: collapse; }' +
+    // A table is a rounded hairline frame with a hairline between rows
+    // and columns and no shading.
+    '.tips-body table {' +
+    '  margin: var(--space-2, 8px) 0;' +
+    '  border: 1px solid var(--border, #ffffff1a);' +
+    '  border-radius: var(--radius-lg, 8px);' +
+    '  border-collapse: separate;' +
+    '  border-spacing: 0;' +
+    '  overflow: hidden;' +
+    '}' +
     '.tips-body th, .tips-body td {' +
     '  padding: var(--space-1, 4px) var(--space-2, 8px);' +
-    '  border: 1px solid var(--panel-line, rgb(255 255 255 / 10%));' +
+    '  border: 0 solid var(--border, #ffffff1a);' +
     '  text-align: left;' +
     '}' +
-    '.tips-body th { background: var(--panel-tint, rgb(255 255 255 / 4%)); font-weight: 600; }' +
+    '.tips-body :is(th, td) + :is(th, td) { border-left-width: 1px; }' +
+    '.tips-body tr + tr > :is(th, td),' +
+    '.tips-body thead + tbody > tr:first-child > td { border-top-width: 1px; }' +
+    '.tips-body th { font-weight: 600; }' +
     '.tips-body hr {' +
     '  margin: var(--space-3, 12px) 0;' +
     '  border: none;' +
-    '  border-top: 1px solid var(--panel-line, rgb(255 255 255 / 10%));' +
+    '  border-top: 1px solid var(--border, #ffffff1a);' +
     '}' +
     '.tips-code { position: relative; }' +
     '.tips-copy {' +
@@ -184,18 +206,22 @@
     '  top: var(--space-1-5, 6px);' +
     '  right: var(--space-1-5, 6px);' +
     '  padding: 1px var(--space-2, 8px);' +
-    '  border: 1px solid var(--border, #2b2b2b);' +
-    '  border-radius: var(--radius-sm, 4px);' +
-    '  background: var(--panel-tint-solid, #232323);' +
-    '  color: var(--dim, #9d9d9d);' +
+    '  border: 1px solid var(--border-input, #ffffff26);' +
+    '  border-radius: var(--radius-md, 6px);' +
+    '  background: var(--surface2, #1f1f1f);' +
+    '  color: var(--dim, #9c9a92);' +
     '  font: inherit;' +
-    '  font-size: var(--fs-xs, 0.7em);' +
+    '  font-size: var(--fs-sm, 0.85em);' +
+    '  font-weight: 500;' +
     '  cursor: pointer;' +
     '}' +
+    // The button floats over the code, so its fill under the pointer is
+    // the hover wash pre-mixed over the opaque button surface.
     '.tips-copy:hover {' +
-    '  color: var(--fg, #ccc);' +
-    '  border-color: color-mix(in srgb, var(--fg, #ccc) 24%, transparent);' +
-    '  background: color-mix(in srgb, var(--fg, #ccc) 10%, var(--bg, #1f1f1f));' +
+    '  color: var(--fg, #f0efec);' +
+    '  border-color: var(--border-hover, #f0efec4d);' +
+    '  background: color-mix(in srgb, var(--fg, #f0efec) 7%,' +
+    '    var(--surface2, #1f1f1f));' +
     '}' +
     '.tips-footer {' +
     '  display: flex;' +
@@ -203,8 +229,7 @@
     '  align-items: center;' +
     '  gap: var(--space-2, 8px);' +
     '  padding: var(--space-3, 12px) var(--space-4, 16px);' +
-    '  border-top: 1px solid var(--panel-line, rgb(255 255 255 / 10%));' +
-    '  background: var(--panel-tint, rgb(255 255 255 / 4%));' +
+    '  border-top: 1px solid var(--border, #ffffff1a);' +
     '}' +
     '.tips-prev, .tips-next {' +
     '  display: inline-flex;' +
@@ -213,27 +238,34 @@
     '  min-height: 26px;' +
     '  padding: var(--space-1, 4px) var(--space-3, 12px);' +
     '  border: 1px solid transparent;' +
-    '  border-radius: var(--radius-sm, 4px);' +
+    '  border-radius: var(--radius-lg, 8px);' +
     '  font: inherit;' +
-    '  font-size: var(--fs-md, 0.9em);' +
+    '  font-size: var(--fs-base, 1em);' +
+    '  font-weight: 500;' +
     '  cursor: pointer;' +
+    '  transition:' +
+    '    background var(--dur-base, 0.15s) var(--ease, ease-out),' +
+    '    border-color var(--dur-base, 0.15s) var(--ease, ease-out);' +
     '}' +
+    // Previous is the secondary button: the raised surface in an
+    // outline.
     '.tips-prev {' +
-    '  border-color: var(--border, #2b2b2b);' +
-    '  background: var(--theme-button-secondaryBackground, transparent);' +
-    '  color: var(--theme-button-secondaryForeground, var(--fg, #ccc));' +
+    '  border-color: var(--border-input, #ffffff26);' +
+    '  background: var(--surface2, #1f1f1f);' +
+    '  color: var(--fg, #f0efec);' +
     '}' +
     '.tips-prev:hover:enabled {' +
-    '  background: var(--theme-button-secondaryHoverBackground,' +
-    '    color-mix(in srgb, var(--fg, #ccc) 10%, transparent));' +
+    '  border-color: var(--border-hover, #f0efec4d);' +
+    '  background: var(--hover, #ffffff13);' +
     '}' +
+    // Next is the primary button: the palette's solid neutral fill.
     '.tips-next {' +
     '  margin-left: auto;' +
-    '  background: var(--theme-button-background, #0078d4);' +
-    '  color: var(--theme-button-foreground, #fff);' +
+    '  background: var(--primary-bg, #efefef);' +
+    '  color: var(--primary-fg, #0b0b0b);' +
     '}' +
     '.tips-next:hover:enabled {' +
-    '  background: var(--theme-button-hoverBackground, #026ec1);' +
+    '  background: var(--primary-hover-bg, #d7d7d7);' +
     '}' +
     '.tips-prev:disabled, .tips-next:disabled {' +
     '  opacity: 0.4;' +
@@ -245,12 +277,12 @@
     '  align-items: center;' +
     '  justify-content: center;' +
     '  gap: var(--space-1-5, 6px);' +
-    '  color: var(--dim, #9d9d9d);' +
-    '  font-size: var(--fs-sm, 0.85em);' +
+    '  color: var(--dim, #9c9a92);' +
+    '  font-size: var(--fs-md, 0.9em);' +
     '  cursor: pointer;' +
     '  user-select: none;' +
     '}' +
-    '.tips-optout input { margin: 0; accent-color: var(--accent, #4daafc); }' +
+    '.tips-optout input { margin: 0; accent-color: var(--accent, #4d9fff); }' +
     // Phones: the paging buttons keep the first row, the checkbox
     // moves to a row of its own instead of squeezing the labels.
     '@media (width <= 480px) {' +
@@ -259,7 +291,7 @@
     '.tips-close:focus-visible, .tips-prev:focus-visible,' +
     '.tips-next:focus-visible, .tips-copy:focus-visible,' +
     '.tips-optout input:focus-visible {' +
-    '  outline: 1px solid var(--theme-focusBorder, var(--accent, #4daafc));' +
+    '  outline: 1px solid var(--ring-focus, #4d9fff);' +
     '  outline-offset: 1px;' +
     '}';
 

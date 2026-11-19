@@ -67,7 +67,7 @@ def test_input_and_cache_prices_move_together() -> None:
             "decisions": False,
         }
     }
-    updates, new_models = mod.compute_changes(current, fetched, {}, {}, {}, {})
+    updates, new_models = mod.compute_changes(current, fetched, {}, {}, {})
     assert new_models == []
     assert updates == [
         {

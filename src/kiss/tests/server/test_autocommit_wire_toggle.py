@@ -89,10 +89,7 @@ class _FakeCredentials:
         "GEMINI_API_KEY",
         "OPENAI_API_KEY",
         "ANTHROPIC_API_KEY",
-        "TOGETHER_API_KEY",
         "OPENROUTER_API_KEY",
-        "ZAI_API_KEY",
-        "MOONSHOT_API_KEY",
     )
 
     def __init__(self) -> None:

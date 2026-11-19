@@ -6,13 +6,15 @@
 'use strict';
 
 // Event panel headers are flat and uniform: no chevron in front of the
-// title, no background and no border of their own (the panel keeps its
-// single outer border), and ONE quiet style for every header (the Bash
-// tool call is not singled out in the accent blue, no collapsible header
-// is bold).  The panels are rendered by the real media/main.js with
-// media/main.css injected, so the assertions are on the cascaded values
-// the page actually paints.  Where the panels sit (the user's on the
-// right, the rest on the left) is transcriptPanelAlignment's.
+// title, no background and no border of their own (nor has the panel:
+// a tool call is one line on the canvas, and an open one shows its
+// content in a sunken card under that line), and ONE quiet style for
+// every header (the Bash tool call is not singled out in the accent
+// blue, no collapsible header is bold).  The panels are rendered by the
+// real media/main.js with media/main.css injected, so the assertions
+// are on the cascaded values the page actually paints.  Where the
+// panels sit (the user's on the right, the rest on the left) is
+// transcriptPanelAlignment's.
 
 const assert = require('assert');
 const harness = require('./simplify2_harness');
@@ -89,26 +91,29 @@ function testToolCallHeaderIsFlat(win) {
     }
   }
   // JSDOM drops a `border: 1px solid var(--border)` shorthand from the
-  // computed style (var() in a shorthand), so the panel's outer border
-  // is read from the parsed stylesheet rule's CSSOM style instead.
-  let tcRule = null;
+  // computed style (var() in a shorthand), so a frame round the panel
+  // would not show there: the panel's rule and the open panel's card
+  // (a ::before, which jsdom cannot compute) are read from the parsed
+  // stylesheet rules' CSSOM style instead.  .tc shares both rules with
+  // the other panels: the selector lists name them all.
+  const rules = {'.tc': null, '.tc:not(.collapsed)::before': null};
   for (const sheet of win.document.styleSheets) {
     for (const rule of sheet.cssRules) {
-      // .tc shares its frame rule with the other panel frames: the
-      // selector list names them all.
-      if (
-        rule.selectorText &&
-        rule.selectorText.split(',').some(x => x.trim() === '.tc')
-      )
-        tcRule = rule;
+      for (const sel of (rule.selectorText || '').split(',')) {
+        if (sel.trim() in rules) rules[sel.trim()] = rule;
+      }
     }
   }
-  assert.ok(tcRule, 'main.css declares .tc');
+  assert.ok(rules['.tc'], 'main.css declares .tc');
+  assert.strictEqual(rules['.tc'].style.border, '', 'the panel draws no frame');
+  const card = rules['.tc:not(.collapsed)::before'];
+  assert.ok(card, 'main.css declares the open panel card');
   assert.strictEqual(
-    tcRule.style.border,
-    '1px solid var(--border)',
-    'the panel keeps its outer border in the --border token',
+    card.style.background,
+    'var(--panel-tint)',
+    'the open panel shows its content in a card of the shared panel tint',
   );
+  assert.strictEqual(card.style.border, '', 'the card draws no frame either');
   console.log('  ok - the tool call header has no background and no border of its own');
 }
 
@@ -146,21 +151,24 @@ function testBashHeaderMatchesTheOtherToolHeaders(win) {
   console.log('  ok - the Bash header matches the other tool headers');
 }
 
-// Every collapsible header the transcript renders, by its markup
-// (`.tr .rl` is the result label inside a tool-result panel).
+// Every collapsible header the transcript renders, by its markup, with
+// its weight.  A header line is regular; a label that names what a
+// panel holds (`.tr .rl`, the result label inside a tool-result panel,
+// and the /ask answer's label) is the medium step, like a tool's name
+// in its header line.
 const HEADER_MARKUP = [
-  '<div class="tc-h">Read</div>',
-  '<div class="tr"><span class="rl">Result</span></div>',
-  '<div class="system-prompt-h">System prompt</div>',
-  '<div class="prompt-h">Prompt</div>',
-  '<div class="llm-panel-hdr">Thoughts</div>',
-  '<span class="ask-answer-label">Answer</span>',
-  '<div class="tc-h tc-h-bash">Bash</div>',
+  ['<div class="tc-h">Read</div>', '400'],
+  ['<div class="tr"><span class="rl">Result</span></div>', '500'],
+  ['<div class="system-prompt-h">System prompt</div>', '400'],
+  ['<div class="prompt-h">Prompt</div>', '400'],
+  ['<div class="llm-panel-hdr">Thoughts</div>', '400'],
+  ['<span class="ask-answer-label">Answer</span>', '500'],
+  ['<div class="tc-h tc-h-bash">Bash</div>', '400'],
 ];
 
 function testNoCollapsibleHeaderIsBold(win) {
   const output = win.document.getElementById('output');
-  for (const markup of HEADER_MARKUP) {
+  for (const [markup, weight] of HEADER_MARKUP) {
     output.insertAdjacentHTML('beforeend', markup);
     const el = output.lastElementChild.matches('.tr')
       ? output.lastElementChild.firstElementChild
@@ -168,7 +176,7 @@ function testNoCollapsibleHeaderIsBold(win) {
     const style = win.getComputedStyle(el);
     assert.strictEqual(
       style.getPropertyValue('font-weight'),
-      '400',
+      weight,
       `${markup} is not bold`,
     );
     assert.ok(

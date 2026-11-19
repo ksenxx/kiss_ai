@@ -175,8 +175,14 @@ class SubagentReopenCloseRaceTest(TwoClientHarness):
             b.send({
                 "type": "resumeSession", "taskId": child, "tabId": sub_tab, "reopen": True,
             })
+            # The window is 0.1 s wide: a poll that a loaded machine holds up misses it and
+            # sees B's commit instead.  The close then lands after the commit, a missed
+            # attempt the caller repeats.
             self.wait_for(
-                _replay_thread_in_window,
+                lambda: (
+                    _replay_thread_in_window()
+                    or len(b.of_type("openSubagentTab", tab_id=sub_tab)) > opens_before
+                ),
                 timeout=10,
                 what="B's replay thread to enter the attach-to-commit window",
             )

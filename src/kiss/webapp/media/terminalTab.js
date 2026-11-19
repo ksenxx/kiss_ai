@@ -108,15 +108,16 @@
     return v || fallback;
   }
 
-  // The page palette (VS Code Dark/Light Modern, injected by
+  // The page palette (the dark or the light one, injected by
   // web_server.py) as an xterm theme.  Only names the palette defines
   // are read (test_remote_theme keeps that list honest); the
-  // terminal shares the editor's background, as VS Code's panel does.
+  // terminal sits on the chat canvas colour.  The fallbacks are the
+  // dark palette's values.
   function themeFromPage() {
-    const bg = cssVar('--theme-editor-background', '#1f1f1f');
+    const bg = cssVar('--theme-editor-background', '#0b0b0b');
     const fg =
       cssVar('--theme-terminal-foreground', '') ||
-      cssVar('--theme-editor-foreground', '#cccccc');
+      cssVar('--theme-editor-foreground', '#f0efec');
     const ansi = name => cssVar('--theme-terminal-ansi' + name, '');
     const theme = {
       background: bg,
@@ -125,7 +126,7 @@
       cursorAccent: bg,
       selectionBackground: cssVar(
         '--theme-editor-selectionBackground',
-        '#264f78',
+        '#1d3d63',
       ),
     };
     const names = [
@@ -257,7 +258,7 @@
           term = new global.Terminal({
             cursorBlink: true,
             fontSize: 13,
-            // main.css's --font-mono: the editor font with Cursor's
+            // main.css's --font-mono: the editor font with the platform
             // monospace fallback chain (a custom property's computed
             // value has its var() references substituted).
             fontFamily: cssVar(

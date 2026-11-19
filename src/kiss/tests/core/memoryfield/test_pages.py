@@ -17,6 +17,7 @@ import yaml
 
 from kiss.core.memoryfield.pages import (
     MemoryDir,
+    PageChangedError,
     is_debris,
     is_valid_page_name,
     now_iso,
@@ -82,6 +83,50 @@ def test_split_frontmatter_roundtrip_and_key_order() -> None:
     parsed, body = split_frontmatter(text)
     assert parsed == fm  # timestamps stay strings because they are quoted
     assert body == "Body\n\nMore\n"
+
+
+def test_provenance_follows_the_standard_keys_and_only_code_sets_who_wrote(
+    tmp_path: Path,
+) -> None:
+    memory = MemoryDir(tmp_path)
+    provenance = {
+        "review_after": "2027-01-01",
+        "sources": "a.py, b.py",
+        "verified": "2026-01-02T00:00:00Z",
+        "writer": "agent",
+        "task": "t1",
+    }
+    page = memory.write("p", "Body", title="T", extra={"source": "x", **provenance})
+    assert list(split_frontmatter(page.raw)[0]) == [
+        "title", "uuid", "created", "updated",
+        "task", "writer", "verified", "sources", "review_after",
+        "source",
+    ]  # fmt: skip
+    # A page body may name its sources, not who wrote or verified it.
+    forged = memory.write(
+        "p",
+        "---\ntask: forged\nwriter: quiz\nverified: '2030-01-01T00:00:00Z'\nsources: c.py\n---\nB2",
+    )
+    assert [forged.frontmatter[key] for key in ("task", "writer", "verified", "sources")] == [
+        "t1", "agent", "2026-01-02T00:00:00Z", "c.py",
+    ]  # fmt: skip
+    # An empty extra value takes the key off the page.
+    cleared = split_frontmatter(memory.write("p", "B3", extra={"task": "", "writer": "quiz"}).raw)
+    assert "task" not in cleared[0] and cleared[0]["writer"] == "quiz"
+    assert cleared[0]["verified"] == "2026-01-02T00:00:00Z"
+    # A write that names its writer and no verified time is stamped from the page as
+    # stored: a job keeps the time an agent last vouched for it (on a page from before
+    # provenance its last update, which the body's frontmatter cannot move), and an
+    # agent verifies it at the time of the write.
+    (tmp_path / "old.md").write_text(
+        "---\nupdated: '2020-01-01T00:00:00Z'\n---\nOld.\n", encoding="utf-8"
+    )
+    merged = memory.write(
+        "old", "---\nupdated: '2030-01-01T00:00:00Z'\n---\nMerged.", extra={"writer": "quiz"}
+    ).frontmatter
+    assert merged["verified"] == "2020-01-01T00:00:00Z" < merged["updated"] < "2030"
+    checked = memory.write("old", "Checked.", extra={"writer": "agent"}).frontmatter
+    assert "2020-01-01T00:00:00Z" < checked["verified"] == checked["updated"]
 
 
 def test_memory_frontmatter_preserves_unicode_line_separators(tmp_path: Path) -> None:
@@ -179,6 +224,46 @@ def test_memory_dir_write_read_update_delete(tmp_path: Path) -> None:
     assert memory.page_names() == ["finnish-bureaucracy", "imported", "woks"]
     with pytest.raises(ValueError, match="Invalid page name"):
         memory.delete("Bad Name")
+
+
+def test_a_conditional_write_or_delete_acts_only_on_the_text_that_was_read(tmp_path: Path) -> None:
+    """A job that read a page long ago neither overwrites nor deletes what was stored since."""
+    memory = MemoryDir(tmp_path)
+    read = memory.write("port", "The port is 6433.", expected="")  # "" = must not exist
+    with pytest.raises(PageChangedError, match="port.md changed"):
+        memory.write("port", "Another first write.", expected="")
+    newer = memory.write("port", "The port is 6434.", expected=read.raw)
+
+    with pytest.raises(PageChangedError):
+        memory.write("port", "Merged from the old text.", expected=read.raw)
+    with pytest.raises(PageChangedError):
+        memory.delete("port", expected=read.raw)
+    assert memory.read("port").raw == newer.raw
+    assert not (tmp_path / ".tombstones" / "port").exists()
+
+    memory.delete("port", expected=newer.raw)
+    assert memory.page_names() == []
+    with pytest.raises(PageChangedError):  # deleted meanwhile: not re-created
+        memory.write("port", "Merged from the old text.", expected=newer.raw)
+    assert memory.page_names() == []
+
+    # The comparison is of bytes.  A page that is not UTF-8 reads with a replacement
+    # character whatever its bytes are, so no text read from it stands for them.
+    damaged = tmp_path / "damaged.md"
+    damaged.write_bytes(b"The port is \xff.\n")
+    read = memory.read("damaged")
+    damaged.write_bytes(b"The port is \xfe.\n")
+    assert memory.read("damaged").raw == read.raw
+    with pytest.raises(PageChangedError):
+        memory.write("damaged", "Merged.", expected=read.raw)
+    with pytest.raises(PageChangedError):
+        memory.delete("damaged", expected=read.raw)
+    assert damaged.read_bytes() == b"The port is \xfe.\n"
+    # An empty file is a page that exists: "must not exist" does not write over it.
+    (tmp_path / "empty.md").write_bytes(b"")
+    with pytest.raises(PageChangedError):
+        memory.write("empty", "A first write.", expected="")
+    assert (tmp_path / "empty.md").read_bytes() == b""
 
 
 class _PagePathCalls:

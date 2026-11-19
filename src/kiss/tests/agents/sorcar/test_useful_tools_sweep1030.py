@@ -38,7 +38,7 @@ from pathlib import Path
 import pytest
 
 from kiss.agents.sorcar.edit_guards import HEREDOC_VERDICT
-from kiss.agents.sorcar.useful_tools import UsefulTools, sleep_guard
+from kiss.agents.sorcar.useful_tools import SPILL_DIR, UsefulTools, sleep_guard
 from kiss.tests.conftest import posix_only
 
 pytestmark = posix_only("the host Bash tool runs bash")
@@ -52,20 +52,35 @@ def _vanished_worktree(tmp_path: Path) -> tuple[Path, Path]:
     return repo, repo / ".kiss-worktrees" / "kiss_wt-gone"
 
 
-def test_spill_of_a_vanished_worktree_goes_where_the_command_ran(tmp_path: Path) -> None:
-    """F1: the full output lands in the parent repo; the worktree is not recreated."""
+def _spill_of(out: str, scratch: Path) -> tuple[int, Path]:
+    """Return the size the truncation marker of *out* gives and the spill file it names.
+
+    The file is named by its absolute path and is in ``tool-out/`` of *scratch*.
+    """
+    match = re.search(r"full output \((\d+) chars\) in (/[^\]\s]+)\]", out)
+    assert match is not None, out[:500]
+    spill = Path(match[2])
+    assert spill.parent == scratch / SPILL_DIR, spill
+    return int(match[1]), spill
+
+
+def test_spill_of_a_vanished_worktree_is_in_the_scratch_dir(tmp_path: Path) -> None:
+    """F1: the full output lands in the scratch dir; the worktree is not recreated.
+
+    The spill does not depend on the work dir any more: neither the
+    parent repo the command falls back to gets a file, nor is the spill
+    skipped when there is no directory to fall back to.
+    """
     repo, wt = _vanished_worktree(tmp_path)
-    tools = UsefulTools(work_dir=str(wt))
+    scratch = tmp_path / "scratch"
+    tools = UsefulTools(work_dir=str(wt), scratch_dir=str(scratch))
     out = tools.Bash("python3 -c \"print('x' * 5000)\"", "big", max_output_chars=300)
-    match = re.search(r" in (tmp/tool-out/[^\]\s]+)\]", out)
-    assert match is not None, out
-    assert not wt.exists()
-    assert (repo / match[1]).read_text() == "x" * 5000 + "\n"
-    # With no directory to fall back to there is no spill and nothing is created.
+    assert _spill_of(out, scratch)[1].read_text() == "x" * 5000 + "\n"
+    assert not wt.exists() and os.listdir(repo) == ["notes.md"]
     lost = tmp_path / "lost" / ".kiss-worktrees" / "kiss_wt-gone"
-    out = UsefulTools(work_dir=str(lost)).Bash("python3 -c \"print('y' * 5000)\"", "big",
-                                               max_output_chars=300)
-    assert "[truncated" in out and "tool-out" not in out
+    tools = UsefulTools(work_dir=str(lost), scratch_dir=str(scratch))
+    out = tools.Bash("python3 -c \"print('y' * 5000)\"", "big", max_output_chars=300)
+    assert _spill_of(out, scratch)[1].read_text() == "y" * 5000 + "\n"
     assert not (tmp_path / "lost").exists()
 
 
@@ -199,14 +214,13 @@ _FLOOD = 64_000_000
 )
 def test_a_huge_foreground_output_is_held_in_bounded_memory(tmp_path: Path, flood: str) -> None:
     """F14: memory stays bounded, the result keeps head and tail, the spill file has it all."""
-    tools = UsefulTools(work_dir=str(tmp_path))
+    scratch = tmp_path / "scratch"
+    tools = UsefulTools(work_dir=str(tmp_path), scratch_dir=str(scratch))
     out, peak = _traced_peak(tools, "Bash", f"echo FIRST; {flood}; echo; echo LAST", "flood",
                              timeout_seconds=120)
     assert peak < 48_000_000, peak
-    match = re.search(r"full output \((\d+) chars\) in (tmp/tool-out/[^\]\s]+)\]", out)
-    assert match is not None, out[:500]
-    spill = tmp_path / match[2]
-    assert int(match[1]) == spill.stat().st_size > _FLOOD
+    size, spill = _spill_of(out, scratch)
+    assert size == spill.stat().st_size > _FLOOD
     assert out.startswith("FIRST\nxxxx") and out.endswith("x\nLAST\n")
     with spill.open() as file:
         assert file.readline() == "FIRST\n"
@@ -230,21 +244,22 @@ def test_a_huge_parallel_output_is_held_in_bounded_memory(tmp_path: Path) -> Non
 
 def test_a_huge_output_of_a_command_that_finishes_before_its_deadline(tmp_path: Path) -> None:
     """F14: ``on_timeout="background"`` reads the job log in pieces, not whole."""
-    tools = UsefulTools(work_dir=str(tmp_path))
+    scratch = tmp_path / "scratch"
+    tools = UsefulTools(work_dir=str(tmp_path), scratch_dir=str(scratch))
     out, peak = _traced_peak(
         tools, "Bash", f"echo FIRST; head -c {_FLOOD} /dev/zero | tr '\\0' x; echo; echo LAST",
         "flood", timeout_seconds=120, on_timeout="background",
     )
     assert peak < 48_000_000, peak
-    match = re.search(r"full output \((\d+) chars\) in (tmp/tool-out/[^\]\s]+)\]", out)
-    assert match is not None, out[:500]
-    assert int(match[1]) == (tmp_path / match[2]).stat().st_size > _FLOOD
+    size, spill = _spill_of(out, scratch)
+    assert size == spill.stat().st_size > _FLOOD
     assert out.startswith("FIRST\nxxxx") and out.endswith("x\nLAST\n")
 
 
 def test_a_big_output_before_a_timeout_keeps_its_ends_and_its_spill(tmp_path: Path) -> None:
     """F14: a command killed at its deadline reports both ends of what it printed."""
-    tools = UsefulTools(work_dir=str(tmp_path))
+    scratch = tmp_path / "scratch"
+    tools = UsefulTools(work_dir=str(tmp_path), scratch_dir=str(scratch))
     out = tools.Bash(
         "echo FIRST; head -c 5000000 /dev/zero | tr '\\0' x; echo; echo LAST; sleep 30",
         "flood", timeout_seconds=3,
@@ -253,29 +268,32 @@ def test_a_big_output_before_a_timeout_keeps_its_ends_and_its_spill(tmp_path: Pa
         "Error: Command execution timeout after 3s. Output before the timeout:\nFIRST\nx"
     ), out[:200]
     assert out.endswith("x\nLAST\n")
-    match = re.search(r"full output \(\d+ chars\) in (tmp/tool-out/[^\]\s]+)\]", out)
-    assert match is not None, out[:500]
-    spill = (tmp_path / match[1]).read_bytes()
+    spill = _spill_of(out, scratch)[1].read_bytes()
     assert len(spill) == 5_000_012
     assert spill.startswith(b"FIRST\nx") and spill.endswith(b"x\nLAST\n")
 
 
-@pytest.mark.parametrize("blocker", ["tmp is a file", "tool-out is read-only"])
+@pytest.mark.parametrize("blocker", ["the scratch dir is a file", "tool-out is read-only"])
 def test_no_spill_file_is_named_when_none_can_be_made(tmp_path: Path, blocker: str) -> None:
     """F14: when the spill file cannot be created the result is cut without naming one."""
-    if blocker == "tmp is a file":
-        (tmp_path / "tmp").write_text("")
+    work, scratch = tmp_path / "work", tmp_path / "scratch"
+    work.mkdir()
+    if blocker == "the scratch dir is a file":
+        scratch.write_text("")
     else:
         if os.geteuid() == 0:
             pytest.skip("root writes into a read-only directory")
-        (tmp_path / "tmp" / "tool-out").mkdir(parents=True, mode=0o500)
+        (scratch / SPILL_DIR).mkdir(parents=True, mode=0o500)
+    tools = UsefulTools(work_dir=str(work), scratch_dir=str(scratch))
     try:
-        out = UsefulTools(work_dir=str(tmp_path)).Bash("seq 1 20000", "count")
+        out = tools.Bash("seq 1 20000", "count")
     finally:
-        if blocker != "tmp is a file":
-            (tmp_path / "tmp" / "tool-out").chmod(0o700)
+        if blocker != "the scratch dir is a file":
+            (scratch / SPILL_DIR).chmod(0o700)
     assert out.startswith("1\n2\n") and out.rstrip().endswith("20000")
     assert "[truncated" in out and "tool-out" not in out, out[-300:]
+    # The spill is not made somewhere else instead, the work dir included.
+    assert os.listdir(work) == [] and (scratch.is_file() or os.listdir(scratch / SPILL_DIR) == [])
 
 
 @pytest.mark.skipif(not os.path.exists("/dev/full"), reason="needs /dev/full")
@@ -286,8 +304,9 @@ def test_a_spill_file_that_cannot_be_written_is_not_named(tmp_path: Path, lines:
     30 lines fit the file's write buffer, so the failure comes when it
     is closed; 100000 lines (589 kB) fail on a write.
     """
-    tools = UsefulTools(work_dir=str(tmp_path))
-    spill_dir = tmp_path / "tmp" / "tool-out"
+    scratch = tmp_path / "scratch"
+    tools = UsefulTools(work_dir=str(tmp_path), scratch_dir=str(scratch))
+    spill_dir = scratch / SPILL_DIR
     spill_dir.mkdir(parents=True)
     (spill_dir / f"{tools._spill_tag}-1-bash.txt").symlink_to("/dev/full")
     out = tools.Bash(f"seq 1 {lines}", "count", max_output_chars=60)

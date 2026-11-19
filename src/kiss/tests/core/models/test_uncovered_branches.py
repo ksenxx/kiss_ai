@@ -177,12 +177,6 @@ class TestModelInfoFactory:
         m = model("openrouter/foo-bar")
         assert m.model_name == "openrouter/foo-bar"
 
-    def test_model_together_prefix(self) -> None:
-        from kiss.core.models.model_info import model
-
-        m = model("meta-llama/Llama-3.3-70B-Instruct-Turbo")
-        assert m.model_name == "meta-llama/Llama-3.3-70B-Instruct-Turbo"
-
     def test_model_text_embedding_004(self) -> None:
         from kiss.core.models.model_info import model
 
@@ -191,18 +185,6 @@ class TestModelInfoFactory:
         # Routed by the ``text-embedding`` prefix like every other name in
         # that family; the exact-name Gemini diversion was dead (audit 01, F5).
         assert type(m).__name__ == "OpenAICompatibleModel"
-
-    def test_model_glm(self) -> None:
-        from kiss.core.models.model_info import model
-
-        m = model("glm-4.6")
-        assert m.model_name == "glm-4.6"
-
-    def test_model_moonshot(self) -> None:
-        from kiss.core.models.model_info import model
-
-        m = model("moonshot-v1-32k")
-        assert m.model_name == "moonshot-v1-32k"
 
 
 class TestAnthropicBuildKwargs:

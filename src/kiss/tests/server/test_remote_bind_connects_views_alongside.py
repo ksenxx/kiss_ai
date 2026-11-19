@@ -24,6 +24,16 @@ and three or more round trips (its own connect) when it did not.
 A bind that is refused (the machine is down) leaves no view stream
 behind: the one warmed for it is closed, as the registry has nothing
 bound to the machine.
+
+A click on another chat of the same machine opens it in a new tab and
+closes the tab left behind.  That close found no tab bound to the
+machine (the new one was still connecting) and closed the view stream,
+which the bind then connected again before it forwarded the resume:
+the second round of handshakes was back.  The view stream is kept for
+a bind on its way (:meth:`kiss.server.remote_views.RemoteViews.expect`),
+so the switch costs the new tab's handshake alone, counted here by the
+connections the proxy accepts; and a stream kept for a bind that is
+then refused is closed once the refusal is in.
 """
 
 from __future__ import annotations
@@ -63,7 +73,16 @@ class TestRemoteBindConnectsViewsAlongside(RemoteTabsHarness):
         target = urlsplit(self.remote.url)
         host, port = str(target.hostname), int(target.port or 0)
 
+        self.dials = 0
+        self.refusing = False
+
         async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            self.dials += 1
+            if self.refusing:
+                # Held past the close of the tab left behind, then dropped.
+                await asyncio.sleep(4 * DELAY)
+                writer.close()
+                return
             upstream_reader, upstream_writer = await asyncio.open_connection(host, port)
             await asyncio.gather(
                 _delayed_pump(reader, upstream_writer),
@@ -119,6 +138,46 @@ class TestRemoteBindConnectsViewsAlongside(RemoteTabsHarness):
             if "task_events" in seen:
                 return seen
         raise AssertionError(f"no task_events after the click: {seen}")
+
+    async def _switch_from_a_chat_of_slow(self, refusing: bool = False) -> None:
+        """Show a chat of ``slow`` in tab-one, then send a page's click on another of its chats.
+
+        The page opens the chat in a new tab (tab-two), resumes it
+        there and closes the tab it left.  With *refusing*, the proxy
+        drops the connections made from the click on.
+        """
+        await self._submit("tab-a", "Say hello", "box")
+        await self._run_until_idle("tab-a")
+        await self._send({"type": "closeTab", "tabId": "tab-a"})
+        await self._until("tabs_state")
+        hello = await self._box_row("Say hello")
+        await self._frames_after_click("tab-one", hello)
+        self.switched = (self.server._server_api.remote_views._streams["slow"], self.dials)
+        self.refusing = refusing
+        await self._send({"type": "openTab", "tabId": "tab-two", "title": hello["title"]})
+        await self._click_history_row("tab-two", hello, "slow")
+        await self._send({"type": "closeTab", "tabId": "tab-one"})
+
+    async def test_a_switch_to_another_chat_of_the_machine_keeps_its_view_stream(self) -> None:
+        """The new tab's stream is the one connection made: the view stream stayed open."""
+        await self._switch_from_a_chat_of_slow()
+        await self._until("task_events", "tab-two")
+        stream, dials = self.switched
+        views = self.server._server_api.remote_views
+        self.assertIs(views._streams.get("slow"), stream, "the view stream was connected again")
+        self.assertEqual(self.dials - dials, 1)
+
+    async def test_a_view_stream_kept_for_a_bind_that_is_refused_is_closed(self) -> None:
+        """The tab left is closed while the bind connects; the refusal leaves nothing bound."""
+        await self._switch_from_a_chat_of_slow(refusing=True)
+        error = await self._until("error", "tab-two")
+        self.assertIn("slow (https://127.0.0.1:", error["text"])
+        views = self.server._server_api.remote_views
+        for _ in range(100):
+            if "slow" not in views._streams:
+                break
+            await asyncio.sleep(0.1)
+        self.assertNotIn("slow", views._streams)
 
     async def test_the_replay_follows_the_binding_within_one_round_trip(self) -> None:
         """The first replay frame comes one forwarded round trip after ``tabMachine``."""

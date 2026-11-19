@@ -1027,22 +1027,6 @@ def _load_catalog_file(catalog_path: Path) -> dict[str, ModelInfo]:
 
 
 _OPENAI_PREFIXES = ("gpt", "text-embedding", "o1", "o3", "o4", "codex", "computer-use")
-_TOGETHER_PREFIXES = (
-    "meta-llama/",
-    "Qwen/",
-    "mistralai/",
-    "deepseek-ai/",
-    "deepcogito/",
-    "google/gemma",
-    "moonshotai/",
-    "nvidia/",
-    "zai-org/",
-    "openai/gpt-oss",
-    "arcee-ai/",
-    "essentialai/",
-    "BAAI/",
-    "intfloat/",
-)
 
 
 @dataclass(frozen=True)
@@ -1125,7 +1109,7 @@ OPENAI_COMPATIBLE_PROVIDERS: tuple[OpenAICompatibleProvider, ...] = (
         host="api.openai.com",
         base_url="https://api.openai.com/v1",
         prefixes=_OPENAI_PREFIXES,
-        excludes=("openai/gpt-oss", "codex/"),
+        excludes=("codex/",),
         api_key_name="OPENAI_API_KEY",
         tools_accept_reasoning_effort=False,
         delegate_tools_to_responses=True,
@@ -1134,39 +1118,6 @@ OPENAI_COMPATIBLE_PROVIDERS: tuple[OpenAICompatibleProvider, ...] = (
             ("function_call", "fc"),
             ("message", "msg"),
         ),
-    ),
-    OpenAICompatibleProvider(
-        name="together",
-        label="Together",
-        host="api.together.xyz",
-        base_url="https://api.together.xyz/v1",
-        prefixes=_TOGETHER_PREFIXES,
-        excludes=(),
-        api_key_name="TOGETHER_API_KEY",
-        tools_accept_reasoning_effort=True,
-        delegate_tools_to_responses=False,
-    ),
-    OpenAICompatibleProvider(
-        name="zai",
-        label="Z.AI",
-        host="api.z.ai",
-        base_url="https://api.z.ai/api/paas/v4",
-        prefixes=("glm-",),
-        excludes=(),
-        api_key_name="ZAI_API_KEY",
-        tools_accept_reasoning_effort=None,
-        delegate_tools_to_responses=False,
-    ),
-    OpenAICompatibleProvider(
-        name="moonshot",
-        label="Moonshot",
-        host="api.moonshot.ai",
-        base_url="https://api.moonshot.ai/v1",
-        prefixes=("kimi-", "moonshot-"),
-        excludes=(),
-        api_key_name="MOONSHOT_API_KEY",
-        tools_accept_reasoning_effort=None,
-        delegate_tools_to_responses=False,
     ),
 )
 
@@ -1639,11 +1590,22 @@ def _is_registered_model_id(name: str) -> bool:
     return entry is not None and not entry.get("alias_of")
 
 
+# GPT-6 point releases (``gpt-6.1-sol``, ``gpt-6.2-astra``): every one
+# OpenAI has published bills cached input at 5% of the input rate, where
+# ``gpt-6-*`` bills 10% (https://developers.openai.com/api/docs/pricing,
+# 2026-11-18: gpt-6.2-astra $8 / $0.40, gpt-6.2-sol $2 / $0.10,
+# gpt-6.1-sol $2 / $0.10, gpt-6.1-terra $1 / $0.05), and has the 272K
+# long-context tier of the GPT-6 line.  The catalog entry of a direct
+# OpenAI model holds only its input and output price, so a point release
+# the page does not list yet is priced by the same rule from the day the
+# updater adds it (gpt-6.2 was matched by neither rule on its release day).
+_GPT6_POINT_RELEASE = re.compile(r"gpt-6\.\d+-")
+
 # Rolling "latest" aliases (OpenRouter ``~openai`` passthroughs) that track
 # GPT-5.6/GPT-6 snapshots and therefore share their cache and long-context
 # pricing rules (their catalog rates match the versioned counterparts, as
-# of 2026-10: astra -> gpt-6-astra, luna -> gpt-6-luna, sol -> gpt-6.1-sol,
-# terra -> gpt-6.1-terra).  ``gpt-latest`` is the
+# of 2026-11-18: astra -> gpt-6.2-astra, luna -> gpt-6-luna, sol ->
+# gpt-6.2-sol, terra -> gpt-6.1-terra).  ``gpt-latest`` is the
 # pre-September-2026 spelling of ``gpt-sol-latest``, kept for user-local
 # catalog copies that predate the rename.  ``gpt-mini-latest`` is NOT here:
 # it tracks gpt-5.4-mini, which has free cache writes and no long-context
@@ -1691,11 +1653,14 @@ def _openai_cache_read_multiplier(bare: str) -> float:
     :func:`_openai_charges_cache_writes`). The multipliers below match
     OpenAI's published pricing: GPT-5.x and GPT-6.x are 0.10x when a
     cached-input price is published (gpt-6-astra: $1.00 cached vs $10.00
-    input) except the GPT-6.1 family at 0.05x (gpt-6.1-sol: $0.10 cached
+    input) except the GPT-6 point releases at 0.05x
+    (:data:`_GPT6_POINT_RELEASE`; gpt-6.1-sol: $0.10 cached
     vs $2.00 input, gpt-6.1-terra: $0.05 cached vs $1.00 input;
     https://developers.openai.com/api/docs/models/gpt-6.1-sol and
     https://developers.openai.com/api/docs/models/gpt-6.1-terra, both
-    "priced at 5% of the uncached input token rate"),
+    "priced at 5% of the uncached input token rate"; gpt-6.2-astra: $0.40
+    cached vs $8.00 input, gpt-6.2-sol: $0.10 vs $2.00, pricing page of
+    2026-11-18),
     GPT-4.1 and o3/o4-mini are 0.25x, while GPT-4o, GPT-4,
     GPT-3.5, o1 and o3-mini are 0.50x. GPT-5 ``pro`` variants currently show
     no cached-input discount, so cached tokens are charged at the full input
@@ -1712,15 +1677,16 @@ def _openai_cache_read_multiplier(bare: str) -> float:
         return 1.0
     # The rolling "latest" aliases track GPT-5.x/6.x snapshots, so they
     # share the tracked snapshot's discount (see
-    # :data:`_OPENAI_ROLLING_LATEST`): gpt-sol-latest / gpt-terra-latest
-    # track gpt-6.1-sol / gpt-6.1-terra (0.05x), the others 0.10x.  Their
+    # :data:`_OPENAI_ROLLING_LATEST`): gpt-astra-latest / gpt-sol-latest /
+    # gpt-terra-latest track gpt-6.2-astra / gpt-6.2-sol / gpt-6.1-terra
+    # (0.05x), the others 0.10x.  Their
     # ``openrouter/~openai/*`` catalog entries carry OpenRouter's published
     # rate, which wins over this fallback (:func:`_apply_cache_pricing`).
-    if bare.startswith(("gpt-sol-latest", "gpt-terra-latest")):
+    if bare.startswith(("gpt-astra-latest", "gpt-sol-latest", "gpt-terra-latest")):
         return 0.05
     if bare.startswith(_OPENAI_ROLLING_LATEST + ("gpt-mini-latest",)):
         return 0.10
-    if bare.startswith("gpt-6.1-"):
+    if _GPT6_POINT_RELEASE.match(bare):
         return 0.05
     if bare.startswith(("gpt-5", "gpt-6")) or "chat-latest" in bare:
         return 0.10
@@ -1745,10 +1711,6 @@ def _openai_bare_name(name: str) -> str | None:
     (``openrouter/openai/*`` and ``openrouter/~openai/*``). Embeddings, the
     open-weight ``gpt-oss`` models, and subscription ``codex/`` models are
     excluded (they have no per-token cache discount in this table).
-
-    ``openai/`` needs no exclusion here: no element of
-    :data:`_OPENAI_PREFIXES` is a prefix of it, so ``openai/gpt-oss-*``
-    never reaches the check in the first place (it is a Together name).
 
     Args:
         name: The MODEL_INFO key.
@@ -2060,13 +2022,6 @@ def _provider_cache_defaults(name: str, inp: float) -> tuple[float, float, float
         # cache price, so the rule has to know it.
         read_mult = 0.05 if name.rsplit("/", 1)[-1].startswith("gemini-4-") else 0.1
         return _derived_price(inp, read_mult), 0.0, None
-    if name.startswith(("kimi-", "moonshot-")):
-        # Moonshot bills a 5-minute cache write at the uncached input rate
-        # (kimi-k3: $3.00 input, $3.00 write, $0.30 read); it is reported in
-        # ``prompt_tokens_details.cache_write_tokens`` and excluded from the
-        # uncached remainder, so a 0.0 write price would give those tokens
-        # away: https://platform.kimi.ai/docs/guide/use-context-caching-feature-of-kimi-api
-        return _derived_price(inp, 0.25), inp, None
     return None
 
 
@@ -2221,9 +2176,10 @@ def _strip_provider_prefix(model_name: str) -> str:
     itself (``gpt-*`` → OpenAI, ``claude-*`` → Anthropic, etc.), so the
     provider prefix is redundant and must be stripped.
 
-    Prefixes that KISS uses for its own routing (``openrouter/``,
-    ``openai/gpt-oss``, ``meta-llama/``, etc.) are NOT stripped — they
-    are already handled by the ``model()`` dispatch chain.
+    A prefix that KISS uses for its own routing (``openrouter/``) is NOT
+    stripped: the ``model()`` dispatch chain handles it.  Nor is the
+    ``openai/`` of ``openai/gpt-oss-*``: OpenAI's API does not serve its
+    open-weight models, so the bare name must not route there.
 
     Args:
         model_name: Model name, possibly with a ``provider/`` prefix.
@@ -2645,8 +2601,8 @@ def get_model_provider(model_name: str) -> str:
     on — so a newly registered vendor is labelled correctly here, and in
     every caller, without any further edit.  The order mirrors
     :func:`model`: registered OpenAI-compatible vendors first (their
-    ``excludes`` are what keep ``codex/`` and ``openai/gpt-oss`` out),
-    then the native SDK/CLI providers.
+    ``excludes`` are what keep ``codex/`` out), then the native SDK/CLI
+    providers.
 
     Args:
         model_name: A ``MODEL_INFO`` key.
@@ -2708,9 +2664,6 @@ _DEFAULT_PROVIDER_PRIORITY = (
     "OpenAI",
     "Gemini",
     "OpenRouter",
-    "Together",
-    "Z.AI",
-    "Moonshot",
     "Bedrock",
     "Claude Code CLI",
     "Codex CLI",
@@ -2746,8 +2699,8 @@ def _model_for_first_configured_provider(choices: dict[str, str]) -> str:
 def get_fast_model() -> str:
     """Return a cheap/fast model based on which API keys are available.
 
-    Priority: Anthropic → OpenAI → Gemini → OpenRouter → Together → Z.AI →
-    Moonshot → Bedrock (the Bedrock id of the Anthropic fast model, see
+    Priority: Anthropic → OpenAI → Gemini → OpenRouter → Bedrock (the
+    Bedrock id of the Anthropic fast model, see
     :func:`registered_bedrock_model`) → Claude Code CLI → Codex CLI.
 
     Returns:
@@ -2759,9 +2712,6 @@ def get_fast_model() -> str:
             "OpenAI": "gpt-6-luna",
             "Gemini": "gemini-3.5-flash-lite",
             "OpenRouter": "openrouter/anthropic/claude-sonnet-5.5",
-            "Together": "deepseek-ai/DeepSeek-V4.1-Flash",
-            "Z.AI": "glm-4.5-air",
-            "Moonshot": "kimi-k2.5",
             "Bedrock": registered_bedrock_model(cheapest=True) or "",
             "Claude Code CLI": "cc/haiku",
             "Codex CLI": "codex/default",
@@ -2772,10 +2722,10 @@ def get_fast_model() -> str:
 def get_default_model() -> str:
     """Return the best default model based on which API keys are configured.
 
-    Priority order: Anthropic > OpenAI > Gemini > OpenRouter > Together AI >
-    Z.AI > Moonshot > Bedrock (the Bedrock id of the Anthropic default
-    model, see :func:`registered_bedrock_model`) > Claude Code CLI >
-    Codex CLI.  Falls back to ``"No model"`` if no keys are set.
+    Priority order: Anthropic > OpenAI > Gemini > OpenRouter > Bedrock (the
+    Bedrock id of the Anthropic default model, see
+    :func:`registered_bedrock_model`) > Claude Code CLI > Codex CLI.
+    Falls back to ``"No model"`` if no keys are set.
     """
     return _model_for_first_configured_provider(
         {
@@ -2783,9 +2733,6 @@ def get_default_model() -> str:
             "OpenAI": "gpt-6.1-sol-medium",
             "Gemini": "gemini-3.8-flash",
             "OpenRouter": "openrouter/anthropic/claude-opus-5.5",
-            "Together": "moonshotai/Kimi-K3",
-            "Z.AI": "glm-4.7",
-            "Moonshot": "kimi-k3",
             "Bedrock": registered_bedrock_model(cheapest=False) or "",
             "Claude Code CLI": "cc/opus",
             "Codex CLI": "codex/default",
@@ -2808,6 +2755,9 @@ def _long_context_uplift(model_name: str) -> tuple[int, float, float] | None:
     gpt-6.1-terra $1/$0.05/$1.25/$5 -> $2/$0.10/$2.50/$7.50 (model page:
     "Prompts with more than 272K input tokens are priced at 2x input and
     cache rates and 1.5x output for the full request"),
+    gpt-6.2-astra $8/$0.40/$10/$40 -> $16/$0.80/$20/$60, gpt-6.2-sol
+    $2/$0.10/$2.50/$10 -> $4/$0.20/$5/$15 (page of 2026-11-18; every
+    GPT-6 point release, :data:`_GPT6_POINT_RELEASE`),
     gpt-6-luna $0.10/$0.01/$0.125/$0.50 ->
     $0.20/$0.02/$0.25/$0.75, gpt-5.6-sol $4/$0.40/$5/$20 ->
     $8/$0.80/$10/$30, and likewise terra/luna/5.5/5.4 at exactly
@@ -2862,10 +2812,14 @@ def _long_context_uplift(model_name: str) -> tuple[int, float, float] | None:
         return 100_000, 5.0, 5.0
     if bare.startswith(_ANTHROPIC_SONNET_LONG_CONTEXT_FAMILIES):
         return 200_000, 2.0, 1.5
-    if bare.startswith(
-        ("gpt-6-", "gpt-6.1-", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5")
-        + _OPENAI_ROLLING_LATEST
-    ) or (bare.startswith("gpt-5.4") and "-mini" not in bare and "-nano" not in bare):
+    if (
+        bare.startswith(
+            ("gpt-6-", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5")
+            + _OPENAI_ROLLING_LATEST
+        )
+        or _GPT6_POINT_RELEASE.match(bare)
+        or (bare.startswith("gpt-5.4") and "-mini" not in bare and "-nano" not in bare)
+    ):
         return 272_000, 2.0, 1.5
     if bare.startswith(("gemini-3.1-pro", "gemini-2.5-pro")):
         return 200_000, 2.0, 1.5
@@ -3102,11 +3056,12 @@ def openrouter_twin(model_name: str) -> str | None:
     """
     # Harbor-style ``anthropic/`` / ``openai/`` / ``google/`` prefixes are
     # dropped first so the alias lookup below sees the exact catalog key;
-    # anything still routed (``openrouter/...``, ``meta-llama/...``) has no
-    # twin.  The alias lookup needs the exact key, which is why the
-    # alias is resolved only after the redundant prefix is gone.  A
-    # ``bedrock/`` name has the twin of its ``claude-*`` catalog key, or
-    # is priced by an OpenRouter entry already (which is then its twin).
+    # a name that still has a ``/`` (``openrouter/...``, a custom
+    # ``org/model``) has no twin.  The alias lookup needs the exact key,
+    # which is why the alias is resolved only after the redundant prefix
+    # is gone.  A ``bedrock/`` name has the twin of its ``claude-*``
+    # catalog key, or is priced by an OpenRouter entry already (which is
+    # then its twin).
     catalog = bedrock_catalog_name(model_name)
     if catalog is not None and catalog.startswith("openrouter/"):
         return catalog

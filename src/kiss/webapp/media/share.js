@@ -579,7 +579,7 @@
 
   // Light / dark mode for the shared page.  The page ships dark (the
   // inlined :root palette); the floating #share-theme-btn switches the
-  // whole document to the Light Modern palette by toggling the
+  // whole document to the light palette by toggling the
   // `light-theme` class on <html> (which the inlined
   // `html.light-theme` variable overrides key off) and flips the
   // active highlight.js theme through the two inlined style elements'

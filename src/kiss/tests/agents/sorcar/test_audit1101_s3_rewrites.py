@@ -22,8 +22,10 @@ mocked:
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -32,6 +34,7 @@ import pytest
 
 from kiss.agents.sorcar.useful_tools import UsefulTools, _without_sleep
 from kiss.core.config import DEFAULT_CONFIG
+from kiss.core.kiss_tmp import kiss_tmp_dir
 from kiss.core.tool_verdict import ToolRedirect
 from kiss.tests.conftest import host_sed_is_gnu, posix_only
 
@@ -57,13 +60,13 @@ def test_heredoc_append_into_a_fifo_is_refused_without_reading_it(
     tools: UsefulTools, tmp_path: Path,
 ) -> None:
     """Reading a FIFO blocks until a writer opens it: the append must not read it."""
-    (tmp_path / "tmp").mkdir()
-    fifo = tmp_path / "tmp" / "fifo"  # a scratch path: no Read is required first
+    scratch = Path(tempfile.mkdtemp(dir=kiss_tmp_dir()))  # scratch: no Read is required first
+    fifo = scratch / "fifo"
     os.mkfifo(fifo)
     outcome: list[str] = []
     thread = threading.Thread(
         target=lambda: outcome.append(
-            tools.Bash("cat <<'EOF' >> tmp/fifo\npayload\nEOF", "append", timeout_seconds=1)
+            tools.Bash(f"cat <<'EOF' >> {fifo}\npayload\nEOF", "append", timeout_seconds=1)
         ),
         daemon=True,
     )
@@ -81,16 +84,27 @@ def test_heredoc_append_into_a_fifo_is_refused_without_reading_it(
         "refusing to append to it."
     ]
     # the same for tee -a, and a directory target
-    out = tools.Bash("tee -a tmp/fifo <<'EOF'\npayload\nEOF", "append", timeout_seconds=1)
+    out = tools.Bash(f"tee -a {fifo} <<'EOF'\npayload\nEOF", "append", timeout_seconds=1)
     assert out.startswith(f"Error: {fifo} exists and is not a regular file")
-    (tmp_path / "tmp" / "dir").mkdir()
-    out = tools.Bash("cat >> tmp/dir <<'EOF'\npayload\nEOF", "append", timeout_seconds=1)
-    assert out.startswith(f"Error: {tmp_path / 'tmp' / 'dir'} exists and is not a regular file")
+    (scratch / "dir").mkdir()
+    out = tools.Bash(f"cat >> {scratch}/dir <<'EOF'\npayload\nEOF", "append", timeout_seconds=1)
+    assert out.startswith(f"Error: {scratch / 'dir'} exists and is not a regular file")
     # a regular scratch file still takes the append, read or not
-    (tmp_path / "tmp" / "notes.md").write_text("old\n")
-    out = tools.Bash("cat >> tmp/notes.md <<'EOF'\nmore\nEOF", "append", timeout_seconds=1)
+    (scratch / "notes.md").write_text("old\n")
+    out = tools.Bash(f"cat >> {scratch}/notes.md <<'EOF'\nmore\nEOF", "append", timeout_seconds=1)
     assert out.startswith("Appended through Write(")
-    assert (tmp_path / "tmp" / "notes.md").read_text() == "old\nmore\n"
+    assert (scratch / "notes.md").read_text() == "old\nmore\n"
+    # tmp/ of the work dir is a folder like any other: a file there must be shown first,
+    # and the refusal does not read the FIFO either
+    (tmp_path / "tmp").mkdir()
+    os.mkfifo(tmp_path / "tmp" / "fifo")
+    (tmp_path / "tmp" / "notes.md").write_text("old\n")
+    for name in ("fifo", "notes.md"):
+        out = tools.Bash(f"cat >> tmp/{name} <<'EOF'\nmore\nEOF", "append", timeout_seconds=1)
+        assert out.startswith("REFUSED: the command did not run: it writes the existing file ")
+        shown = json.dumps(str(tmp_path / "tmp" / name))
+        assert f"call Read(file_path={shown}) and then the same command" in out
+    assert (tmp_path / "tmp" / "notes.md").read_text() == "old\n"
 
 
 # --- F2: an append redirected to a Write ------------------------------------

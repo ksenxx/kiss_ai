@@ -12,12 +12,16 @@ picture's ``<img>`` and asks the daemon for the bytes
 screenshots is thus a fraction of its size on a slow network, and a
 picture nobody scrolls to is never sent.
 
+A finished task's panels come when its "Trajectory" panel is opened
+(``kiss/server/lazy_replay.py``), its pictures still as handles.
+
 Real daemon (``RemoteAccessServer``) with a real history database,
 real Chromium (Playwright):
 
-* a picture at the top of a long transcript (the page lands at the
-  bottom) is not asked for until the page scrolls up to it; then the
-  real reply makes the browser decode it (``naturalWidth > 0``);
+* a picture at the bottom of a long transcript (the opened Trajectory
+  panel shows its top) is not asked for until the page scrolls down to
+  it; then the real reply makes the browser decode it
+  (``naturalWidth > 0``);
 * a handle the daemon cannot serve marks the picture missing.
 """
 
@@ -30,6 +34,7 @@ import pytest
 from playwright.sync_api import expect, sync_playwright
 
 from kiss.agents.sorcar import persistence
+from kiss.tests.conftest import click_row_menu_item
 from kiss.tests.server.test_content_tab_file_links import _ServerHarness
 from kiss.tests.webapp.test_content_tab_file_links import _open_page
 
@@ -42,23 +47,24 @@ _FILLER_RESULTS = 80
 
 
 def _seed_task_with_picture(harness: _ServerHarness) -> str:
-    """Persist a finished task whose first tool result carries a picture."""
+    """Persist a finished task whose last tool result carries a picture."""
     task_id, _ = persistence._add_task(_PROMPT, "chat-lazy", {"work_dir": str(harness.work_dir)})
-    stream: list[dict[str, Any]] = [
-        {"type": "tool_call", "tool": "screenshot", "input": {"file_path": "shot.png"}},
-        {
-            "type": "tool_result", "content": "saved shot.png", "is_error": False,
-            "tool_name": "screenshot",
-            "images": [{"b64": _PNG_B64, "mime": "image/png", "path": "shot.png"}],
-        },
-    ]
+    stream: list[dict[str, Any]] = []
     for i in range(_FILLER_RESULTS):
         stream.append({"type": "tool_call", "tool": "Bash", "input": {"command": f"ls {i}"}})
         stream.append({
             "type": "tool_result", "content": "\n".join(f"file-{i}-{j}" for j in range(6)),
             "is_error": False, "tool_name": "Bash",
         })
-    stream.append({"type": "result", "summary": "done", "success": True})
+    stream += [
+        {"type": "tool_call", "tool": "screenshot", "input": {"file_path": "shot.png"}},
+        {
+            "type": "tool_result", "content": "saved shot.png", "is_error": False,
+            "tool_name": "screenshot",
+            "images": [{"b64": _PNG_B64, "mime": "image/png", "path": "shot.png"}],
+        },
+        {"type": "result", "summary": "done", "success": True},
+    ]
     for ev in stream:
         persistence._queue_chat_event(dict(ev), task_id=task_id)
     persistence._flush_chat_events()
@@ -100,18 +106,37 @@ class TestReplayLazyImages:
             group = page.locator('#history-list .history-chat-group[data-chat-id="chat-lazy"]')
             expect(group).to_have_count(1, timeout=30000)
             # The chat's rows sit folded under its header: unfold, then click the task.
-            group.locator(".history-chat-collapse").click()
+            click_row_menu_item(group.locator(".history-chat-header"), ".history-chat-collapse")
             row = group.locator(".sidebar-item").filter(has_text=_PROMPT)
             expect(row).to_have_count(1, timeout=30000)
             row.first.click()
+            # The task's panels sit in its folded Trajectory panel, which
+            # comes empty: the picture's panel is on the page once the
+            # reader opens it.
+            expect(page.locator("#output > .trajectory.lazy-unloaded")).to_have_count(
+                1, timeout=30000
+            )
+            assert page.locator("#output img").count() == 0
+            header = page.locator("#output > .trajectory > .collapse-header")
+            header.click()
             img = page.locator("#output img.tr-img-lazy")
             expect(img).to_have_count(1, timeout=30000)
             assert page.evaluate(
                 "() => { const i = document.querySelector('#output img.tr-img-lazy');"
                 " return [i.dataset.replayTask, i.dataset.replayIndex]; }"
             ) == [task_id, "0"]
-            # A replayed panel is folded, so the picture is not on
-            # screen: it has no bytes and nothing was asked for.
+            # The opened panel shows its top, so the picture, below a
+            # long transcript, is not on screen: it has no bytes and
+            # nothing was asked for.
+            page.wait_for_timeout(500)
+            assert page.evaluate(
+                "() => { const i = document.querySelector('#output img.tr-img-lazy');"
+                " return [i.getAttribute('src'), i.getBoundingClientRect().top >="
+                " document.getElementById('output').getBoundingClientRect().bottom]; }"
+            ) == [None, True]
+            assert _replay_image_requests(sent) == []
+            # Nor is it on screen once the panel is folded again.
+            header.click()
             page.wait_for_timeout(500)
             assert page.evaluate(
                 "() => { const i = document.querySelector('#output img.tr-img-lazy');"
@@ -155,11 +180,9 @@ class TestReplayLazyImages:
             # the page asks for it, and the replay REPLACES the tab's
             # transcript when it lands, late on a loaded machine.  A
             # picture added before that vanishes with it: wait for the
-            # restored transcript (its own lazy picture) first.
+            # restored transcript (its folded Trajectory panel) first.
             if harness.server._agent_server.tab_registry.snapshot():
-                page.wait_for_selector(
-                    "#output img[data-replay-task]", state="attached", timeout=30000
-                )
+                page.wait_for_selector("#output .trajectory", state="attached", timeout=30000)
             page.evaluate(
                 """() => {
                      window.dispatchEvent(new MessageEvent('message', {data: {
@@ -170,11 +193,10 @@ class TestReplayLazyImages:
                      }}));
                    }"""
             )
-            # The daemon restores the tabs of earlier pages (a replayed
-            # task's own lazy picture among them), so pick this picture
-            # by its handle; the panel may have folded and the picture
-            # may sit below a long transcript: unfold and scroll to it,
-            # as a reader would, so it is on screen.
+            # The daemon restores the tabs of earlier pages, so pick
+            # this picture by its handle; the panel may have folded and
+            # the picture may sit below a long transcript: unfold and
+            # scroll to it, as a reader would, so it is on screen.
             sel = '#output img[data-replay-task="no-such-task"]'
             page.wait_for_selector(sel, state="attached", timeout=30000)
             page.evaluate(

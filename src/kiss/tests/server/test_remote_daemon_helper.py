@@ -59,8 +59,11 @@ def test_child_that_dies_before_seeding_is_reported(tmp_path: Path) -> None:
         {"chat_id": "c", "task": "a", "task_id": "dup"},
         {"chat_id": "c", "task": "b", "task_id": "dup"},
     ]
-    with pytest.raises(RuntimeError, match="before seeding"):
+    # The exit code and the reason are in the error: the child's stderr was not kept, and
+    # a child that died on a loaded machine ("exited with None") left nothing to tell why.
+    with pytest.raises(RuntimeError, match="exited with 1 before seeding") as error:
         start_remote_daemon(home, seed=seed, timeout=60)
+    assert "IntegrityError" in str(error.value)
 
 
 def test_a_child_that_does_not_start_is_reaped(tmp_path: Path) -> None:
@@ -73,8 +76,9 @@ def test_a_child_that_does_not_start_is_reaped(tmp_path: Path) -> None:
     with socket.socket() as taken:
         taken.bind(("127.0.0.1", 0))
         taken.listen()
-        with pytest.raises(RuntimeError, match="remote daemon exited with"):
+        with pytest.raises(RuntimeError, match="remote daemon exited with") as error:
             start_remote_daemon(home, port=taken.getsockname()[1], timeout=60)
+    assert "cannot bind to 127.0.0.1" in str(error.value), "the error ends with the child's stderr"
     children = [
         child for child in gc.get_objects()
         if isinstance(child, subprocess.Popen) and isinstance(child.args, list)

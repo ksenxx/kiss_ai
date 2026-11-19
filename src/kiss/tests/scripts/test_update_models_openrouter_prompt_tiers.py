@@ -163,7 +163,7 @@ def test_fetch_compute_apply_writes_prompt_tiers(
         fetched = mod.fetch_openrouter()
     assert fetched[base]["prompt_tiers"] == GROK_TIERS
 
-    updates, new_models = mod.compute_changes(current, fetched, {}, {}, {}, {})
+    updates, new_models = mod.compute_changes(current, fetched, {}, {}, {})
     assert {u["name"]: u["changes"] for u in updates} == {base: {"prompt_tiers": GROK_TIERS}}
     assert {nm["name"]: nm for nm in new_models}[GROK]["prompt_tiers"] == GROK_TIERS
     mod.apply_updates_to_file(updates, new_models, [], current, dry_run=False)
@@ -189,13 +189,13 @@ def test_fetch_compute_apply_writes_prompt_tiers(
     # Idempotent: a second pass over the written catalog changes nothing.
     current_again = mod.get_current_model_info()
     assert current_again[base]["prompt_tiers"] == GROK_TIERS
-    updates_again, _ = mod.compute_changes(current_again, fetched, {}, {}, {}, {})
+    updates_again, _ = mod.compute_changes(current_again, fetched, {}, {}, {})
     assert [u for u in updates_again if u["name"] in (base, GROK)] == []
 
     # OpenRouter withdraws the tier: base and aliases lose it.
     withdrawn = {name: dict(entry) for name, entry in fetched.items()}
     del withdrawn[base]["prompt_tiers"]
-    updates_w, _ = mod.compute_changes(current_again, withdrawn, {}, {}, {}, {})
+    updates_w, _ = mod.compute_changes(current_again, withdrawn, {}, {}, {})
     assert [u["changes"] for u in updates_w if u["name"] == base] == [{"prompt_tiers": None}]
     mod.apply_updates_to_file(updates_w, [], [], current_again, dry_run=False)
     written = json.loads(catalog.read_text())

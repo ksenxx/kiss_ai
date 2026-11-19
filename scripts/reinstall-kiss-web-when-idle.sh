@@ -27,20 +27,69 @@
 #   KISS_REINSTALL_POLL_SECONDS      seconds between idle probes (default 5)
 #   KISS_REINSTALL_DEADLINE_SECONDS  give up after this long without an idle window (default 14400)
 #   KISS_REINSTALL_LABEL             job label / unit name (default kiss-reinstall-<epoch>-<pid>)
+#   KISS_REINSTALL_LOGDIR            the job's log directory, handed on to the job (default
+#                                    reinstall-kiss-web in the agents' temp directory)
+#   KISS_REINSTALL_LOGROOT           set for the job by the launcher: the agents' temp directory
+#                                    that holds the default log directory
 #   KISS_HOME                        the daemon's state directory, handed on to the job
 #
-# The worker logs to <repo>/tmp/reinstall-kiss-web/<label>.log and keeps each
-# install.sh transcript next to it.  It exits 0 once install.sh reports
+# The worker logs to <OS temp dir>/kiss-tmp/reinstall-kiss-web/<label>.log (the
+# agents' temp directory, never the checkout) and keeps each install.sh
+# transcript next to it.  It exits 0 once install.sh reports
 # "kiss-web is up" or "already serves this runtime", retries after "restart
 # deferred", and gives up (non-zero) on any other outcome or at the deadline.
 set -u
+
+# Make $1 a directory of the user's own, mode 700, when it is missing, and say
+# whether it is one: not another user's, not a link, and not one that others
+# can write to (what is in it may be theirs).  One they could only enter is
+# closed to them.
+own_dir() {
+    mkdir -m 700 "$1" 2>/dev/null
+    [ -d "$1" ] && [ ! -L "$1" ] && [ -O "$1" ] || return 1
+    case "$(ls -ld "$1")" in
+        ?????w*|????????w*) return 1 ;;
+    esac
+    chmod 700 "$1"
+}
+
+# The agents' temp directory, <OS temp dir>/kiss-tmp, as kiss.core.kiss_tmp
+# makes it: the user's own (own_dir), and kiss-tmp-<uid> where that name is
+# taken by something else (in a /tmp several users share, what is written
+# there could be read or redirected).  Fails when both are.  A command of a
+# sub-agent has the sub-agent's private folder in that directory as its
+# TMPDIR: the directory is then the one the folder is in, which stays when
+# the sub-agent ends.
+kiss_tmp_dir() {
+    local base="${TMPDIR:-/tmp}" dir parent
+    base="${base%/}"
+    parent="${base%/*}"
+    case "${base##*/}:${parent##*/}" in
+        kiss-sub-*:kiss-tmp*) base="${parent%/*}" ;;
+    esac
+    for dir in "$base/kiss-tmp" "$base/kiss-tmp-$(id -u)"; do
+        if own_dir "$dir"; then
+            printf '%s\n' "$dir"
+            return 0
+        fi
+    done
+    echo "reinstall-kiss-web-when-idle: $dir is not a directory of your own; point TMPDIR at one" >&2
+    return 1
+}
 
 SCRIPT="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 POLL_SECONDS="${KISS_REINSTALL_POLL_SECONDS:-5}"
 DEADLINE_SECONDS="${KISS_REINSTALL_DEADLINE_SECONDS:-14400}"
 LABEL="${KISS_REINSTALL_LABEL:-kiss-reinstall-$(date +%s)-$$}"
-LOGDIR="$REPO/tmp/reinstall-kiss-web"
+LOGDIR="${KISS_REINSTALL_LOGDIR:-}"
+# The agents' temp directory that holds the default log directory, checked
+# again whenever the job opens its log; empty for a directory the caller named.
+LOGROOT="${KISS_REINSTALL_LOGROOT:-}"
+if [ -z "$LOGDIR" ]; then
+    LOGROOT="$(kiss_tmp_dir)" || exit 1
+    LOGDIR="$LOGROOT/reinstall-kiss-web"
+fi
 LOG="$LOGDIR/$LABEL.log"
 
 ts() { date -u +%FT%TZ; }
@@ -50,6 +99,8 @@ JOB_ENV=(
     "HOME=$HOME"
     "PATH=$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
     "KISS_REINSTALL_LABEL=$LABEL"
+    "KISS_REINSTALL_LOGDIR=$LOGDIR"
+    "KISS_REINSTALL_LOGROOT=$LOGROOT"
     "KISS_REINSTALL_POLL_SECONDS=$POLL_SECONDS"
     "KISS_REINSTALL_DEADLINE_SECONDS=$DEADLINE_SECONDS"
 )
@@ -154,12 +205,24 @@ kiss_web_is_idle() {
     [ ! -f "$custom" ] || daemon_is_idle "$custom"
 }
 
+# Send the worker's output to its log, making the log directory when it is
+# missing: a temp directory can be emptied while the job waits for hours (by
+# a cleaner of the system, or by hand).  The agents' temp directory is made
+# again as the user's own; a link or another user's directory that took its
+# name is not written through.
+open_log() {
+    if [ -n "$LOGROOT" ] && ! own_dir "$LOGROOT"; then
+        echo "reinstall-kiss-web-when-idle: $LOGROOT is not a directory of your own any more" >&2
+        return 1
+    fi
+    mkdir -p "$LOGDIR" && exec >>"$LOG" 2>&1
+}
+
 worker() {
     local deadline=$(( $(date +%s) + DEADLINE_SECONDS )) idle_streak=0 attempt=0 runlog rc
     export KISS_NONINTERACTIVE=1
-    mkdir -p "$LOGDIR"
-    exec >>"$LOG" 2>&1
     trap unload_launchd_label EXIT
+    open_log || return 1
     echo "=== $(ts) worker started (pid $$, pgid $(ps -o pgid= -p $$ | tr -d ' '), label $LABEL)"
     while [ "$(date +%s)" -lt "$deadline" ]; do
         if kiss_web_is_idle; then
@@ -172,6 +235,7 @@ worker() {
             continue
         fi
         attempt=$((attempt + 1))
+        open_log || return 1
         runlog="$LOGDIR/$LABEL.install-$attempt.log"
         echo "=== $(ts) kiss-web idle for 3 polls; running install.sh (attempt $attempt)"
         ( cd "$REPO" && /bin/bash ./install.sh --non-interactive </dev/null ) >"$runlog" 2>&1

@@ -42,6 +42,9 @@ from urllib.parse import urlsplit
 
 from kiss.agents.sorcar import local_endpoint
 
+_STDERR_FILE = "daemon-stderr.log"
+"""The file of a daemon's home its stderr goes to (:func:`start_remote_daemon`)."""
+
 
 class RemoteDaemon:
     """Handle of a daemon started by :func:`start_remote_daemon`."""
@@ -135,21 +138,29 @@ def start_remote_daemon(
     ]
     if certfile is not None and keyfile is not None:
         cmd += ["--certfile", str(certfile), "--keyfile", str(keyfile)]
-    process = subprocess.Popen(
-        cmd, env=child_env, cwd=str(home), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-        text=True,
-    )
+    # The child's stderr is kept in its home: a child that dies names the reason there.
+    with (home / _STDERR_FILE).open("w", encoding="utf-8") as stderr:
+        process = subprocess.Popen(
+            cmd, env=child_env, cwd=str(home), stdout=subprocess.PIPE, stderr=stderr, text=True,
+        )
     assert process.stdout is not None
     try:
         line = process.stdout.readline()
         if not line:
-            raise RuntimeError(f"remote daemon exited with {process.poll()} before seeding")
+            # Its stdout ended, so the child is exiting.  The exit code is all there is to
+            # tell why when it wrote nothing to stderr (a child the OS could not start).
+            code = process.wait(timeout=20)
+            raise RuntimeError(
+                f"remote daemon exited with {code} before seeding{_stderr_tail(home)}"
+            )
         seeded = json.loads(line)
         task_ids, pid = seeded["tasks"], seeded["pid"]
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             if process.poll() is not None:
-                raise RuntimeError(f"remote daemon exited with {process.returncode}")
+                raise RuntimeError(
+                    f"remote daemon exited with {process.returncode}{_stderr_tail(home)}"
+                )
             # A stale file from an earlier daemon of the same home names
             # another pid: wait for this child's record.
             endpoint = local_endpoint.read_endpoint(endpoint_file)
@@ -164,6 +175,12 @@ def start_remote_daemon(
         # or whose start was interrupted, ends here.
         _kill(process)
         raise
+
+
+def _stderr_tail(home: Path) -> str:
+    """Return the last lines the daemon of *home* wrote to stderr, as the end of an error."""
+    lines = (home / _STDERR_FILE).read_text(encoding="utf-8", errors="replace").splitlines()
+    return "; its stderr ended:\n" + "\n".join(lines[-20:])
 
 
 def _watch_database_redirect(home: Path, original: Path) -> None:

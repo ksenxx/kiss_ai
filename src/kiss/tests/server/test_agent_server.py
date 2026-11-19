@@ -82,7 +82,6 @@ class TestModelVendorOrder(unittest.TestCase):
             "claude-opus-4-6",
             "gpt-4o",
             "openrouter/x",
-            "glm-4.6",
             "cc/opus",
         ]
         sorted_names = sorted(names, key=_model_vendor_order)
@@ -90,15 +89,16 @@ class TestModelVendorOrder(unittest.TestCase):
         assert sorted_names[1] == "cc/opus"
         assert sorted_names[2] == "gpt-4o"
         assert sorted_names[3] == "gemini-2.0-flash"
-        assert sorted_names[-1] in ("unknown-model", "together/some-model")
+        assert sorted_names[-1] == "unknown-model"
 
     def test_vendor_is_the_provider_that_serves_the_model(self) -> None:
         """The picker groups every catalog model under the provider its requests go to.
 
-        ``openai/gpt-oss-*`` is OpenAI's open-weight family served by
-        Together AI (a ``TOGETHER_API_KEY`` runs it), so it belongs to
-        the "Together AI" group like the other maker-prefixed Together
-        models (``google/gemma-*``, ``moonshotai/*``), not to "OpenAI".
+        ``openrouter/openai/gpt-oss-*`` is OpenAI's open-weight family
+        served by OpenRouter (an ``OPENROUTER_API_KEY`` runs it), so it
+        belongs to the "OpenRouter" group like the other maker-prefixed
+        OpenRouter models (``openrouter/google/gemma-*``,
+        ``openrouter/moonshotai/*``), not to "OpenAI".
         """
         group = {
             "Anthropic": "Anthropic",
@@ -107,10 +107,7 @@ class TestModelVendorOrder(unittest.TestCase):
             "OpenAI": "OpenAI",
             "Codex CLI": "OpenAI",
             "Gemini": "Gemini",
-            "Z.AI": "Z.AI",
-            "Moonshot": "Moonshot",
             "OpenRouter": "OpenRouter",
-            "Together": "Together AI",
         }
         # A user's endpoint models route to no provider ("Unknown") and
         # are listed from MY_MODELS.json, never through model_vendor.
@@ -121,7 +118,7 @@ class TestModelVendorOrder(unittest.TestCase):
             if provider in group and group[provider] != _model_vendor_name(name)
         }
         assert not misfiled, misfiled
-        assert model_vendor("openai/gpt-oss-120b") == ("Together AI", 7)
+        assert model_vendor("openrouter/openai/gpt-oss-120b") == ("OpenRouter", 4)
         assert model_vendor("openai/gpt-4o") == ("OpenAI", 2)
 
 

@@ -22,12 +22,14 @@ import kiss.server.web_server
 WEB_SERVER_PY = Path(kiss.server.web_server.__file__)
 
 
-def test_remote_page_font_size_vars_match_task_panel() -> None:
-    """The task panel sizes itself with --theme-editor-font-size and
-    the chat panels with rem units derived from --theme-font-size;
-    the remote page must inject the SAME size for both so panel
-    contents and the task panel share one size (13px, the VS Code
-    workbench size and the base of Cursor's UI type scale)."""
+def test_remote_page_injects_one_font_size_var() -> None:
+    """The remote page injects ONE font-size variable:
+    --theme-font-size, the root size every rem step of main.css's type
+    scale derives from (the task panel's text included, one step up at
+    --fs-lg; 13px, the size of Claude Code Desktop's sidebar and
+    composer).  The server defines no second size, the former
+    --theme-editor-font-size that nothing read, which could drift from
+    it."""
     src = WEB_SERVER_PY.read_text(encoding="utf-8")
     assert "--theme-font-size: 13px" in src
-    assert "--theme-editor-font-size: 13px" in src
+    assert "--theme-editor-font-size" not in src

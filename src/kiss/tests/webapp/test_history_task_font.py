@@ -10,7 +10,7 @@ import pytest
 from playwright.sync_api import expect, sync_playwright
 
 from kiss.agents.sorcar import persistence
-from kiss.tests.conftest import goto_retrying_network_change
+from kiss.tests.conftest import click_row_menu_item, goto_retrying_network_change
 from kiss.tests.server.test_content_tab_file_links import _ServerHarness
 
 _FONT = """el => {
@@ -53,16 +53,21 @@ def test_history_task_text_matches_chat_header(theme: str, tmp_path: Path) -> No
                 expect(header).to_be_visible()
                 header_font = header.evaluate(_FONT)
                 assert header_font[2] == "400"
-                # The chat's "Show details" chevron unfolds its task rows
-                # (a click on the header itself opens the chat).
-                page.locator(".history-chat-header .history-chat-collapse").click()
+                # The "Show details" line of the chat's "…" menu unfolds
+                # its task rows (a click on the header itself opens the
+                # chat).
+                click_row_menu_item(
+                    page.locator(".history-chat-header"), ".history-chat-collapse"
+                )
                 text = page.locator("#history-list .running-item > .sidebar-item-text")
                 expect(text).to_be_visible()
                 expect(text).to_have_text(title)
                 assert text.evaluate(_FONT) == header_font
 
                 # Expanding task metadata and hovering must not change its font.
-                page.locator("#history-list .running-item .sidebar-item-collapse").click()
+                click_row_menu_item(
+                    page.locator("#history-list .running-item"), ".sidebar-item-collapse"
+                )
                 text.hover()
                 assert text.evaluate(_FONT) == header_font
                 page.screenshot(path=str(tmp_path / f"history-font-{theme}.png"))

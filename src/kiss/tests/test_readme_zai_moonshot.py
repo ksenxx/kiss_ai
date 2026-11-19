@@ -1,10 +1,11 @@
-"""End-to-end README/MODELS.md checks for Z.AI/Moonshot support and MiniMax removal.
+"""End-to-end README/MODELS.md checks for the retired providers and the catalog totals.
 
 The README and MODELS.md are user-facing integration surfaces: the README
 documents which API keys users should configure and the catalog totals, and
 MODELS.md the provider categories and models the bundled catalog contains.
-These tests ensure that both stay aligned with ``MODEL_INFO.json`` after
-replacing MiniMax support with Z.AI and Moonshot AI.
+These tests ensure that both stay aligned with ``MODEL_INFO.json`` now that
+MiniMax and Together AI are gone and Z.AI's and Moonshot AI's models are
+reachable through OpenRouter only.
 """
 
 from __future__ import annotations
@@ -43,9 +44,6 @@ _README_CATEGORY_LABELS = {
     "Anthropic": "Anthropic",
     "Bedrock": "Amazon Bedrock (`bedrock/*`)",
     "Gemini": "Gemini",
-    "Together": "Together AI",
-    "Z.AI": "Z.AI",
-    "Moonshot": "Moonshot AI",
     "OpenRouter": "OpenRouter",
     "Claude Code CLI": "Claude Code CLI (`cc/*`)",
     "Codex CLI": "Codex CLI (`codex/*`)",
@@ -57,10 +55,7 @@ def _provider_category(model_name: str) -> str:
 
     Uses the runtime routing table
     (:func:`kiss.core.models.model_info.get_model_provider`) — the same
-    single source the README rewriter consults — so the open-weight
-    ``openai/gpt-oss-*`` and ``google/gemma-*`` models count under
-    Together AI (they are served with a ``TOGETHER_API_KEY``) rather than
-    under the OpenAI/Gemini vendor families. A ``KeyError`` here means a
+    single source the README rewriter consults. A ``KeyError`` here means a
     catalog model that no registered provider routes.
     """
     return _README_CATEGORY_LABELS[get_model_provider(model_name)]
@@ -82,12 +77,14 @@ def test_readme_has_no_minimax_references() -> None:
         assert "<strong>MiniMax" not in text
 
 
-def test_readme_documents_zai_and_moonshot_api_keys() -> None:
-    """The setup snippet documents the new Z.AI and Moonshot env vars."""
+def test_readme_documents_the_supported_api_keys_and_no_retired_one() -> None:
+    """The setup snippet exports the four supported keys; no retired key is documented."""
     readme = _readme_text()
-    assert "export ZAI_API_KEY=..." in readme
-    assert "export MOONSHOT_API_KEY=..." in readme
-    assert "export MINIMAX_API_KEY=..." not in readme
+    for key in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "OPENROUTER_API_KEY"):
+        assert f"export {key}=..." in readme
+    for text in (readme, _models_text()):
+        for key in ("MINIMAX_API_KEY", "TOGETHER_API_KEY", "ZAI_API_KEY", "MOONSHOT_API_KEY"):
+            assert key not in text
 
 
 def test_readme_provider_table_matches_catalog_categories() -> None:
@@ -100,8 +97,6 @@ def test_readme_provider_table_matches_catalog_categories() -> None:
     assert header in models
     for provider, count in counts.items():
         assert f"| {provider} | {count} |" in models
-    assert "| Z.AI | 8 |" in models
-    assert "| Moonshot AI | 10 |" in models
 
 
 def test_readme_capability_totals_match_catalog() -> None:
@@ -118,18 +113,13 @@ def test_readme_capability_totals_match_catalog() -> None:
     assert f"- **{decisions_count}** decision models" in readme
 
 
-def test_readme_lists_zai_and_moonshot_models() -> None:
-    """The full model list in MODELS.md includes direct Z.AI and Moonshot AI sections."""
-    readme = _models_text()
-    assert "<summary><strong>Z.AI (8)</strong></summary>" in readme
-    assert "<summary><strong>Moonshot AI (10)</strong></summary>" in readme
-    for model_name in (
-        "glm-4.6",
-        "glm-4.7",
-        "kimi-k2.6",
-        "kimi-k3-low",
-        "kimi-k3-high",
-        "kimi-k3-max",
-        "moonshot-v1-32k",
-    ):
-        assert f"- `{model_name}`" in readme
+def test_models_md_lists_zai_and_moonshot_models_under_openrouter_only() -> None:
+    """MODELS.md has no Together AI, Z.AI or Moonshot AI section; their models are OpenRouter's."""
+    models = _models_text()
+    for provider in ("Together AI", "Z.AI", "Moonshot AI"):
+        assert f"| {provider} |" not in models
+        assert f"<summary><strong>{provider} (" not in models
+    for retired in ("glm-4.7", "kimi-k3", "moonshot-v1-32k", "moonshotai/Kimi-K3"):
+        assert f"- `{retired}`" not in models
+    for routed in ("openrouter/z-ai/glm-4.7", "openrouter/moonshotai/kimi-k3"):
+        assert f"- `{routed}`" in models

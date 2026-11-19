@@ -112,7 +112,7 @@ RSI7D_TASK = (
     "prompt only where its own runs show a repeatable failure. Spend at most $20 in total and "
     "at most $8 on replays; replay only tasks that changed nothing on disk, with "
     "replay_in_place. "
-    "Delete tmp/rsi7d/replays before finishing. Write the report to "
+    "Delete <scratch dir>/rsi7d/replays before finishing. Write the report to "
     "./reports/rsi7d-autorouter-<date>.md and, when the work dir is a git checkout, git add it."
 )
 """The ``/rsi7d`` task text of the weekly job: the scope ``autorouter`` first, then the
@@ -147,14 +147,12 @@ Tiers = dict[str, tuple[tuple[str, str], ...]]
 
 TIERS: Tiers = {
     "small": (
-        ("zai-org/GLM-5.3-Flash", "Z.ai flash; #1 on OpenRouter by weekly tokens"),
         ("openrouter/z-ai/glm-5.3-flash", "Z.ai flash; #1 on OpenRouter by weekly tokens"),
         ("gpt-6-luna-xhigh", "OpenAI small model, 1M context; cheapest cost per task"),
         (
             "openrouter/openai/gpt-6-luna-xhigh",
             "OpenAI small model, 1M context; cheapest cost per task",
         ),
-        ("deepseek-ai/DeepSeek-V4.1-Flash", "DeepSeek flash"),
         ("openrouter/deepseek/deepseek-v4.1-flash", "DeepSeek flash"),
         ("openrouter/xiaomi/mimo-v2.6-flash", "Xiaomi's flash model"),
         ("openrouter/qwen/qwen3.8-flash", "Qwen flash"),
@@ -408,11 +406,6 @@ in `exclude` even when `pick_model` ranks it first.
   its task opens "NOT an authentication task: after `check_gmail_auth` returns ok,
   continue with the steps below". Re-dispatch a child that "stopped after
   authentication" once that way on another model.
-
-## Lessons from recent runs (rsi7d)
-
-- `tmp/PROGRESS.md` may be the calling task's notes: Read it and append a section
-  under your own heading; never `Write` over it.
 
 ## Finishing
 

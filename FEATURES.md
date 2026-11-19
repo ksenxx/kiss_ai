@@ -57,18 +57,17 @@ Version 2026.11.7 · HEAD `d522176885` (6,001 commits) · compiled 2026-11-10 ·
   - Their chats, files, settings, terminals and browser pages appear on the local surfaces.
   - `run_agent(machine=...)` and `Bash(background=True, machine=...)` send work to them.
   - `/sync` brings every registered machine and the local checkout to the same commit.
-- **1,077 model entries** **CHANGED** in `src/kiss/core/models/MODEL_INFO.json` (section 8):
-  - **Capabilities and aliases**: 1,033 generation, 885 with function calling, 7 embedding, 30 typed decisions; 623 base models and 454 effort aliases.
-  - **Providers**:
-    - 238 direct API models (OpenAI 89, Anthropic 82, Gemini 49, Moonshot 10, Z.AI 8).
-    - 496 through OpenRouter.
+- **988 model entries** **CHANGED** in `src/kiss/core/models/MODEL_INFO.json` (section 8):
+  - **Capabilities and aliases**: 937 generation, 803 with function calling, 6 embedding, 37 typed decisions; 529 base models and 459 effort aliases.
+  - **Providers** **CHANGED** (11-19: Together AI, Z.AI and Moonshot are no longer called directly; Z.AI's and Moonshot's models stay available through OpenRouter):
+    - 238 direct API models (OpenAI 99, Anthropic 82, Gemini 57).
+    - 514 through OpenRouter.
     - 144 Claude models through Amazon Bedrock.
-    - 109 through Together AI.
-    - 79 `cc/` (Claude Code) and 11 `codex/` CLI-backed entries, driven as plain models with the KISS system prompt and tools and billed to the Claude or ChatGPT subscription by default.
-  - **Routers**: Five router entries (`autorouter`, `bestrouter`, `orautorouter`, `orbestrouter`, `ccxbestrouter`) appear in the model picker and are implemented as SEAs.
-- **30 bundled Sorcar Extension Agents** **CHANGED** in `src/kiss/agents/seas/` (31 folders with the shared `base`; section 9):
-  - 28 slash commands, 2 hidden (`coding`, `sorcar`) and 5 model-picker entries; 13 were added since 2026-09-30.
-  - `src/kiss/agents/third_party_agents/` adds 44 SEA folders (43 commands, 42 of them channel SEAs), and `/cron` is built in, so a registry with an empty `SEAS.md` lists 72 commands.
+    - 79 `cc/` (Claude Code) and 13 `codex/` CLI-backed entries, driven as plain models with the KISS system prompt and tools and billed to the Claude or ChatGPT subscription by default.
+  - **Routers**: Six router entries (`autorouter`, `bestrouter`, `orautorouter`, `orbestrouter`, `ccxbestrouter`, `brbestrouter`) appear in the model picker and are implemented as SEAs.
+- **35 bundled Sorcar Extension Agents** **CHANGED** in `src/kiss/agents/seas/` (36 folders with the shared `base`; section 9):
+  - 33 slash commands, 2 hidden (`coding`, `sorcar`) and 6 model-picker entries; 19 were added since 2026-09-30.
+  - `src/kiss/agents/third_party_agents/` adds 44 SEA folders (43 commands, 42 of them channel SEAs), and `/cron` is built in, so a registry with an empty `SEAS.md` lists 77 commands.
   - Every SEA defines exactly one `BaseSea` subclass, a bundled one in `<name>/<name>_sea.py`, and every registered command defines `description()`.
 - **44 built-in tool functions** **CHANGED** in a full-profile top-level run on the host, in parallel mode with web tools and memory on and the decisions model available, before skill, MCP-server and SEA-supplied tools (section 7):
   - **Tool counts by category**: shell 3, files 3, checkpoints 2, worktree 2, browser 15, memory 7, dispatch 4, MCP sign-in 2, interaction 6 including `finish` and, when the decisions model is available, `decide`.
@@ -125,6 +124,7 @@ Version 2026.11.7 · HEAD `d522176885` (6,001 commits) · compiled 2026-11-10 ·
 - Module-level SEA getters gave way to the `BaseSea` class (10-05).
 - `sorcar.db` became `history.db` and `SORCAR.md` became `AGENTS.md` (10-03, version 2026.10.2); a legacy file is adopted on first use.
 - `WorktreeSorcarAgent` was removed (10-10), the `dummy` SEA became the hidden `sorcar` SEA (10-05), the `run_tasks_parallel` engine was removed (10-07) and `benchmarkings/` left the repository (130,969 files).
+- Direct support for Together AI, Z.AI and Moonshot AI was removed (11-19): `TOGETHER_API_KEY`, `ZAI_API_KEY` and `MOONSHOT_API_KEY` are no longer settings, the three routes left the provider registry and their 127 entries left `MODEL_INFO.json`. Z.AI's and Moonshot's models stay available through OpenRouter (section 8).
 - **Commits**: `4700ea15a9` `bbee1689b1` `b609fc4a21` `e76e7a0ffa` `4859c0f7ed` `52f15f1521` `c115cb7d2b` `b9ed868023`
 
 ### Machines and remote execution
@@ -140,11 +140,11 @@ Version 2026.11.7 · HEAD `d522176885` (6,001 commits) · compiled 2026-11-10 ·
 
 ### Models and providers
 
-- `MODEL_INFO.json` grew from 706 to 1,077 entries:
+- `MODEL_INFO.json` grew from 706 to 988 entries (counted on 11-19, after the entries of the Together AI, Z.AI and Moonshot routes were removed):
   - `bedrock/` 0 to 144 (Bedrock Claude with ambient AWS credentials).
   - `cc/` 16 to 79.
-  - `openrouter/` 412 to 496.
-  - 454 alias entries (`alias_of`) that pin an effort or thinking level (`-low` to `-max` for Claude, `-low`, `-medium` and `-high` for Gemini).
+  - `openrouter/` 412 to 514.
+  - 459 alias entries (`alias_of`) that pin an effort or thinking level (`-low` to `-max` for Claude, `-low`, `-medium` and `-high` for Gemini).
 - `cc/` and `codex/` are plain models:
   - KISS tools reach the Codex CLI over an MCP bridge (`codex_mcp_bridge.py`) and the Claude Code CLI as text.
   - A turn bills to the subscription unless an API key pays.
@@ -171,7 +171,7 @@ Version 2026.11.7 · HEAD `d522176885` (6,001 commits) · compiled 2026-11-10 ·
 ### Tool output and context management
 
 - **Output truncation**: A `Bash` result keeps 8,000 characters by default (`tool_output_default_chars`):
-  - On the host, the rest goes to `tmp/tool-out/` and a whole-file `Read` and `memory_list` are cut to the same budget.
+  - On the host, the rest goes to `<scratch dir>/tool-out/` **CHANGED** (11-18) and a whole-file `Read` and `memory_list` are cut to the same budget.
   - In a container or behind an exec bridge, `Bash` truncates without a spill file and `Read`, which runs through it, is cut the same way even for a line range.
 - **Auto-detach**: A foreground host `Bash` whose timeout exceeds 120 s continues as a background job after 120 s (`bash_detach_seconds`), except an `until` poll or a call that detaches at its own timeout (`on_timeout`).
 - **Context controls**:
@@ -827,9 +827,9 @@ Findings by project:
  │ page opened at a loopback URL  │ │ auth: token, sorcar-local.json  │ │ scripts/run_sea.py        │
  └────────┬───────────────────────┘ └────────┬────────────────────────┘ └────────────┬──────────────┘
           │ WebSocket /ws on one port (8787) │ plain on loopback, TLS elsewhere      │ run_sea runs a
-          │ 88 JSON commands (sorcar.py API) │ one object per frame, events by tab   │ SorcarAgent;
+          │ 90 JSON commands (sorcar.py API) │ one object per frame, events by tab   │ SorcarAgent;
  ┌────────▼──────────────────────────────────▼────────────────────────┐              │ run_agent and
- │ kiss-web daemon  src/kiss/server (37 modules, 45,818 lines)        │              │ run_parallel
+ │ kiss-web daemon  src/kiss/server (38 modules, 45,818 lines)        │              │ run_parallel
  │ RemoteAccessServer: HTTP + WebSocket listener, auth, tunnel, TLS   │              │ need a daemon
  │ ServerApi -> AgentServer: TabRegistry (~/.kiss/tabs.json), replay, │              │
  │   sub-agent tab lifecycle, task_runner, merge_flow, autocomplete   │              │
@@ -856,19 +856,19 @@ Findings by project:
  └────────┬─────────────────────────────────────────────────────────────────────────────────────────┘
           │
  ┌────────▼─────────────────────┐ ┌──────────────────────────────┐ ┌────────────────────────────────┐
- │ Models (1,077 entries)       │ │ State in ~/.kiss             │ │ Extension points               │
+ │ Models (988 entries)         │ │ State in ~/.kiss             │ │ Extension points               │
  │ Anthropic · OpenAI · Gemini  │ │ history.db · config.json     │ │ SEAs (seas/, SEAS.md folders,  │
  │ Amazon Bedrock · OpenRouter  │ │ api_keys.env · tabs.json     │ │ third_party_agents/): tools()  │
- │ Together · Z.ai · Moonshot   │ │ memories/ · cron/jobs.json   │ │ and hooks · skills (SKILL.md)  │
- │ cc/ and codex/ CLIs          │ │ machines.json · tls/         │ │ MCP servers (mcp.json)         │
- │ MY_MODELS.json overrides     │ │ AGENTS.md · AUTOROUTER.md    │ │ promptlets (MY_INJECTION.md)   │
- │ 5 router SEAs in the picker  │ │ sorcar-local.json            │ │ white-label brand (brand.json) │
+ │ cc/ and codex/ CLIs          │ │ memories/ · cron/jobs.json   │ │ and hooks · skills (SKILL.md)  │
+ │ MY_MODELS.json overrides     │ │ machines.json · tls/         │ │ MCP servers (mcp.json)         │
+ │ 6 router SEAs in the picker  │ │ AGENTS.md · AUTOROUTER.md    │ │ promptlets (MY_INJECTION.md)   │
+ │                              │ │ sorcar-local.json            │ │ white-label brand (brand.json) │
  └──────────────────────────────┘ └──────────────────────────────┘ └────────────────────────────────┘
 ```
 
 ### Figure 1. The data path from clients to models
 
-- Every client of the daemon sends commands of one catalogue (`src/kiss/server/sorcar.py`, `API`, 88 commands) over the same WebSocket listener and receives the same types of JSON event.
+- Every client of the daemon sends commands of one catalogue (`src/kiss/server/sorcar.py`, `API`, 90 commands) over the same WebSocket listener and receives the same types of JSON event.
 - Delivery of a task's events is scoped by tab:
   - One copy per subscribed tab, stamped with its `tabId`, goes to every page (which filters by tab) and to the same-machine clients that addressed that tab or none.
   - The copies of a tab closed on every page go to those clients alone.
@@ -891,7 +891,7 @@ Findings by project:
   - The VS Code extension was removed 10-14.
   - The page `media/chat.html` with `main.js` (32,016 lines) runs in a browser tab, as an installed PWA, in the `kiss-app` window and from an iOS Home Screen Web Clip (section 5).
 - **Layers**:
-  - `src/kiss/server` (37 modules, 45,818 lines) is the daemon.
+  - `src/kiss/server` (38 modules, 45,818 lines) is the daemon.
   - `src/kiss/agents/sorcar` (50 modules, 64,809 lines) holds the agent, its tools and the synchronous client `daemon_client.py`, kept in that layer so that `run_agent` and the cron scheduler submit tasks without importing `kiss.server`.
   - `src/kiss/core` (29 modules, 13,544 lines) and `src/kiss/core/models` (15 modules, 20,164 lines) hold the base agent and the model adapters.
 - **Catalogue**:
@@ -1265,7 +1265,7 @@ Files a user keeps in `~/.kiss/` (`$KISS_HOME` when set; a white-label brand nam
       - A restricted-profile note lists only the tools the run really has.
       - `WEB_TOOLS_OFF_NOTE` is added when browsing is off.
       - The memory protocol with a recall for the task text is appended (section 13).
-      - Task Settings gain the parallel mode and the scratch dir (`./tmp/`, or `./tmp/<task-id>/` under a chat).
+      - Task Settings gain the parallel mode and the scratch dir (`<OS temp dir>/kiss-tmp/<task-id>/` under a chat, `<OS temp dir>/kiss-tmp/` with no task id, `<OS temp dir>/kiss-tmp/kiss-sub-<random>/` for a sub-agent, and `/tmp/kiss-tmp/…` in a container; `kiss-tmp-<uid>` when `kiss-tmp` is taken in a shared `/tmp`, private to the user and emptied on the first use after a reboot) **CHANGED** (11-18; `./tmp/` and `./tmp/<task-id>/` before).
 - **Tool set** (sections 7 and 9):
   - Starts from the built-ins of the profile plus the caller's tools; `append_basic_tools=False` leaves only `finish` and the caller's tools.
   - A SEA's `tools()` sees that set without `finish`, which is added after the hook returns and cannot be removed by it (a tool named `finish` that the hook returns takes the built-in one's place, as the `coding` SEA's does).
@@ -1302,11 +1302,15 @@ Files a user keeps in `~/.kiss/` (`$KISS_HOME` when set; a white-label brand nam
     - Saves the result.
   - `run()` takes `prompt_template` first and 36 parameters in all, 5 of them private to the daemon.
 - **Chat history in the prompt**:
-  - Includes at most 10 prior tasks (the first 2 and the newest 8 when the chat has more), under `## Previous tasks and results from the chat session for reference`, followed by `# Task (work on it now)`.
+  - The tasks of a chat form a tree whose root is the chat's first task:
+    - A task run after the user loaded a task from the CHATS list continues that task; any other task continues the chat's last task. The row stores the link in `task_history.chat_parent_id`.
+    - The load counts once, for the next task started from that tab, and ends when the tab's transcript is replaced by another task's or by the chat's latest.
+    - Clicking a task while the chat is running applies to the next new task sent from that tab. Plain messages typed in the meantime still go to the running task and leave the selection in place, whereas a `<task>` message queues a new task and consumes the selection—unless the daemon refuses the message, in which case the selection returns with the restored draft.
+    - A task from before the link was stored, or whose parent was deleted, continues the task just before it in the chat. A sub-agent continues the task that dispatched it.
+  - Includes the tasks on the path from the root to the task being continued, at most 10 of them (the first 2 and the newest 8 when the path is longer), under `## Previous tasks and results from the chat session for reference`, followed by `# Task (work on it now)`.
   - With `KISS_CHAT_HISTORY_DIGEST` on (the default):
     - The newest two tasks and results are quoted in full while they fit, and the older tasks become 600/300-character task/result digests, the oldest dropped first until the prefix fits 6,000 characters.
     - When the newest two alone exceed that, they are digested too and the prefix is then cut at 6,000 characters.
-  - A task resumed from an earlier one is seeded from that task's parent chain instead of the whole chat.
 - **Bare-path prompts** (`bare_path_task.py`, 112 lines):
   - A prompt that is only an existing path, optionally quoted or starting with `~`, becomes a directive to open it with:
     - `open` (macOS).
@@ -1405,7 +1409,7 @@ Every tool call passes through two stages in order:
 #### Environment-backed `Config` fields (`src/kiss/core/config.py`, 723 lines)
 
 - **Field count and boolean parsing**:
-  - `Config` has 37 fields: 36 read the environment when the process starts, and the 37th, `max_budget`, defaults to 100.0.
+  - `Config` has 34 fields **CHANGED** (11-19, down from 37): 33 read the environment when the process starts, and the 34th, `max_budget`, defaults to 100.0.
   - Boolean flags are off for `0`, `false`, `no` and `off`.
 - **Runtime and threshold fields**:
   - **`KISS_CLAUDE_CODE_USE_SUBSCRIPTION`** (default: on): `cc/` models bill the Claude subscription of the `claude` CLI; API keys are kept out of its environment (section 8) **NEW**.
@@ -1428,7 +1432,7 @@ Every tool call passes through two stages in order:
   - **`KISS_ROUTINE_TURN_EFFORT`** (default: empty): Reasoning effort of a routine turn; empty keeps the model's effort.
   - **`KISS_TOOL_OUTPUT_MAX_CHARS`** (default: 50000): Ceiling of `max_output_chars` for one `Bash` or `memory_list` result.
   - **`KISS_TOOL_OUTPUT_DEFAULT_CHARS`** (default: 8000): Default budget (section 7) **NEW** of:
-    - A `Bash` result (head and tail are kept; on the host the whole output is also written to a file under `tmp/tool-out/`).
+    - A `Bash` result (head and tail are kept; on the host the whole output is also written to a file under `<scratch dir>/tool-out/` **CHANGED** (11-18)).
     - A whole-file `Read` on the host (the lines that fit, then a continuation note; a container `Read` is cut head and tail like a `Bash` result).
     - A `memory_list` listing (cut at a page boundary, with the count of pages left out).
   - **`KISS_BASH_DETACH_SECONDS`** (default: 120): A foreground host `Bash` with a longer timeout, no `until` poll and `on_timeout` left at `kill` continues as a background job after this grace period; 0 disables (section 7) **NEW**.
@@ -1438,9 +1442,9 @@ Every tool call passes through two stages in order:
   - **`KISS_DISPATCH_PATH_REWRITE`** (default: on):
     - Sub-agent task text naming the parent repository is rewritten to the active worktree path (paths under the checkout's `.venv`, the environment the worktree shares, stay) when the sub-agent inherits from the caller and runs on this machine.
     - A channel, an `inherit: false` call and a run on another machine get the text as given (section 10).
-- **Credential fields (the other 15 fields)**:
+- **Credential fields (the other 12 fields)**:
   - Each is read from the environment variable of its own name, is empty by default, and is stored by the app in `~/.kiss/api_keys.env`, never in `config.json` (section 8):
-    - Seven API keys and a workspace id: `ANTHROPIC_API_KEY`, `ANTHROPIC_WORKSPACE_ID`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, `TOGETHER_API_KEY`, `OPENROUTER_API_KEY`, `ZAI_API_KEY`, `MOONSHOT_API_KEY`.
+    - Four API keys and a workspace id **CHANGED** (11-19): `ANTHROPIC_API_KEY`, `ANTHROPIC_WORKSPACE_ID`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, `OPENROUTER_API_KEY`.
     - Amazon Bedrock credentials: `AWS_BEARER_TOKEN_BEDROCK`, or `AWS_ACCESS_KEY_ID` with `AWS_SECRET_ACCESS_KEY` and optional `AWS_SESSION_TOKEN`, and `AWS_REGION`, in whose place the Bedrock adapter uses `us-east-1` while it is empty.
     - Two CLI tokens: `CLAUDE_CODE_OAUTH_TOKEN` and `CODEX_ACCESS_TOKEN` **NEW**.
 
@@ -1493,13 +1497,13 @@ Every tool call passes through two stages in order:
 - `Bash(command, description, timeout_seconds=300, max_output_chars=8000, background, machine, on_timeout, until, poll_seconds=5)`:
   - Runs each call in a fresh shell in the work dir.
   - **Output budget and truncation**:
-    - A result keeps 8,000 characters by default (`KISS_TOOL_OUTPUT_DEFAULT_CHARS`), head and tail, and on the host names the file under `tmp/tool-out/` that holds the whole output.
+    - A result keeps 8,000 characters by default (`KISS_TOOL_OUTPUT_DEFAULT_CHARS`), head and tail, and on the host names the file under `<scratch dir>/tool-out/` (`<kiss-tmp>/tool-out/` with no scratch dir) that holds the whole output **CHANGED** (11-18).
     - `max_output_chars` raises the budget to at most 50,000 (`KISS_TOOL_OUTPUT_MAX_CHARS`) **CHANGED**.
   - **Secret redaction** **NEW** (11-11): A secret of the key store that a tool prints is shown as its variable's name before the output is stored, sent or cut (`src/kiss/core/secret_redaction.py`):
     - Covers every value of at least 8 characters whatever its variable is called, the region `AWS_REGION` excepted.
     - A value once read stays covered while the daemon runs, so a key rotated while a command still prints the old one is replaced all the same.
   - **Background and remote jobs**:
-    - `background=true` detaches the command like `nohup`, logs to `tmp/bash_jobs/` and returns a job id.
+    - `background=true` detaches the command like `nohup`, logs to `<scratch dir>/bash_jobs/<id>.log` (`<kiss-tmp>/bash_jobs/<id>.log` with no scratch dir) **CHANGED** (11-18) and returns a job id.
     - `machine=` starts that job on a registered SSH machine (section 15) and streams its output into the local log **NEW**.
   - **Timeouts and auto-detach**:
     - `on_timeout="background"` starts the command as a job and waits `timeout_seconds` for it, so a command that outlives its deadline keeps running.
@@ -1514,7 +1518,7 @@ Every tool call passes through two stages in order:
 - **Early exit on unread sub-agent results** **NEW** (11-09): On the host, an `until` poll and a `bash_job` wait also end early once every sub-agent job of the task has finished with a result unread (each such result ends one wait), naming `agent_job('', 'wait_any')` as the call that returns it (section 10).
 - `run_commands_parallel(commands, max_workers=0, timeout_seconds=1800, max_output_chars=5000, description)`:
   - Runs a JSON list of commands in threads (`max_workers=0` runs all at once) and reports a tally line, then each command's exit code and output.
-  - On the host, a report over 50,000 characters is written to `tmp/tool-out/` and a digest is returned in its place (each command's status and the last 1,200 characters of each failure) **NEW**.
+  - On the host, a report over 50,000 characters is written to `<scratch dir>/tool-out/` **CHANGED** (11-18) and a digest is returned in its place (each command's status and the last 1,200 characters of each failure) **NEW**.
 
 ### Files (3)
 
@@ -1571,7 +1575,7 @@ Every tool call passes through two stages in order:
   - `use_my_chrome(action, tab_id, url, script, uid, text, timeout=30)` drives the user's everyday default-profile Chrome (which Chrome 136+ no longer exposes over CDP) through the bundled "KISS Sorcar Bridge" MV3 extension, with ten actions:
     - `list_tabs`, `open_tab`, `navigate`, `activate_tab`, `close_tab`.
     - `evaluate`.
-    - `screenshot` (saved under the work dir's `tmp/`).
+    - `screenshot` (saved to `<scratch dir>/chrome-shot-<ns>.png` **CHANGED** (11-18)).
     - `snapshot` of interactive elements with uids.
     - `click` and `type_text` by uid.
 
@@ -1686,13 +1690,13 @@ Guards and rules that apply across the shell and file tools:
     - A `sed -i` with a newline in its script.
     - Any other Python here-document that reads, substitutes and writes a file (`re.sub`, a loop, two files).
     - A here-document into a path only the shell can resolve.
-  - **Exemptions**: Scratch files under `tmp/` are exempt, and a here-document may create a new file at a literal path.
+  - **Exemptions**: Scratch files (in the agents' temp directory `<OS temp dir>/kiss-tmp/` when the work dir does not itself lie there, or under `~/.kiss/cron/work`; a `tmp/` folder of the work dir is an ordinary folder) are exempt **CHANGED** (11-18), and a here-document may create a new file at a literal path.
 - **Read before modify**:
   - `Edit` and `Write` refuse an existing file that was not shown in the session.
   - Shown means a `Read`, or a `cat`, `sed -n`, `grep -n`, `nl`, `head` or `tail` whose single operand is that file **NEW**.
   - Reads are keyed by repository-relative path, so a file read in the main checkout stays read in its worktree **NEW**.
   - A refused `Edit` returns the region around `old_string`, which then counts as read **NEW**.
-  - New files and scratch files (under a `tmp/` directory inside the work dir, or under `~/.kiss/cron/work`) are exempt.
+  - New files and scratch files (in the agents' temp directory `<OS temp dir>/kiss-tmp/` when the work dir does not itself lie there, or under `~/.kiss/cron/work`; a `tmp/` folder of the work dir is an ordinary folder) are exempt **CHANGED** (11-18).
 - **Worktree rules** (section 12): Inside a worktree:
   - A command that names the main checkout's path, other than under its `.venv`, is refused.
   - `uv run <program>` is rewritten to the main checkout's environment binary with the worktree's sources on `PYTHONPATH` when the rewrite is unambiguous (that environment has the program; no `uv` option with a value such as `--with` or `--directory`), and any other `uv run`, `uv sync`, `uv add` and `uv remove` are refused **NEW**.
@@ -1700,7 +1704,7 @@ Guards and rules that apply across the shell and file tools:
   - **Container execution**: The six shell and file tools run inside the container:
     - `Bash` defaults to a 30 s timeout there and has no `machine` and no detach after 120 s.
     - `background`, `on_timeout` and `bash_job` work through `ContainerJobs`, which keeps each job's log, pid and exit code under `/tmp/kiss-jobs` (a sub-agent's under `kiss-jobs/` of its private folder, deleted with it), and `until` re-runs the command inside the container **NEW**.
-    - A `Bash` output over its budget is cut with no file under `tmp/tool-out/`, and a `run_commands_parallel` report is returned whole whatever its length.
+    - A `Bash` output over its budget is cut with no spill file under `tool-out/`, and a `run_commands_parallel` report is returned whole whatever its length.
     - `Read` returns at most `max_lines` lines from `start_line` with a count of the lines left, cut head and tail like a `Bash` output at its 8,000-character default, with no outline, and answers a directory or a missing path with `Error: File not found`.
     - The file tools have no read-before-modify guard, and an `edits` batch stops at its first failure with the earlier edits applied.
   - **Exec bridge** **NEW**: A `docker_image` of the form `exec:http://127.0.0.1:<port>` runs the same tools over an exec bridge, an HTTP endpoint that executes commands in a remote sandbox.
@@ -1718,7 +1722,7 @@ Tool profiles (`TOOL_PROFILES` and `TOOL_GROUPS` in `sorcar_agent.py`):
 | `full` | everything above | default |
 | `review` **CHANGED** | `shell` + `browser` groups, `memory_search`, `memory_pull`, `memory_read`, `memory_list`, `decide`, `summary`, `talk` (26 tools); aliases `readonly`, `read_only`, `read-only` | read-only reviewer sub-agents (section 10): named by the caller, or inferred for a sub-agent in a reviewer's sub-tree whose task asks for no change (`KISS_TOOL_PROFILES=0` turns the inference off) |
 | `assistant` | `shell` + `user` + `decide` + `control` groups (9 tools) | conversational runs without file edits; one of the three profiles (`shell`, `assistant`, `review`) that `/rsi7d` proposes when a full-toolset SEA used fewer tools |
-| `none` **NEW** | nothing built in (`finish` plus what the SEA's `tools()` hook returns) | `/ask`, `/install`, `/machine`, `/good_morning`, `/recommendations`, `/sync_history_and_memory` (all locked) |
+| `none` **NEW** | nothing built in (`finish` plus what the SEA's `tools()` hook returns) | `/ask`, `/install`, `/machine`, `/good_morning`, `/memory_consolidate`, `/memory_quiz`, `/recommendations`, `/sync_history_and_memory` (all locked) |
 | `bash` | `Bash` | `/sh` (locked), `/remember`, `/forget`, `/task_update` |
 | `shell` | `Bash`, `bash_job`, `Read`, `run_commands_parallel` | `/skillopt` |
 | `edit` **NEW** | `Edit`, `Write`, `create_worktree`, `commit_and_merge`, `checkpoint`, `rollback` | `/sync` runs on `shell+edit+agents` (locked) |
@@ -1759,29 +1763,25 @@ Tool profiles (`TOOL_PROFILES` and `TOOL_GROUPS` in `sorcar_agent.py`):
 ### Catalogue and custom models
 
 - **Catalogue**:
-  - 1,077 entries (706 on 09-30):
-    - 1,033 generation, 885 with function calling, 7 embedding and 30 typed-decision (`dec`) entries; 7 OpenRouter entries have every capability flag off.
-    - 623 are base models and 454 are effort aliases of one (`alias_of`).
-  - The prefix of a name selects its provider:
+  - 988 entries **CHANGED** (11-19; 706 on 09-30, 1,115 before the 127 entries of the Together AI, Z.AI and Moonshot routes were removed):
+    - 937 generation, 803 with function calling, 6 embedding and 37 typed-decision (`dec`) entries; 7 OpenRouter entries and 1 Gemini entry have every capability flag off.
+    - 529 are base models and 459 are effort aliases of one (`alias_of`).
+  - The prefix of a name selects its provider; a name of none of them (`glm-4.7`, `kimi-k3`, `Qwen/Qwen3.7-Max`) is an unknown model **CHANGED** (11-19):
 
     | Provider | Name prefix | Credential | Entries | Base | Aliases |
     |---|---|---|---:|---:|---:|
-    | OpenRouter | `openrouter/` | `OPENROUTER_API_KEY` | 496 | 363 | 133 |
+    | OpenRouter | `openrouter/` | `OPENROUTER_API_KEY` | 514 | 373 | 141 |
     | Amazon Bedrock | `bedrock/` | AWS credentials | 144 | 32 | 112 |
-    | Together AI | `Qwen/`, `meta-llama/`, `deepseek-ai/`, `moonshotai/`, `zai-org/`, `openai/gpt-oss` and eight more | `TOGETHER_API_KEY` | 109 | 95 | 14 |
-    | OpenAI | `gpt`, `o1`, `o3`, `o4`, `text-embedding`, `codex`, `computer-use` | `OPENAI_API_KEY` | 89 | 49 | 40 |
+    | OpenAI | `gpt`, `o1`, `o3`, `o4`, `text-embedding`, `codex`, `computer-use` | `OPENAI_API_KEY` | 99 | 51 | 48 |
     | Anthropic | `claude-` | `ANTHROPIC_API_KEY` | 82 | 18 | 64 |
     | Claude Code CLI | `cc/` | the `claude` executable | 79 | 18 | 61 |
-    | Gemini | `gemini-` | `GEMINI_API_KEY` | 49 | 22 | 27 |
-    | Codex CLI | `codex/` | the `codex` executable | 11 | 11 | 0 |
-    | Moonshot | `kimi-`, `moonshot-` | `MOONSHOT_API_KEY` | 10 | 7 | 3 |
-    | Z.AI | `glm-` | `ZAI_API_KEY` | 8 | 8 | 0 |
+    | Gemini | `gemini-` | `GEMINI_API_KEY` | 57 | 24 | 33 |
+    | Codex CLI | `codex/` | the `codex` executable | 13 | 13 | 0 |
 
   - **Families**:
-    - **OpenAI**: `gpt-*` 84, `o3` 2, `text-embedding-*` 3.
+    - **OpenAI**: `gpt-*` 94, `o3` 2, `text-embedding-*` 3.
     - **Anthropic**: Opus 37, Sonnet 19, Fable 18, Haiku 8.
-    - **Together**: Qwen 24, Meta Llama 16, DeepSeek 14, Moonshot 14, Z.ai 10, `openai/gpt-oss` 8, DeepCogito 6, Mistral 6, NVIDIA 4, Gemma 3 and four single-entry vendors.
-    - **OpenRouter**: 71 vendor segments (`openai` 87, `anthropic` 78, `qwen` 42, `google` 31), 40 rolling `openrouter/~vendor/*` entries and all 30 `dec` entries.
+    - **OpenRouter**: 74 vendor segments (`openai` 97, `anthropic` 78, `qwen` 40, `google` 34), 40 rolling `openrouter/~vendor/*` entries and all 37 `dec` entries; Z.AI's and Moonshot's models are reachable only here (`openrouter/z-ai/*`, `openrouter/moonshotai/*`).
     - **Bedrock**: 17 `us.` and 15 `global.` Claude inference-profile ids.
     - **Claude Code CLI**: `cc/opus`, `cc/sonnet`, `cc/haiku` and 15 `cc/claude-*` names.
 - **Entry fields and loading**:
@@ -1807,12 +1807,12 @@ Tool profiles (`TOOL_PROFILES` and `TOOL_GROUPS` in `sorcar_agent.py`):
 ### Provider adapters and CLI-backed models
 
 - **OpenAI-compatible adapter**:
-  - OpenRouter, OpenAI, Together, Z.AI and Moonshot share `OpenAICompatibleModel` (Chat Completions) and `OpenAICompatibleModel2` (the Responses API).
+  - OpenRouter and OpenAI share `OpenAICompatibleModel` (Chat Completions) and `OpenAICompatibleModel2` (the Responses API); so does every custom endpoint **CHANGED** (11-19: the Together AI, Z.AI and Moonshot routes were removed).
   - **Transport selection**:
     - A tool-bearing request to `api.openai.com` goes to `/v1/responses`, because Chat Completions there rejects `tools` together with `reasoning_effort`; only the model config's `use_responses_api` forces either transport.
-    - The catalogue flag of the same name (true on 523 entries) puts every generation request of a model on the Responses API, but only at the default endpoint of the vendor the name routes to; at any other endpoint (a custom gateway, another vendor's) it is ignored and the Chat Completions adapter is used, except that an endpoint model in `MY_MODELS.json` whose name none of the OpenAI-compatible vendors routes (a `claude-` or `gemini-` name included) follows its own entry's flag.
+    - The catalogue flag of the same name (true on 533 entries) puts every generation request of a model on the Responses API, but only at the default endpoint of the vendor the name routes to; at any other endpoint (a custom gateway, another vendor's) it is ignored and the Chat Completions adapter is used, except that an endpoint model in `MY_MODELS.json` whose name none of the OpenAI-compatible vendors routes (a `claude-` or `gemini-` name included) follows its own entry's flag.
   - **Vendor-specific rules**:
-    - For Z.AI and Moonshot, the adapter keeps the effort and learns from the vendor's reply whether tools accept it.
+    - At an endpoint that neither vendor owns (a custom gateway), the adapter keeps the effort and learns from the endpoint's reply whether tools accept it.
     - OpenRouter Claude routes, the rolling `~anthropic` aliases included (10-18), get a top-level `cache_control` so prompt caching applies.
     - A harbor-style `openai/`, `anthropic/` or `google/` prefix on a directly routed name is stripped.
 - **Anthropic adapter**:
@@ -1862,38 +1862,37 @@ Tool profiles (`TOOL_PROFILES` and `TOOL_GROUPS` in `sorcar_agent.py`):
       - **`codex/*` turn**: Priced from the turn's summed usage, without OpenAI's processing-tier multipliers and with long-prompt rates only when it made a single request; a model the catalogue cannot price stays at $0 with one warning.
 - **Typed decisions and embeddings**:
   - A `dec` entry answers `noul`, `choice` and `score` questions through OpenRouter's Decisions API (`POST /api/alpha/decisions`) instead of generating text; it backs the `decide` tool (section 7) and the Jev classifier (section 11).
-  - `get_embedding` serves the 7 `emb` entries (3 OpenAI, 2 Gemini, 2 Together-hosted).
+  - `get_embedding` serves the 6 `emb` entries (3 OpenAI, 3 Gemini).
 
 ### Effort aliases, pricing, fail-over and vision bridge
 
 - **Effort aliases** **CHANGED**:
   - A `<base>-<level>` entry copies its base entry's prices and limits and sets `thinking`; the base entry holds the highest supported level, capped at `high`.
-  - The 454 aliases are 109 `-high`, 107 `-low`, 103 `-medium`, 71 `-xhigh` and 64 `-max`; on 09-30 only OpenAI, OpenRouter, Together and Moonshot names had aliases (118).
+  - The 459 aliases are 109 `-high`, 108 `-low`, 107 `-medium`, 75 `-xhigh` and 60 `-max`; on 09-30 only OpenAI, OpenRouter, Together and Moonshot names had aliases (118).
   - **Ladders**:
     - **OpenAI**: `low`/`medium`/`high`/`xhigh`.
     - **Claude**: Up to `low` to `max` depending on the generation (10-07), mirrored onto `bedrock/`, `openrouter/anthropic/claude-*` (10-28) and `cc/claude-*` names.
     - **Gemini**: `low`/`medium`/`high` (11-05).
-    - **Kimi K3**: `low`/`high`/`max`.
+    - **Kimi K3** (through OpenRouter): `low`/`high`/`max`.
     - **Grok 4.3 and 4.5**: `low`/`medium`/`high` (6 aliases).
-    - **GLM-5.2**: `high`/`max` (4 aliases).
+    - **GLM-5.2** (through OpenRouter): `high`/`max` (2 aliases).
     - **Grok 3 Mini**: The updater also holds a `low`/`high` ladder for Grok 3 Mini, which has no catalogue entry.
 - **Prices**:
   - `calculate_cost` prices input, output, cache-read, cache-write (a default and a long lifetime: 5 minutes and 1 hour on Anthropic, 30 minutes and 12 hours on OpenAI), audio and image-output tokens separately.
   - **Cache prices**: Cache prices an entry states are kept and the others are derived per provider (for an `openrouter/` entry that states a read price only the long-lifetime write is derived; its unstated default write bills at the input price):
     - **Anthropic**: Reads at 0.1x the input price (0.05x for Opus 5.5 and Sonnet 5.5, 0.025x for Fable and Mythos 5.1 and, since 11-10, 5.2), writes at 1.25x and 1-hour writes at 2x.
-    - **OpenAI** (its `openrouter/openai/` and rolling `openrouter/~openai/` routes included): Reads at 0.1x for most GPT-5 and GPT-6 names, 0.05x for GPT-6.1, `gpt-sol-latest` and `gpt-terra-latest`, 0.25x or 0.5x for older families and the full input price for `-pro` names, with free writes before GPT-5.6 and writes at 1.25x (30-minute) and 2.5x (12-hour) for GPT-5.6, GPT-6 and the rolling aliases that track them.
+    - **OpenAI** (its `openrouter/openai/` and rolling `openrouter/~openai/` routes included): Reads at 0.1x for most GPT-5 and GPT-6 names, 0.05x for the GPT-6 point releases (GPT-6.1 and, since 11-18, GPT-6.2), `gpt-astra-latest` (since 11-18), `gpt-sol-latest` and `gpt-terra-latest`, 0.25x or 0.5x for older families and the full input price for `-pro` names, with free writes before GPT-5.6 and writes at 1.25x (30-minute) and 2.5x (12-hour) for GPT-5.6, GPT-6 and the rolling aliases that track them.
     - **Gemini**: Reads at 0.1x (0.05x for the `gemini-4-*` models, direct or through OpenRouter, since 11-13).
-    - **Moonshot**: Reads at 0.25x.
   - **Long prompts** **CHANGED**:
     - `prompt_tiers` (10-30; 107 OpenRouter entries, imported from OpenRouter's `pricing.overrides`) replace an entry's prices for prompts strictly longer than `min_prompt_tokens`.
     - Entries without tiers use a name-based uplift on the whole request:
       - **2x input and cache and 1.5x output**:
-        - Above 272,000 prompt tokens for `gpt-5.4` (not mini or nano), `gpt-5.5`, `gpt-5.6-*`, `gpt-6-*` and `gpt-6.1-*`.
+        - Above 272,000 prompt tokens for `gpt-5.4` (not mini or nano), `gpt-5.5`, `gpt-5.6-*`, `gpt-6-*` and the GPT-6 point releases (`gpt-6.1-*` and, since 11-18, `gpt-6.2-*`).
         - Above 200,000 for `gemini-3.1-pro`, `gemini-2.5-pro` and Claude Sonnet 4.5 (10-29).
       - **5x every rate**: Above 100,000 for Claude Haiku 5.5.
   - **Modifiers** **NEW**:
     - **Anthropic**: Fast mode (`usage.speed` `fast`) bills 2x and US-only inference (`usage.inference_geo` `us`, Claude 4.6 and later) 1.1x; the two stack and neither applies on Bedrock (10-21).
-    - **OpenAI**: Processing tiers are read from the response's `service_tier`: 0.5x for Flex, 2x for priority or fast with per-family exceptions (2.5x for `gpt-5.5`), 6x for ultrafast (10-08).
+    - **OpenAI**: Processing tiers are read from the response's `service_tier`: 0.5x for Flex, 2x for priority or fast with per-family exceptions (2.5x for `gpt-5.5`), 6x for ultrafast (10-08), 3x for `gpt-6.2-*` until March 1, 2027, Pacific time (11-18).
   - **Provider-reported and interrupted calls**:
     - OpenRouter calls are billed from the provider-reported `usage.cost` (BYOK upstream cost is added only when `is_byok`); a reported cost always replaces the catalogue estimate.
     - A call that fails or is stopped mid-stream is billed for the usage its adapter had received by then; with none, nothing is billed.
@@ -1904,12 +1903,9 @@ Tool profiles (`TOOL_PROFILES` and `TOOL_GROUPS` in `sorcar_agent.py`):
       2. OpenAI
       3. Gemini
       4. OpenRouter
-      5. Together
-      6. Z.AI
-      7. Moonshot
-      8. Bedrock
-      9. Claude Code CLI
-      10. Codex CLI
+      5. Bedrock
+      6. Claude Code CLI
+      7. Codex CLI
     - `get_fast_model` picks the cheap counterpart (`claude-sonnet-5-5`, `gpt-6-luna`).
   - **Fail-over rules** (a run fails over at most once; with no candidate there is no switch; on switch, the conversation is copied over and a warning names both models):
     - **Non-retryable provider error**: Switches to:
@@ -1917,7 +1913,7 @@ Tool profiles (`TOOL_PROFILES` and `TOOL_GROUPS` in `sorcar_agent.py`):
       - With an OpenRouter key, the model's OpenRouter twin, at the same effort level when that alias exists there and on the base twin otherwise.
     - **Safety refusal, content-filter stop, output-cap cut-off or repeated empty turn**: Prefers a model of another family **NEW** (11-01, `model_families.py`), trying in order:
       1. The declared `fallback` when it is of another family.
-      2. The first configured of 11 second-opinion models that is of another family (the list is headed by `gpt-6-astra`, `claude-opus-5-5` and `gemini-3.1-pro-preview`).
+      2. The first configured of 10 second-opinion models that is of another family (the list is headed by `gpt-6-astra`, `claude-opus-5-5` and `gemini-3.1-pro-preview`).
       3. The same-family `fallback` or twin.
     - The same family table picks reviewer sub-agents of another family (section 10).
 - **Vision bridge** **NEW** (11-01, `vision_bridge.py`):
@@ -1929,7 +1925,7 @@ Tool profiles (`TOOL_PROFILES` and `TOOL_GROUPS` in `sorcar_agent.py`):
 - **Credentials and Settings**:
   - Keys live in `~/.kiss/api_keys.env` (one `export KEY=value` line each, mode 0600), loaded at daemon start and applied to the running process when saved, so a newly configured provider's models are listed at once; an empty value deletes the key.
   - **Settings subpanels** (five collapsible subpanels):
-    - **API Keys**: Anthropic, Anthropic workspace id, OpenAI, Z.AI, Moonshot, OpenRouter, Together, Gemini.
+    - **API Keys** **CHANGED** (11-19): Anthropic, Anthropic workspace id, OpenAI, Gemini, OpenRouter.
     - **Custom Models**.
     - **Bedrock** **NEW**: Bearer token, access key id, secret access key, session token, region.
     - **Claude Code** **NEW**: Login state from `claude auth status`, the subscription switch, a `claude setup-token` token.
@@ -1937,7 +1933,7 @@ Tool profiles (`TOOL_PROFILES` and `TOOL_GROUPS` in `sorcar_agent.py`):
   - With a registered machine selected, the Settings sheet reads and writes that machine's configuration, custom models and CLI login state (section 15).
 - **Model picker**:
   - The daemon lists the function-calling models whose provider is configured:
-    - Grouped by vendor (Anthropic with `cc/`, Bedrock, OpenAI with `codex/`, Gemini, Z.AI, Moonshot, OpenRouter, Together AI) and sorted by descending price within a group.
+    - Grouped by vendor (Anthropic with `cc/`, Bedrock, OpenAI with `codex/`, Gemini, OpenRouter) and sorted by descending price within a group.
     - Each row displays its input and output price and its use count (table `model_usage`).
     - Routers head the list, followed by custom models.
   - A pick sets the tab's model and the daemon default (`last_model` in `config.json`).
@@ -2013,10 +2009,10 @@ Tool profiles (`TOOL_PROFILES` and `TOOL_GROUPS` in `sorcar_agent.py`):
 - **Model updates**:
   - The "Update Models" button in Settings runs `python -m kiss.scripts.update_models --model-info ~/.kiss/MODEL_INFO.json` as a detached process, one at a time, logging to `~/.kiss/update_models.log`; the running daemon keeps the catalogue it loaded until it restarts.
   - **Vendor listings and pricing**:
-    - The script lists models from OpenRouter (models and decisions), Together, Gemini, Anthropic, OpenAI and, since 10-21, Bedrock, and Codex slugs from the Codex repository's `models.json`; `cc/` names are derived from the Anthropic listing.
-    - Only the OpenRouter and Together listings carry prices (with context lengths, which Gemini's gives too); the Anthropic, OpenAI and Bedrock listings give ids alone.
+    - The script lists models from OpenRouter (models and decisions), Gemini, Anthropic, OpenAI and, since 10-21, Bedrock, and Codex slugs from the Codex repository's `models.json`; `cc/` names are derived from the Anthropic listing.
+    - Only the OpenRouter listing carries prices (with context lengths, which Gemini's gives too); the Anthropic, OpenAI and Bedrock listings give ids alone.
     - A new direct OpenAI, Anthropic or Gemini entry therefore copies the prices of its OpenRouter twin or, without one, is added at $0 with the comment `NEW: needs pricing` and bills nothing until a later run finds a price.
-    - A direct entry that has a price is never repriced, so a vendor's price change reaches it only through a hand edit, and no listing covers the direct Moonshot and Z.AI entries.
+    - A direct entry that has a price is never repriced, so a vendor's price change reaches it only through a hand edit.
     - It never lists MiniMax models, nor OpenAI `-pro` models since 10-18.
   - **Probing and atomic write**:
     1. The script probes each new model for generation, embeddings, decisions, function calling, the Responses API and the highest effort level it accepts, except new `cc/`, `codex/` and `bedrock/` candidates, which are not probed (a CLI name is entered as a function-calling generator, a Bedrock id copies its Claude twin's flags).
@@ -2238,7 +2234,7 @@ Console script `sea` (added 10-05) **NEW**:
 
 ### Bundled SEAs
 
-`src/kiss/agents/seas/` holds 31 folders: `base` and 30 SEAs, of which 28 are commands, 2 are hidden and 5 are model-picker entries:
+`src/kiss/agents/seas/` holds 36 folders: `base` and 35 SEAs, of which 33 are commands, 2 are hidden and 6 are model-picker entries:
 
 - Below, "caller's" means the setting is left to the tab or the calling task.
 - W marks a `WorkerSea`; all others derive from `BaseSea`.
@@ -2291,7 +2287,7 @@ Console script `sea` (added 10-05) **NEW**:
     - The first edit is refused, twice at most, until the agent has written its interpretation ledger.
     - `finish` (the SEA's own tool, with an `evidence` argument) is checked by the agent's verifier script (900 s cap) and one read-only review (240 s an attempt).
     - The first refusal buys one round whatever refused it, a later round is refused only while a script fails, and 3 rounds are the most.
-  - The gate's readers are `gate_readers.py` (709 lines) and `shell_changes.py` (464 lines).
+  - The gate's readers are `gate_readers.py` (714 lines) and `shell_changes.py` (481 lines).
 - **Profile and own tools**: W.
 - **Model**: per trial.
 - **Budget**: per trial.
@@ -2318,6 +2314,17 @@ Console script `sea` (added 10-05) **NEW**:
   - 100 rounds by default.
 - **Profile and own tools**: `full`.
 - **Model**: caller's (`bestrouter` until 11-16).
+- **Budget**: caller's.
+- **Timeout**: 3,600 s.
+
+#### `/discover_viz` **NEW** (11-17)
+
+- **Purpose**: An HTML animation of the Pareto frontier of a `/discover` run, built from its persisted trajectory (section 3):
+  - The points appear one by one under their parents.
+  - A tooltip on a point shows its `pareto.md` fields.
+  - Every round says how its idea was picked and whether the point was added to the frontier or discarded.
+- **Profile and own tools**: W, `shell+edit+browser`, web on: `discover_trajectory`, `render_discover_viz`.
+- **Model**: caller's.
 - **Budget**: caller's.
 - **Timeout**: 3,600 s.
 
@@ -2364,6 +2371,41 @@ Console script `sea` (added 10-05) **NEW**:
 - **Profile and own tools**: W, `none` (locked): `machine_add`, `machine_remove`, `machine_list`.
 - **Model**: caller's.
 - **Budget**: $1.
+- **Timeout**: 3,600 s.
+
+#### `/memory_consolidate` **NEW** (11-18)
+
+- **Purpose**: Merges near-duplicate memory pages without losing a fact.
+  - A *family* is a connected group of pages of one memory whose embeddings are at cosine similarity 0.9 or more (`kiss.core.memoryfield.consolidate.families`, section 13).
+  - A family is examined only when its bodies fit in one page together (8,192 bytes less 700), none of its pages was written by a merge, all of them are UTF-8, no merge of its pages was undone, and the archive does not record it as left alone with the same pages and text.
+  - Each run examines up to 10 families (`--limit N`), the most similar first, with up to four model calls each (a family stops at the first check it fails):
+    1. The task's model writes the page that replaces the family, or answers `SEPARATE`.
+    2. The judge model writes up to 5 questions per page (20 in all) from the originals without seeing the merged page.
+    3. The judge says for each question whether the merged page still gives the answer.
+    4. The judge reads the originals beside the merged page and lists every fact it no longer finds. The questions only sample the facts: on real merges with one line taken out they noticed the loss in about one page of five, the side-by-side reading in more than nine of ten.
+  - The judge is `--judge <model>`, else the strongest configured model of another family, else the task's model. A family passes only when the merged page fits in a page, answers every question and misses no fact. One run at a time examines a memory.
+- **Writes**:
+  - Nothing unless the task text holds `--apply`: the dry run reports each family with the page it would write.
+  - With `--apply`, a merge copies every member into `<memory>/.archive/<time>-<page>/` with a `merge.json` record, writes the merged page under the newest member's name with `writer: consolidation`, and deletes the other members. Each write and delete happens only while the page is still the text the job read.
+  - With `--apply`, a family that is left as it is because its pages are separate records, the merged page is too large, it did not answer every question or a fact was found missing is recorded in `<memory>/.archive/left-alone.json` and skipped until one of its pages changes. A family whose examination ended in a reply that could not be used is not recorded, so another run examines it again.
+  - `--list` prints the recorded merges and writes nothing; `--restore <merge>` works with or without `--apply`: it writes back each page the merge deleted where no page of that name exists, and the page the merge replaced only while the merged page is still byte for byte what the merge wrote. `--memory <name>` narrows the job to one memory.
+- **Profile and own tools**: W, `none` (locked): `consolidate_memory`, which takes no argument and reads the options from the user's own words of the task text (not from the run context of a scheduled run, which quotes the previous report), so neither the model nor an earlier report can switch writing on. It starts no model call once 10% or less of the task's budget is left.
+- **Model**: caller's.
+- **Budget**: $10.
+- **Timeout**: 3,600 s.
+
+#### `/memory_quiz` **NEW** (11-18)
+
+- **Purpose**: Checks that what finished tasks learned can be found in memory.
+  - Questions the user's own top-level tasks (no sub-agent, no `/ask`) that ran on this machine, ran no SEA and no cron job, succeeded with a result of at least 2,000 characters within the last 2 days (`--days N`) and are not yet in the log; at most 20 per run (`--limit N`). `--task <id prefix>` instead names one task that succeeded on this machine.
+  - Per task, the task's model writes up to 5 questions about durable knowledge in the report (from the last 3,000 characters of the task and the first 10,000 of the report), each with the report sentence that states the answer. A question is used only when the report holds that sentence and the judge model finds its answer and fact stated in the report.
+  - Memory is searched as a new task in the task's work directory would search it, and the judge model (chosen as for `/memory_consolidate`) reads the first 5 results. The outcome is a **hit** when they give the answer, a **retrieval gap** when the pages the task or its sub-tasks wrote or the next 10 results give it, and a **construction gap** when nothing does.
+- **Writes**:
+  - A task whose examination is complete is appended to the log `<memory root>/.quiz/log.jsonl`: one JSON line per question with its outcome, or a single line with the outcome `no questions` when its report holds nothing durable to ask about. A task in the log is not questioned again unless `--task` names it. A task whose questions could not be written or judged is not logged, so another run asks again; a run that completes no task appends nothing. One run at a time questions a memory.
+  - Nothing else unless the task text holds `--write`: then the facts of each task's construction gaps go into one new page `quiz-<first 12 characters of the task id>`, in the repository's domain memory when the task ran in one and the general memory otherwise, with `writer: quiz`, no `verified` time, a `review_after` 21 days ahead and, for each fact, the passage of the report it came from. An existing page of that name is never overwritten.
+- **Profile and own tools**: W, `none` (locked): `quiz_memory`, which takes no argument and reads the options as `/memory_consolidate` does. It starts no model call once 10% or less of the task's budget is left.
+- **Model**: caller's.
+- **Budget**: $10.
 - **Timeout**: 3,600 s.
 
 #### `/merge`
@@ -2558,6 +2600,8 @@ Console script `sea` (added 10-05) **NEW**:
   - `recommendations.json`
   - `machines.json`
   - `memories/<repo>/knowledge.sqlite3`
+  - `.archive/` in each memory directory (`/memory_consolidate`'s merges and `left-alone.json`)
+  - `memories/.quiz/log.jsonl` (`/memory_quiz`)
   - `channel_work/`
   - `cron/jobs.json` (the weekly rsi7d, daily knowledge, recommendations and good-morning jobs)
   - Read access to `history.db`
@@ -2638,16 +2682,16 @@ One dispatcher (`src/kiss/agents/sorcar/agent_dispatch.py`, 3,422 lines, with th
 - **End of the caller's run**:
   - `finish` and `commit_and_merge` are each refused once while jobs are still running, with their ids; a job still running when the run ends is cancelled.
   - Stop on the caller cancels the sub-task its call is waiting on, and what a stopped sub-task spent is still charged to the caller.
-- **Clean-up when a sub-agent ends** **NEW** (11-11):
-  - A sub-agent on the host or in an attached container gets a private folder, `<system temp dir>/kiss-sub-<8 characters>`, which is:
+- **Clean-up when a sub-agent ends** **NEW** (11-11; under `kiss-tmp/` since 11-18):
+  - A sub-agent gets a private folder inside the agents' temp directory, `<OS temp dir>/kiss-tmp/kiss-sub-<random>` on the host and `/tmp/kiss-tmp/kiss-sub-<8 hex>` in an attached container **CHANGED** (11-18), which is:
     - The `Scratch dir` of its Task Settings.
     - The `TMPDIR`, `TMP` and `TEMP` of every command its tools start (on Windows `TMPDIR` only: Git Bash takes `/tmp` for all of a user's shells from the `TMP`/`TEMP` of whichever started first, so a private folder there left those shells without `/tmp` once it was deleted).
-    - The place of its job logs and spilled output, so none of these lands under the work tree's `tmp/`.
+    - The place of its job logs and spilled output, separate from the parent task's scratch dir.
   - When its run ends (finish, failure, Stop or the caller's kill), clean-up runs in order:
     1. Its background jobs are killed.
     2. Every process whose start environment still carries `KISS_SUBAGENT_DIR=<folder>` is killed (`processes.kill_env_marked`, which also finds a process that left its group through `setsid` or `nohup`).
     3. The folder is deleted.
-  - A top-level task keeps `./tmp/<task-id>/` and its jobs.
+  - A top-level task keeps `<OS temp dir>/kiss-tmp/<task-id>/` (`<OS temp dir>/kiss-tmp/` with no task id; `/tmp/kiss-tmp/…` in a container) and its jobs **CHANGED** (11-18; `./tmp/<task-id>/` before).
   - Not covered: a process started with a scrubbed environment or as another user, exec-bridge runs, and the folder of a sub-agent whose daemon died.
 
 ### Fan-out guards, review rules and sandboxes
@@ -2660,7 +2704,7 @@ One dispatcher (`src/kiss/agents/sorcar/agent_dispatch.py`, 3,422 lines, with th
     3. Else a strong model of its own family.
   - Four cases pass:
     - A review.
-    - A fan-out of two or more tasks that each name a piece of their own (paths, directories, dotted names, URLs, backticked spans; `tmp/` paths and a piece named by every task of a fan-out of three or more do not count).
+    - A fan-out of two or more tasks that each name a piece of their own (paths, directories, dotted names, URLs, backticked spans; scratch paths — `tmp/`, `/tmp/`, `kiss-tmp/` and `kiss-sub-…` — and a piece named by every task of a fan-out of three or more do not count **CHANGED** (11-18)).
     - A caller whose own task asks for sub-agents (it mentions sub-agents, sub-tasks, `run_agent`, `run_parallel`, parallel agents, adversarial testing or training, a second opinion or a reviewer).
     - Another model, or another effort of the same model, named by the call or by the SEA, whatever its vendor.
   - Channels, `inherit: false` calls and runs on another machine are not checked.
@@ -2692,7 +2736,7 @@ One dispatcher (`src/kiss/agents/sorcar/agent_dispatch.py`, 3,422 lines, with th
   - `run_parallel(tasks, agent="", model="", tool_profile="", max_budget="", timeout="", options="", description="")` is one `run_agent` call per task of a JSON array, started together and waited for together; the `max_workers` argument is gone.
   - The SEA is resolved and checked once and every task is planned before any starts, so an error starts nothing.
   - The result is a YAML list in input order, and a child still running at `timeout` is returned as a job notice.
-  - A report over `tool_output_max_chars` (50,000) is written to a file and replaced by a digest of one line per child (11-02).
+  - A report over `tool_output_max_chars` (50,000) is written to `<scratch dir>/tool-out/<tag>-agents.txt` in the caller's scratch dir and replaced by a digest of one line per child (11-02; returned whole when the caller's tools run in a sandbox **CHANGED** (11-18)).
   - `tasks` is parsed leniently (raw newlines and lone backslashes are repaired) and a `$(...)` substitution is rejected.
   - `run_parallel` and `number_of_cores` are offered only to a run in parallel mode:
     - The web client always asks for it.
@@ -2701,7 +2745,7 @@ One dispatcher (`src/kiss/agents/sorcar/agent_dispatch.py`, 3,422 lines, with th
   - The prompt asks for at most two levels of nesting; the code sets no limit.
 - **`run_commands_parallel`**:
   - `run_commands_parallel(commands, max_workers=0, timeout_seconds=1800, max_output_chars=5000, description="")` runs shell commands concurrently in threads with no model in the loop (section 7).
-  - A report too long for the context is written under `tmp/tool-out/` and replaced by a digest.
+  - On the host, a report too long for the context is written under `<scratch dir>/tool-out/` **CHANGED** (11-18) and replaced by a digest.
 - **Sub-agent tabs**:
   - A sub-agent's tab has the deterministic id `{parent_tab_id}__sub_{task_id}`.
   - It opens on every connected client while the sub-agent runs and is closed everywhere by `subagentDone` when the sub-agent finishes, or by `closeSubagentTab` when any client closes it.
@@ -2730,7 +2774,7 @@ One dispatcher (`src/kiss/agents/sorcar/agent_dispatch.py`, 3,422 lines, with th
 - **LLM classifier**:
   - Makes one non-agentic call on the run's model, whose prompt asks for a bare JSON verdict.
   - **Provider attempts**:
-    - For Gemini and the OpenAI-compatible providers (OpenAI, OpenRouter, Together, Z.AI, Moonshot) the call also enforces the verdict's JSON schema, and one prompt-only attempt follows when it yields no verdict.
+    - For Gemini and the OpenAI-compatible providers (OpenAI, OpenRouter) the call also enforces the verdict's JSON schema, and one prompt-only attempt follows when it yields no verdict.
     - Every other provider, Anthropic included, gets a single prompt-only attempt.
   - **Limits and timeouts**:
     - The task is cut to 20,000 characters, and each attempt is configured with an output cap of 1,000 tokens (`max_tokens`), a `stream_stall_timeout` of 60 s and a nominal budget of $1, which is checked before the single request and cannot stop it.
@@ -2838,7 +2882,7 @@ One dispatcher (`src/kiss/agents/sorcar/agent_dispatch.py`, 3,422 lines, with th
 - **Write guard** **NEW** (`_guard_worktree`): while the run has the tools:
   - `Write` or `Edit` of a checkout path that git does not ignore is refused until the repository has a worktree, and the refusal names the `create_worktree` call to make.
   - A path of a repository whose worktree the work dir is not in is refused with the worktree path to use; an absolute checkout path of the work dir's own worktree is remapped into it.
-  - Ignored paths (`git check-ignore`), paths inside a worktree and repositories whose worktree setup failed pass.
+  - Scratch files (`_is_scratch_path`), ignored paths (`git check-ignore`), paths inside a worktree and repositories whose worktree setup failed pass **CHANGED** (11-18).
   - `rollback` is refused while the work dir is in a checkout (checkpoints, section 7).
   - The first `finish` with an unmerged worktree is refused once.
   - `Bash` is outside this guard, except for a shell rewrite that it applies as a `Write` or an `Edit` (section 7), which is judged like one: any other `Bash` write goes straight into the checkout, and the worktree rules of `Bash` (section 7) apply only inside a worktree.
@@ -2886,7 +2930,7 @@ One dispatcher (`src/kiss/agents/sorcar/agent_dispatch.py`, 3,422 lines, with th
   - After a daemon restart no bar is shown; the branch and directory remain for a manual merge.
   - The CLI names the unmerged branch and directory on stderr; a library caller uses `agent.merge()`, `agent.discard()` or `agent.leave_as_is()`.
 - **Git-ignored files**:
-  - A worktree's git-ignored files (`tmp/`, build output, a `.env`) are in no commit, and nothing copies them into the checkout.
+  - A worktree's git-ignored files (build output, caches, a `.env`) are in no commit, and nothing copies them into the checkout.
   - A merge, a retirement, a discard and the orphan reclaim remove them with the worktree directory.
 
 ### Commits and Source Control
@@ -2939,13 +2983,15 @@ One dispatcher (`src/kiss/agents/sorcar/agent_dispatch.py`, 3,422 lines, with th
 
 ## 13. Persistent memory and repository knowledge
 
-`kiss.core.memoryfield` (`pages.py`, `index.py`, `tools.py`, `evaluate.py`; 2,720 lines with `__init__.py`):
+`kiss.core.memoryfield` (`pages.py`, `index.py`, `statements.py`, `tools.py`, `consolidate.py`, `evaluate.py`; 3,907 lines with `__init__.py`):
 
 ### Storage, indexing and tools
 
 - **Pages**:
   - A flat directory of Markdown files with YAML frontmatter (`title`, `uuid`, `summary`, `created`, `updated`), names `^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$`, and an 8 KB guideline (larger pages are saved with a warning and only the first 8,192 bytes are embedded).
   - A write keeps the stored `uuid` and `created`, refuses an empty body and publishes atomically; a delete writes `.tombstones/<name>` before it removes the page, so a sync cannot resurrect it.
+  - Conditional write and delete **NEW** (11-18): `MemoryDir.write(..., expected=)` and `MemoryDir.delete(name, expected=)` act only while the stored page is still the text the caller read (`""` for a page that must not exist), compared under the memory's lock; otherwise they raise `PageChangedError` and change nothing. The maintenance SEAs use it so a page another task stored meanwhile is never overwritten or deleted.
+  - Consolidation **NEW** (11-18): `consolidate.py` is the model-free part of `/memory_consolidate` (section 9). `families()` groups the near-duplicate pairs of a memory into connected families and marks the ones to leave alone; `commit()` copies the members into `<memory>/.archive/<time>-<page>/`, writes the merged page under the newest member's name and deletes the others, each step conditional; `restore()` writes the archived pages back with a fresh `updated` time, so they outlive the tombstones on other machines; `leave_alone()` records a family examined and not merged. The `.archive/` directory is read by no page listing, index or machine sync.
   - Writes and deletes of one memory are serialised across processes by the lock file `<memory>.lock` beside its directory (60 s wait, then the tool returns an error) **NEW** (10-18).
   - Symlinked pages, index files and tombstone directories are refused; sync and editor debris (`.DS_Store`, `desktop.ini`, `Thumbs.db`, `*~`, `*.sync-conflict-*`) is ignored.
 - **Index**:
@@ -2977,7 +3023,7 @@ One dispatcher (`src/kiss/agents/sorcar/agent_dispatch.py`, 3,422 lines, with th
   - Rule 1 no longer demands a `memory_search` as the first turn **CHANGED** (10-25): the model reads the listed pages it needs, searches only for a sub-topic the list does not cover and, when a page updated in the last 30 days answers a factual question, re-verifies only the facts that change (prices, versions, dates) on at most three sites.
   - The other rules are as before:
     - Record durable knowledge one topic per page under about 8 KB with sources.
-    - Store no secrets, credentials or raw transcripts and keep per-round notes in `./tmp/PROGRESS.md`.
+    - Store no secrets, credentials or raw transcripts and keep per-round notes in `<scratch dir>/PROGRESS.md` **CHANGED** (11-18; `./tmp/PROGRESS.md` before).
     - Call `memory_refresh` when results look redundant or outdated.
 - **Location and domains**:
   - The general memory is `~/.kiss/memories/`, or the directory named by the `memory_dir` key of `~/.kiss/config.json`.
@@ -3055,7 +3101,7 @@ One dispatcher (`src/kiss/agents/sorcar/agent_dispatch.py`, 3,422 lines, with th
 
 ## 14. The kiss-web daemon and remote web app
 
-- **Codebase**: `src/kiss/server/` (37 modules, 45,818 lines; `web_server.py` 11,812).
+- **Codebase**: `src/kiss/server/` (38 modules, 45,818 lines; `web_server.py` 11,812).
 - **Daemon responsibilities** (one daemon per machine):
   - Owns the agents, the tab registry, the cron scheduler (section 20), the SEA slash-command watcher (section 9), the browser and terminal tab services, the file index and the daemon side of voice (section 18).
   - The spare-worktree pool it used to prewarm was removed 10-09 (section 12).
@@ -3091,7 +3137,7 @@ One dispatcher (`src/kiss/agents/sorcar/agent_dispatch.py`, 3,422 lines, with th
   - With no password stored the daemon serves only loopback peers and machine links with an enrolled client certificate: other peers get a 403 and no tunnel is started.
   - Five wrong passwords from one address within 60 s lock that address out (`auth_locked` with `retry_after`).
 - **Command catalogue**:
-  - `sorcar.py` `API` lists 88 commands (41 forwarded unchanged to the backend, 47 with their own `ServerApi` handler).
+  - `sorcar.py` `API` lists 90 commands (42 forwarded unchanged to the backend, 48 with their own `ServerApi` handler).
   - Dispatch pipeline:
     1. `validate_command` refuses an unknown name or a missing required field.
     2. `ServerApi.dispatch` routes the command.
@@ -3117,6 +3163,11 @@ One dispatcher (`src/kiss/agents/sorcar/agent_dispatch.py`, 3,422 lines, with th
   - A replay is bounded, and embedded pictures travel as handles the page fetches with `getReplayImage` **NEW**. The bounds:
     - The text of a `thinking_delta`, `text_delta` or `system_output` event, when longer than 200,000 characters, is cut to its first and last 100,000 joined by a note counting the omitted ones.
     - A 16 MiB budget applies for the serialised events, past which the oldest are left out with a note while the newest is always kept.
+  - A transcript is loaded in the pieces the reader opens (`server/lazy_replay.py`, 11-18) **NEW**, for a page that sends `lazy: true` with `ready` or `resumeSession`:
+    - A finished task is sent as its settings, a `trajectory` stub with the panel count, its result cards and its last usage; a running task is sent its outline at once.
+    - `getTaskEvents` fetches the outline (the summaries and every panel no summary folded) when the Trajectory panel is opened and, with `seg`, the panels one summary folded; a tab bound to another machine fetches over the machine link.
+    - The layout is computed from the event rows without their bodies, and a finished task's first piece is kept in the database, so opening the chat again reads the task row, that piece and the few rows it names.
+    - A history click is broadcast to every page that shows the tab, so it comes in pieces only when all of them load that way.
   - Replay snapshots are taken under the delivery lock with a reserved send slot, so no event is duplicated or lost.
 - **Browser tab**:
   - `BrowserTabService`:
@@ -3395,7 +3446,7 @@ A daemon keeps a registry of other computers' daemons and drives them from its o
     - The merge waits 2 s (`HISTORY_FANOUT_WAIT`).
     - A slower machine contributes the page it last answered with, and a `tasks_updated` follows when the rows it then brings differ.
   - Remote row display and actions:
-    - Remote rows carry a machine chip, and a machine filter (all, this machine, each registered machine) appears once a machine is registered.
+    - Every row's **...** menu names the machine it ran on (a registered machine's label or this daemon's host name, **CHANGED** 11-19), and a machine filter (all, this machine, each registered machine) appears once a machine is registered.
     - A click resumes the chat in a local tab bound to the machine.
     - The favourite star, title edit and delete buttons of a remote row, and the star of its chat (11-16), act on that machine's `history.db` (`setFavorite`, `setChatSummary`, `setChatFavorite`, `deleteTask`, `deleteChat`).
   - A task that a history sync copied in is listed under the machine it ran on: `task_history.machine` holds that machine's short host name, matched to a registered machine through `~/.kiss/machine_hosts.json`.
@@ -3509,6 +3560,7 @@ A daemon keeps a registry of other computers' daemons and drives them from its o
     - **Summary digest**: A `summary` call works differently: it gathers the panels since the previous summary (or the Task panel) under one folded digest, Thinking included, and leaves questions, user messages, `/ask` answers and other panels with pictures outside it.
     - Both rules are **CHANGED** (10-06, 10-07; before, the sweep also folded Thinking and answered questions, and a digest took in questions and pictures).
     - **Trajectory** **NEW** (10-07): When the task ends, its event panels fold into a single Trajectory panel ("N events") between the task and the result.
+    - **NEW** (11-18): In a chat loaded from history the Trajectory panel is fetched when it is opened, and each summary digest inside it fetches the panels it folded when opened in turn; Save chat first loads what the page still lacks.
   - **Result panel and Suggested next**:
     - The Result panel shows the summary as sanitised HTML with a `Status: FAILED` or `Status: Continue` line when it applies.
     - Tokens and cost left its header on 10-12 **CHANGED** and are read in Task Info.
@@ -3573,7 +3625,7 @@ A daemon keeps a registry of other computers' daemons and drives them from its o
 - **Footer and "..." menu**:
   - **Footer controls** (under the composer):
     - The Chats and Task info drawer buttons (shown only in a narrow window on a device without touch).
-    - **+** for a new chat (an untouched new chat is reused).
+    - **New chat** (a chat-bubble icon with a `+` inside its top right, **CHANGED** 11-19; an untouched new chat is reused).
     - Inject.
     - The model picker.
     - **...**, whose 11 entries are Voice trigger, Save chat, Attach files, Git Commit, Browser, Terminal, Dark mode or Light mode, High contrast, Auto mode, iPhone Home Screen and Settings.
@@ -3617,19 +3669,16 @@ The left sidebar, a drawer on a phone:
     3. Yesterday.
     4. One section per earlier day.
 - **Chat group header and actions**:
-  - A chat is one group whose header shows the stored chat summary (section 11) or the first task, an age and, when one applies, the last task's status mark **NEW** (10-07):
+  - A chat is one group whose header is a single ellipsized line showing the stored chat summary (section 11) or the first task, a **...** menu button at the right and, when one applies, the last task's status mark **CHANGED** (11-19; mark **NEW** 10-07):
     - A spinner while it runs.
     - A `?` while it waits for an answer (10-06).
     - A red cross once it failed.
     - A green tick only when it finished while this page was open; a task that succeeded before the page loaded has no mark.
   - Header actions:
-    - Clicking the header opens the chat **CHANGED** (10-08).
-    - A chevron unfolds its tasks.
-    - A star marks the chat as a favourite **NEW** (11-16).
-    - A pencil or a double-click renames it **NEW** (10-15: Enter saves, Escape cancels, an empty box restores the computed summary).
-    - A trash button deletes it after a second click **NEW** (10-20).
+    - Clicking the header opens the chat **CHANGED** (10-08), and double-clicking the title renames it **NEW** (10-15).
+    - The **...** button opens a popover menu **CHANGED** (11-19) with named items (**Show the chat's tasks** or **Hide the chat's tasks**, **Favourite chat** **NEW** 11-16, **Edit the chat summary** where Enter saves, Escape cancels and an empty box restores the computed summary, and **Delete chat** **NEW** 10-20, confirmed inside the menu), followed under a hairline by the relative time of the latest task and the machine the header opens the chat on.
 - **Task rows**:
-  - A task row has the same mark, the text, favourite, copy and delete (**NEW** 10-20, not while the task runs), and age and machine labels (the tag and SEA labels left on 11-12).
+  - A task row is a single ellipsized line (**CHANGED** 11-19, down from three) with the same status mark, the task text and a **...** button whose popover menu lists **Favourite task**, **Copy task to clipboard**, **Expand task details**, **Delete task** (**NEW** 10-20, not while the task runs), the launch age and the machine name (the tag and SEA labels left on 11-12).
   - Unfolded, it adds metrics, working directory, model, budget and the chat, task and parent ids with copy buttons.
 - **Registered machines**:
   - Chats of every registered machine are merged in **NEW** (10-10, 10-24), open in a tab bound to that machine (10-13), and their rename, favourite and delete are sent to the machine that owns them (11-08).
@@ -3740,14 +3789,14 @@ The left sidebar, a drawer on a phone:
   - **Use web tools**: Default on.
   - **Use persistent memory**: Default on (section 13).
   - **Compaction** **NEW** (11-05): Default on (section 6).
-  - **Drive my Chrome** **NEW** (10-28): Default off (section 17).
-  - **Play a victory sound when a task finishes** **NEW** (11-04): Default on; kept per browser.
+  - **Drive my Chrome** **NEW** (10-28): Default off (section 17); the **?** button next to it pops up the steps that install the Chrome extension **CHANGED** (11-19, they were the checkbox's label before).
+  - **Play a sound when a task finishes** **NEW** (11-04; the label was shortened on 11-19): Default on; kept per browser.
   - **Auto submit spoken task**: Default Yes; kept per browser (section 18).
   - **Wake phrase ("Hey Sorcar") sensitivity**: Default 80; slider from 0 to 100; kept per browser.
   - **Tips, Update, Reset Server, Update Models** (buttons):
     - Reset Server asks "Restart the server?" first when a task is running.
     - Update, Reset Server and Update Models act on this daemon and are hidden on another machine's sheet.
-  - **API Keys** (folded): 8 fields: Anthropic key and workspace id, OpenAI, Z.AI, Moonshot, OpenRouter, Together, Gemini.
+  - **API Keys** (folded) **CHANGED** (11-19): 5 fields: Anthropic key and workspace id, OpenAI, Gemini, OpenRouter.
   - **Custom Models** (folded):
     - Name, endpoint, API key and headers boxes with Add.
     - Under them, the models saved in `~/.kiss/MY_MODELS.json` (section 8), each with Edit (which loads it into the boxes, swaps Add for Save and Cancel and may rename it) and a two-step Delete.
@@ -3774,7 +3823,7 @@ The left sidebar, a drawer on a phone:
     - A swipe right on the file screen returns to the chat, on its machine, that the screen was reached from (11-12); over a streamed browser page it does so only when the machine's daemon says that nothing under the finger had anything left to scroll that way (`browserTouch`).
     - The two drawer buttons are hidden there and a sticky notice explains the swipe **NEW** (10-19); it returns on every page load until its "Do not show this again" box is ticked, which that browser remembers (`kiss-swipe-hint-dismissed`).
   - **Composer folding**:
-    - The composer's text box folds away while a task runs, and **+** unfolds and focuses it (11-06).
+    - The composer's text box folds away while a task runs, and **New chat** unfolds and focuses it (11-06).
 - **Appearance**:
   - **Themes and modes**:
     - Light (VS Code Light Modern, the default) and dark (Dark Modern), plus High contrast and Auto mode **NEW** (10-17; Auto is dark from 19:00 to 07:00 on the device clock).
@@ -3783,6 +3832,8 @@ The left sidebar, a drawer on a phone:
     - `main.css` defines 90 root tokens (7 font sizes, 11 spacing steps, 9 radii, 5 shadows, 3 durations, a 17-layer z-index scale and the colours).
     - `remote-codex.css` sets 64 custom properties on the page body from the theme palette that the daemon inlines.
     - Text is 13 px.
+  - **Auto-hiding scrollbars** **NEW** (11-19):
+    - Scrollbars in the sidebars, transcript and menus stay hidden at rest and show a slim pill thumb while the user scrolls (for 1.2 s after the last user scroll, or while hovered or dragged), keeping their gutter reserved so rows do not shift.
 - **Updates and refresh**:
   - When the daemon finds a newer release (section 14):
     - A sticky toast offers Update, Update when idle (installed the first time no task is running; Cancel calls it off) and Remind me later (24 hours, in every window).
@@ -3950,7 +4001,7 @@ The left sidebar, a drawer on a phone:
 - **Sounds**:
   - `working-on-it.mp3` plays when a spoken message is submitted.
   - `victory.mp3` **NEW** (11-04), a half-second synthesised flourish rendered by `kiss.scripts.make_victory_sound`, plays when a top-level task ends with `task_done`, whether it succeeded or not and whether it ran on this daemon or on a registered machine (section 15); sub-agents, errors, stops and replayed transcripts are silent.
-  - The Settings checkbox "Play a victory sound when a task finishes (on this machine or on a registered one)", on by default and kept per browser, mutes it; a play the browser's autoplay policy refuses is kept for the next click or keypress.
+  - The Settings checkbox "Play a sound when a task finishes", on by default and kept per browser, mutes it; a play the browser's autoplay policy refuses is kept for the next click or keypress.
 - **Debug captures** **NEW** (11-07):
   - Every capture the daemon can decode is saved before transcription as a WAV plus a JSON note (the wake flags, then the transcript, its language and whether it was accepted) under `~/.kiss/voice-debug/`, newest 200 kept.
   - In the page, `localStorage.kissVoiceDebug = '1'` logs recognizer results and partials, the microphone track and RMS levels to the console.
@@ -4277,7 +4328,7 @@ The left sidebar, a drawer on a phone:
     2. Runs `install.sh`.
     3. Sets the web app password (`KISS_WEB_PASSWORD`, else the stored one, else a generated one printed in `docker logs`).
     4. Runs `kiss-web` in the foreground on port 8787 (host port `PORT`, 8787 by default).
-  - State persists in the `kiss-sorcar-web-home` volume and 14 variables are forwarded (`GH_TOKEN`, `KISS_WEB_PASSWORD`, the Anthropic key and workspace id, the OpenAI, Gemini, Together and OpenRouter keys, five AWS variables, `CLAUDE_CODE_OAUTH_TOKEN`).
+  - State persists in the `kiss-sorcar-web-home` volume and 13 variables are forwarded (`GH_TOKEN`, `KISS_WEB_PASSWORD`, the Anthropic key and workspace id, the OpenAI, Gemini and OpenRouter keys, five AWS variables, `CLAUDE_CODE_OAUTH_TOKEN`).
   - The launcher probes `https://localhost:PORT`, whose self-signed certificate is accepted once or installed from `/ca.crt`, in a loop of up to 900 rounds that sleeps 1 s after each failed probe, then once more after the loop whether it succeeded or ran out (901 requests at most); a probe has no time limit of its own, so 900 s is not a hard deadline.
   - Inside tasks, `docker_image=` runs the shell and file tools in a container with the work dir mounted at its host path (section 7).
 
@@ -4321,7 +4372,7 @@ The left sidebar, a drawer on a phone:
   - Every stage runs even after an earlier one failed, except that a failed `uv sync` ends the run, and the error lines of each failed stage are repeated at the end of the output, at most 60 per stage.
   - `--read-only` **NEW** (11-11): leaves out the cleaning, `uv sync` and the two generated docs and runs every stage with `uv run --no-sync`, so that it can run beside the tests.
   - `--fix` **NEW** (10-25):
-    - First runs `ruff check --fix src/` (lint fixes only, no formatter), prints one status line per stage and only the residual errors, and stores the verdict in `check-cache.json` under `tmp/`, keyed by `--full` and by a SHA-256 fingerprint of the path, size and modification time of every source file under `src/` and of `pyproject.toml`, `uv.lock` and `pyrightconfig.json`.
+    - First runs `ruff check --fix src/` (lint fixes only, no formatter), prints one status line per stage and only the residual errors, and stores the verdict in `<OS temp dir>/kiss-tmp/check-cache-<12-hex-of-root>.json` (skipped when `kiss-tmp` is not owned by the current user) **CHANGED** (11-18; `tmp/check-cache.json` before), keyed by `--full` and by a SHA-256 fingerprint of the path, size and modification time of every source file under `src/` and of `pyproject.toml`, `uv.lock` and `pyrightconfig.json`.
     - A repeat run on an unchanged tree still does the clean-up (unless `--no-clean`) and the auto-fix, then prints the stored verdict and runs none of the stages.
   - Inside a task's worktree **NEW** (11-02), the stages use the main checkout's `.venv` with the worktree's `src/` and `projects/` first on `PYTHONPATH`:
     - Dependencies are synced with `uv sync --inexact --no-install-project`.
@@ -4341,7 +4392,7 @@ The left sidebar, a drawer on a phone:
   - `--splits N` prints instead a JSON list of at most N commands of the form `uv run pytest -q -p no:cacheprovider --timeout=600 <files>` for `run_commands_parallel`; `--timeout S` changes the per-test limit and `0` omits it.
   - `--owned <paths>` (11-09) selects only the given test files and the tests named for the given modules (`test_<module>.py`, `test_<module>_*.py`), with no import hops, for a sub-agent whose tree also holds its siblings' edits; a module with no such test is named on stderr.
   - Splits are balanced by measured durations (11-09):
-    - The suite's `conftest.py` sums the setup, call and teardown seconds of each test file and merges them at session end, under a file lock, into `tmp/test-durations.json` of the main checkout, which its worktrees share (`$KISS_TEST_DURATIONS` names another file).
+    - The suite's `conftest.py` sums the setup, call and teardown seconds of each test file and merges them at session end, under a file lock, into `<OS temp dir>/kiss-tmp/test-durations.json` **CHANGED** (11-18; `tmp/test-durations.json` of the main checkout before), which the main checkout, every worktree and the commands of sub-agents on the machine share since its last reboot (`$KISS_TEST_DURATIONS` names another file; a sub-agent's commands have its private folder in `kiss-tmp` as their temp directory, and `kiss_tmp_dir()` then names the directory that folder is in).
     - Files go longest first into the lightest split, and a file with no record weighs its size times the median seconds per byte of the recorded files.
 
 ### Test suites, isolation and policy
@@ -4456,8 +4507,8 @@ The left sidebar, a drawer on a phone:
     - Rewrites an unambiguous `uv run <program>` to the main checkout's `.venv/bin/<program>` with the worktree's sources on `PYTHONPATH`, and refuses `uv sync`, `uv add`, `uv remove` and any `uv run` it cannot rewrite, naming the command to run instead **NEW** (11-02; the rewrite 11-03).
     - Refuses a command that names the main checkout's path outside its `.venv` (section 7).
   - Task output paths:
-    - Scratch files go to the task's own `./tmp/<task-id>/` directory **CHANGED** (10-25; it was the shared `./tmp/`).
-    - The progress log goes to `./tmp/PROGRESS.md`.
+    - Scratch files go to `<OS temp dir>/kiss-tmp/<task-id>/` (`<OS temp dir>/kiss-tmp/` with no task id, `<OS temp dir>/kiss-tmp/kiss-sub-<random>/` for a sub-agent, and `/tmp/kiss-tmp/…` in a container; `kiss-tmp-<uid>` when `kiss-tmp` is taken in a shared `/tmp`, private to the user and emptied on the first use after a reboot) **CHANGED** (11-18; `./tmp/<task-id>/` from 10-25, `./tmp/` before).
+    - The progress log goes to `<scratch dir>/PROGRESS.md` **CHANGED** (11-18; `./tmp/PROGRESS.md` before).
     - Reports longer than about 800 words are written as HTML under `./reports`.
   - Agent notes and rules:
     - `AGENTS.md` at the repository root (32 lines; `SORCAR.md` until 10-03) and `CLAUDE.md` (30 lines) **NEW** (10-15) carry notes for coding agents: one home-automation pointer in `AGENTS.md` and the same block of AWS rules in both.

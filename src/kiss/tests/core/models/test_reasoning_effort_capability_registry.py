@@ -6,8 +6,8 @@
 
 Whether ``tools`` + ``reasoning_effort`` survive on the same Chat
 Completions request used to be governed by a hardcoded host allowlist in
-``openai_compatible_model.py`` — every new vendor (OpenRouter, Together,
-...) required a manual patch.  The knowledge now lives in a single
+``openai_compatible_model.py`` — every new vendor (OpenRouter, ...)
+required a manual patch.  The knowledge now lives in a single
 config-driven registry, ``model_info.OPENAI_COMPATIBLE_PROVIDERS``: each
 factory-routed vendor declares ``tools_accept_reasoning_effort``
 (True/False) when verified live, or ``None`` when unverified — in which
@@ -28,7 +28,8 @@ Contract verified here:
   keep the effort; declared-False hosts strip it; unknown and
   declared-None hosts send it optimistically, retry once without it when
   the endpoint rejects it with a 400 mentioning ``reasoning_effort``, and
-  cache the verdict per endpoint either way.
+  cache the verdict per endpoint either way.  No shipped vendor declares
+  ``None``, so that case registers one for the duration of its test.
 """
 
 from __future__ import annotations
@@ -43,6 +44,7 @@ import pytest
 
 from kiss.core.models.model_info import (
     OPENAI_COMPATIBLE_PROVIDERS,
+    OpenAICompatibleProvider,
     model,
     openai_compatible_provider_for_base_url,
 )
@@ -51,7 +53,7 @@ from kiss.core.models.openai_compatible_model import (
     OpenAICompatibleModel,
 )
 
-_KNOWN_VENDORS = {"openai", "openrouter", "together", "zai", "moonshot"}
+_KNOWN_VENDORS = {"openai", "openrouter"}
 
 # The model id every wire test below sends, and therefore half of the
 # (base_url, api_model_name) verdict-cache key.
@@ -113,9 +115,6 @@ class TestFactoryRoutesMatchRegistry:
     _REPRESENTATIVE = {
         "openrouter": "openrouter/openai/gpt-4o",
         "openai": "gpt-4o",
-        "together": "meta-llama/Llama-3.3-70B-Instruct-Turbo",
-        "zai": "glm-4.6",
-        "moonshot": "kimi-k2-0905-preview",
     }
 
     def test_every_vendor_routes_to_registered_base_url(self) -> None:
@@ -135,11 +134,7 @@ class TestFactoryRoutesMatchRegistry:
 
     def test_excluded_prefixes_route_elsewhere(self) -> None:
         """Registry excludes keep non-OpenAI-compatible names out of the table."""
-        together = model(
-            "openai/gpt-oss-20b", model_config={"use_responses_api": False}
-        )
-        assert isinstance(together, OpenAICompatibleModel)
-        assert together.base_url == "https://api.together.xyz/v1"
+        assert type(model("codex/default")).__name__ == "CodexModel"
 
 
 def _chat_ok_json() -> bytes:
@@ -249,8 +244,8 @@ class TestDeclaredCapabilityOnTheWire:
     """Registry-declared verdicts drive the wire behavior directly."""
 
     def test_declared_true_host_keeps_effort(self, wire_server: str) -> None:
-        """A Together-hosted URL keeps tools + reasoning_effort as declared."""
-        m = _make_model(f"{wire_server}/api.together.xyz")
+        """An OpenRouter-hosted URL keeps tools + reasoning_effort as declared."""
+        m = _make_model(f"{wire_server}/openrouter.ai")
         m.initialize("hi")
         m.generate_and_process_with_tools({"echo": echo})
         assert len(_CapabilityHandler.captured_bodies) == 1
@@ -279,12 +274,27 @@ class TestDeclaredCapabilityOnTheWire:
         assert "reasoning_effort" not in body
         assert body["tools"]
 
-    def test_declared_none_vendor_uses_adaptive_path(self, wire_server: str) -> None:
-        """A registered vendor declared None (z.ai) probes adaptively."""
-        base_url = f"{wire_server}/api.z.ai"
-        provider = openai_compatible_provider_for_base_url(base_url)
-        assert provider is not None and provider.name == "zai"
-        assert provider.tools_accept_reasoning_effort is None
+    def test_declared_none_vendor_uses_adaptive_path(
+        self, wire_server: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A registered vendor declared None probes adaptively, as an unknown endpoint does."""
+        unverified = OpenAICompatibleProvider(
+            name="unverified",
+            label="Unverified",
+            host="api.unverified.test",
+            base_url="https://api.unverified.test/v1",
+            prefixes=("unverified-",),
+            excludes=(),
+            api_key_name="OPENROUTER_API_KEY",
+            tools_accept_reasoning_effort=None,
+            delegate_tools_to_responses=False,
+        )
+        monkeypatch.setattr(
+            "kiss.core.models.model_info.OPENAI_COMPATIBLE_PROVIDERS",
+            (*OPENAI_COMPATIBLE_PROVIDERS, unverified),
+        )
+        base_url = f"{wire_server}/api.unverified.test"
+        assert openai_compatible_provider_for_base_url(base_url) is unverified
         m = _make_model(base_url)
         m.initialize("hi")
         m.generate_and_process_with_tools({"echo": echo})

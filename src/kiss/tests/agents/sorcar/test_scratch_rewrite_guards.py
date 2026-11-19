@@ -15,11 +15,17 @@ resolve.  Two changes, bash and GNU sed being the oracles:
   (:func:`kiss.agents.sorcar.useful_tools._is_scratch_path`) runs as
   written, as ``Write`` overwrites one unread; a tracked file keeps
   the refusal naming the ``Edit`` to make.
+
+The scratch files are those of the agents' temp directory now
+(:func:`kiss.core.kiss_tmp.kiss_tmp_dir`); a ``tmp/`` folder of the work
+dir is a folder like any other, its files guarded like tracked ones.
 """
 
 from __future__ import annotations
 
+import os
 import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -34,6 +40,7 @@ from kiss.agents.sorcar.edit_guards import (
 )
 from kiss.agents.sorcar.shell_scan import SimpleCommand, resolve, simple_commands
 from kiss.agents.sorcar.useful_tools import UsefulTools
+from kiss.core.kiss_tmp import kiss_tmp_dir
 from kiss.core.processes import bash_version
 from kiss.tests.conftest import host_sed_is_gnu, posix_only
 
@@ -353,30 +360,40 @@ def test_guards_follow_an_assigned_variable_to_the_file() -> None:
 
 @pytest.fixture
 def work(tmp_path: Path) -> Path:
-    """A work dir holding the tracked ``notes.md`` and the scratch ``tmp/notes.md``."""
+    """A work dir holding the tracked ``notes.md`` and ``tmp/notes.md``, a file like it."""
     (tmp_path / "notes.md").write_text("one\n")
     (tmp_path / "tmp").mkdir()
     (tmp_path / "tmp" / "notes.md").write_text("one\n")
     return tmp_path
 
 
+@pytest.fixture
+def scratch() -> Path:
+    """A folder of the agents' temp directory holding the scratch ``notes.md``."""
+    folder = Path(tempfile.mkdtemp(dir=kiss_tmp_dir()))
+    (folder / "notes.md").write_text("one\n")
+    return folder
+
+
 @pytest.mark.skipif(not host_sed_is_gnu(), reason="GNU sed is the oracle")
-def test_multiline_sed_runs_on_a_scratch_file_only(work: Path) -> None:
+def test_multiline_sed_runs_on_a_scratch_file_only(work: Path, scratch: Path) -> None:
     tools = UsefulTools(work_dir=str(work))
-    out = tools.Bash("sed -i 's/one/&\\ntwo/' tmp/notes.md", "scratch")
-    assert "REFUSED" not in out and (work / "tmp" / "notes.md").read_text() == "one\ntwo\n"
-    out = tools.Bash("T=tmp; sed -i 's/two/&\\nthree/' $T/notes.md", "scratch, variable")
+    out = tools.Bash(f"sed -i 's/one/&\\ntwo/' {scratch}/notes.md", "scratch")
+    assert "REFUSED" not in out and (scratch / "notes.md").read_text() == "one\ntwo\n"
+    out = tools.Bash(f"T={scratch}; sed -i 's/two/&\\nthree/' $T/notes.md", "scratch, variable")
     assert "REFUSED" not in out
-    assert (work / "tmp" / "notes.md").read_text() == "one\ntwo\nthree\n"
-    out = tools.Bash("sed -i 's/one/&\\ntwo/' notes.md", "tracked")
-    assert out.startswith("REFUSED: the `sed -i` call did NOT run") and (
-        (work / "notes.md").read_text() == "one\n")
+    assert (scratch / "notes.md").read_text() == "one\ntwo\nthree\n"
+    # a tracked file is refused, and so is one in tmp/ of the work dir
+    for tracked in ("notes.md", "tmp/notes.md"):
+        out = tools.Bash(f"sed -i 's/one/&\\ntwo/' {tracked}", "tracked")
+        assert out.startswith("REFUSED: the `sed -i` call did NOT run") and (
+            (work / tracked).read_text() == "one\n")
     # A ``{name}>`` or ``11>`` before a redirection names a descriptor to bash
     # and is a word (here: a sed operand, the file named so) to sh: the guard
     # holds under both readings (review 2026-11-04 follow-up 2 F1).
     for brace in ("{fd}", "11"):
         (work / brace).write_text("one\n")
-        out = tools.Bash(f"sed -i 's/one/&\\ntwo/' tmp/notes.md {brace}>tmp/log", "operand")
+        out = tools.Bash(f"sed -i 's/one/&\\ntwo/' {scratch}/notes.md {brace}>tmp/log", "operand")
         assert out.startswith("REFUSED: the `sed -i` call did NOT run"), out
         assert (work / brace).read_text() == "one\n"
     out = tools.Bash("{fd}>tmp/log sed -i 's/one/&\\ntwo/' notes.md", "before the command")
@@ -384,12 +401,13 @@ def test_multiline_sed_runs_on_a_scratch_file_only(work: Path) -> None:
     assert (work / "notes.md").read_text() == "one\n"
     # The file need not have been shown: a one-substitution sed on a scratch
     # file is applied as the Edit it stands for, unread.
-    out = tools.Bash("sed -i 's/three/3/' tmp/notes.md", "mechanical")
+    out = tools.Bash(f"sed -i 's/three/3/' {scratch}/notes.md", "mechanical")
     assert out.startswith("Applied as Edit(") and (
-        (work / "tmp" / "notes.md").read_text() == "one\ntwo\n3\n")
-    out = tools.Bash("sed -i 's/one/1/' notes.md", "mechanical, tracked")
-    assert out.startswith("REFUSED: the `sed -i` call did NOT run") and "not shown" in out
-    assert (work / "notes.md").read_text() == "one\n"
+        (scratch / "notes.md").read_text() == "one\ntwo\n3\n")
+    for tracked in ("notes.md", "tmp/notes.md"):
+        out = tools.Bash(f"sed -i 's/one/1/' {tracked}", "mechanical, tracked")
+        assert out.startswith("REFUSED: the `sed -i` call did NOT run") and "not shown" in out
+        assert (work / tracked).read_text() == "one\n"
 
 
 _REWRITE = (
@@ -398,18 +416,21 @@ _REWRITE = (
 )
 
 
-def test_python_heredoc_rewrites_a_scratch_file_only(work: Path) -> None:
+def test_python_heredoc_rewrites_a_scratch_file_only(work: Path, scratch: Path) -> None:
     tools = UsefulTools(work_dir=str(work))
-    out = tools.Bash(_REWRITE.format(path="tmp/notes.md"), "scratch")
-    assert "REFUSED" not in out and (work / "tmp" / "notes.md").read_text() == "uno\n"
-    out = tools.Bash(_REWRITE.format(path="notes.md"), "tracked")
-    assert out.startswith("REFUSED: the python heredoc did NOT run") and (
-        (work / "notes.md").read_text() == "one\n")
+    note = f"{scratch}/notes.md"
+    out = tools.Bash(_REWRITE.format(path=note), "scratch")
+    assert "REFUSED" not in out and (scratch / "notes.md").read_text() == "uno\n"
+    # a tracked file is refused, and so is one in tmp/ of the work dir
+    for tracked in ("notes.md", "tmp/notes.md"):
+        out = tools.Bash(_REWRITE.format(path=tracked), "tracked")
+        assert out.startswith("REFUSED: the python heredoc did NOT run") and (
+            (work / tracked).read_text() == "one\n")
     # A path the program builds at run time may name any file: refused as before.
-    built = _REWRITE.replace("p = {path!r}", "d = 'tmp'\np = f'{d}/notes.md'")
+    built = _REWRITE.replace("p = {path!r}", f"d = {str(scratch)!r}\np = f'{{d}}/notes.md'")
     out = tools.Bash(built, "f-string path")
     assert out.startswith("REFUSED: the python heredoc did NOT run")
-    assert (work / "tmp" / "notes.md").read_text() == "uno\n"
+    assert (scratch / "notes.md").read_text() == "uno\n"
     # The write need not be the pattern python_edit converts: a tracked file
     # rewritten with the .replace inline in the write stays refused...
     inline = ("python3 - <<'EOF'\np='notes.md'\ns=open(p).read()\n"
@@ -417,7 +438,7 @@ def test_python_heredoc_rewrites_a_scratch_file_only(work: Path) -> None:
     out = tools.Bash(inline, "inline")
     assert out.startswith("REFUSED: the python heredoc did NOT run")
     # ...and a program writing a scratch file and a tracked one too.
-    both = _REWRITE.format(path="tmp/notes.md").replace(
+    both = _REWRITE.format(path=note).replace(
         "open(p, 'w')", "open('notes.md', 'a')\nopen(p, 'w')")
     out = tools.Bash(both, "two files")
     assert out.startswith("REFUSED: the python heredoc did NOT run")
@@ -426,40 +447,41 @@ def test_python_heredoc_rewrites_a_scratch_file_only(work: Path) -> None:
     # into the scratch dir before it, a check after it): the program is read from
     # the python command's own here-document, and its relative path resolves
     # from the directory the ``cd`` left it in.
-    (work / "tmp" / "notes.md").write_text("one\n")
-    around = "cd tmp && " + _REWRITE.format(path="notes.md") + "\ngrep -c uno notes.md"
+    (scratch / "notes.md").write_text("one\n")
+    around = f"cd {scratch} && " + _REWRITE.format(path="notes.md") + "\ngrep -c uno notes.md"
     out = tools.Bash(around, "cd before, grep after")
-    assert out.strip() == "1" and (work / "tmp" / "notes.md").read_text() == "uno\n"
+    assert out.strip() == "1" and (scratch / "notes.md").read_text() == "uno\n"
     assert (work / "notes.md").read_text() == "one\n"
-    out = tools.Bash("cd tmp && " + _REWRITE.format(path="../notes.md"), "cd, then tracked")
+    leaving = os.path.relpath(work / "notes.md", scratch)  # ../../<...>/notes.md
+    out = tools.Bash(f"cd {scratch} && " + _REWRITE.format(path=leaving), "cd, then tracked")
     assert out.startswith("REFUSED: the python heredoc did NOT run")
     assert (work / "notes.md").read_text() == "one\n"
     # an expanding here-document (unquoted delimiter) with a ``$`` is unknown text
-    expanding = _REWRITE.format(path="tmp/notes.md").replace("<<'EOF'", "<<EOF").replace(
+    expanding = _REWRITE.format(path=note).replace("<<'EOF'", "<<EOF").replace(
         "'uno'", "'$uno'") + "\necho done"
     out = tools.Bash(expanding, "expanding")
     assert out.startswith("REFUSED: the python heredoc did NOT run")
     # every python of the command is read (review 2026-11-03): a scratch rewrite
     # first does not let a tracked rewrite after it run
-    (work / "tmp" / "notes.md").write_text("one\n")
-    two = _REWRITE.format(path="tmp/notes.md") + "\n" + _REWRITE.format(path="notes.md")
+    (scratch / "notes.md").write_text("one\n")
+    two = _REWRITE.format(path=note) + "\n" + _REWRITE.format(path="notes.md")
     out = tools.Bash(two, "scratch, then tracked")
     assert out.startswith("REFUSED: the python heredoc did NOT run")
     assert (work / "notes.md").read_text() == "one\n"
-    assert (work / "tmp" / "notes.md").read_text() == "one\n"
-    two = _REWRITE.format(path="tmp/notes.md") + "\n" + _REWRITE.format(path="tmp/notes.md")
+    assert (scratch / "notes.md").read_text() == "one\n"
+    two = _REWRITE.format(path=note) + "\n" + _REWRITE.format(path=note)
     assert "REFUSED" not in tools.Bash(two, "scratch twice")
-    assert (work / "tmp" / "notes.md").read_text() == "uno\n"
+    assert (scratch / "notes.md").read_text() == "uno\n"
     # A program changing its directory (audit 2026-11-04 S5 F10) writes a relative
     # path in a directory the scanner's cwd does not name: here the tracked file
-    # above the scratch one the ``cd`` would resolve ``notes.md`` to.  Refused.
-    (work / "tmp" / "notes.md").write_text("one\n")
+    # of the work dir, not the scratch one the ``cd`` would resolve ``notes.md`` to.  Refused.
+    (scratch / "notes.md").write_text("one\n")
     moved = _REWRITE.format(path="notes.md").replace(
-        "import re\n", "import re, os\nos.chdir('..')\n")
-    out = tools.Bash("cd tmp && " + moved, "cd, then chdir back")
+        "import re\n", f"import re, os\nos.chdir({str(work)!r})\n")
+    out = tools.Bash(f"cd {scratch} && " + moved, "cd, then chdir back")
     assert out.startswith("REFUSED: the python heredoc did NOT run")
     assert (work / "notes.md").read_text() == "one\n"
-    assert (work / "tmp" / "notes.md").read_text() == "one\n"
+    assert (scratch / "notes.md").read_text() == "one\n"
 
 
 #: A read-replace-write of ``f`` whose replacements are one chain of 400 calls.
@@ -519,7 +541,7 @@ def test_a_python_rewrite_too_deep_to_read_is_refused_not_raised() -> None:
 
 
 def test_a_heredoc_copying_python_rewrite_text_is_data(work: Path) -> None:
-    # The body a ``cat`` copies into a scratch script is data, not a python
+    # The body a ``cat`` copies into a new script is data, not a python
     # heredoc the command runs (audit 2026-11-04 S5 F13): the copy runs...
     tools = UsefulTools(work_dir=str(work))
     script = _REWRITE.format(path="notes.md").replace(
@@ -591,12 +613,15 @@ def test_a_heredoc_copying_python_rewrite_text_is_data(work: Path) -> None:
         assert rewrite_guard(sink + body, str(work), lambda path: True) is None, sink
 
 
-def test_heredoc_copies_through_a_variable_reach_scratch_files(work: Path) -> None:
+def test_heredoc_copies_through_a_variable_reach_scratch_files(work: Path, scratch: Path) -> None:
     tools = UsefulTools(work_dir=str(work))
-    out = tools.Bash("T=tmp/probe; mkdir -p $T; cat > $T/s.py <<'EOF'\nprint(1)\nEOF", "create")
-    assert "REFUSED" not in out and (work / "tmp" / "probe" / "s.py").read_text() == "print(1)\n"
-    out = tools.Bash("P=tmp/notes.md; cat >> $P <<'EOF'\ntwo\nEOF", "append")
-    assert "REFUSED" not in out and (work / "tmp" / "notes.md").read_text() == "one\ntwo\n"
-    out = tools.Bash("P=notes.md; cat >> $P <<'EOF'\ntwo\nEOF", "tracked")
-    assert out.startswith(HEREDOC_VERDICT.format(path=work / "notes.md"))
-    assert (work / "notes.md").read_text() == "one\n"
+    create = f"T={scratch}/probe; mkdir -p $T; cat > $T/s.py <<'EOF'\nprint(1)\nEOF"
+    out = tools.Bash(create, "create")
+    assert "REFUSED" not in out and (scratch / "probe" / "s.py").read_text() == "print(1)\n"
+    out = tools.Bash(f"P={scratch}/notes.md; cat >> $P <<'EOF'\ntwo\nEOF", "append")
+    assert "REFUSED" not in out and (scratch / "notes.md").read_text() == "one\ntwo\n"
+    # a tracked file is refused, and so is one in tmp/ of the work dir
+    for tracked in ("notes.md", "tmp/notes.md"):
+        out = tools.Bash(f"P={tracked}; cat >> $P <<'EOF'\ntwo\nEOF", "tracked")
+        assert out.startswith(HEREDOC_VERDICT.format(path=work / tracked))
+        assert (work / tracked).read_text() == "one\n"

@@ -4,8 +4,7 @@
 # add your name here
 """End-to-end test: capability probes survive vendor models that require ``stream=true``.
 
-A handful of vendor backends (most notably Together AI's
-``Qwen/Qwen3.7-Max`` / ``Qwen/Qwen3.7-Plus``) reject Chat Completions
+A handful of vendor backends reject Chat Completions
 requests that omit ``"stream": true`` with::
 
     400 — This model only supports streaming. Set "stream": true.

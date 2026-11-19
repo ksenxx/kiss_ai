@@ -213,4 +213,4 @@ class TestDropdownMarkup:
         select = re.search(r'<select id="hf-workdir".*?</select>', html, re.S)
         assert select is not None
         assert re.findall(r'<option value="([^"]*)"', select.group(0)) == [""]
-        assert re.search(r'<label for="hf-workdir"[^>]*>WORKDIR</label>', html)
+        assert re.search(r'<label for="hf-workdir"[^>]*>Workdir</label>', html)

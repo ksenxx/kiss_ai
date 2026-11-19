@@ -288,10 +288,10 @@ function testIndicatorsAreVerticallyCenteredInTaskPanels() {
       `row ${title} indicator must stay at the left edge as first child`,
     );
     const style = win.getComputedStyle(indicator);
-    // The action buttons occupy a line of their own below the task
-    // text, so the panel is taller than its title: the indicator is
-    // centered on the first line of the text (the panel's padding-top
-    // plus half a line box) instead of on the whole panel.
+    // An unfolded panel shows its details below the task text, so it
+    // may be taller than its title: the indicator is centered on the
+    // first line of the text (the panel's padding-top plus half a line
+    // box) instead of on the whole panel.
     assert.strictEqual(
       style.top,
       `calc(0.5lh + ${padTop})`,

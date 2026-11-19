@@ -277,10 +277,15 @@ def capture_remote(browser, base: str, out: Path) -> str:  # noqa: ANN001
 
 
 def capture_share(browser, transcript: str, out: Path) -> None:  # noqa: ANN001
-    """Capture the shared-chat page in its dark and light themes."""
+    """Capture the shared-chat page in its dark and light themes.
+
+    The body is laid out as ``main.js`` (``buildShareableHtml``) sends it:
+    one ``.share-task`` section per task inside ``#output``, whose
+    padding is the transcript's inset from the window's edges.
+    """
     share_html = web_server._build_share_page(
         "Design tokens",
-        '<div class="share-task">' + transcript + "</div>",
+        '<div id="output"><div class="share-task">' + transcript + "</div></div>",
     )
     ctx = browser.new_context(viewport={"width": 900, "height": 900})
     try:

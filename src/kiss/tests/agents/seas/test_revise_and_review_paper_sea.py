@@ -31,8 +31,11 @@ from kiss.agents.sorcar.agent_dispatch import (
     DEFAULT_DISPATCH_TIMEOUT_SECONDS,
     resolve_timeout,
 )
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.sea_apply import apply_sea
 from kiss.agents.sorcar.sea_settings import resolve_settings
+from kiss.core.kiss_tmp import kiss_tmp_dir
+from kiss.tests.agents.seas.conftest import registered
 from kiss.tests.agents.seas.sea_contract import assert_appending_sea_run, assert_no_removed_getters
 from kiss.tests.agents.sorcar.local_model_server import (
     finish_body,
@@ -74,6 +77,17 @@ def test_sea_methods_follow_the_user_contract() -> None:
     assert 'use_memory="false"' in prompt and "Never pass `chat_id`" in prompt
     assert "`writer_task(" in prompt and "`reviewer_task(" in prompt and "`loop_status(" in prompt
     assert "ask the user once with `ask_user_question`" in prompt
+    # The staged PDFs, the review notes and the progress file are in the coordinator's
+    # scratch dir, which the prompt introduces once; nothing goes to a tmp folder.
+    assert prompt.count("Scratch dir of Task Settings") == 1
+    for phrase in (
+        "1. copy the built PDF alone to `<scratch dir>/revise_review/round-<N>/<stem>.pdf` (the\n"
+        "   Scratch dir of Task Settings);",
+        "2. delete earlier review notes under `<scratch dir>/` (`PAPER-NOTES.md`,",
+        "Update `<scratch dir>/PROGRESS.md`\neach round. Git add the paper directory",
+    ):
+        assert phrase in prompt, phrase
+    assert "tmp" not in prompt and "tmp" not in sea._WRITER_RULES
     names = [t.__name__ for t in agent.tools([print])]
     assert names == ["print", "writer_task", "reviewer_task", "loop_status"]
     assert agent.settings({}) == {
@@ -149,6 +163,16 @@ def test_writer_task_first_round_and_revision_rounds() -> None:
     assert "Do not run a review of your own" in first
     assert "run that search\n  through `/discover` as the block below says" in first
     assert "ablation" in first
+    # The longer report goes to a file the task names in the caller's scratch dir (the
+    # agents' temp directory outside a task): the writer's own is deleted when it ends.
+    report = "revise_review/writer-report-round<N>.md` on disk, not into the report:"
+    assert f"goes to\n  `{kiss_tmp_dir().as_posix()}/{report}" in first
+    assert "./tmp" not in first and "<paper dir>" not in first
+    caller = ChatSorcarAgent("revise-review-test")
+    caller._last_task_id = "c" * 32
+    with registered(caller, "revise-review-test"):
+        in_task = sea.writer_task("Write for NeurIPS 2027 at /w/p/p.tex.", 1)
+    assert f"goes to\n  `{kiss_tmp_dir().as_posix()}/{'c' * 32}/{report}" in in_task
 
     later = sea.writer_task(
         "Write for NeurIPS 2027.", 3, "/w/reports/p-round2-review.txt", " YCSB allowed. \n"
@@ -168,17 +192,19 @@ def test_reviewer_task_is_fresh_and_keeps_the_write_tool() -> None:
     """The reviewer task names the staged copy only, forbids earlier notes, asks for the verdict."""
     text = sea.reviewer_task(
         " Review for ICLR 2027, cutoff June 2026. ",
-        "/w/tmp/revise_review/round-2/p.pdf",
+        "/t/kiss-tmp/c1/revise_review/round-2/p.pdf",
         "/w/reports/p-round2-review.txt",
         2,
         word_limit=800,
     )
-    assert text.startswith("You ARE the paper review agent. Review the paper at /w/tmp/")
+    assert text.startswith("You ARE the paper review agent. Review the paper at /t/kiss-tmp/c1/")
     assert "write the review to /w/reports/p-round2-review.txt (word_limit=800)" in text
     assert "Review instructions from the user:\nReview for ICLR 2027, cutoff June 2026.\n" in text
     assert "round 2 of a revision cycle; do not mention rounds" in text
     assert "Do not open any other file of the repository, any earlier review" in text
-    assert "under /w/tmp/revise_review/round-2/notes/" in text
+    notes = "/t/kiss-tmp/c1/revise_review/round-2/notes/"
+    assert f"research log under {notes}, not under your scratch dir. Run unattended" in text
+    assert "./tmp" not in text
     assert "do not ask the user questions" in text
     assert '"strong accept" only for a paper you would argue for at the meeting.' in text
     assert text.endswith(

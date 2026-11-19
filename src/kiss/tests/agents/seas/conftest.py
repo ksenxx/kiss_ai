@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import os
+import tempfile
 import threading
 import time
 from collections.abc import Iterator, Sequence
@@ -18,6 +19,7 @@ import pytest
 import yaml
 
 from kiss.agents.seas.autorouter.autorouter_sea import Tiers
+from kiss.agents.seas.base.base_sea import BaseSea
 from kiss.agents.seas.recommendations.recommendations_sea import recommendations_file
 from kiss.agents.seas.write_paper.write_paper_sea import _find_tex_binary
 from kiss.agents.sorcar import machines
@@ -30,13 +32,24 @@ from kiss.agents.sorcar.persistence import (
     _rw_lock,
     _save_task_result,
 )
-from kiss.agents.sorcar.sea_commands import SeaRun
+from kiss.agents.sorcar.sea_commands import SeaRun, evaluate_sea
 from kiss.core.config import kiss_home
-from kiss.core.models.model_info import get_available_models
+from kiss.core.models.model_info import (
+    delete_custom_model,
+    get_available_models,
+    save_custom_model,
+)
 from kiss.core.processes import run_process_group
+from kiss.core.user_config import save_config
 from kiss.server import agent_state
 from kiss.tests.agents.sorcar.conftest import isolated_sea_registry
-from kiss.tests.agents.sorcar.local_model_server import MODEL, serve
+from kiss.tests.agents.sorcar.local_model_server import (
+    MODEL,
+    ScriptedHandler,
+    finish_body,
+    serve,
+    tool_call_body,
+)
 
 HERMETIC_GIT = {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull}
 """Environment that hides the developer's global and system git config.
@@ -261,6 +274,7 @@ def run_sea(
     *,
     agent: ChatSorcarAgent | None = None,
     max_steps: int = 8,
+    every_request: bool = False,
     **overrides: Any,
 ) -> tuple[Any, list[dict[str, Any]]]:
     """Run *run* (an :func:`evaluate_sea` result) against the scripted local model.
@@ -273,7 +287,9 @@ def run_sea(
     caller that registers it first.
 
     Returns:
-        The parsed YAML result and the agentic requests (those offering tools).
+        The parsed YAML result and the agentic requests (those offering
+        tools); with *every_request*, the calls a tool made on the run's
+        model as well, in the order the model received them.
     """
     settings = run.settings
     kwargs: dict[str, Any] = {
@@ -297,7 +313,7 @@ def run_sea(
         agent = ChatSorcarAgent("sea-test")
     with serve(script) as (url, requests):
         result = agent.run(model_config={"base_url": url, "api_key": "local"}, **kwargs)
-    return yaml.safe_load(result), [r for r in requests if r.get("tools")]
+    return yaml.safe_load(result), [r for r in requests if every_request or r.get("tools")]
 
 
 @contextmanager
@@ -365,6 +381,7 @@ def persist_task(
     *,
     success: bool | None = None,
     timestamp: float | None = None,
+    machine: str = "",
     **columns: object,
 ) -> str:
     """Persist a finished task row with *events* and *result* and return its id.
@@ -378,7 +395,8 @@ def persist_task(
     string included, is saved as the task's result with the outcome
     *success*, as the daemon does for a run that finished with nothing
     to say.  *timestamp* (epoch seconds) backdates the row's
-    ``timestamp`` column, which the insert stamps with the current time.
+    ``timestamp`` column, which the insert stamps with the current time;
+    *machine* makes it a row a history sync copied in from that machine.
     """
     now_ms = int(time.time() * 1000)
     payload: dict[str, object] = {
@@ -397,10 +415,14 @@ def persist_task(
     _flush_chat_events(task_id)
     if result is not None:
         _save_task_result(result, task_id=task_id, success=success)
-    if timestamp is not None:
+    if timestamp is not None or machine:
         db = _get_db()
         with _rw_lock.write_lock():
-            db.execute("UPDATE task_history SET timestamp = ? WHERE id = ?", (timestamp, task_id))
+            db.execute(
+                "UPDATE task_history SET timestamp = COALESCE(?, timestamp), machine = ? "
+                "WHERE id = ?",
+                (timestamp, machine, task_id),
+            )
             db.commit()
     return task_id
 
@@ -423,3 +445,92 @@ def empty_history() -> None:
         db.execute("DELETE FROM events")
         db.execute("DELETE FROM task_history")
         db.commit()
+
+
+@pytest.fixture
+def own_temp_dir(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> Path:
+    """Give the test a temp directory of its own, so the agents' one in it starts empty.
+
+    The session's temp directory is shared by its tests, and on Windows,
+    where a pytest process gets no root of its own (the top-level
+    ``conftest.py``), by every process of a parallel run: a test that
+    emptied ``<kiss-tmp>/rsi7d`` there deleted the files a test of
+    another process was working on.  The directory is made beside the
+    test's ``tmp_path``, not in it: a fake checkout there must not find
+    the agents' files in its ``git status``.
+
+    Returns:
+        The directory ``tempfile`` and the test's child processes use.
+    """
+    temp = tmp_path_factory.mktemp("t")
+    monkeypatch.setattr(tempfile, "tempdir", str(temp))
+    monkeypatch.setenv("TMPDIR", str(temp))
+    return temp
+
+
+JUDGE = "memory-job-judge"
+"""The model the memory jobs' checks run on in tests: an endpoint model of :func:`judge_model`."""
+
+
+@pytest.fixture
+def memory_root(tmp_path: Path) -> Iterator[Path]:
+    """Point the user's memory at a directory of the test's own; yield it.
+
+    The memory jobs work on every page of the configured memory, and the
+    session-wide ``KISS_HOME`` holds the pages other tests wrote.
+    """
+    save_config({"memory_dir": str(tmp_path / "memories")})
+    try:
+        yield tmp_path / "memories"
+    finally:
+        save_config({"memory_dir": ""})
+
+
+@contextmanager
+def judge_model(
+    script: list[bytes], handler_base: type[ScriptedHandler] = ScriptedHandler
+) -> Iterator[list[dict[str, Any]]]:
+    """Serve *script* as the model :data:`JUDGE` for the block; yield the requests it receives."""
+    with serve(script, handler_base) as (url, requests):
+        assert save_custom_model(JUDGE, endpoint=url, api_key="local") is None
+        try:
+            yield requests
+        finally:
+            assert delete_custom_model(JUDGE) is None
+
+
+def run_memory_job(
+    sea: BaseSea, task: str, replies: list[bytes], work_dir: Path, **overrides: Any
+) -> tuple[str, list[dict[str, Any]]]:
+    """Run the memory job *sea* on *task* as a registered task whose model is scripted.
+
+    The scripted model calls the job's one tool, answers the calls that
+    tool makes on the task's model with *replies*, in order, and finishes.
+
+    Returns:
+        The report of the job's tool and every request the task's model
+        received, in order (:func:`prompts` picks the tool's own calls).
+    """
+    script = [
+        tool_call_body(sea.tools([])[-1].__name__, {}, prompt_tokens=500),
+        *replies,
+        finish_body("<p>done</p>", prompt_tokens=700),
+    ]
+    agent = ChatSorcarAgent("memory-job-test")
+    with registered(agent, "memory-job-test"):
+        result, requests = run_sea(
+            evaluate_sea([sea], task), script, work_dir, agent=agent, every_request=True,
+            **overrides,
+        )
+    assert result["success"] is True
+    last = next(r for r in reversed(requests) if r.get("tools"))
+    report = next(str(m["content"]) for m in last["messages"] if m["role"] == "tool")
+    # Without the status footer the agent appends to a tool result.
+    return report.split("\n\nSteps:", 1)[0], requests
+
+
+def prompts(requests: list[dict[str, Any]]) -> list[str]:
+    """Return the prompt of each of *requests* that offers no tools: a memory job's own calls."""
+    return [str(r["messages"][0]["content"]) for r in requests if not r.get("tools")]

@@ -99,7 +99,7 @@ class TestWelcomeLogoHtml(unittest.TestCase):
         self.assertNotIn("{{", self.html, "every template placeholder is filled")
 
     def test_highlight_sheets_follow_the_theme(self) -> None:
-        # Light Modern is the page's default theme: the linked sheet is
+        # The light theme is the page's default: the linked sheet is
         # the light one, and both sheets are handed to main.js.
         link = _by_id(self.tags, "hljs-theme")
         self.assertIsNotNone(link)

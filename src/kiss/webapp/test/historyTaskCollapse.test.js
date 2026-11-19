@@ -200,12 +200,24 @@ function testCssHidesMetadataWhenCollapsed() {
     'none',
     'a collapsed panel hides its metadata',
   );
-  assert.strictEqual(
-    win.getComputedStyle(text).getPropertyValue('-webkit-line-clamp'),
-    '3',
-    'a collapsed panel clamps the task text to 3 lines',
-  );
+  // The task text keeps to ONE line, cut with an ellipsis, whether the
+  // panel is folded or not (it was clamped to three lines before).
+  const assertOneLine = when => {
+    const style = win.getComputedStyle(text);
+    assert.deepStrictEqual(
+      [style.whiteSpace, style.overflow, style.textOverflow],
+      ['nowrap', 'hidden', 'ellipsis'],
+      `${when} panel shows its task text on one line`,
+    );
+    assert.strictEqual(
+      style.getPropertyValue('-webkit-line-clamp'),
+      '',
+      `${when} panel no longer clamps its task text to several lines`,
+    );
+  };
+  assertOneLine('a collapsed');
   toggle.click();
+  assertOneLine('an expanded');
   assert.notStrictEqual(
     win.getComputedStyle(info).display,
     'none',

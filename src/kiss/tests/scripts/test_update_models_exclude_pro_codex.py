@@ -40,7 +40,7 @@ def test_openai_gpt_pro_is_not_added_as_new_model() -> None:
         "gpt-5.5-pro": {"source": "openai"},
         "gpt-5.5-pro-2026-04-23": {"source": "openai"},
     }
-    _, new_models = compute_changes(_empty_current(), {}, {}, {}, {}, openai)
+    _, new_models = compute_changes(_empty_current(), {}, {}, {}, openai)
     names = {m["name"] for m in new_models}
     assert "gpt-5-pro" not in names
     assert "gpt-5-pro-2025-10-06" not in names
@@ -57,7 +57,7 @@ def test_openai_gpt_codex_is_not_added_as_new_model() -> None:
         "gpt-5.1-codex-mini": {"source": "openai"},
         "gpt-5.3-codex": {"source": "openai"},
     }
-    _, new_models = compute_changes(_empty_current(), {}, {}, {}, {}, openai)
+    _, new_models = compute_changes(_empty_current(), {}, {}, {}, openai)
     names = {m["name"] for m in new_models}
     assert names.isdisjoint(set(openai))
 
@@ -78,7 +78,7 @@ def test_openrouter_openai_gpt_pro_passthrough_is_not_added() -> None:
             "source": "openrouter",
         },
     }
-    _, new_models = compute_changes(_empty_current(), openrouter, {}, {}, {}, {})
+    _, new_models = compute_changes(_empty_current(), openrouter, {}, {}, {})
     names = {m["name"] for m in new_models}
     assert "openrouter/openai/gpt-5-pro" not in names
     assert "openrouter/openai/gpt-5.5-pro" not in names
@@ -106,7 +106,7 @@ def test_openrouter_openai_gpt_codex_passthrough_is_not_added() -> None:
             "source": "openrouter",
         },
     }
-    _, new_models = compute_changes(_empty_current(), openrouter, {}, {}, {}, {})
+    _, new_models = compute_changes(_empty_current(), openrouter, {}, {}, {})
     names = {m["name"] for m in new_models}
     assert names.isdisjoint(set(openrouter))
 
@@ -122,7 +122,7 @@ def test_normal_gpt_model_is_still_added() -> None:
             "source": "openrouter",
         },
     }
-    _, new_models = compute_changes(_empty_current(), openrouter, {}, {}, {}, openai)
+    _, new_models = compute_changes(_empty_current(), openrouter, {}, {}, openai)
     names = {m["name"] for m in new_models}
     assert "gpt-99" in names
     assert "openrouter/openai/gpt-99" in names
@@ -141,7 +141,7 @@ def test_non_gpt_pro_models_are_unaffected() -> None:
             "source": "openrouter",
         },
     }
-    _, new_models = compute_changes(_empty_current(), openrouter, {}, {}, {}, {})
+    _, new_models = compute_changes(_empty_current(), openrouter, {}, {}, {})
     names = {m["name"] for m in new_models}
     assert "openrouter/acme/super-pro" in names
 

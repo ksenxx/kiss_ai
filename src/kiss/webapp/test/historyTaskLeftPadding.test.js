@@ -9,10 +9,11 @@ const assert = require('assert');
 const {loadMainCss, makePage, send} = require('./simplify2_harness');
 const {makeRow} = require('./history_helpers');
 
-// A history row reserves a left column for its status icon: the row's
-// padding-left is 19px (a 13px icon column plus a 6px gap to the text)
-// and the icon sits 5px in, so it never overlaps the task text.  The
-// values are read off the rendered row, not the stylesheet source.
+// A history row reserves a left column for its status icon: the icon
+// sits 5px in, and the row's padding-left is 23px (those 5px, the
+// icon's 12px and a 6px gap to the text), so the icon never overlaps
+// the task text.  The values are read off the rendered row, not the
+// stylesheet source.
 
 function testStatusIconFitsInsideRowPadding() {
   const {win} = makePage();
@@ -34,8 +35,8 @@ function testStatusIconFitsInsideRowPadding() {
   const dotStyle = win.getComputedStyle(dot);
   assert.strictEqual(
     rowStyle.paddingLeft,
-    '19px',
-    'a history row keeps a 19px left column (13px icon + 6px gap)',
+    '23px',
+    'a history row keeps a 23px left column (5px + 12px icon + 6px gap)',
   );
   assert.strictEqual(
     dotStyle.left,

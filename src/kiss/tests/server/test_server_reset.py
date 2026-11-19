@@ -244,9 +244,11 @@ class TestServerResetComplete(IsolatedAsyncioTestCase):
     Simulates the freshly-respawned daemon by pre-creating the
     pending-reset flag file in the test's url-file directory
     *before* ``start_async`` runs.  The startup path then finds the
-    flag, deletes it, and schedules the broadcast.  The module-level
-    delay constant is shrunk so the test does not have to wait the
-    full production window.
+    flag, deletes it, and schedules the broadcast for the connections
+    present when the production delay (3 s) expires.  The delay is
+    not shrunk: 1.0 s ran out before the two TLS + auth handshakes
+    of ``_connect`` were done in a process that had not connected
+    before (1.1 s on an idle Windows machine, 1.5 s on a loaded one).
     """
 
     async def asyncSetUp(self) -> None:
@@ -269,12 +271,6 @@ class TestServerResetComplete(IsolatedAsyncioTestCase):
         )
         self.flag_path = flag_path
 
-        self._saved_delay = web_server_mod._SERVER_RESET_COMPLETE_DELAY
-        # Long enough for two TLS + auth handshakes in ``_connect`` to
-        # finish before the broadcast fires, short enough to keep the
-        # test fast.
-        web_server_mod._SERVER_RESET_COMPLETE_DELAY = 1.0
-
         self.server = RemoteAccessServer(
             host="127.0.0.1",
             port=self.port,
@@ -287,7 +283,6 @@ class TestServerResetComplete(IsolatedAsyncioTestCase):
         self._writers: list[LocalWriter] = []
 
     async def asyncTearDown(self) -> None:
-        web_server_mod._SERVER_RESET_COMPLETE_DELAY = self._saved_delay
         for writer in self._writers:
             writer.close()
             try:
@@ -313,7 +308,7 @@ class TestServerResetComplete(IsolatedAsyncioTestCase):
         reader: LocalReader,
         predicate: Callable[[dict[str, Any]], bool],
         max_events: int = 200,
-        timeout: float = 5.0,
+        timeout: float = 10.0,
     ) -> dict[str, Any]:
         for _ in range(max_events):
             line = await asyncio.wait_for(reader.readline(), timeout=timeout)

@@ -57,7 +57,7 @@ def test_openrouter_preview_with_zero_pricing_is_added():
             "source": "openrouter",
         },
     }
-    _, new_models = compute_changes(current, openrouter, {}, {}, {}, {})
+    _, new_models = compute_changes(current, openrouter, {}, {}, {})
     names = [m["name"] for m in new_models]
     assert "openrouter/acme/cool-model-preview" in names
     model = next(m for m in new_models if m["name"] == "openrouter/acme/cool-model-preview")
@@ -75,47 +75,9 @@ def test_openrouter_variant_endpoints_still_skipped():
             "source": "openrouter",
         },
     }
-    _, new_models = compute_changes(current, openrouter, {}, {}, {}, {})
+    _, new_models = compute_changes(current, openrouter, {}, {}, {})
     names = [m["name"] for m in new_models]
     assert "openrouter/acme/model-preview:free" not in names
-
-
-def test_together_preview_with_zero_pricing_is_added():
-    """Free preview models from Together should be added."""
-    current = _make_current()
-    together = {
-        "meta-llama/some-model-preview": {
-            "context_length": 131072,
-            "input_price_per_1M": 0.0,
-            "output_price_per_1M": 0.0,
-            "source": "together",
-            "type": "chat",
-            "is_embedding": False,
-        },
-    }
-    _, new_models = compute_changes(current, {}, together, {}, {}, {})
-    names = [m["name"] for m in new_models]
-    assert "meta-llama/some-model-preview" in names
-    model = next(m for m in new_models if m["name"] == "meta-llama/some-model-preview")
-    assert model["needs_pricing"] is True
-
-
-def test_together_non_preview_zero_pricing_is_not_added():
-    """Non-preview Together models with zero pricing should be filtered out."""
-    current = _make_current()
-    together = {
-        "meta-llama/some-free-model": {
-            "context_length": 131072,
-            "input_price_per_1M": 0.0,
-            "output_price_per_1M": 0.0,
-            "source": "together",
-            "type": "chat",
-            "is_embedding": False,
-        },
-    }
-    _, new_models = compute_changes(current, {}, together, {}, {}, {})
-    names = [m["name"] for m in new_models]
-    assert "meta-llama/some-free-model" not in names
 
 
 def test_gemini_preview_model_is_added():
@@ -129,7 +91,7 @@ def test_gemini_preview_model_is_added():
             "is_generation": True,
         },
     }
-    _, new_models = compute_changes(current, {}, {}, gemini, {}, {})
+    _, new_models = compute_changes(current, {}, gemini, {}, {})
     names = [m["name"] for m in new_models]
     assert "gemini-99-flash-preview" in names
     model = next(m for m in new_models if m["name"] == "gemini-99-flash-preview")
@@ -147,7 +109,7 @@ def test_existing_model_not_duplicated():
             "source": "openrouter",
         },
     }
-    updates, new_models = compute_changes(current, openrouter, {}, {}, {}, {})
+    updates, new_models = compute_changes(current, openrouter, {}, {}, {})
     new_names = [m["name"] for m in new_models]
     assert "openrouter/google/gemini-2.5-flash" not in new_names
     assert len(updates) == 0
@@ -158,7 +120,7 @@ def test_codex_candidates_added_from_codex_models_json():
     current = _make_current()
     codex_slugs = {"gpt-5.5", "gpt-5.4", "gpt-5.4-mini"}
     _, new_models = compute_changes(
-        current, {}, {}, {}, {}, {}, codex_slugs=codex_slugs
+        current, {}, {}, {}, {}, codex_slugs=codex_slugs
     )
     names = {m["name"] for m in new_models}
     for expected in (
@@ -248,7 +210,7 @@ def test_openrouter_preview_zero_context_not_added():
             "source": "openrouter",
         },
     }
-    _, new_models = compute_changes(current, openrouter, {}, {}, {}, {})
+    _, new_models = compute_changes(current, openrouter, {}, {}, {})
     names = [m["name"] for m in new_models]
     assert "openrouter/acme/cool-model-preview" not in names
 
@@ -456,7 +418,7 @@ def test_skip_test_records_gemini_embedding_as_embedder(
     with _paged_listings(monkeypatch):
         gemini = fetch_gemini()
         openai = fetch_openai()
-    _, candidates = compute_changes({}, {}, {}, gemini, {}, openai)
+    _, candidates = compute_changes({}, {}, gemini, {}, openai)
     by_name = {c["name"]: c for c in candidates}
     assert by_name["gemini-embedding-001"]["is_embedding"] is True
     assert by_name["gemini-embedding-001"]["is_generation"] is False

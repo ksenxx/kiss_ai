@@ -192,32 +192,6 @@ class TestModelInfo:
             if info.is_embedding_supported:
                 assert info.output_price_per_1M == 0.0, f"{name}: embedding should have 0 output"
 
-    def test_glm_4_6_in_model_info(self):
-        assert "glm-4.6" in MODEL_INFO
-        info = MODEL_INFO["glm-4.6"]
-        assert info.context_length == 204800
-        assert info.input_price_per_1M == 0.60
-        assert info.output_price_per_1M == 2.20
-        assert info.is_function_calling_supported is True
-        assert info.is_generation_supported is True
-        assert info.is_embedding_supported is False
-
-    def test_glm_4_5_flash_in_model_info(self):
-        assert "glm-4.5-flash" in MODEL_INFO
-        info = MODEL_INFO["glm-4.5-flash"]
-        assert info.input_price_per_1M == 0.0
-        assert info.output_price_per_1M == 0.0
-        assert info.is_function_calling_supported is True
-
-    def test_moonshot_v1_32k_in_model_info(self):
-        assert "moonshot-v1-32k" in MODEL_INFO
-        info = MODEL_INFO["moonshot-v1-32k"]
-        assert info.context_length == 32768
-        assert info.is_function_calling_supported is True
-
-    def test_kimi_in_model_info(self):
-        assert "kimi-k2.6" in MODEL_INFO
-
     def test_every_model_asks_for_its_own_provider_key(self):
         """Every catalog entry's key must match the provider that routes it.
 
@@ -232,9 +206,6 @@ class TestModelInfo:
         expected_by_provider = {
             "OpenAI": "OPENAI_API_KEY",
             "OpenRouter": "OPENROUTER_API_KEY",
-            "Together": "TOGETHER_API_KEY",
-            "Z.AI": "ZAI_API_KEY",
-            "Moonshot": "MOONSHOT_API_KEY",
             "Anthropic": "ANTHROPIC_API_KEY",
             "Gemini": "GEMINI_API_KEY",
             "Claude Code CLI": None,
@@ -441,12 +412,6 @@ class TestCachePricing:
         _apply_cache_pricing("openrouter/openai/gpt-oss-120b", fresh)
         assert fresh.cache_read_price_per_1M is None
         assert fresh.cache_write_price_per_1M is None
-
-    def test_undocumented_providers_have_no_cache_pricing(self):
-        for name in ("glm-4-32b-0414-128k", "deepseek-ai/DeepSeek-V3-0324", "Qwen/Qwen3.6-Plus"):
-            info = MODEL_INFO[name]
-            assert info.cache_read_price_per_1M is None, f"{name} should not have cache pricing"
-            assert info.cache_write_price_per_1M is None
 
     def test_embedding_models_no_cache_pricing(self):
         for name in ("text-embedding-3-small", "text-embedding-3-large", "text-embedding-ada-002"):

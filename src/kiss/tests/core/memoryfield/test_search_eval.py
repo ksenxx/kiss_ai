@@ -38,6 +38,22 @@ def test_eval_reports_hit(tmp_path: Path) -> None:
     assert "R@1 1.00" in result.stdout
 
 
+def test_eval_compares_the_statement_ranking_with_one_vector_per_page(tmp_path: Path) -> None:
+    memory = MemoryDir(tmp_path)
+    shelves = "\n".join(f"- shelf {i} holds flour sugar salt pepper rice beans" for i in range(40))
+    memory.write("kitchen", f"{shelves}\n- saffron threads cost a fortune\n")
+    memory.write("saffron-shop", "- the spice shop sells paprika and saffron powder\n")
+    questions = tmp_path / "q.yaml"
+    questions.write_text(yaml.safe_dump([{"q": "saffron threads", "gold": ["kitchen"]}]))
+    by_statement = run_eval(str(tmp_path), "--questions", str(questions))
+    assert "#1  saffron threads  (top: kitchen)" in by_statement.stdout
+    assert "ranked by page and best statement: R@1 1.00" in by_statement.stdout
+    # One vector per page dilutes the saffron line among the forty shelves.
+    by_page = run_eval(str(tmp_path), "--questions", str(questions), "--page-vectors")
+    assert "#2  saffron threads  (top: saffron-shop)" in by_page.stdout
+    assert "ranked by page vector: R@1 0.00" in by_page.stdout
+
+
 def test_eval_defaults_to_the_question_set_kept_with_the_memory(tmp_path: Path) -> None:
     """Without --questions the script reads ``<memory>/eval/questions.yaml``."""
     questions = write_kb(tmp_path, "web-stealth")

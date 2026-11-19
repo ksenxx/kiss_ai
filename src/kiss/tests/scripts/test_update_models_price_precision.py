@@ -5,8 +5,8 @@
 
 """End-to-end tests: cheap models' prices survive the catalog updater.
 
-October 2026 cost audit: ``fetch_openrouter`` / ``fetch_together``
-rounded per-1M prices to three decimals ($0.00632/M became $0.006/M)
+October 2026 cost audit: ``fetch_openrouter`` rounded per-1M prices
+to three decimals ($0.00632/M became $0.006/M)
 and ``compute_changes`` ignored any input/output change of $0.005/M or
 less, which is a 14% change on a $0.035/M model
 (``openrouter/amazon/nova-micro-v1`` stayed at $0.040/M).  Prices are
@@ -34,10 +34,10 @@ LISTING = {
 }
 
 
-def _entry(inp: float, out: float, emb: bool = False) -> dict:
+def _entry(inp: float, out: float) -> dict:
     return {
         "context_length": 32000, "input_price_per_1M": inp, "output_price_per_1M": out,
-        "fc": False, "emb": emb, "gen": not emb,
+        "fc": False, "emb": False, "gen": True,
     }
 
 
@@ -76,7 +76,7 @@ def test_small_absolute_but_large_relative_changes_are_applied(
     with _listing_server(LISTING) as url:
         _point_fetch_at(monkeypatch, url)
         fetched = mod.fetch_openrouter()
-    updates, new_models = mod.compute_changes(current, fetched, {}, {}, {}, {})
+    updates, new_models = mod.compute_changes(current, fetched, {}, {}, {})
     # The local listing server also serves the decisions catalog; those are new.
     assert all(m.get("is_decisions") for m in new_models)
     by_name = {u["name"]: u["changes"] for u in updates}
@@ -104,34 +104,5 @@ def test_a_variable_price_is_not_a_price(monkeypatch: pytest.MonkeyPatch) -> Non
     with _listing_server(listing, {"data": []}) as url:
         _point_fetch_at(monkeypatch, url)
         fetched = mod.fetch_openrouter()
-    assert mod.compute_changes(current, fetched, {}, {}, {}, {}) == ([], [])
+    assert mod.compute_changes(current, fetched, {}, {}, {}) == ([], [])
     assert mod.find_deprecated_models(current, fetched, {}, {}, {}) == []
-
-
-def test_together_prices_use_the_same_precision_and_threshold() -> None:
-    """Together's per-1M listing gets the relative comparison too, embeddings included."""
-    current = {
-        "BAAI/bge-base-en-v1.5": _entry(0.01, 0.0, emb=True),
-        "moonshotai/Kimi-K3": _entry(2.7, 13.5),
-        "Qwen/Qwen3-Next": _entry(0.1, 0.1),
-    }
-    together = {
-        "BAAI/bge-base-en-v1.5": {
-            "context_length": 32000, "input_price_per_1M": 0.008, "output_price_per_1M": 0.0,
-            "cache_read_price_per_1M": None, "source": "together",
-        },
-        "moonshotai/Kimi-K3": {
-            "context_length": 32000, "input_price_per_1M": 2.7, "output_price_per_1M": 13.5,
-            "cache_read_price_per_1M": None, "source": "together",
-        },
-        "Qwen/Qwen3-Next": {
-            "context_length": 32000, "input_price_per_1M": 0.1, "output_price_per_1M": 0.104,
-            "cache_read_price_per_1M": None, "source": "together",
-        },
-    }
-    updates, new_models = mod.compute_changes(current, {}, together, {}, {}, {})
-    assert new_models == []
-    assert [(u["name"], u["changes"]) for u in updates] == [
-        ("BAAI/bge-base-en-v1.5", {"input_price_per_1M": 0.008}),
-        ("Qwen/Qwen3-Next", {"output_price_per_1M": 0.104}),
-    ]

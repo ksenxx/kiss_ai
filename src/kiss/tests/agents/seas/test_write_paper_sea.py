@@ -147,6 +147,23 @@ def test_sea_methods_follow_the_user_contract() -> None:
     assert "Engineering trivia is not evidence" in prompt
     assert "Conventional headings" in prompt and "25. Padding" in prompt
     assert "(f) whether the central claim and the" in prompt and "(j) the appendix" in prompt
+    # The plan, the research log and the progress file are in the task's scratch dir,
+    # which the prompt introduces once; nothing goes to a tmp folder of the work tree.
+    assert prompt.count("Scratch dir of Task Settings") == 1
+    for phrase in (
+        "write in\n`<scratch dir>/PLAN.md` (the Scratch dir of Task Settings): the research",
+        "Log each verification with its URL in\n  `<scratch dir>/information-<paper>.md`.",
+        "Write `<scratch dir>/PLAN.md`: the contribution statement (above)",
+        "each logged in `<scratch dir>/information-<paper>.md` with a summary",
+        "delete the planning and research files under the scratch dir,\n",
+        "record the decision in `<scratch dir>/PLAN.md`. If",
+        "(zero slack, per\n  `<scratch dir>/PROGRESS.md` or memory)",
+        "(an earlier round's tools live in that round's scratch dir), or",
+        "Your progress file is `<scratch dir>/PROGRESS.md`, the file you\n  created; never",
+        "never `Edit` one in the worktree (it does not exist:",
+    ):
+        assert phrase in prompt, phrase
+    assert "tmp" not in prompt
     assert [t.__name__ for t in sea.tools([print])] == ["print", "check_paper", "build_paper"]
     # Browse, skip the classifier; a ``run_agent`` dispatch waits six hours.
     # ``run_parallel`` is always offered, so nothing turns fan-out on.

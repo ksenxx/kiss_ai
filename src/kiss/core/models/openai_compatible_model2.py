@@ -495,8 +495,8 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         :meth:`_response_output_items_to_input_items`), so after a hand-off
         between two Responses endpoints (``set_model``) the input carries
         the other vendor's ``reasoning`` items and item ids.  OpenAI
-        rejects both: every request after a hop from Together's
-        ``openai/gpt-oss-120b`` back to an OpenAI model failed with
+        rejects both: every request after a hop from another vendor's
+        model back to an OpenAI model failed with
         ``Missing required parameter: 'input[8].summary'``.  The endpoint's
         ``responses_item_id_prefixes`` tells such items apart.  Only the
         request changes; the conversation keeps them for a hop back.

@@ -984,12 +984,12 @@ test('the stylesheets carry the layout, the pulse and the machine strip', () => 
   const hide = computedOf(win, 'content-pane-hide');
   assert.strictEqual(hide.display, 'inline-flex');
   assert.strictEqual(hide.flexShrink, '0');
-  // The chat header strip ("machine: directory"): centred, bold, green.
+  // The chat header strip ("machine > directory"): a breadcrumb from the
+  // chat column's left edge, in the body colour at the medium weight.
   const header = computedOf(win, 'chat-header');
-  assert.strictEqual(header.justifyContent, 'center');
-  assert.strictEqual(header.fontWeight, '700');
-  assert.strictEqual(header.color, 'var(--green)');
-  assert.strictEqual(computedOf(win, 'chat-machine').textAlign, 'center');
+  assert.strictEqual(header.justifyContent, 'start');
+  assert.strictEqual(header.fontWeight, '500');
+  assert.strictEqual(header.color, 'var(--fg)');
   // The pulse: an active panel's header text, tool call and Thoughts
   // alike, breathes.
   send(win, {type: 'tool_call', name: 'Bash', command: 'sleep 1', ts: 1000});

@@ -11,8 +11,11 @@ max), and writes one HTML file with inline SVG bar charts and tables.
 Usage::
 
     uv run python scripts/transport_bench/report.py \
-        tmp/transport_bench/results.json reports/transport_bench_uds_vs_wss.html \
-        --findings tmp/transport_bench/findings.html
+        <kiss-tmp>/transport_bench/results.json reports/transport_bench_uds_vs_wss.html \
+        --findings <kiss-tmp>/transport_bench/findings.html
+
+``<kiss-tmp>`` is the agents' temp directory, ``<OS temp dir>/kiss-tmp``:
+:mod:`run_bench` prints the path of the results it wrote there.
 """
 
 from __future__ import annotations

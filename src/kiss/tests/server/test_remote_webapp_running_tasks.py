@@ -132,7 +132,13 @@ class TestReadyOpensRunningTasks(IsolatedAsyncioTestCase):
     async def _ready_replies(
         self, ready_cmd: dict[str, Any],
     ) -> list[dict[str, Any]]:
-        """Auth, send *ready_cmd*, and drain the server's replies."""
+        """Auth, send *ready_cmd*, and drain the server's replies.
+
+        Every ``ready`` is answered with a ``tabs_state`` snapshot; on a
+        loaded machine the replies before it can be seconds apart, so
+        the server counts as silent (2 s without a reply) only once the
+        snapshot has arrived.
+        """
         async with connect(
             f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify_ssl(),
         ) as ws:
@@ -141,12 +147,15 @@ class TestReadyOpensRunningTasks(IsolatedAsyncioTestCase):
             self.assertEqual(resp["type"], "auth_ok")
             await ws.send(json.dumps(ready_cmd))
             events: list[dict[str, Any]] = []
+            silence = 30.0
             for _ in range(30):
                 try:
-                    raw = await asyncio.wait_for(ws.recv(), timeout=2)
+                    raw = await asyncio.wait_for(ws.recv(), timeout=silence)
                     events.append(json.loads(raw))
                 except TimeoutError:
                     break
+                if events[-1].get("type") == "tabs_state":
+                    silence = 2.0
             return events
 
     def _register_tab(self, tab_id: str, chat_id: str, title: str) -> None:

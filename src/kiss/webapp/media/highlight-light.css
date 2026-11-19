@@ -1,16 +1,18 @@
 /*
- * highlight.js theme: VS Code "Light Modern" token colours.
+ * highlight.js theme: the syntax colours of Claude Code Desktop's
+ * light look.
  *
- * Light Modern includes light_plus.json, which includes light_vs.json
- * (extensions/theme-defaults/themes in microsoft/vscode); the values
- * below are those files' tokenColors, mapped onto highlight.js's
- * scope classes exactly like highlight-dark.css.  The block's
- * background and padding come from main.css's .hljs rule (the
- * theme's textCodeBlock.background).
+ * The app paints code with five hues on the body colour: keywords in
+ * its red-orange, strings in brown, numbers and constants in amber,
+ * function and type names in purple and comments in grey; names,
+ * properties, operators and punctuation stay the body colour.  They
+ * are mapped onto highlight.js's scope classes exactly like
+ * highlight-dark.css.  The block's background and padding come from
+ * main.css's .hljs rule (the theme's textCodeBlock.background).
  */
 pre code.hljs { display: block; overflow-x: auto; }
 
-.hljs { color: #3b3b3b; }
+.hljs { color: #0b0b0b; }
 
 /* keyword, storage, constant.language, variable.language */
 .hljs-doctag,
@@ -18,74 +20,74 @@ pre code.hljs { display: block; overflow-x: auto; }
 .hljs-meta .hljs-keyword,
 .hljs-variable.language_,
 .hljs-literal,
-.hljs-meta { color: #00f; }
+.hljs-meta { color: #c2452d; }
 
 /* entity.name.function, support.function */
 .hljs-title,
 .hljs-title.function_,
-.hljs-title.function_.invoke__ { color: #795e26; }
+.hljs-title.function_.invoke__ { color: #6f42c1; }
 
 /* entity.name.type, entity.name.class, support.type, support.class */
 .hljs-type,
 .hljs-title.class_,
 .hljs-title.class_.inherited__,
-.hljs-built_in { color: #267f99; }
+.hljs-built_in { color: #6f42c1; }
 
 /* variable, support.type.property-name */
 .hljs-variable,
 .hljs-property,
 .hljs-selector-attr,
-.hljs-template-variable { color: #001080; }
+.hljs-template-variable { color: #0b0b0b; }
 
 /* entity.other.attribute-name */
 .hljs-attr,
-.hljs-attribute { color: #e50000; }
+.hljs-attribute { color: #0b0b0b; }
 
 /* constant.numeric */
-.hljs-number { color: #098658; }
+.hljs-number { color: #9a6700; }
 
 /* string */
 .hljs-string,
-.hljs-meta .hljs-string { color: #a31515; }
+.hljs-meta .hljs-string { color: #9c4a21; }
 
 /* string.regexp */
-.hljs-regexp { color: #811f3f; }
+.hljs-regexp { color: #9c4a21; }
 
 /* variable.other.constant, variable.other.enummember */
-.hljs-symbol { color: #0070c1; }
+.hljs-symbol { color: #9a6700; }
 
 /* comment */
 .hljs-comment,
 .hljs-code,
-.hljs-quote { color: #008000; }
+.hljs-quote { color: #6e7781; }
 
 /* entity.name.tag */
 .hljs-name,
 .hljs-selector-tag,
-.hljs-selector-pseudo { color: #800000; }
+.hljs-selector-pseudo { color: #c2452d; }
 
 /* entity.other.attribute-name.class.css, .id.css */
 .hljs-selector-class,
-.hljs-selector-id { color: #800000; }
+.hljs-selector-id { color: #6f42c1; }
 
 /* keyword.operator */
 .hljs-operator,
-.hljs-punctuation { color: #000; }
+.hljs-punctuation { color: #0b0b0b; }
 
-.hljs-subst { color: #3b3b3b; }
+.hljs-subst { color: #0b0b0b; }
 
 /* markup.heading */
-.hljs-section { color: #800000; font-weight: bold; }
+.hljs-section { color: #0b0b0b; font-weight: bold; }
 
 /* markdown list punctuation */
-.hljs-bullet { color: #0451a5; }
+.hljs-bullet { color: #c2452d; }
 
 /* markup.italic, markup.bold */
-.hljs-emphasis { color: #800080; font-style: italic; }
+.hljs-emphasis { color: #0b0b0b; font-style: italic; }
 
-.hljs-strong { color: #000080; font-weight: bold; }
+.hljs-strong { color: #0b0b0b; font-weight: bold; }
 
 /* markup.inserted, markup.deleted */
-.hljs-addition { color: #098658; }
+.hljs-addition { color: #2d8a4e; }
 
-.hljs-deletion { color: #a31515; }
+.hljs-deletion { color: #e5484d; }

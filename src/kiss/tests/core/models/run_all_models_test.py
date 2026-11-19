@@ -12,9 +12,6 @@ Usage:
     # Test all models (WARNING: This takes a very long time!)
     python src/kiss/tests/run_all_models_test.py
 
-    # Test only Together AI models
-    python src/kiss/tests/run_all_models_test.py --provider together
-
     # Test only OpenRouter models
     python src/kiss/tests/run_all_models_test.py --provider openrouter
 
@@ -46,11 +43,6 @@ SLOW_MODELS = {
     "o1-mini",
     "o1-pro",
     "o3-pro",
-    "Qwen/QwQ-32B",
-    "Qwen/Qwen3-235B-A22B-Thinking-2507",
-    "Qwen/Qwen3-Next-80B-A3B-Thinking",
-    "moonshotai/Kimi-K2-Thinking",
-    "deepseek-ai/DeepSeek-R1",
     "openrouter/deepseek/deepseek-r1",
     "openrouter/deepseek/deepseek-r1-0528",
     "openrouter/openai/o1",
@@ -209,25 +201,6 @@ def get_provider_prefix(provider: str) -> list[str]:
         "openai": ["gpt-", "o1", "o3", "text-embedding-"],
         "anthropic": ["claude-"],
         "gemini": ["gemini-", "models/"],
-        "together": [
-            "meta-llama/",
-            "Qwen/",
-            "mistralai/",
-            "deepseek-ai/",
-            "google/",
-            "moonshotai/",
-            "nvidia/",
-            "arcee-ai/",
-            "refuel-ai/",
-            "marin-community/",
-            "essentialai/",
-            "zai-org/",
-            "deepcogito/",
-            "Alibaba-NLP/",
-            "BAAI/",
-            "togethercomputer/",
-            "intfloat/",
-        ],
         "openrouter": ["openrouter/"],
     }
     return provider_prefixes.get(provider.lower(), [])
@@ -238,7 +211,7 @@ def filter_models_by_provider(models: list[str], provider: str) -> list[str]:
     prefixes = get_provider_prefix(provider)
     if not prefixes:
         print(f"Unknown provider: {provider}")
-        print("Valid providers: openai, anthropic, gemini, together, openrouter")
+        print("Valid providers: openai, anthropic, gemini, openrouter")
         return []
 
     return [m for m in models if any(m.startswith(p) for p in prefixes)]
@@ -250,7 +223,7 @@ def main() -> int:
     parser.add_argument(
         "--provider",
         type=str,
-        help="Filter by provider (openai, anthropic, gemini, together, openrouter)",
+        help="Filter by provider (openai, anthropic, gemini, openrouter)",
     )
     parser.add_argument(
         "--model",

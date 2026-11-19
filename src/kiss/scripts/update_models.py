@@ -300,7 +300,6 @@ class _PageCursors:
 
 OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
 OPENROUTER_DECISIONS_MODELS_URL = f"{OPENROUTER_MODELS_URL}?output_modalities=decisions"
-TOGETHER_MODELS_URL = "https://api.together.xyz/v1/models"
 GEMINI_MODELS_URL = "https://generativelanguage.googleapis.com/v1beta/models"
 ANTHROPIC_MODELS_URL = "https://api.anthropic.com/v1/models"
 OPENAI_MODELS_URL = "https://api.openai.com/v1/models"
@@ -684,60 +683,6 @@ def prefer_standard_endpoint_prices(openrouter: dict[str, dict]) -> list[str]:
     return replaced
 
 
-def fetch_together(verbose: bool = False) -> dict[str, dict]:
-    """Fetch models from Together AI API (pricing is per-1M already)."""
-    api_key = os.getenv("TOGETHER_API_KEY", "")
-    if not api_key:  # pragma: no branch
-        print("  WARNING: TOGETHER_API_KEY not set, skipping Together AI")
-        return {}
-    if verbose:  # pragma: no branch
-        print("  Fetching Together AI models...")
-    data = api_get(
-        TOGETHER_MODELS_URL,
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Accept": "application/json",
-            "User-Agent": "kiss-update-models/1.0",
-        },
-    )
-    from kiss.core.models.model_info import _TOGETHER_PREFIXES
-
-    models: dict[str, dict] = {}
-    for m in data:  # pragma: no branch
-        model_id = m.get("id", "")
-        model_type = m.get("type", "")
-        ctx = _cap_context_length(m.get("context_length", 0) or 0)
-        pricing = m.get("pricing", {})
-        inp = float(pricing.get("input", 0) or 0)
-        out = float(pricing.get("output", 0) or 0)
-        if not model_id or not model_id.startswith(_TOGETHER_PREFIXES):  # pragma: no branch
-            continue
-        if model_type not in ("chat", "embedding", "language"):  # pragma: no branch
-            continue
-        is_emb = model_type == "embedding"
-        if is_emb:
-            # An embedding produces no output tokens; Together's listing has
-            # started echoing the input rate as ``output`` for them.
-            out = 0.0
-        # Together reports ``prompt_tokens_details.cached_tokens`` and bills
-        # them at ``pricing.cached_input`` (per 1M, e.g. Kimi-K3 $0.30 on a
-        # $3.00 input); without the catalog price ``calculate_cost`` would
-        # bill cache hits at the full input rate.
-        cached = float(pricing.get("cached_input", 0) or 0)
-        models[model_id] = {
-            "context_length": ctx,
-            "input_price_per_1M": round(inp, 6),
-            "output_price_per_1M": round(out, 6),
-            "cache_read_price_per_1M": round(cached, 6) if cached > 0 else None,
-            "source": "together",
-            "is_embedding": is_emb,
-            "type": model_type,
-        }
-    if verbose:  # pragma: no branch
-        print(f"    Found {len(models)} relevant models")
-    return models
-
-
 def fetch_gemini(verbose: bool = False) -> dict[str, dict]:
     """Fetch models from Google Gemini API (context lengths, no pricing)."""
     api_key = os.getenv("GEMINI_API_KEY", "")
@@ -1053,8 +998,8 @@ def get_current_model_info() -> dict[str, dict]:
 def _noop_token_callback(_token: str) -> None:
     """No-op token callback used during capability probes.
 
-    Some vendor models (e.g. ``Qwen/Qwen3.7-Max`` on Together AI) reject
-    Chat Completions requests without ``stream=true``. KISS's
+    Some vendor models reject Chat Completions requests without
+    ``stream=true``. KISS's
     ``OpenAICompatibleModel._stream_text`` only switches on streaming when
     a ``token_callback`` is registered, so probes must register one even
     if they don't care about the streamed deltas — otherwise the request
@@ -1340,15 +1285,10 @@ def _anthropic_effort_scale(model_name: str) -> tuple[str, ...]:
     return ANTHROPIC_EFFORT_LEVELS
 
 _MOONSHOT_MODEL_PREFIXES: tuple[str, ...] = (
-    "kimi-",
-    "moonshot-",
-    "moonshotai/",
     "openrouter/moonshotai/",
     "openrouter/~moonshotai/",
 )
-"""Catalog-key prefixes of Moonshot/Kimi models across every routing path:
-direct (``kimi-*`` / ``moonshot-*``), Together (``moonshotai/*``), and
-OpenRouter (``openrouter/moonshotai/*``)."""
+"""Catalog-key prefixes of Moonshot/Kimi models, which only OpenRouter routes."""
 
 _GROK_EFFORT_LEVELS: tuple[str, ...] = ("low", "medium", "high")
 """The xAI Grok ``reasoning_effort`` scale for the ``grok-4.3`` / ``grok-4.5``
@@ -1386,7 +1326,6 @@ preserved and ``xhigh`` is not materialized. Every other GLM (4.5 / 4.6 /
 and is deliberately kept behind the probe gate."""
 
 _GLM_5_2_MODEL_PREFIXES: tuple[str, ...] = (
-    "zai-org/",
     "openrouter/z-ai/",
     "openrouter/~z-ai/",
 )
@@ -1438,16 +1377,15 @@ def _is_grok_3_mini_family(model_name: str) -> bool:
 def _is_glm_5_2_family(model_name: str) -> bool:
     """Return True when ``model_name`` is exactly a z-ai GLM-5.2 model.
 
-    Per the November 2026 audit, ``zai-org/GLM-5.2`` and
-    ``openrouter/z-ai/glm-5.2`` are the **only** Zhipu / GLM entries that
-    accept the ``reasoning_effort`` API surface (native values ``high`` and
-    ``max``). Every other GLM (4.5 / 4.6 / 4.7 / 5.0 / 5.1 / 5v-turbo /
-    ``glm-4.5-air`` etc.) uses the older ``thinking.type`` boolean and
-    must stay behind the probe gate.
+    Per the November 2026 audit, ``openrouter/z-ai/glm-5.2`` is the
+    **only** Zhipu / GLM entry that accepts the ``reasoning_effort`` API
+    surface (native values ``high`` and ``max``). Every other GLM (4.5 /
+    4.6 / 4.7 / 5.0 / 5.1 / 5v-turbo / ``glm-4.5-air`` etc.) uses the older
+    ``thinking.type`` boolean and must stay behind the probe gate.
 
     The match requires:
 
-    * a recognized GLM-5.2 route prefix (``zai-org/``, ``openrouter/z-ai/``,
+    * a recognized GLM-5.2 route prefix (``openrouter/z-ai/``,
       ``openrouter/~z-ai/``), AND
     * a last-segment name equal to ``glm-5.2`` (case-insensitive) — so a
       hypothetical ``glm-5.2v-turbo`` or ``glm-5.2-air`` stays gated out
@@ -1465,25 +1403,6 @@ def _is_glm_5_2_family(model_name: str) -> bool:
     return base == "glm-5.2"
 
 
-def _is_together_gpt_oss(model_name: str) -> bool:
-    """Return True for the Together-route OpenAI gpt-oss family.
-
-    Together AI hosts the open-weight gpt-oss models under the ``openai/``
-    catalog namespace (``openai/gpt-oss-120b``, ``openai/gpt-oss-20b``).
-    That prefix does not overlap ``_OPENAI_PREFIXES`` (which starts with
-    ``gpt``, ``o1``, ``o3``, ``o4``, ``codex``, ``computer-use``), so
-    these entries would otherwise slip through the probe gate. They are
-    OpenAI-compatible chat-completions models and accept the OpenAI
-    ``reasoning_effort`` ladder (topping at ``high``); the standard
-    OpenAI scale returned by :func:`_thinking_scale_for` is correct for
-    them — the probe naturally lands at ``high`` and stops.
-
-    The check is scoped to ``openai/gpt-oss-*`` slugs specifically so
-    that no unrelated Together model is affected.
-    """
-    return model_name.startswith("openai/gpt-oss-")
-
-
 def _is_kimi_k3_family(model_name: str) -> bool:
     """Return True when ``model_name`` is a Kimi K3-generation model.
 
@@ -1497,9 +1416,8 @@ def _is_kimi_k3_family(model_name: str) -> bool:
     ``reasoning_effort``) would otherwise fabricate alias levels the
     model does not honor.
 
-    The check is on the last ``/``-separated segment, case-insensitively,
-    so it covers ``kimi-k3``, ``moonshotai/Kimi-K3`` (Together) and
-    ``openrouter/moonshotai/kimi-k3`` alike.
+    The check is on the last ``/``-separated segment, case-insensitively
+    (``openrouter/moonshotai/kimi-k3``).
 
     Args:
         model_name: The catalog key of the model.
@@ -1534,9 +1452,9 @@ def _thinking_scale_for(model_name: str) -> tuple[str, ...]:
       ``reasoning.effort`` to Anthropic unchanged; the Claude Code CLI
       takes the level as ``--effort``).
     * Every other model uses the OpenAI ladder :data:`_THINKING_LEVELS`
-      (``low``/``medium``/``high``/``xhigh``) — including Together's
-      OpenAI-compatible ``openai/gpt-oss-*`` entries, which naturally top
-      at ``high``.
+      (``low``/``medium``/``high``/``xhigh``) — including OpenRouter's
+      open-weight ``openai/gpt-oss-*`` entries, which naturally top at
+      ``high``.
 
     Every scale is required to contain ``"high"`` — the level stored on
     base entries when the detected maximum is higher (see
@@ -1634,9 +1552,8 @@ def detect_thinking_level(
       every Claude model, so a probe proves nothing; the level is mirrored
       from the direct twin by :func:`_sync_openrouter_claude_thinking`.
     * Every other vendor not yet verified to support the parameter (only
-      the OpenAI family — direct and via OpenRouter, plus Together's
-      ``openai/gpt-oss-*`` — Kimi K3, the xAI Grok effort family, and
-      z-ai GLM-5.2 are probed).
+      the OpenAI family — direct and via OpenRouter — Kimi K3, the xAI
+      Grok effort family, and z-ai GLM-5.2 are probed).
     """
     from kiss.core.models.model_info import _OPENAI_PREFIXES
 
@@ -1651,7 +1568,6 @@ def detect_thinking_level(
     )
     is_anthropic = model_name.startswith("claude-")
     is_openrouter_openai = model_name.startswith(("openrouter/openai/", "openrouter/~openai/"))
-    is_together_gpt_oss = _is_together_gpt_oss(model_name)
     is_moonshot_k3 = model_name.startswith(_MOONSHOT_MODEL_PREFIXES) and _is_kimi_k3_family(
         model_name
     )
@@ -1664,7 +1580,6 @@ def detect_thinking_level(
         or is_openai
         or is_anthropic
         or is_openrouter_openai
-        or is_together_gpt_oss
         or is_moonshot_k3
         or is_grok_effort
         or is_glm_5_2
@@ -2774,7 +2689,6 @@ def _prompt_tier_changes(cur: dict[str, Any], fetched: dict[str, Any]) -> dict[s
 def compute_changes(
     current: dict[str, dict],
     openrouter: dict[str, dict],
-    together: dict[str, dict],
     gemini: dict[str, dict],
     anthropic: dict[str, dict],
     openai: dict[str, dict],
@@ -2833,42 +2747,6 @@ def compute_changes(
                         "is_decisions": fetched.get("decisions", False),
                         **_cache_price_changes({}, fetched),
                         **_prompt_tier_changes({}, fetched),
-                    }
-                )
-
-    for name, fetched in together.items():
-        if name in current:  # pragma: no branch
-            cur = current[name]
-            changed = {}
-            if (  # pragma: no branch
-                fetched["context_length"] and fetched["context_length"] != cur["context_length"]
-            ):
-                changed["context_length"] = fetched["context_length"]
-            if _price_changed(cur["input_price_per_1M"], fetched["input_price_per_1M"]):
-                changed["input_price_per_1M"] = fetched["input_price_per_1M"]
-            if _price_changed(cur["output_price_per_1M"], fetched["output_price_per_1M"]):
-                changed["output_price_per_1M"] = fetched["output_price_per_1M"]
-            changed.update(_cache_price_changes(cur, fetched))
-            if changed:  # pragma: no branch
-                updates.append({"name": name, "changes": changed, "source": "together"})
-        else:
-            is_preview = "preview" in name.split("/")[-1]
-            has_pricing = fetched["input_price_per_1M"] > 0
-            if (
-                fetched["context_length"]
-                and fetched.get("type") in ("chat", "embedding")
-                and (has_pricing or is_preview)
-            ):
-                new_models.append(
-                    {
-                        "name": name,
-                        "context_length": fetched["context_length"],
-                        "input_price_per_1M": fetched["input_price_per_1M"],
-                        "output_price_per_1M": fetched["output_price_per_1M"],
-                        "source": "together",
-                        "is_embedding": fetched.get("is_embedding", False),
-                        "needs_pricing": not has_pricing,
-                        **_cache_price_changes({}, fetched),
                     }
                 )
 
@@ -3489,20 +3367,16 @@ def apply_updates_to_file(
 
 
 # Runtime routing label (from model_info.get_model_provider) -> README
-# category label. The README spells some labels differently: "Together AI"
-# / "Moonshot AI" carry the vendor suffix, and the CLI categories keep the
-# backticked prefix so the table row can be matched verbatim by
-# tests/test_readme_zai_moonshot. There is deliberately no "Unknown" entry:
-# a catalog model that no provider routes must fail the sync loudly
-# (KeyError) instead of being silently miscounted.
+# category label. The README spells some labels differently: the Bedrock
+# and CLI categories keep the backticked prefix of their table row. There
+# is deliberately no "Unknown" entry: a catalog model that no provider
+# routes must fail the sync loudly (KeyError) instead of being silently
+# miscounted.
 _PROVIDER_LABEL_TO_README_CATEGORY: dict[str, str] = {
     "OpenAI": "OpenAI",
     "Anthropic": "Anthropic",
     "Bedrock": "Amazon Bedrock (`bedrock/*`)",
     "Gemini": "Gemini",
-    "Together": "Together AI",
-    "Z.AI": "Z.AI",
-    "Moonshot": "Moonshot AI",
     "OpenRouter": "OpenRouter",
     "Claude Code CLI": "Claude Code CLI (`cc/*`)",
     "Codex CLI": "Codex CLI (`codex/*`)",
@@ -3515,10 +3389,8 @@ def _readme_provider_category(model_name: str) -> str:
     Categories follow the provider that ROUTES the model, looked up from
     the single runtime routing table
     (:func:`kiss.core.models.model_info.get_model_provider`) rather than a
-    duplicated prefix list — so the open-weight ``openai/gpt-oss-*`` and
-    ``google/gemma-*`` models count under Together AI (they are served
-    with a ``TOGETHER_API_KEY``), and any future routing change is
-    reflected here automatically.
+    duplicated prefix list, so any future routing change is reflected
+    here automatically.
 
     Raises:
         KeyError: If no registered provider routes ``model_name``.
@@ -3862,7 +3734,6 @@ def main() -> None:
     openrouter_models = fetch_openrouter(verbose=args.verbose)
     for name in prefer_standard_endpoint_prices(openrouter_models):
         print(f"  {name}: listed at a regional surcharge, priced by its standard endpoint")
-    together_models = fetch_together(verbose=args.verbose)
     gemini_models = fetch_gemini(verbose=args.verbose)
     anthropic_models = fetch_anthropic(verbose=args.verbose)
     openai_models = fetch_openai(verbose=args.verbose)
@@ -3890,7 +3761,6 @@ def main() -> None:
     updates, new_models = compute_changes(
         current,
         openrouter_models,
-        together_models,
         gemini_models,
         anthropic_models,
         openai_models,

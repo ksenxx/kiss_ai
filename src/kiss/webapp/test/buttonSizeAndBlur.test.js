@@ -75,18 +75,17 @@ function testInputFooterButtonsAreBigger() {
   assert.ok(stopSvg, 'main.css must size #stop-btn svg');
   assertAtLeast(stopSvg.width, 15, '#stop-btn svg width');
 
-  for (const id of [
-    'menu-btn',
-    'model-btn',
-    'upload-btn',
-    'tricks-btn',
-    'voice-btn',
-  ]) {
+  for (const id of ['menu-btn', 'upload-btn', 'tricks-btn', 'voice-btn']) {
     const svg = doc.querySelector('#' + id + ' svg');
     assert.ok(svg, '#' + id + ' must contain an svg icon');
     assertAtLeast(svg.getAttribute('width'), 16, '#' + id + ' svg width');
     assertAtLeast(svg.getAttribute('height'), 16, '#' + id + ' svg height');
   }
+  // The model button is a text pill: the model's name and no icon.
+  assert.deepStrictEqual(
+    Array.from(doc.getElementById('model-btn').children, el => el.id),
+    ['model-name'],
+  );
   // The upload icon sits in the "..." menu: whichever rule sizes it there
   // (`.more-item-icon svg` today) must keep it at 16px or more.
   const uploadSvg = win.getComputedStyle(doc.querySelector('#upload-btn svg'));
@@ -100,11 +99,11 @@ function testTabBarPlusAndSettingsAreBigger() {
   const doc = win.document;
 
   const addBtn = doc.getElementById('new-chat-btn');
-  assert.ok(addBtn, 'input footer must render the "+" (new chat) button');
-  const plus = addBtn.querySelector('svg');
-  assert.ok(plus, 'new-chat button must contain the plus svg');
-  assertAtLeast(plus.getAttribute('width'), 16, 'new-chat svg width');
-  assertAtLeast(plus.getAttribute('height'), 16, 'new-chat svg height');
+  assert.ok(addBtn, 'input footer must render the new-chat button');
+  const bubble = addBtn.querySelector('svg');
+  assert.ok(bubble, 'new-chat button must contain its chat-bubble svg');
+  assertAtLeast(bubble.getAttribute('width'), 16, 'new-chat svg width');
+  assertAtLeast(bubble.getAttribute('height'), 16, 'new-chat svg height');
 
   const moreBtn = doc.getElementById('more-btn');
   assert.ok(moreBtn, 'input footer must render the "..." button');
@@ -119,7 +118,7 @@ function testTabBarPlusAndSettingsAreBigger() {
   assertAtLeast(gear.getAttribute('width'), 16, 'settings gear svg width');
   assertAtLeast(gear.getAttribute('height'), 16, 'settings gear svg height');
   win.close();
-  console.log('  ok - footer "+", "..." and settings buttons are sized');
+  console.log('  ok - footer new-chat, "..." and settings buttons are sized');
 }
 
 function testCloseButtonsAreBigger() {
