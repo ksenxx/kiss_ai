@@ -39,7 +39,6 @@ from kiss.agents.sorcar.agent_dispatch import (
     make_run_parallel_tool,
     notice_job_id,
     unread_results_note,
-    wait_any_results,
 )
 from kiss.agents.sorcar.useful_tools import UsefulTools
 from kiss.core.kiss_agent import is_routine_turn
@@ -133,10 +132,11 @@ def test_wait_any_returns_the_first_job_to_finish_and_never_twice(
         # The lead line names both sides; the slow job is not "still
         # running" there, so the turn is not filed as routine.
         assert out.startswith(f"Finished: {fast.job_id}; running: {slow.job_id}.\n"), out
-        results = wait_any_results(out)
-        assert list(results) == [fast.job_id]
-        assert yaml.safe_load(results[fast.job_id])["success"] is True
-        assert "child 0 done" in results[fast.job_id]
+        # One section follows it: the fast job's result under its header line.
+        section = f"Job {fast.job_id} ({fast.name} agent task) finished:\n{fast.result}"
+        assert out.split("\n\n", 1)[1] == section
+        assert yaml.safe_load(fast.result)["success"] is True
+        assert "child 0 done" in fast.result
         assert fast.reported and not slow.reported
         assert not is_routine_turn("agent_job", {"job_id": "", "action": "wait_any"}, out, False)
         assert is_long_running_call("agent_job", {"job_id": "", "action": "wait_any"})
@@ -150,7 +150,7 @@ def test_wait_any_returns_the_first_job_to_finish_and_never_twice(
             f"None of {slow.job_id} finished within 0s; they are still running",
         )
         assert is_routine_turn("agent_job", {"job_id": "", "action": "wait_any"}, timed_out, False)
-        assert wait_any_results(timed_out) == {}
+        assert "agent task) finished:" not in timed_out
         # A JSON number waits like its text: Bash and bash_job take
         # timeout_seconds as a number, so models pass one here too.
         assert tool(f"{fast.job_id}, {slow.job_id}", "wait_any", 0) == timed_out

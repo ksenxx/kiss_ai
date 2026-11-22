@@ -317,9 +317,9 @@ function testClosingAChatClosesItsSubagentsAndKeepsItsFiles() {
   send(win, {type: 'tabs_state', tabs: [entry('a'), entry('b')]});
   spawnSubagent(win, 'a', 'a-sub-1');
   const fileId = openFile(win, 'a', 'kept.md');
-  // The chat's own entry is on the chat screen.
+  // The chat is on screen when the registry drops it.
   clickTab(win, 'a');
-  click(win, stripEl(win, 'a').querySelector('.chat-tab-close'));
+  send(win, {type: 'tabs_state', tabs: [entry('b')]});
   assert.deepStrictEqual(
     openIds(win),
     ['b', fileId],

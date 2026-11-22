@@ -8,12 +8,17 @@ Tests verify correctness and accuracy of all terminal printing logic
 with real objects.
 """
 
+import functools
 import io
 import re
 import unittest
 from types import SimpleNamespace
+from typing import Any
 
+from kiss.agents.sorcar.docker_manager import _timeout_message, _with_exit_code
+from kiss.agents.sorcar.useful_tools import UsefulTools, sleep_alternative
 from kiss.core.print_to_console import ConsolePrinter
+from kiss.core.tool_interrupt import USER_INTERRUPTED_MESSAGE
 from kiss.core.utils import finish
 
 
@@ -129,6 +134,67 @@ class TestBashStreamInResultPanel(unittest.TestCase):
         assert "RESULT" in out
         result_idx = out.index("RESULT")
         assert "file contents here" in out[result_idx:], out
+
+
+class TestStreamedBashStatus(unittest.TestCase):
+    """What the ``Bash`` tools write around a streamed command's output reaches the console.
+
+    The stream carries the output only, and the result of a streamed call
+    used to print as its closing rule alone: a failed, a timed-out and a
+    left-running command read as one that passed.
+    """
+
+    def setUp(self) -> None:
+        self.printer, self.buf = _make()
+        self.tools = UsefulTools(
+            stream_callback=functools.partial(self.printer.print, type="bash_stream"),
+        )
+
+    def _body(self, result: str, interrupted: bool = False) -> list[str]:
+        """Print *result* as the result ending a ``Bash`` call; return the lines in its rules."""
+        self.printer.print(result, type="tool_result", tool_name="Bash", interrupted=interrupted)
+        opening, *body, closing = self.buf.getvalue()[self.start:].splitlines()
+        assert "RESULT" in opening and closing and not closing.strip("─"), (opening, closing)
+        return body
+
+    def _bash(self, **bash: Any) -> list[str]:
+        """Make a real ``Bash`` call as the agent does; return the lines in its result's rules."""
+        self.printer.print("Bash", type="tool_call", tool_input=bash)
+        self.start = len(self.buf.getvalue())
+        self.returned = self.tools.Bash(description="status", **bash)
+        return self._body(self.returned)
+
+    def test_the_host_tools_status_follows_the_stream(self) -> None:
+        self.assertEqual(self._bash(command="echo out; exit 3"), ["out", "Error (exit code 3):"])
+        self.assertEqual(
+            self._bash(command="echo out; sleep 30", timeout_seconds=1),
+            ["out", "Error: Command execution timeout after 1s. Output before the timeout:"],
+        )
+        left = self._bash(command="echo out; sleep 30", timeout_seconds=1, on_timeout="background")
+        self.tools.bash_job(self.returned.split()[9], action="kill")
+        notice = r"\Aout\nStill running after 1s; left running as background job \w+ .+\Z"
+        self.assertRegex("\n".join(left), notice)
+        # Output is the stream's, however it reads: printed again it would show twice.
+        lookalike = ["Error: disk full", "[exit code: 1]"]
+        self.assertEqual(self._bash(command="; ".join(f"echo '{x}'" for x in lookalike)), lookalike)
+
+    def test_the_container_tools_status_and_a_cut_short_call(self) -> None:
+        timed_out = "Error: command timed out after 5s and was killed. Output before the timeout:"
+        polled = _with_exit_code("out", 2) + "\n[until 'x': not matched after 2 runs]"
+        waited = "\nWaited on job j1 for up to 40 s instead of sleeping (running).\n"
+        for result, status, interrupted in (
+            (_with_exit_code("out\n", 2), ["[exit code: 2]"], False),
+            (_timeout_message(5, "out\n"), [timed_out], False),
+            # Before an ``until`` verdict and what the tool says of a long sleep.
+            (polled + waited, ["[exit code: 2]"], False),
+            (_with_exit_code("out\n", 2) + sleep_alternative(40), ["[exit code: 2]"], False),
+            ("out\n" + sleep_alternative(40), [], False),  # passed: a note is no status
+            # A call the user stopped says so, as its panel of the web transcript does.
+            (USER_INTERRUPTED_MESSAGE, [USER_INTERRUPTED_MESSAGE], True),
+        ):
+            self.start = len(self.buf.getvalue())
+            self.printer.print("out\n", type="bash_stream")
+            self.assertEqual(self._body(result, interrupted), ["out", *status], result)
 
 
 def _result_panel(raw: str) -> tuple[bool, set[str]]:

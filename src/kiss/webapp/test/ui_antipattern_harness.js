@@ -43,11 +43,19 @@ function forbidNativeDialogs(w) {
   };
 }
 
+// The `error` event of every exception a page built by makePage left
+// uncaught.  One thrown inside a DOM listener, a timer or an observer
+// callback never reaches the test either (jsdom reports it on the
+// page's window and the dispatch returns normally), so makeRunner fails
+// the test from this ledger as well.
+const pageErrors = [];
+
 /**
  * Build a page.  `win.prompt` / `win.confirm` throw: nothing may call
- * them.  The page is the desktop one (wide viewport: split chat/content
- * layout) unless `opts.narrow` is set, which builds the mobile page where
- * a content tab replaces the chat.
+ * them.  An exception the page leaves uncaught is recorded for
+ * makeRunner.  The page is the desktop one (wide viewport: split
+ * chat/content layout) unless `opts.narrow` is set, which builds the
+ * mobile page where a content tab replaces the chat.
  */
 function makePage(opts) {
   const wide = !(opts && opts.narrow);
@@ -69,6 +77,7 @@ function makePage(opts) {
         configurable: true,
       });
       forbidNativeDialogs(w);
+      w.addEventListener('error', e => pageErrors.push(e));
       created = harness.stubMonaco(w);
     },
   });
@@ -340,12 +349,21 @@ function makeRunner(opts) {
       fail(name, new Error(`${calls} must not be called (native dialog)`));
       return;
     }
+    // So is an exception a page left uncaught.  A test that provokes
+    // one on purpose handles its `error` event itself (preventDefault).
+    const uncaught = pageErrors.splice(0).filter(e => !e.defaultPrevented);
+    if (uncaught.length) {
+      const stacks = uncaught.map(e => (e.error && e.error.stack) || e.message);
+      fail(name, new Error('uncaught page error:\n' + stacks.join('\n')));
+      return;
+    }
     closeWindows();
     passed++;
     console.log(`  \u2713 ${name}`);
   }
   function fail(name, e) {
     nativeDialogCalls.length = 0;
+    pageErrors.length = 0;
     closeWindows();
     failures.push({name, error: e});
     console.log(`  \u2717 ${name}`);

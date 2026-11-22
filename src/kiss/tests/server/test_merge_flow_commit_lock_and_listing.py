@@ -147,6 +147,25 @@ class TestCommitDoesNotHoldRepoLockDuringMessageGeneration(_CommitHarness):
         assert "changed while the commit message" in done["message"], done
         assert _git(self.repo, "rev-parse", "HEAD") == head
 
+    def _refused_after_checkout(self, *checkout: str) -> None:
+        """A checkout at the same commit keeps parent and staged tree, and moves the destination."""
+        head = _git(self.repo, "rev-parse", "HEAD")
+        thread, pause = self._commit_held_at_generator()
+        _git(self.repo, "checkout", "-q", *checkout)
+        pause.release()
+        thread.join(120)
+        done = _wait_for(self.events, "autocommit_done")
+        assert done["success"] is False and done["committed"] is False, done
+        assert "changed while the commit message" in done["message"], done
+        assert _git(self.repo, "rev-parse", "HEAD") == head
+        assert _git(self.repo, "rev-parse", "main") == head
+
+    def test_branch_created_at_the_same_commit_during_generation_is_refused(self) -> None:
+        self._refused_after_checkout("-b", "other")
+
+    def test_head_detached_at_the_same_commit_during_generation_is_refused(self) -> None:
+        self._refused_after_checkout("--detach")
+
     def test_staging_failure_after_generation_is_reported(self) -> None:
         head = _git(self.repo, "rev-parse", "HEAD")
         thread, pause = self._commit_held_at_generator()

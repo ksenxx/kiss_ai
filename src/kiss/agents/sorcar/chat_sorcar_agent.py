@@ -49,6 +49,7 @@ from kiss.agents.sorcar.sorcar_agent import (
     _first_cleanup_error,
     canonical_tool_profile,
     classification_chooses_prompt,
+    launch_model_config,
     resolve_tool_profile,
 )
 from kiss.core._version import __version__
@@ -853,6 +854,7 @@ class ChatSorcarAgent(SorcarAgent):
         _history_prompt: str | None = None,
         _open_bare_path: bool = True,
         _start_ms: int = 0,
+        _task_id: str = "",
         compaction: bool = True,
     ) -> str:
         """Run the agent with chat-session context management.
@@ -938,6 +940,10 @@ class ChatSorcarAgent(SorcarAgent):
             _start_ms: The run's start as a ms epoch, when the caller
                 stamped it before calling (the daemon's ``<task>``
                 block); 0 (default) dates the run at row allocation.
+            _task_id: The id of the run's ``task_history`` row, when the
+                caller chose it (the daemon's ``<task>`` block, whose
+                row ids name their run); ``""`` (default) picks a
+                random one.
             compaction: Whether the run compacts its context (see
                 :meth:`SorcarAgent.run`): False never compacts, True (the
                 default) compacts while the global Compaction setting is
@@ -1039,6 +1045,13 @@ class ChatSorcarAgent(SorcarAgent):
         # left behind by crashing before its own cleanup; a verdict the
         # task runner pre-seeded survives it.
         self._reset_task_classification()
+        # The launcher that read the registry for the run's configuration
+        # said whose endpoint it has (the task runner); for a run without
+        # one the read is made here, ahead of the classifier, which is
+        # asked where the run is.  Stated right before ``super().run``.
+        owns_endpoint = self._launch_owns_endpoint
+        if owns_endpoint is None:
+            model_config, owns_endpoint = launch_model_config(resolved_model, model_config)
         if classification_chooses_prompt(
             resolve_tool_profile(effective_profile), append_basic_tools, base_system_prompt,
         ):
@@ -1113,7 +1126,7 @@ class ChatSorcarAgent(SorcarAgent):
         # while the committed one stayed "running".  When the allocation
         # fails, or a Stop lands in it before its commit, the id names
         # no row and every cleanup step keyed by it writes nothing.
-        task_id = uuid.uuid4().hex
+        task_id = _task_id or uuid.uuid4().hex
         try:
             _add_task(
                 history_prompt, chat_id=self._chat_id, extra=early_extra, task_id=task_id,
@@ -1180,6 +1193,7 @@ class ChatSorcarAgent(SorcarAgent):
             )
 
             run_started = True
+            self._launch_owns_endpoint = owns_endpoint
             result = super().run(
                 model_name=resolved_model,
                 prompt_template=agent_prompt,
@@ -1251,6 +1265,9 @@ class ChatSorcarAgent(SorcarAgent):
                 )
             finally:
                 self._last_result_summary = result_summary
+                # Said for this run alone, also when it ended before
+                # ``super().run`` cleared it.
+                self._launch_owns_endpoint = None
                 try:
                     if run_printer is not None:
                         try:

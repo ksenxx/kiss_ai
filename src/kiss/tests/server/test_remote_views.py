@@ -34,6 +34,7 @@ from __future__ import annotations
 import asyncio
 import http.server
 import os
+import re
 import shutil
 import signal
 import sys
@@ -158,6 +159,25 @@ class RemoteViewsTest(TwoClientHarness):
             "workDir": work_dir, "machine": machine,
         })
         return self.wait_event(client, "terminalOpened", timeout=60, tab_id=tab_id)
+
+    def _machine_action(self, client: Client, generation: int, **action: str) -> None:
+        """Run a MACHINES subpanel action of *client* to its error-free answer."""
+        client.send({"type": "machineAction", "generation": generation, **action})
+        answer = self.wait_event(client, "machines", timeout=60, generation=generation)
+        self.assertEqual(answer["error"], "")
+
+    def _shell_home(self, client: Client, tab_id: str) -> str:
+        """The ``$HOME`` of the shell behind *tab_id*: the home of the daemon that runs it."""
+        client.send({
+            "type": "terminalInput", "tab_id": tab_id,
+            "data": "printf '<home>%s</home>\\n' \"$HOME\"\n",
+        })
+        # The typed line is echoed too: it has the ``%s`` the answer has not.
+        found = self.wait_for(
+            lambda: re.search(r"<home>([^<%]+)</home>", self._output(client, tab_id)),
+            timeout=60, what=f"the home of the shell of {tab_id}",
+        )
+        return str(found.group(1))
 
     # -- terminal ------------------------------------------------------------
 
@@ -452,6 +472,74 @@ class RemoteViewsTest(TwoClientHarness):
         self._open_terminal(a, "term-after")
         a.send({"type": "terminalClose", "tab_id": "term-after"})
         self.wait_for(lambda: not views._streams, timeout=30, what="idle stream closed")
+
+    def test_a_machine_registered_again_or_removed_takes_its_stream_with_it(self) -> None:
+        """An open goes to the machine as it is registered now, not to an earlier one's stream.
+
+        The name ``box`` is given to a second daemon while a shell of
+        the first one is open: that shell's page is told, and the next
+        shell runs on the second daemon.  Once removed, the machine
+        takes no open, and its shell ends the same way.
+        """
+        a, b, views = self.a, self.b, self._views()
+        self._open_terminal(a, "term-first")
+        first = views._streams["box"]
+        home = Path(tempfile.mkdtemp(prefix="remote_views_second_"))
+        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
+        second = start_remote_daemon(home, password="pw-second", env={"HOME": str(home)})
+        self.addCleanup(second.stop)
+        self._machine_action(
+            b, 2, action="add", name="box", address=second.url, machinePassword="pw-second",
+        )
+        self._open_terminal(a, "term-second")
+        self.assertEqual(self._shell_home(a, "term-second"), str(home))
+        ended = self.wait_event(a, "terminalError", timeout=60, tab_id="term-first")
+        self.assertEqual(
+            (ended["text"], ended["machine"]), ("box: the machine registry changed", "box"),
+        )
+        self.assertTrue(first.retired)
+        self.assertEqual(views._streams["box"].machine.url, second.url)
+
+        self._machine_action(b, 3, action="remove", name="box")
+        a.send({
+            "type": "terminalOpen", "tab_id": "term-third", "cols": 80, "rows": 24,
+            "workDir": "", "machine": "box",
+        })
+        refused = self.wait_event(a, "terminalError", timeout=60, tab_id="term-third")
+        self.assertIn("box is not a registered machine", refused["text"])
+        self.wait_event(a, "terminalError", timeout=60, tab_id="term-second")
+        self.assertEqual(views._streams, {})
+        self.assertEqual(b.of_type("terminalError"), [])
+
+    def test_a_stream_connected_while_its_machine_left_the_registry_is_not_kept(self) -> None:
+        """A registration that changes during a stream's handshake refuses the open it was for.
+
+        The stream is held once connected, before it is registered
+        here, and the machine is removed meanwhile: the shell is not
+        opened on a machine the registry no longer names, and no
+        stream to it stays behind.
+        """
+        a, b, views = self.a, self.b, self._views()
+        connected = Pause(
+            threading.Thread.start.__code__,
+            lambda local: local["self"].name == "remote-views-box",
+        )
+        with connected:
+            a.send({
+                "type": "terminalOpen", "tab_id": "term-raced", "cols": 80, "rows": 24,
+                "workDir": "", "machine": "box",
+            })
+            self.assertTrue(connected.paused.wait(30), "the open never connected a stream")
+            self._machine_action(b, 2, action="remove", name="box")
+        answer = self.wait_for(
+            lambda: [e for e in a.events if e.get("tab_id") == "term-raced"],
+            timeout=60, what="the answer to the open",
+        )[0]
+        self.assertEqual(
+            (answer["type"], answer.get("text")),
+            ("terminalError", "box: the machine registry changed, try again"),
+        )
+        self.assertEqual(views._streams, {})
 
     # -- browser -------------------------------------------------------------
 

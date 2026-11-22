@@ -15,6 +15,7 @@ option key must be named in the text the model reads.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import subprocess
 import sys
@@ -25,7 +26,7 @@ import pytest
 
 from kiss.agents.sorcar.agent_dispatch import OPTION_TYPES, make_run_agent_tool
 from kiss.agents.sorcar.sea_cli import main
-from kiss.agents.sorcar.sea_commands import bundled_commands
+from kiss.agents.sorcar.sea_commands import bundled_commands, evaluate_sea
 from kiss.agents.sorcar.sea_docs import (
     GENERATED_FILES,
     REPO_ROOT,
@@ -194,6 +195,40 @@ def test_readme_example_tool_that_fails_on_a_locked_database_leaves_it_usable(
         "second",
     ]
     assert locked.type is sqlite3.OperationalError
+
+
+def readme_example(first_line: str) -> dict[str, Any]:
+    """Run the server README's Python example that starts with *first_line*; its globals."""
+    text = (REPO_ROOT / "src/kiss/server/README.md").read_text(encoding="utf-8")
+    start = text.index(first_line)
+    example: dict[str, Any] = {}
+    exec(text[start : text.index("\n```", start)], example)
+    return example
+
+
+def test_readme_weather_example_help_shows_a_command_that_names_a_city() -> None:
+    """The quick-start SEA of the server README, as written: the task is the city."""
+    weather = readme_example("# weather/weather_sea.py")["WeatherSea"]()
+    assert evaluate_sea([weather], "").prompt == (
+        "Look up the current weather in San Francisco and report it."
+    )
+    # What its help shows typed after the command is looked up as the city.
+    (city,) = re.findall(r"`/weather (.+?)`", weather.description())
+    assert city == "Paris"
+    assert evaluate_sea([weather], city).prompt == (
+        "Look up the current weather in Paris and report it."
+    )
+
+
+def test_readme_strict_sh_example_does_not_call_its_rm_filter_read_only() -> None:
+    """The inheritance example of the server README, as written: it stops ``rm ``, not writes."""
+    strict = readme_example("# strict_sh/strict_sh_sea.py")["StrictShSea"]()
+    hook = evaluate_sea([strict], "ls").tool_call_hook
+    assert hook("Bash", {"command": "printf x > victim.txt"}).allowed
+    refused = hook("Bash", {"command": "rm victim.txt"})
+    assert not refused.allowed
+    # A write gets through, so neither its help nor its refusal may promise a read-only run.
+    assert "read-only" not in strict.description() + refused.text
 
 
 def test_run_agent_description_names_every_option(tmp_path: Path) -> None:

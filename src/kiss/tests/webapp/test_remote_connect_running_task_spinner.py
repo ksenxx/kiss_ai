@@ -37,7 +37,6 @@ from websockets.asyncio.client import connect
 
 from kiss.agents.sorcar import local_endpoint
 from kiss.core.kiss_agent import KISSAgent
-from kiss.tests.conftest import click_row_menu_item
 from kiss.tests.server.conftest import no_verify_ssl
 from kiss.tests.server.test_explorer_scm_commands import (
     ExplorerHarness,
@@ -260,7 +259,7 @@ def test_remote_client_opened_mid_run_gets_status_replay_and_spinner(
         )
         records = [t for t in page.evaluate("window._testApi.openTabs()") if t["id"] == tab]
         assert len(records) == 1, records
-        assert records[0]["isRunning"] is True and records[0]["isDone"] is False
+        assert records[0]["isRunning"] is True
         # Tab titles are shortened with an ellipsis; the visible part is
         # the prompt's beginning.
         label = records[0]["title"]
@@ -268,12 +267,12 @@ def test_remote_client_opened_mid_run_gets_status_replay_and_spinner(
         row = page.locator("#history-list .sidebar-item.running-item", has_text=PROMPT)
         group = row.locator("xpath=ancestor::*[contains(@class, 'history-chat-group')]")
         # The chat's panel starts folded (only the user unfolds it): its
-        # header carries the running spinner; the "Show details" line of
-        # its "…" menu reveals the task row with its own.
+        # header carries the running spinner; the fold button on its
+        # line reveals the task row with its own.
         group.locator(".history-chat-header .history-chat-status.status-spinner").wait_for(
             timeout=15000,
         )
-        click_row_menu_item(group.locator(".history-chat-header"), ".history-chat-collapse")
+        group.locator(".history-chat-header > .history-chat-collapse").click()
         row.locator("> .sidebar-item-running.status-spinner").wait_for(timeout=15000)
         assert row.count() == 1
         assert row.get_attribute("data-category") == "running"

@@ -40,12 +40,15 @@ const V8_FLAGS = ['--no-maglev', '--no-concurrent-sparkplug'];
 
 // Upper bound on one suite's wall-clock time, so that a hang (in a suite,
 // or in the runtime at exit) is reported as a failure naming the suite
-// instead of stalling `npm test` until someone kills it.  Measured with
-// every suite timed under a 32-wide pool on an 80-core box (2026-10):
-// the slowest, remotePasswordBypass.coverage.js, took 23 s and the next
-// four 9-16 s, so two minutes is five times the slowest suite's real time
-// and a hung suite costs the run two minutes instead of ten.
-const SUITE_TIMEOUT_MS = 2 * 60 * 1000;
+// instead of stalling `npm test` until someone kills it.  A bound for a
+// slow machine that also runs other tests, not for the fastest one idle
+// (2026-11): the slowest suite, projects.coverage.js, takes 45 s alone
+// on an 80-core box and 95 s on a 10-core laptop under load, where a
+// full test run made coverage gates of 20 s to 35 s take over 90 s.
+// The two minutes this was before killed such suites.  Ten minutes is
+// above what a gate allows one suite of its own (CHILD_TIMEOUT_MS in
+// coverage_gate.js).
+const SUITE_TIMEOUT_MS = 10 * 60 * 1000;
 
 // Suites running at once: one per CPU, capped (each is a node + jsdom
 // process of a few hundred MB, and the *.coverage.js gates spawn a child

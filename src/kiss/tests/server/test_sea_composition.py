@@ -27,6 +27,7 @@ What these tests pin down (``reports/sea-design-report.html``):
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import sys
@@ -337,7 +338,7 @@ class Chan(sea_class('wbase'), ChannelSea):
 
 
 def test_a_class_shared_by_the_picker_base_and_the_script_contributes_once(
-    registry: Path, tmp_path: Path,
+    registry: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     tally = tmp_path / "tally.txt"
     tally.write_text("", encoding="utf-8")
@@ -397,6 +398,69 @@ class Sibling(sea_class('root')):
     # The base IS the script: one layer.
     root = registry / "root" / "root_sea.py"
     assert [layer.path for layer in sea_layers(root, base=root)] == [root.resolve()]
+    # A script may also import the picker's class the ordinary way, through a
+    # ``sys.path`` entry that is a symlink to the picker's folder: the class is
+    # the picker's own file under another spelling of its path, and each of its
+    # methods still contributes once (audit 2026-11-21, S11/F2).
+    aliased = _write(registry / "aliasedbase" / "aliasedbase_sea.py", """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+def shared_tool(x: str) -> str:
+    '''Shared tool.'''
+    return x
+
+class Shared(BaseSea):
+    def settings(self, settings):
+        return settings | {'timeout': settings.get('timeout', 0) + 5}
+    def prompt(self, task):
+        return '[shared] ' + task
+    def system_prompt(self, system_prompt):
+        return system_prompt + '|shared'
+    def tools(self, tools):
+        return tools + [shared_tool]
+""")
+    importer = _write(registry / "importer" / "importer_sea.py", """
+from aliasedbase_sea import Shared
+
+class Importer(Shared):
+    def prompt(self, task):
+        return '[importer] ' + task
+""")
+    alias = tmp_path / "alias"
+    alias.symlink_to(aliased.parent, target_is_directory=True)
+    monkeypatch.syspath_prepend(str(alias))
+    try:
+        layers = sea_layers(importer, base=aliased)
+        imported = sys.modules[type(layers[1]).__mro__[1].__module__]
+        assert Path(imported.__file__ or "") == alias / aliased.name  # the other spelling
+        assert _mro_names(layers[1]) == ["BaseSea", "Shared", "Importer"]
+        run = evaluate_sea(layers, "t")
+        assert run.prompt == "[importer] [shared] t"
+        assert run.settings["timeout"] == 5
+        assert run.system_prompt_hook("s") == "s|shared"
+        assert [tool.__name__ for tool in run.tools_hook([])] == ["shared_tool"]
+    finally:
+        sys.modules.pop("aliasedbase_sea", None)
+    # A script may leave anything in its module's ``__file__``: a path no file
+    # can have (an embedded NUL) is compared as it is spelt.
+    odd = _write(registry / "odd" / "odd_sea.py", """
+from kiss.agents.seas.base.base_sea import BaseSea
+
+__file__ = 'no\\0file'
+
+class Odd(BaseSea):
+    def prompt(self, task):
+        return '[odd] ' + task
+""")
+    layers = sea_layers(odd)
+    try:
+        assert evaluate_sea(layers, "t").prompt == "[odd] t"
+    finally:
+        sys.modules.pop(type(layers[-1]).__module__, None)
+    # What the next test of this process to ask for its stack does (Mac full run 2026-11-22):
+    # ``inspect.getmodule`` resolves the ``__file__`` of every module published since its
+    # last call, and raises ValueError on one that holds a NUL, so that module is unpublished.
+    inspect.stack(0)
 
 
 def test_failed_reload_keeps_an_earlier_execution_resolving_its_annotations(
@@ -802,6 +866,51 @@ class Chan(ChannelSea):
         assert "BASE PROTOCOL" in run["system_prompt"]
         assert "DERIVED PROTOCOL" in run["system_prompt"]
         assert "base_tool" in run["tool_names"] and "shared" in run["tool_names"]
+
+    def test_a_tool_without_a_name_fails_the_run_in_the_words_of_the_check(self) -> None:
+        """A tool the SEA adds without a ``__name__`` is refused by the run as ``/check`` does.
+
+        ``/check`` accepted a ``functools.partial``, reporting it by its type's name, and the
+        run then died of a bare ``AttributeError`` where the toolset reads ``tool.__name__``
+        (audit 2026-11-21, S11/F3).  Both refuse it in the same words, which name the SEA's
+        ``tools()``; a named function that wraps the partial is registered, and the run goes on.
+        """
+        source = """
+import functools
+from kiss.agents.seas.base.base_sea import BaseSea
+
+def greet(name: str) -> str:
+    '''Greet name.'''
+    return 'hello ' + name
+
+def greet_ada() -> str:
+    '''Greet Ada.'''
+    return functools.partial(greet, name='Ada')()
+
+class Sea(BaseSea):
+    def description(self):
+        return 'greets'
+    def tools(self, tools):
+        return tools + [TOOL]
+"""
+        nameless = _write(
+            self.folder / "nameless" / "nameless_sea.py",
+            source.replace("TOOL", "functools.partial(greet, name='Ada')"),
+        )
+        _write(self.folder / "wrapped" / "wrapped_sea.py", source.replace("TOOL", "greet_ada"))
+        self._register()
+        refusal = (
+            f"tools() of SEA {str(nameless)!r} returned a tool that has no __name__ (a partial)"
+        )
+        assert refusal in sea_commands.sea_check("nameless", nameless)
+        runs: list[dict[str, Any]] = []
+        self._record_runs(runs)
+        result = sorcar.run(
+            "/nameless hi", work_dir=self.repo, endpoint_file=self.endpoint_file, timeout=60,
+        )
+        assert result.success is False and refusal in result.text, result
+        assert runs == []
+        assert "greet_ada" in self._run("/wrapped hi")["tool_names"]
 
     def test_channel_run_holds_its_workspace_for_the_run_and_releases_it(self) -> None:
         # ``tools()`` runs with the run's workspace active (a channel

@@ -60,8 +60,7 @@ PANEL_FRACTION = 0.2
 # retrying and re-hiding #app behind the "server is starting" veil.
 # An !important stylesheet rule beats those inline styles, so the
 # layout stays stable while every real main.js handler and every real
-# CSS rule still applies.  Then expand the collapsible Filters
-# section so the toggle chips get laid out.
+# CSS rule still applies.
 _PREPARE_JS = """
 () => {
   const style = document.createElement('style');
@@ -71,7 +70,6 @@ _PREPARE_JS = """
     #auth-modal { display: none !important; }
   `;
   document.head.appendChild(style);
-  document.getElementById('history-filters-toggle').click();
 }
 """
 
@@ -140,12 +138,12 @@ def _drag_resizer_to(page: Page, x: float) -> None:
 
 
 def _open_desktop_page(browser: Browser, url: str, width: int) -> Page:
-    """Open the remote page at ``width`` and expand the history filters."""
+    """Open the remote page at ``width`` and wait until the history panel is laid out."""
     page = browser.new_page(viewport={"width": width, "height": 900})
     goto_retrying_network_change(page, url)
     page.wait_for_selector("body.remote-desktop", state="attached")
     page.evaluate(_PREPARE_JS)
-    page.wait_for_selector(".history-filter-chips .hf-chip", state="visible")
+    page.wait_for_selector("#history-filter-btn", state="visible")
     return page
 
 

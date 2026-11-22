@@ -9,8 +9,8 @@
 //    usage_info, result events, and the text-fallback parser);
 //  - token counts render as exactly three significant digits with a
 //    K/M/B/T suffix (thousands/millions/billions/trillions), plain
-//    below one thousand, in the header and the history rows (the result
-//    panel's header carries no metrics at all);
+//    below one thousand, in the header (the result panel's header
+//    carries no metrics at all);
 //  - model-list items wrap the name in a .model-item-name span (the
 //    CSS start-truncation hook that keeps the list from scrolling
 //    horizontally on narrow screens) with U+200E bidi guards.
@@ -19,7 +19,6 @@
 
 const assert = require('assert');
 const {makePage, send, stubRaf} = require('./simplify2_harness');
-const {makeRow} = require('./history_helpers');
 
 function headerTokens(win) {
   return win.document.getElementById('status-tokens').textContent;
@@ -44,8 +43,8 @@ const TOKEN_CASES = [
   [999600000000000, '1000T'],
 ];
 
-// The header counters, the Result panel, the history row and the model
-// list do not interfere, so every check runs on one page.
+// The header counters, the Result panel and the model list do not
+// interfere, so every check runs on one page.
 function testHeaderTokensCompactOnStructuredUsageInfo(win) {
   for (const [tokens, expected] of TOKEN_CASES) {
     send(win, {
@@ -116,30 +115,6 @@ function testResultPanelHeaderCarriesNoMetrics(win) {
   console.log('  ok - the result panel header shows no tokens or cost');
 }
 
-function testHistoryRowsUseCompactFormats(win) {
-  send(win, {
-    type: 'history',
-    offset: 0,
-    sessions: [
-      makeRow({
-        id: 'h1',
-        task_id: 7,
-        title: 'big run',
-        tokens: 1234567,
-        cost: 0.1234,
-        steps: 42,
-      }),
-    ],
-  });
-  const metrics = win.document.querySelector('.running-item-metrics');
-  assert.ok(metrics, 'the history row must render its metrics span');
-  assert.ok(
-    metrics.textContent.includes('1.23M tok • $0.12'),
-    'history metrics must be compact; got: ' + metrics.textContent,
-  );
-  console.log('  ok - history rows use the compact formats');
-}
-
 function testModelItemsWrapNameForStartTruncation(win) {
   const long = 'claude-extremely-long-model-name-20261114-thinking-64k';
   send(win, {
@@ -177,7 +152,6 @@ const {win} = makePage({beforeScripts: stubRaf});
 testHeaderTokensCompactOnStructuredUsageInfo(win);
 testHeaderCostTwoDecimalsOnAllPaths(win);
 testResultPanelHeaderCarriesNoMetrics(win);
-testHistoryRowsUseCompactFormats(win);
 testModelItemsWrapNameForStartTruncation(win);
 win.close();
 console.log('metricFormatting.test.js: all tests passed');

@@ -14,7 +14,8 @@ tab contract instead of opening a top-level tab of its own:
    task id and the calling task's ``parent_tab_id``, so every client
    viewing the parent opens a nested client-local sub-agent tab;
 3. the child's history row nests under the parent task (persisted
-   ``subagent`` extra), so parent replays restore the sub-agent tab;
+   ``subagent`` extra), so a parent replay announces the sub-agent's
+   tab while it runs and ends it once it is over;
 4. a ``subagentDone`` is broadcast when the run ends, to the fan-out
    viewers subscribed via ``resumeSession`` and to the dispatch tab id.
 
@@ -394,8 +395,8 @@ class RunAgentSubagentTabTest(DaemonLocalHarness):
         )
 
         # 5. The child's history row nests under the calling task,
-        #    exactly like a run_parallel child's — this is what makes
-        #    parent replays restore the sub-agent tab.
+        #    exactly like a run_parallel child's — this is where a
+        #    parent replay finds the sub-agent.
         nested = _persistence._load_subagent_rows_by_parent_task_id(
             parent.task_id,
         )
@@ -411,12 +412,13 @@ class RunAgentSubagentTabTest(DaemonLocalHarness):
         )
         assert parent.task_id in top_level_ids
 
-        # 6. A parent replay (every client ``ready`` triggers one per
-        #    bound tab) re-announces the finished child with its row's
-        #    start stamp: the chat page attributes the child to the
-        #    fan-out tool call that was running at that time, and only
-        #    an owning, collapsed panel keeps the finished child's tab
-        #    from reopening on every reconnect.
+        # 6. The child's row has its start stamp (a viewer's timer
+        #    counts from it), and the announcement the viewer's resume
+        #    in step 3 got (the child ran then) anchors the tab to the
+        #    parent's.  A parent replay (every client ``ready``
+        #    triggers one per bound tab) announces nothing for the
+        #    finished child: it ends the tab a page that missed the
+        #    finish still holds.
         child_row = next(
             row for row in nested if str(row.get("task_id")) == child_task_id
         )
@@ -424,9 +426,11 @@ class RunAgentSubagentTabTest(DaemonLocalHarness):
             json.loads(str(child_row.get("extra") or "{}")).get("startTs", 0),
         )
         assert row_start_ts > 0, f"child row has no startTs: {child_row!r}"
-        # The viewer's own resumeSession in step 3 already produced an
-        # ``openSubagentTab`` under this id (running); only events from
-        # the parent replay onwards count.
+        announced = next(
+            e for e in list(received)
+            if e.get("type") == "openSubagentTab" and e.get("tab_id") == viewer_sub_tab_id
+        )
+        assert announced.get("parent_tab_id") == PARENT_TAB_ID
         seen_before_replay = len(received)
         self._send_from_viewer({
             "type": "resumeSession",
@@ -434,22 +438,22 @@ class RunAgentSubagentTabTest(DaemonLocalHarness):
             "taskId": parent.task_id,
             "tabId": PARENT_TAB_ID,
         })
-        replayed = self._wait_for(
+        ended = self._wait_for(
             lambda: next(
                 (
                     e for e in list(received)[seen_before_replay:]
-                    if e.get("type") == "openSubagentTab"
+                    if e.get("type") == "subagentDone"
                     and e.get("tab_id") == viewer_sub_tab_id
                 ),
                 None,
             ),
-            what="openSubagentTab re-announce of the finished child",
+            what="subagentDone for the finished child on the parent's replay",
         )
-        assert replayed.get("isDone") is True
-        assert replayed.get("parent_tab_id") == PARENT_TAB_ID
-        assert replayed.get("startTs") == row_start_ts, (
-            f"re-announce must carry the row's startTs: {replayed!r}"
-        )
+        assert ended.get("task_id") == child_task_id
+        assert not [
+            e for e in list(received)[seen_before_replay:]
+            if e.get("type") == "openSubagentTab"
+        ], "a finished child was announced"
 
     def test_multi_task_dispatch_completes_every_child_row(self) -> None:
         """A multi-``<task>`` dispatch completes each child row's tab.

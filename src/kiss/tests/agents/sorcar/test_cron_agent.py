@@ -20,6 +20,7 @@ in ``test_cron_concurrent_runs``).
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 import os
@@ -50,6 +51,7 @@ from kiss.agents.sorcar.cron_agent import (
     tick,
 )
 from kiss.agents.sorcar.sea_settings import WORKER_DEFAULTS
+from kiss.core import tool_interrupt
 from kiss.core.config import kiss_home
 from kiss.tests.agents.sorcar.test_audit0903_stop_timeout_lost_result import (
     _TOKEN,
@@ -292,7 +294,7 @@ def test_default_jobs_are_seeded_once_per_home() -> None:
     assert cron_agent.seed_default_jobs() == names
     recommend, morning = load_jobs()
     assert recommend["name"] == (
-        "Recommendations: ten suggested tasks from your recent work and apps"
+        "Recommendations: twenty suggested tasks from your recent work and apps"
     )
     assert recommend["prompt"] == "/recommendations now" and recommend["command"] == ""
     assert recommend["schedule"] == "0 */6 * * *"
@@ -332,8 +334,9 @@ def test_default_jobs_are_seeded_once_per_home() -> None:
     # under its former name is kept and nothing is seeded beside it, and
     # a record naming the former name means it was seeded, so removing
     # or editing that job never brings the default back.
-    (former,) = cron_agent.FORMER_DEFAULT_NAMES
-    assert cron_agent.FORMER_DEFAULT_NAMES[former] == names[0]
+    formers = list(cron_agent.FORMER_DEFAULT_NAMES)
+    assert [cron_agent.FORMER_DEFAULT_NAMES[f] for f in formers] == [names[0]] * 2
+    former = formers[-1]
     for job in load_jobs():
         cron_job("remove", job_id=job["id"])
     cron_agent._seeded_defaults_path().unlink()
@@ -435,6 +438,38 @@ def test_seed_keeps_user_job_created_while_seeding() -> None:
     assert [j["name"] for j in load_jobs() if j["name"] != names[0]] == [names[1]]
 
 
+def test_a_second_seeder_leaves_the_defaults_to_the_one_at_work() -> None:
+    """No seeder acts on a record of seeded defaults that another has since written.
+
+    The record was read before, and outside, any lock.  A seeder held
+    between that read and its first insertion went on from what it had
+    read: after a second seeder (another daemon starting on the home)
+    had seeded the defaults and the user had removed them, it created
+    them again, although the record named them by then (audit
+    2026-11-21, S3 F2).  The read, the insertions and the write of the
+    record are one transaction under a lock of its own, so the second
+    seeder finds the first at work and seeds nothing.
+    """
+    names = [spec["name"] for spec in cron_agent.DEFAULT_JOBS]
+    outcome: list[list[str]] = []
+    worker = threading.Thread(target=lambda: outcome.append(cron_agent.seed_default_jobs()))
+    with Pause(cron_agent._create_or_ensure.__code__, _seeding_a_default) as held:
+        worker.start()
+        try:
+            assert held.paused.wait(30), "seeding never reached the store transaction"
+            assert cron_agent.seed_default_jobs() == [], "seeded beside the seeder at work"
+            assert load_jobs() == []
+        finally:
+            held.release()
+            worker.join(30)
+    assert not worker.is_alive() and outcome == [names]
+    assert [j["name"] for j in load_jobs()] == names
+    # Seeded once: what the user removes now stays removed.
+    for job in load_jobs():
+        cron_job("remove", job_id=job["id"])
+    assert cron_agent.seed_default_jobs() == [] and load_jobs() == []
+
+
 def test_jobs_follow_the_daemon_between_brand_homes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -447,7 +482,7 @@ def test_jobs_follow_the_daemon_between_brand_homes(
     jobs this store lacks, by name, with a fresh next run.
     """
     names = [spec["name"] for spec in cron_agent.DEFAULT_JOBS]
-    (former,) = cron_agent.FORMER_DEFAULT_NAMES
+    former = list(cron_agent.FORMER_DEFAULT_NAMES)[-1]
     # A KISS_HOME outside $HOME (this test session's) is nobody's brand
     # home: no marker, no hand-over.
     assert kiss_home().parent != Path.home()
@@ -683,10 +718,14 @@ def test_create_validation_errors() -> None:
         "create", name="x", schedule="2001-01-01T00:00", command="c",
     ))
     # A count no float holds is an unsupported schedule, not a crash of the tool.
-    for schedule in ("every " + "9" * 400 + "h", "9" * 400 + "d"):
-        assert "Unsupported schedule" in err(cron_job(
-            "create", name="x", schedule=schedule, command="c",
-        ))
+    # So is one a float holds whose seconds overflow to infinity: the job
+    # was created enabled, never due (audit 2026-11-21, S3 F5).
+    for count in ("9" * 400, "9" * 305):
+        for schedule in (f"every {count}d", f"{count}d"):
+            assert "Unsupported schedule" in err(cron_job(
+                "create", name="x", schedule=schedule, command="c",
+            ))
+    assert load_jobs() == []
     assert "not a number" in err(cron_job(
         "create", name="x", schedule="every 5m", prompt="p", max_budget="lots",
     ))
@@ -2165,6 +2204,75 @@ def test_apply_job_action_run_now_starts_a_thread_once(tmp_path: Path) -> None:
     assert _wait_for_run(job_id)["last_summary"] == "ran now"
 
 
+def _stops_a_run(local_vars: dict[str, Any]) -> bool:
+    """Whether an injection is a scheduler's stop ending one of its runs (for ``Pause``)."""
+    return local_vars["exc_type"] is cron_agent._HostStopping
+
+
+@posix_only("the jobs are sh commands")
+def test_a_scheduler_stopped_outside_an_event_loop_refuses_a_run_only_while_it_stops(
+    tmp_path: Path,
+) -> None:
+    """A host with no event loop starts nothing while its scheduler's stop is at work.
+
+    The stop ends the runs that are alive when it looks, once: a ``run_now``
+    handled after that look started a run that nobody stopped (audit
+    2026-11-21).  Such a host goes on once the stop has returned, as the
+    harness daemons that stop a scheduler in their teardown do: a run asked
+    for then is started.  A daemon's stop is covered in ``tests/server``.
+    """
+    running = _create(cron_job(
+        "create", name="running", schedule="every 1d",
+        command=f"touch {tmp_path / 'up'}; sleep 60",  # ends by itself if left behind
+    ))
+    late = _create(cron_job("create", name="late", command="echo late", schedule="every 1d"))
+    stop_event = start_scheduler_thread(interval=3600)
+    assert cron_agent.apply_job_action("run_now", running["id"]) == ""
+    deadline = time.monotonic() + 20
+    while not (tmp_path / "up").exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    stopper = threading.Thread(
+        target=cron_agent.stop_scheduler_thread, args=(stop_event,), daemon=True,
+    )
+    with Pause(tool_interrupt.inject_async_exception.__code__, _stops_a_run) as stop:
+        stopper.start()
+        assert stop.paused.wait(30)
+        asked_meanwhile = cron_agent.apply_job_action("run_now", late["id"])
+    stopper.join(60)
+    assert asked_meanwhile == (
+        f"job {late['id']!r} is not started: the scheduler's host is shutting down"
+    )
+    assert cron_agent.apply_job_action("run_now", late["id"]) == ""
+    assert _wait_for_run(late["id"])["last_summary"] == "late"
+
+
+def test_a_scheduler_started_on_the_event_loop_of_a_stopped_one_starts_runs_again() -> None:
+    """A new scheduler host ends the refusal a stopped one left on its event loop.
+
+    A stopped host's loop can still bring requests for a run, which are
+    refused until that loop is closed.  A scheduler started on it meanwhile
+    (an in-process restart) is a host that stops what it starts: were it
+    refused too, it would run nothing.
+    """
+    job = _create(cron_job("create", name="again", command="echo again", schedule="every 1d"))
+    job_id = job["id"]
+
+    async def _restart() -> list[str]:
+        await asyncio.to_thread(cron_agent.stop_scheduler_thread, start_scheduler_thread(3600))
+        asked = [cron_agent.apply_job_action("run_now", job_id)]
+        restarted = start_scheduler_thread(3600)
+        try:
+            asked.append(cron_agent.apply_job_action("run_now", job_id))
+            await asyncio.to_thread(_wait_for_run, job_id)
+        finally:
+            await asyncio.to_thread(cron_agent.stop_scheduler_thread, restarted)
+        return asked
+
+    refused = f"job {job_id!r} is not started: the scheduler's host is shutting down"
+    assert asyncio.run(_restart()) == [refused, ""]
+    assert load_jobs()[0]["last_summary"] == "again"
+
+
 def test_run_context_names_time_window_and_previous_result() -> None:
     """The block carries now, the schedule, the window start, the previous attempt, its result."""
     job = {
@@ -2305,6 +2413,11 @@ def test_prompt_job_naming_an_unconnected_connector_does_not_dispatch(
     assert stored["last_summary"].startswith("Gmail is not connected: this scheduled job")
     assert "/gmail authenticate" in stored["last_summary"]
     assert cron_agent.connector_problem("list my open pull requests") is None
+    # A connector's word inside another word names no connector: such a job
+    # was held back for a calendar and a drive it never mentioned (audit
+    # 2026-11-21, S3 F4).  A word it starts ("gmails") still names it.
+    assert cron_agent.connector_problem("run orgcalc.py, then bigdrive-sync") is None
+    assert cron_agent.connector_problem("count my gmails") is not None
 
 
 def test_every_connector_word_resolves_to_a_sea_with_a_status_hook() -> None:
@@ -2316,7 +2429,8 @@ def test_every_connector_word_resolves_to_a_sea_with_a_status_hook() -> None:
         assert module.connection_status() == "", (word, sea)
         problem = cron_agent.connector_problem(f"check {word} now")
         assert problem is not None and problem.startswith(f"{label} is not connected"), word
-        assert f"/{sea} authenticate" in problem, word
+        # The sidebar section that reconnects it, by the title it has there.
+        assert f"Open the Connectors panel (or /{sea} authenticate)" in problem, word
     assert cron_agent.CONNECTOR_WORDS["googlechat"][0] == "googlechat"
 
 

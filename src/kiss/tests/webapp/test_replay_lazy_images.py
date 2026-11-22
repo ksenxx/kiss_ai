@@ -34,7 +34,6 @@ import pytest
 from playwright.sync_api import expect, sync_playwright
 
 from kiss.agents.sorcar import persistence
-from kiss.tests.conftest import click_row_menu_item
 from kiss.tests.server.test_content_tab_file_links import _ServerHarness
 from kiss.tests.webapp.test_content_tab_file_links import _open_page
 
@@ -106,7 +105,7 @@ class TestReplayLazyImages:
             group = page.locator('#history-list .history-chat-group[data-chat-id="chat-lazy"]')
             expect(group).to_have_count(1, timeout=30000)
             # The chat's rows sit folded under its header: unfold, then click the task.
-            click_row_menu_item(group.locator(".history-chat-header"), ".history-chat-collapse")
+            group.locator(".history-chat-header > .history-chat-collapse").click()
             row = group.locator(".sidebar-item").filter(has_text=_PROMPT)
             expect(row).to_have_count(1, timeout=30000)
             row.first.click()

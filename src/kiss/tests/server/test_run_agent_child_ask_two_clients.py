@@ -19,10 +19,9 @@ the answer it gets).  Checked on the wire, per client:
    and, once they watch it, get its ``askUser`` question.
 2. A client connecting MID-QUESTION gets the running child from its
    ``ready`` replay and the pending question once it opens the tab.
-3. Closing the child's tab on one client closes it everywhere
-   (``closeSubagentTab``); reopening it from one client (what expanding
-   the parent's fan-out panel does) announces it again on every client,
-   question included.
+3. A replay of the parent on the launching client while the child still
+   waits (its ``ready`` after a reconnect) announces the running child
+   to that client again, question included.
 4. One client's ``userAnswer`` reaches the real child, every client gets
    ``askUserDone`` then ``subagentDone``, and the parent finishes.
 5. A client connecting AFTER completion is told of no running child and
@@ -122,18 +121,10 @@ class RunAgentChildAskTwoClientsTest(TwoClientHarness):
                     return str(child["task_id"])
         return None
 
-    def _watch_child(
-        self, client: Client, task_id: str, parent_tab: str, reopen: bool = False,
-    ) -> str:
-        """Subscribe *client* to the child's stream, as a page does on ``new_tab``.
-
-        With *reopen*, as its fan-out panel does when the user expands
-        it: only that opens a tab the user closed again.
-        """
+    def _watch_child(self, client: Client, task_id: str, parent_tab: str) -> str:
+        """Subscribe *client* to the child's stream, as a page does on ``new_tab``."""
         sub_tab = f"{parent_tab}__sub_{task_id}"
-        client.send({
-            "type": "resumeSession", "taskId": task_id, "tabId": sub_tab, "reopen": reopen,
-        })
+        client.send({"type": "resumeSession", "taskId": task_id, "tabId": sub_tab})
         return sub_tab
 
     def _open_deferred_tab(self, client: Client, tab_id: str) -> None:
@@ -157,9 +148,9 @@ class RunAgentChildAskTwoClientsTest(TwoClientHarness):
     def _running_child_tabs(self, client: Client) -> set[str]:
         opened: set[str] = set()
         for e in list(client.events):
-            if e.get("type") == "openSubagentTab" and not e.get("isDone"):
+            if e.get("type") == "openSubagentTab":
                 opened.add(str(e["tab_id"]))
-            elif e.get("type") in ("closeSubagentTab", "subagentDone"):
+            elif e.get("type") == "subagentDone":
                 opened.discard(str(e.get("tab_id")))
         return opened
 
@@ -204,36 +195,21 @@ class RunAgentChildAskTwoClientsTest(TwoClientHarness):
             self.wait_event(c, "askUser", tabId=child_tab)["question"], QUESTION,
         )
 
-        # 3. The user closes the child's tab on one client: closed
-        #    everywhere (the child keeps running); reopening it from one
-        #    client announces it again everywhere, question included.
-        b.send({"type": "closeTab", "tabId": child_tab})
-        for client in (a, b, c):
-            self.wait_event(client, "closeSubagentTab", tab_id=child_tab)
+        # 3. The launching client replays the parent while the child
+        #    still waits (its ``ready`` after a reconnect): the running
+        #    child is announced to it again, question included.
+        announced = len(a.of_type("openSubagentTab", tab_id=child_tab))
+        asked = len(a.of_type("askUser", tabId=child_tab))
+        a.ready()
+        self.wait_for(
+            partial(self._more_than, a, "openSubagentTab", "tab_id", child_tab, announced),
+            what="a: running child announced again",
+        )
+        self.wait_for(
+            partial(self._more_than, a, "askUser", "tabId", child_tab, asked),
+            what="a: question shown again",
+        )
         self.assertNotIn("child", self.answers, "the child must still be waiting")
-        before = {
-            cl.name: (
-                len(cl.of_type("openSubagentTab", tab_id=child_tab)),
-                len(cl.of_type("askUser", tabId=child_tab)),
-            )
-            for cl in (a, b, c)
-        }
-        self._watch_child(a, child_id, a.tab_id, reopen=True)
-        for client in (a, b, c):
-            self.wait_for(
-                partial(self._more_than, client, "openSubagentTab", "tab_id",
-                        child_tab, before[client.name][0]),
-                what=f"{client.name}: child tab reopened",
-            )
-            self.wait_for(
-                partial(self._more_than, client, "askUser", "tabId",
-                        child_tab, before[client.name][1]),
-                what=f"{client.name}: question shown again",
-            )
-            self.assertFalse(
-                self.wait_event(client, "openSubagentTab", tab_id=child_tab)
-                .get("isDone"),
-            )
 
         # 4. One client answers: the real child gets the answer, every
         #    client is told the question is over and the child done.

@@ -3,14 +3,23 @@
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
 
-"""The "…" menu of a Chats-panel row while it is open, in a real Chromium.
+"""The buttons on the line of a Chats-panel row, in a real Chromium: a
+header's fold button and the "…" button with the menu it opens.
 
-A chat panel's header and a task panel show one line of text; the
-row's buttons, its "... ago" label and its machine are the lines of a
-menu that the row's "…" button opens as a popover
-(``makeSidebarRowMenu`` in ``media/main.js``).  jsdom has no Popover
-API, so what the page does while a menu is open is tested here:
+A chat panel's header shows one line of text that ends in a fold
+button and a "…" button, a task panel one line that ends in the "…"
+button alone; the row's other buttons, its "... ago" label and its
+machine are the lines of a menu that the "…" button opens as a popover
+(``makeSidebarRowMenu`` in ``media/main.js``).  jsdom lays nothing out
+and has no Popover API, so where the buttons sit and what the page
+does while a menu is open is tested here:
 
+* a header's fold button sits immediately left of its "…" button in a
+  box of the same size, after the ellipsized title, and folds the
+  chat's tasks without opening a chat, at a desktop's and a phone's
+  width;
+* a task panel is one line at both widths: it has no fold button and
+  nothing hangs under its text;
 * one menu is open at a time, and its own button or a press elsewhere
   closes it without opening a chat;
 * the arrow keys, Home and End walk its lines and Enter chooses one;
@@ -26,15 +35,14 @@ What a row looks like with its menu closed and what the menu lists is
 pinned by ``test_codex_task_panel_style.py``; that the menu closes
 with the phone layout's Chats drawer, by ``test_mobile_swipe_screens.py``.
 
-Not tested here: a browser without the Popover API (Firefox before
-125, Safari before 17).  There ``main.js`` asks for no open menu (the
+A browser without the Popover API (Firefox before 125, Safari before
+17) cannot open a menu.  There ``main.js`` asks for no open menu (the
 ``POPOVERS`` check, the path every jsdom suite takes) and ``main.css``
 leaves the "…" buttons and the menus out
 (``@supports not selector(:popover-open)``), so a row is its line of
-text alone.  Every browser Playwright installs has popovers, so that
-stylesheet branch cannot run in this suite; it was checked by hand in
-Firefox 124, where the list rendered its rows without the buttons and
-a chat opened, with no page error.
+text, and a header keeps its fold button.  Every browser Playwright
+installs has popovers, so the last test puts the rules of those
+stylesheet blocks in force itself; no such browser was run.
 """
 
 from __future__ import annotations
@@ -55,8 +63,69 @@ _CONTEXT_MENU_JS = (
     Path(__file__).resolve().parents[2] / "webapp" / "media" / "contentContextMenu.js"
 )
 
+_FOLD = ":scope > .sidebar-item-collapse"
 _MORE = ":scope > .sidebar-item-more"
 _MENU = ":scope > .sidebar-item-actions"
+
+# How the fold button and the "…" button of a chat's header sit on the
+# line of its title.
+_LINE_BUTTONS_JS = """row => {
+  const box = el => {
+    const r = el.getBoundingClientRect();
+    return {left: r.left, right: r.right, middle: (r.top + r.bottom) / 2,
+            width: r.width, height: r.height};
+  };
+  const fold = row.querySelector(':scope > .sidebar-item-collapse');
+  const text = row.querySelector(':scope > .history-chat-title');
+  return {
+    foldThenMore: fold.nextElementSibling.matches('.sidebar-item-more'),
+    fold: box(fold),
+    more: box(fold.nextElementSibling),
+    text: box(text),
+    textIsCut: text.scrollWidth > text.clientWidth,
+    textOverflow: getComputedStyle(text).textOverflow,
+  };
+}"""
+
+# A task panel: its fold buttons, its children by their first class,
+# how its "…" button sits on the line of its text, and how much taller
+# the panel is than that line with the panel's own padding and border.
+_TASK_LINE_JS = """row => {
+  const text = row.querySelector(':scope > .sidebar-item-text');
+  const line = text.getBoundingClientRect();
+  const more = row.querySelector(':scope > .sidebar-item-more').getBoundingClientRect();
+  const style = getComputedStyle(row);
+  const frame = ['paddingTop', 'paddingBottom', 'borderTopWidth', 'borderBottomWidth']
+    .reduce((sum, side) => sum + parseFloat(style[side]), 0);
+  return {
+    foldButtons: row.querySelectorAll('.sidebar-item-collapse').length,
+    children: Array.from(row.children, child => child.classList[0]),
+    textLines: line.height / parseFloat(getComputedStyle(text).lineHeight),
+    textIsCut: text.scrollWidth > text.clientWidth,
+    textOverflow: getComputedStyle(text).textOverflow,
+    moreAfterText: more.left - line.right,
+    moreOffTextMiddle: (more.top + more.bottom - line.top - line.bottom) / 2,
+    underTheLine: row.getBoundingClientRect().height - line.height - frame,
+  };
+}"""
+
+# Put in force, at their place in the sheet, the rules main.css keeps for
+# a browser without popovers; returns how many blocks of them there are.
+_APPLY_NO_POPOVER_RULES_JS = """() => {
+  let blocks = 0;
+  for (const sheet of document.styleSheets) {
+    for (let i = sheet.cssRules.length - 1; i >= 0; i--) {
+      const rule = sheet.cssRules[i];
+      if (!(rule instanceof CSSSupportsRule)) continue;
+      if (!/not\\s+selector\\(:popover-open\\)/.test(rule.conditionText)) continue;
+      blocks++;
+      Array.from(rule.cssRules).forEach((inner, k) => {
+        sheet.insertRule(inner.cssText, i + 1 + k);
+      });
+    }
+  }
+  return blocks;
+}"""
 
 _A_MENU_IS_OPEN_JS = (
     "() => !!document.querySelector('#history-list .sidebar-item-actions:popover-open')"
@@ -117,6 +186,25 @@ def _open_page(browser, sessions: list[dict]):
     return context, page
 
 
+def _open_long_task_page(browser, width: int, height: int):
+    """A page of *width* by *height* listing the sample chats, every
+    chat unfolded and the text of the finished one far too long for a
+    line of the list; returns ``(context, page)``."""
+    long_text = "a task whose text is far too long for one line of the Chats list " * 12
+    sessions = [
+        {**s, "title": long_text, "preview": long_text} if s["id"] == "chat-ok" else s
+        for s in _sample_sessions()
+    ]
+    context, page = _open_history_page(browser, width, height)
+    # The desktop layout shows the list at once and has asked for it:
+    # the rows come as the answer to that request.
+    asked = page.evaluate(
+        "window.__postedMessages.filter(m => m.type === 'getHistory').map(m => m.generation)"
+    )
+    _post_history(page, sessions, generation=asked[-1] if asked else 0)
+    return context, page
+
+
 def _post_page(page: Page, sessions: list[dict]) -> None:
     """The daemon's next ``history`` page arrives."""
     page.evaluate(
@@ -160,6 +248,76 @@ def _is_open(row: Locator) -> bool:
     return bool(row.locator(_MENU).evaluate("menu => menu.matches(':popover-open')"))
 
 
+@pytest.mark.parametrize(("width", "height"), [(1280, 800), (390, 844)])
+def test_fold_button_sits_left_of_the_menu_button_and_folds(_browser, width, height) -> None:
+    """On a chat's header the fold button comes right before the "…"
+    button, on the line of the title and in a box of the same size; a
+    title too long for the line is cut with an ellipsis before the
+    two.  Both come into sight with the pointer on the header.  A click
+    on the fold button folds or unfolds the chat's tasks, renames the
+    button, with the tooltip the click brought up, and opens no chat."""
+    context, page = _open_long_task_page(_browser, width, height)
+    try:
+        posted = page.evaluate("window.__postedMessages.length")
+        header, task = _header(page, "chat-ok"), _task(page, "chat-ok")
+        place = header.evaluate(_LINE_BUTTONS_JS)
+        fold, more, text = place["fold"], place["more"], place["text"]
+        assert place["foldThenMore"], place
+        assert fold["right"] <= more["left"] + 0.5, place
+        assert fold["width"] == pytest.approx(more["width"], abs=0.5), place
+        assert fold["height"] == pytest.approx(more["height"], abs=0.5), place
+        assert fold["middle"] == pytest.approx(more["middle"], abs=0.5), place
+        assert fold["middle"] == pytest.approx(text["middle"], abs=1), place
+        assert place["textIsCut"] and place["textOverflow"] == "ellipsis", place
+        assert text["right"] <= fold["left"] + 0.5, place
+        header.hover()
+        expect(header.locator(_FOLD)).to_have_css("opacity", "1")
+        expect(header.locator(_MORE)).to_have_css("opacity", "1")
+
+        tooltip = page.locator("#custom-tooltip.visible")
+        header.locator(_FOLD).click()
+        expect(task).to_be_hidden()
+        expect(header.locator(_FOLD)).to_have_attribute("aria-label", "Show the chat's tasks")
+        expect(tooltip).to_have_text("Show details")
+        header.locator(_FOLD).click()
+        expect(task).to_be_visible()
+        expect(header.locator(_FOLD)).to_have_attribute("aria-label", "Hide the chat's tasks")
+        expect(tooltip).to_have_text("Hide details")
+        assert page.evaluate("window.__postedMessages.length") == posted, "a fold opens no chat"
+    finally:
+        context.close()
+
+
+@pytest.mark.parametrize(("width", "height"), [(1280, 800), (390, 844)])
+def test_task_panel_is_one_line_with_no_fold_button(_browser, width, height) -> None:
+    """A task panel is its status icon, one line of text and the "…"
+    button with its closed menu: it has no fold button and nothing
+    hangs under the text, so the panel is as tall as that line.  A text
+    too long for the line is cut with an ellipsis before the "…"
+    button, which comes into sight with the pointer on the panel."""
+    context, page = _open_long_task_page(_browser, width, height)
+    try:
+        task = _task(page, "chat-ok")
+        line = task.evaluate(_TASK_LINE_JS)
+        assert line["foldButtons"] == 0, line
+        assert line["children"] == [
+            "sidebar-item-completed",
+            "sidebar-item-text",
+            "sidebar-item-more",
+            "sidebar-item-actions",
+        ], line
+        assert line["textLines"] == pytest.approx(1, abs=0.1), line
+        assert line["textIsCut"] and line["textOverflow"] == "ellipsis", line
+        assert line["moreAfterText"] >= -0.5, line
+        assert line["moreOffTextMiddle"] == pytest.approx(0, abs=1), line
+        assert line["underTheLine"] == pytest.approx(0, abs=0.5), line
+        expect(task.locator(_MENU)).to_be_hidden()
+        task.hover()
+        expect(task.locator(_MORE)).to_have_css("opacity", "1")
+    finally:
+        context.close()
+
+
 def test_one_menu_at_a_time_and_a_press_elsewhere_closes_it(_browser) -> None:
     """A row's "…" button opens its menu and closes the menu of another
     row; the button of the open menu closes it, and so does a press
@@ -197,7 +355,7 @@ def test_keys_walk_the_menu_and_escape_closes_it_alone(_browser) -> None:
             "buttons => buttons.map(button => button.getAttribute('aria-label'))"
         )
         assert len(labels) == 4, labels
-        on_first_line = "() => document.activeElement.matches('.history-chat-collapse')"
+        on_first_line = "() => document.activeElement.matches('.history-chat-favorite')"
         on_more_button = (
             "() => document.activeElement.matches('.history-chat-header > .sidebar-item-more')"
         )
@@ -213,9 +371,11 @@ def test_keys_walk_the_menu_and_escape_closes_it_alone(_browser) -> None:
         ]:
             page.keyboard.press(key)
             assert page.evaluate("document.activeElement.getAttribute('aria-label')") == label, key
-        # The first line folds the chat's tasks away.
+        # The first line stars the chat.
         page.keyboard.press("Enter")
-        expect(_task(page, "chat-ok")).to_be_hidden()
+        assert page.evaluate(
+            "window.__postedMessages.filter(m => m.type === 'setChatFavorite').map(m => m.chatId)"
+        ) == ["chat-ok"]
         assert not _is_open(header)
         page.wait_for_function(on_more_button, timeout=5000)
 
@@ -388,5 +548,24 @@ def test_no_tooltip_shows_over_an_open_menu(_browser) -> None:
         assert not _is_open(task)
         assert task.locator(_MORE).evaluate("more => more === document.activeElement")
         page.wait_for_function(f"() => !({_TOOLTIP_SHOWS_JS})()", timeout=5000)
+    finally:
+        context.close()
+
+
+def test_fold_button_stays_where_the_browser_has_no_popovers(_browser) -> None:
+    """Under the rules main.css keeps for a browser without popovers a
+    row has no "…" button, and a header's fold button is still there
+    and still folds."""
+    context, page = _open_page(_browser, _sample_sessions())
+    try:
+        assert page.evaluate(_APPLY_NO_POPOVER_RULES_JS) >= 1
+        header, task = _header(page, "chat-ok"), _task(page, "chat-ok")
+        for row in (header, task):
+            expect(row.locator(_MORE)).to_be_hidden()
+        expect(header.locator(_FOLD)).to_be_visible()
+        header.locator(_FOLD).click()
+        expect(task).to_be_hidden()
+        header.locator(_FOLD).click()
+        expect(task).to_be_visible()
     finally:
         context.close()

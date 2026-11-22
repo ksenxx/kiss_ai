@@ -18,8 +18,8 @@ below it (``#input-container``) WHILE its sub-agent task is RUNNING —
 so the user can inject follow-up prompts into the running sub-agent
 (``appendUserMessage`` posted with the sub-agent's tab id) and stop
 ONLY that sub-agent's task (``stop`` posted with the sub-agent's tab
-id) — and must remove the input as soon as the sub-agent task
-completes (``subagentDone`` / ``openSubagentTab`` with ``isDone``).
+id) — and must remove the input as soon as the sub-agent's task is
+no longer running (its ``status`` with ``running: false``).
 """
 
 from __future__ import annotations

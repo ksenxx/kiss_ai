@@ -675,6 +675,12 @@ def test_shell_notes_report_survivors_and_changed_inputs(tmp_path: Path) -> None
             harness.on_llm_call([result])
             return result
 
+        def kill_tracked(*exited: str) -> dict[str, Any]:
+            """Kill the processes the harness tracks, each by its pid, as one tool call
+            (the gate allows a ``kill`` whose pids it can read); *exited* as for ``shell``."""
+            pids = " ".join(str(pid) for pid, _start in sorted(harness.tracked_pids))
+            return shell(f"kill {pids}", *exited)
+
         # A background process that outlives its call is reported once, with its pid.
         result = shell("cd /app && nohup sleep 300 >/dev/null 2>&1 &")
         assert "started by your last shell command(s) are still running" in result["content"]
@@ -693,8 +699,7 @@ def test_shell_notes_report_survivors_and_changed_inputs(tmp_path: Path) -> None
         harness.on_llm_call([result])
         assert "still running after your last shell" in result["content"]
         # A kill that lands: nothing left to report.
-        result = shell("kill $(for d in /proc/[0-9]*; do tr '\\0' ' ' < $d/cmdline 2>/dev/null "
-                       "| grep -q '^sleep 300' && echo ${d#/proc/}; done)", "sleep 300")
+        result = kill_tracked("sleep 300")
         assert "still running" not in result["content"] and harness.tracked_pids == set()
         # Children a reported process spawns later (a build's compiler steps) are tracked
         # silently: no note per turn, but a missed kill lists them with their parent.
@@ -706,9 +711,7 @@ def test_shell_notes_report_survivors_and_changed_inputs(tmp_path: Path) -> None
         result = shell("kill 999999 2>/dev/null; true")
         assert "still running after your last shell" in result["content"]
         assert "sleep 301" in result["content"]
-        result = shell("kill $(for d in /proc/[0-9]*; do tr '\\0' ' ' < $d/cmdline 2>/dev/null "
-                       "| grep -q 'sleep 301' && echo ${d#/proc/}; done) 2>/dev/null",
-                       "sleep 301")
+        result = kill_tracked("sleep 301")
         assert "still running" not in result["content"] and harness.tracked_pids == set()
         # A child born between turns is adopted at the next call's start, so it stays
         # tracked when its parent exits during that call and is orphaned to pid 1; a
@@ -738,9 +741,7 @@ def test_shell_notes_report_survivors_and_changed_inputs(tmp_path: Path) -> None
         assert "still running after your last shell" in result["content"]
         assert "sleep 303 (parent 1)" in result["content"]
         assert "sleep 302 (parent 1)" in result["content"]
-        result = shell("kill $(for d in /proc/[0-9]*; do tr '\\0' ' ' < $d/cmdline 2>/dev/null "
-                       "| grep -q 'sleep 30[23]' && echo ${d#/proc/}; done) 2>/dev/null",
-                       "sleep 302", "sleep 303")
+        result = kill_tracked("sleep 302", "sleep 303")
         assert "still running" not in result["content"] and harness.tracked_pids == set()
         # Pre-existing files changed or deleted by the shell are named once, with the size change.
         result = shell("printf '1,2\\n3,4\\n5,6\\n' > /app/data.csv && rm /app/gone.txt")

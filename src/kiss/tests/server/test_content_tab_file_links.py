@@ -15,11 +15,13 @@ core+sorcar+server-only test methods to tests/server).
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import shutil
 import tempfile
 import threading
+import time
 from collections.abc import Coroutine
 from pathlib import Path
 from typing import Any
@@ -29,6 +31,7 @@ from websockets.asyncio.client import connect
 
 import kiss.agents.sorcar.persistence as th
 import kiss.core.user_config as vc
+from kiss.server import web_server
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.local_ws import _generate_self_signed_cert
 from kiss.tests.persistence_helpers import close_db
@@ -104,11 +107,23 @@ class _ServerHarness:
         return asyncio.run_coroutine_threadsafe(coro, self.loop).result(60)
 
     def stop(self) -> None:
-        """Stop the server, its loop, and restore redirected globals."""
+        """Stop the server, join its loop's worker threads, stop the loop, restore the globals.
+
+        The worker threads are joined before the loop closes, as
+        ``asyncio.run`` joins them for the real daemon: work a
+        connection started in the loop's default executor
+        (``asyncio.to_thread``, e.g. the Connectors status probe a
+        page asks for) would otherwise outlive the harness.
+        """
         try:
-            asyncio.run_coroutine_threadsafe(
-                self.server.stop_async(), self.loop,
-            ).result(60)
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    self.server.stop_async(), self.loop,
+                ).result(60)
+            finally:
+                asyncio.run_coroutine_threadsafe(
+                    self.loop.shutdown_default_executor(), self.loop,
+                ).result(60)
         finally:
             self.loop.call_soon_threadsafe(self.loop.stop)
             self._thread.join(timeout=30)
@@ -125,6 +140,48 @@ def harness():
     h = _ServerHarness()
     yield h
     h.stop()
+
+
+async def _refuses_executor_work() -> bool:
+    """Whether the running loop takes no more work for its default executor: it is joining it."""
+    try:
+        await asyncio.get_running_loop().run_in_executor(None, int)
+    except RuntimeError:
+        return True
+    return False
+
+
+def _work_until_joined(
+    loop: asyncio.AbstractEventLoop, working: threading.Event, joined: threading.Event,
+) -> None:
+    """Executor work of *loop* that lasts until the loop joins its executor, told by *joined*."""
+    working.set()
+    try:
+        while not asyncio.run_coroutine_threadsafe(_refuses_executor_work(), loop).result(30):
+            time.sleep(0.01)
+    except (RuntimeError, TimeoutError):
+        return  # the loop was stopped or closed over this work: nothing joined it
+    joined.set()
+
+
+def test_harness_stop_joins_the_work_its_loop_started_in_threads() -> None:
+    """``_ServerHarness.stop`` returns once the work in its loop's executor is over, not before.
+
+    The work here ends when the loop refuses more work for its
+    executor, which is how joining the executor begins: a ``stop`` that
+    closed the loop without joining returned over work still running
+    (a real page's status probe was left to the session's reaper).
+    """
+    own = _ServerHarness()
+    working, joined = threading.Event(), threading.Event()
+    own.loop.call_soon_threadsafe(
+        own.loop.run_in_executor, None, _work_until_joined, own.loop, working, joined,
+    )
+    try:
+        assert working.wait(30), "the loop never started the work"
+    finally:
+        own.stop()
+    assert joined.is_set(), "the harness closed its loop over work running in its executor"
 
 
 async def _ws_request(harness: _ServerHarness, payload: dict) -> dict:
@@ -181,12 +238,75 @@ class TestOpenFileBackend:
         )
         assert "File not found" in reply["error"]
         assert "content" not in reply
+        assert "unsupported" not in reply
 
     def test_binary_file_returns_error(self, harness) -> None:
+        """A binary file no tab can show: its error, flagged, naming the resolved file."""
         path = str(harness.work_dir / "binary.bin")
-        reply = self._request(harness, {"type": "openFile", "path": path})
-        assert "binary" in reply["error"].lower()
+        reply = self._request(harness, {
+            "type": "openFile", "path": "binary.bin", "workDir": str(harness.work_dir),
+        })
+        assert reply["error"] == "Cannot display binary file: binary.bin"
+        assert (reply["unsupported"], reply["path"], reply["name"]) == (True, path, "binary.bin")
         assert "content" not in reply
+        # Past the text cap it keeps the sentence it had, and is flagged too.
+        big = harness.work_dir / "big.bin"
+        big.write_bytes(b"\0" * (web_server._OPEN_FILE_MAX_BYTES + 1))
+        try:
+            reply = self._request(harness, {"type": "openFile", "path": str(big)})
+        finally:
+            big.unlink()
+        assert reply["error"] == f"File too large to display: {big}"
+        assert (reply["unsupported"], reply["path"], reply["name"]) == (True, str(big), "big.bin")
+
+    def test_download_serves_the_bytes_of_any_file(self, harness) -> None:
+        """``download`` answers with the file's bytes, typed by its name, for the client to save.
+
+        A type a browser would run as a page, and a name that tells
+        none, are plain bytes.
+        """
+        docx = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        plain = "application/octet-stream"
+        cases = {
+            "report.docx": docx, "clip.mp4": "video/mp4", "blob.kissdata": plain,
+            "page.html": plain, "data.xml": plain, "drawing.svg": plain,
+        }
+        folder = harness.work_dir / "downloads"
+        folder.mkdir()
+        try:
+            for name, mime in cases.items():
+                data = b"PK\x03\x04\x00" + name.encode()
+                (folder / name).write_bytes(data)
+                reply = self._request(harness, {
+                    "type": "openFile", "path": name, "workDir": str(folder),
+                    "tabId": "t-1", "token": "open:3", "download": True,
+                })
+                assert reply == {
+                    "type": "fileContent", "path": str(folder / name), "name": name,
+                    "tabId": "t-1", "token": "open:3", "binary": True, "download": True,
+                    "mime": mime, "size": len(data),
+                    "base64": base64.b64encode(data).decode("ascii"),
+                }, name
+            # Only ``true`` asks for the bytes, and a picture a tab
+            # shows is not turned into a download by being opened.
+            (folder / "dot.png").write_bytes(b"\x89PNG\r\n\x1a\n\0")
+            for name, download in (("report.docx", "yes"), ("dot.png", False)):
+                reply = self._request(harness, {
+                    "type": "openFile", "path": str(folder / name), "download": download,
+                })
+                assert "download" not in reply, name
+                assert reply.get("unsupported", False) is (name == "report.docx"), name
+            # The size cap is the one of the files a viewer tab shows.
+            big = folder / "big.bin"
+            with open(big, "wb") as f:
+                f.truncate(web_server._OPEN_BINARY_MAX_BYTES + 1)
+            reply = self._request(harness, {
+                "type": "openFile", "path": str(big), "download": True,
+            })
+            assert reply["error"] == f"File too large to display: {big}"
+            assert "unsupported" not in reply and "base64" not in reply
+        finally:
+            shutil.rmtree(folder)
 
     def test_line_number_echoed_in_reply(self, harness) -> None:
         """A ``path:NN`` link's line arrives as ``line``; the reply
@@ -230,5 +350,6 @@ class TestOpenFileBackend:
             )
             assert "too large" in reply["error"]
             assert "content" not in reply
+            assert "unsupported" not in reply
         finally:
             big.unlink()

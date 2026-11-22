@@ -34,7 +34,6 @@ const {
 } = require('./simplify2_harness');
 const {
   bootParallelRun,
-  clickClose,
   announceRetaggedSubagent,
 } = require('./subagent_tab_helpers');
 const {makeRunner} = require('./ui_antipattern_harness');
@@ -286,9 +285,9 @@ async function main() {
     replay(win, 'sa-1', 't1');
     assert.strictEqual(lazyImages(observer, 'sa-1').length, 1);
     // The daemon re-announces the sub-agent under a new id: the tab is
-    // renamed and its picture follows.
+    // renamed (the daemon is not told) and its picture follows.
     announceRetaggedSubagent(win, parentId, 'sa-2');
-    assert.ok(posted.some(m => m.type === 'closeTab' && m.tabId === 'sa-1'));
+    assert.ok(!posted.some(m => m.type === 'closeTab'));
     assert.strictEqual(
       lazyImages(observer, 'sa-1').length,
       0,
@@ -299,7 +298,7 @@ async function main() {
       1,
       'BUG: the picture kept the old owner',
     );
-    clickClose(win, 'sa-2');
+    send(win, {type: 'subagentDone', tab_id: 'sa-2'});
     assert.strictEqual(
       observer.targets.size,
       0,

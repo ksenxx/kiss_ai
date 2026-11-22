@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import time
+import tracemalloc
 from pathlib import Path
 
 import pytest
@@ -401,12 +402,17 @@ class TestTheRealCliStreamKeepsFlowing:
     def test_a_turn_with_malformed_nesting_and_a_nan_call_ends_quickly_and_hides_the_call(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """The whole turn, scanner included, stays within budget; the call never shows.
+        """The turn's own work, scanner included, stays within budget; the call never shows.
 
         20,000 balanced-but-malformed nested braces used to cost the batch
         scanner over ten seconds after the child had exited, and a ``NaN``
         argument used to be released to the panel as raw JSON although the
-        parser returned it as a call.
+        parser returned it as a call.  The budget is CPU time of the thread
+        that runs the turn, where all of that work is done: the wall clock
+        also counts the stand-in's start and every moment a busy machine
+        gives the processor to something else.  The memory is bounded too:
+        the stream parser kept a copy of the braces still open for every
+        brace that closed, 1.5 GB for this reply.
         """
         junk = '{"k": ' * 20000 + "x" + "}" * 20000
         call = '{"tool_calls": [{"name": "Bash", "arguments": {"command": "ls", "n": NaN}}]}'
@@ -415,13 +421,19 @@ class TestTheRealCliStreamKeepsFlowing:
         tokens: list[str] = []
         model = ClaudeCodeModel("cc/opus", token_callback=tokens.append)
         model.initialize("do it")
-        started = time.monotonic()
-        calls, content, _response = model.generate_and_process_with_tools({"Bash": _run_bash})
-        elapsed = time.monotonic() - started
+        tracemalloc.start()
+        try:
+            started = time.thread_time()
+            calls, content, _response = model.generate_and_process_with_tools({"Bash": _run_bash})
+            cpu_seconds = time.thread_time() - started
+            peak = tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
 
         assert [c["name"] for c in calls] == ["Bash"]
         assert calls[0]["arguments"]["command"] == "ls"
         assert content.startswith("".join(lines[:3]))
         assert "tool_calls" not in "".join(tokens)
         assert "".join(tokens).startswith("".join(lines[:3]))
-        assert elapsed < 5.0
+        assert cpu_seconds < 5.0
+        assert peak < 100 * 1024 * 1024, peak

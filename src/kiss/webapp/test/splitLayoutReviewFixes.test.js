@@ -184,10 +184,19 @@ function testBrowserTabComesBackAfterStackedRoundTrip() {
  * even when nothing remembers it: a file opened in the background
  * while stacked (no pane selection was recorded), and a browser that
  * was the pane's tab until another surface closed it while stacked.
- * Either way the row must not sit over "No open files".
+ * Either way the row must not sit over "No open files".  A file on
+ * screen while stacked moves to the pane the same way: its chat, back
+ * in the chat pane with the task it got under the file, repaints the
+ * row before the pane has its tab (renderStrip's fallback Tab stop).
  */
 function testWideningSelectsASurvivingContentTab() {
-  for (const browserClosedWhileStacked of [false, true]) {
+  for (const label of [
+    'background open while stacked',
+    'browser closed while stacked',
+    'on screen while stacked',
+  ]) {
+    const browserClosedWhileStacked = label.startsWith('browser');
+    const onScreen = label.startsWith('on screen');
     const {win, fireChange} = makePage({desktopMatches: false});
     send(win, {
       type: 'tabs_state',
@@ -206,19 +215,23 @@ function testWideningSelectsASurvivingContentTab() {
       name: 'b.txt',
       content: 'B',
       version: 'v1',
-      background: true,
+      background: !onScreen,
     });
     if (browserClosedWhileStacked) {
       send(win, {type: 'closeBrowserTab', tab_id: 'browser-1'});
     }
     const fileTab = openTabs(win).find(t => t.contentPath === '/ws/b.txt');
     assert.ok(fileTab, 'the file is open');
-    assert.strictEqual(activeId(win), 'a1', 'stacked: the chat stays on screen');
+    assert.strictEqual(
+      activeId(win),
+      onScreen ? fileTab.id : 'a1',
+      'stacked: the chat stays on screen under a background file only',
+    );
+    if (onScreen) {
+      send(win, {type: 'task_events', tabId: 'a1', task: 'its task', events: []});
+    }
 
     fireChange(true);
-    const label = browserClosedWhileStacked
-      ? 'browser closed while stacked'
-      : 'background open while stacked';
     assert.strictEqual(
       shownContentTab(win),
       fileTab.id,
@@ -233,7 +246,17 @@ function testWideningSelectsASurvivingContentTab() {
       'none',
       label + ': "No open files" is hidden',
     );
-    assert.strictEqual(activeId(win), 'a1', label + ': the chat is unchanged');
+    assert.strictEqual(activeId(win), 'a1', label + ': the chat pane has the chat');
+    const row = win.document.querySelectorAll('#content-tab-list .chat-tab');
+    assert.deepStrictEqual(
+      Array.from(row, el => [
+        el.dataset.tabId,
+        el.getAttribute('aria-selected'),
+        el.getAttribute('tabindex'),
+      ]),
+      [[fileTab.id, 'true', '0']],
+      label + ": the file is its row's selected tab and Tab stop",
+    );
     win.close();
   }
 }

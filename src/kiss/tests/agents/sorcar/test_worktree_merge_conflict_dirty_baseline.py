@@ -468,6 +468,43 @@ class TestTaskChangesAFileThatWasUntracked:
         assert GitWorktreeOps.status_porcelain(repo) == ""
         assert "safe in 'git stash'" in stash_warning
 
+    @pytest.mark.parametrize("old_git", [False, True], ids=["merge-tree", "private-worktree"])
+    def test_user_staging_after_publication_is_not_part_of_the_task_commit(
+        self, task: GitWorktree, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, old_git: bool,
+    ) -> None:
+        """Both preparations settle from owned content, not a contaminated live-index snapshot."""
+        repo = task.repo_root
+        (task.wt_dir / "notes.txt").write_text("user baseline\nagent line\n")
+        _finish(task)
+        assert GitWorktreeOps.stash_if_dirty(repo)
+        _install_hook(
+            repo, "post-index-change",
+            "if [ -e .git/AUTO_MERGE ] && [ ! -e .git/user-staged ]; then\n"
+            "  : > .git/user-staged\n  echo PRIVATE > staged.txt\n  git add staged.txt\nfi",
+        )
+        if old_git:
+            import os
+            import shlex
+
+            real_git = shutil.which("git")
+            assert real_git
+            shim = tmp_path / "bin" / "git"
+            shim.parent.mkdir()
+            shim.write_text(
+                '#!/bin/sh\ncase " $* " in *" merge-tree "*) exit 129 ;; esac\n'
+                f'exec {shlex.quote(real_git)} "$@"\n'
+            )
+            shim.chmod(0o755)
+            monkeypatch.setenv("PATH", f"{shim.parent}{os.pathsep}{os.environ['PATH']}")
+
+        result = GitWorktreeOps.squash_merge(repo, task.branch, task.baseline_commit)
+
+        assert result == MergeResult.SUCCESS
+        assert _git("show", "HEAD:notes.txt", cwd=repo).stdout == "user baseline\nagent line\n"
+        assert _git("show", "HEAD:staged.txt", cwd=repo).returncode != 0
+        assert _git("show", ":staged.txt", cwd=repo).stdout == "PRIVATE\n"
+        assert GitWorktreeOps.status_porcelain(repo) == "A  staged.txt"
+
     def test_the_probe_and_the_reapplication_settle_it_too(self, task: GitWorktree) -> None:
         repo = task.repo_root
         (task.wt_dir / "notes.txt").write_text("user baseline\nagent line\n")

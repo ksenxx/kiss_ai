@@ -93,7 +93,7 @@ class _Loop(_Service):
     """``_run_threadsafe`` on the worker: the entry of ``open_for_agent``."""
 
     def __call__(self) -> None:
-        self.service._run_threadsafe(_nothing())
+        self.service._run_threadsafe(_nothing)
 
 
 class _Target(_Service):

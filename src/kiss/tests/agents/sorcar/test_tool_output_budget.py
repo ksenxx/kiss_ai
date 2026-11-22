@@ -26,6 +26,7 @@ from kiss.core.config import DEFAULT_CONFIG
 from kiss.core.kiss_tmp import kiss_tmp_dir
 from kiss.core.memoryfield.index import hashed_embedding
 from kiss.core.memoryfield.tools import MemoryTools
+from kiss.core.secret_redaction import add_secrets, redact_secrets
 
 
 def test_bash_keeps_the_budget_and_spills_the_full_output(tmp_path: Path) -> None:
@@ -119,6 +120,47 @@ def test_lines_within_budget_clips_a_lone_over_long_first_line() -> None:
     assert clipped == ["a" * 10 + "\n[line clipped to 10 chars; grep or cut for the rest]\n"]
     assert _lines_within_budget(["ab", "cd", "ef"], 4) == ["ab", "cd"]
     assert _lines_within_budget([], 4) == []
+
+
+def test_a_line_clipped_to_the_budget_shows_no_part_of_a_secret(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The cut of an over-long line comes after its secrets are replaced, so it parts none.
+
+    S16/F6: the line was cut first, and the start of a secret left
+    before the marker was no secret to the pass over the whole result.
+    The second read has a budget past the piece a long line is read in
+    (65,536 characters), so the cut comes in pieces joined.  The third
+    lists the line in an outline: within the budget its entry is whole,
+    the secret in it for the pass over the whole result to replace;
+    past the budget (the fourth) the entry is cut like the line.
+    """
+    secret = "S16-read-credential-0123456789abcdef"
+    add_secrets({"S16_READ_KEY": secret})
+    tools = UsefulTools(work_dir=str(tmp_path))
+    budget = DEFAULT_CONFIG.tool_output_default_chars
+    note = "\n[line clipped to {} chars; grep or cut for the rest]\n"
+    path = tmp_path / "one-line.json"
+    path.write_text("x" * (budget - 20) + secret + "y" * 100)
+    shown = tools.Read(str(path))
+    assert shown == "x" * (budget - 20) + "S16_READ_KEY" + "y" * 8 + note.format(budget)
+    monkeypatch.setattr(DEFAULT_CONFIG, "tool_output_default_chars", 70_000)
+    path.write_text("x" * 69_990 + secret + "y" * 100)
+    shown = tools.Read(str(path))
+    assert shown.startswith("x" * 69_990) and shown.endswith(note.format(70_000))
+    assert "S16-" not in shown and len(shown) <= 70_000 + len(note.format(70_000))
+    monkeypatch.setattr(DEFAULT_CONFIG, "read_outline_lines", 5)
+    start = "def long(): " + "x" * 65_500
+    path = tmp_path / "long.py"
+    lines = start + secret + "y" * 100 + "\n" + "def short(): pass\n" * 5 + "def last(): S\r"
+    path.write_bytes(lines.encode())
+    shown = tools.Read(str(path))
+    assert f"\n1: {start}{secret}{'y' * 100}\n2: def short(): pass\n" in shown
+    assert "\n7: def last(): S\n" in shown
+    assert f"\n1: {start}S16_READ_KEY{'y' * 100}\n2: " in redact_secrets(shown)
+    monkeypatch.setattr(DEFAULT_CONFIG, "tool_output_default_chars", 65_530)
+    shown = tools.Read(str(path), force=True)
+    assert f"\n1: {start}S16_READ_KEY{'y' * 6} [line clipped to 65530 chars]\n2: " in shown
 
 
 def test_memory_list_cuts_a_long_listing_with_a_note(tmp_path: Path) -> None:

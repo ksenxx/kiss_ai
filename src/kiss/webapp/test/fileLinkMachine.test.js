@@ -137,10 +137,12 @@ function testHomeTabSendsNoMachine() {
 
 /**
  * Pick *name* ('' = this machine) in the chat header's machine
- * drop-down, as a user would: this only says where the tab's NEXT task
- * goes; the daemon's binding (`tabMachine`) stays.
+ * drop-down, as a user would, and come back to the chat *tabId*: the
+ * pick says where new chats run (one opens for it); the chat left
+ * keeps the machine its task ran on (the daemon's binding,
+ * `tabMachine`).
  */
-function pickInDropDown(win, name) {
+function pickInDropDown(win, name, tabId) {
   send(win, {
     type: 'machines',
     machines: [
@@ -155,13 +157,25 @@ function pickInDropDown(win, name) {
     name,
     'the drop-down shows the pick',
   );
+  assert.notStrictEqual(
+    win._testApi.getActiveTabId(),
+    tabId,
+    'the pick opened a new chat',
+  );
+  win._testApi.switchToTab(tabId);
+  assert.strictEqual(win._testApi.getActiveTabId(), tabId);
 }
 
 function testLinksFollowTheBindingNotTheDropDown() {
   const wv = makeDomPage();
   // The box tab's task ran on "box"; the user has since picked
-  // "other" in the drop-down for the next task but not submitted.
-  pickInDropDown(wv.win, 'other');
+  // "other" in the drop-down (a new chat for it) and come back.
+  pickInDropDown(wv.win, 'other', BOX_TAB);
+  assert.strictEqual(
+    wv.win.document.getElementById('chat-machine').value,
+    'box',
+    'the chat left keeps its machine',
+  );
   send(wv.win, {type: 'prompt', text: 'see src/box.py please', tabId: BOX_TAB});
   send(wv.win, {type: 'text_end', tabId: BOX_TAB});
   const sent = checks(wv.posted);
@@ -186,10 +200,10 @@ function testLinksFollowTheBindingNotTheDropDown() {
     !linkFor(wv.win, 'src/box.py'),
     "another machine's reply is ignored",
   );
-  // The user picks this machine for the next task, then the daemon
+  // The user picks this machine for new chats, then the daemon
   // drops and comes back before the box answers: the re-issued check,
   // the link and the click still belong to the box.
-  pickInDropDown(wv.win, '');
+  pickInDropDown(wv.win, '', BOX_TAB);
   send(wv.win, {type: 'daemonStatus', connected: false});
   send(wv.win, {type: 'daemonStatus', connected: true});
   const reissued = checks(wv.posted);
@@ -216,8 +230,8 @@ function testLinksFollowTheBindingNotTheDropDown() {
 function testHomeTabLinksIgnoreADropDownPick() {
   const wv = makeDomPage();
   wv.win._testApi.switchToTab(HOME_TAB);
-  // The home tab's task ran here; "box" is picked for the next one.
-  pickInDropDown(wv.win, 'box');
+  // The home tab's task ran here; "box" is picked for new chats.
+  pickInDropDown(wv.win, 'box', HOME_TAB);
   send(wv.win, {
     type: 'prompt',
     text: 'see src/home.py please',

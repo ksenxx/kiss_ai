@@ -3,30 +3,33 @@
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
 //
-// End-to-end (jsdom) tests for the tab context menu's "Close All" and
-// "Close Inactive" in media/main.js: the tab on screen is closed LAST,
-// so no tab that is about to be closed anyway is brought on screen in
-// between.  On the old code the active tab was closed first, in list
-// order, and every successor it picked was restored, its deferred
-// transcript fetched (a `resumeSession`), and then closed on the next
-// iteration.
+// End-to-end (jsdom) tests for the batch entries of a content tab's
+// context menu in media/main.js ("Close Others" and "Close All"; the
+// menu's third entry is "Close"):
+// * they close content tabs (files, reports, browser and terminal
+//   tabs) only: a chat's or a sub-agent's tab is not the user's to
+//   close, so it stays, idle or running, and a chat whose transcript
+//   the daemon deferred is not fetched;
+// * the content tab on screen is closed LAST, so no tab that is about
+//   to be closed anyway is brought on screen in between.
 'use strict';
 
 const assert = require('assert');
+const harness = require('./simplify2_harness');
 const h = require('./ui_antipattern_harness');
-const {tabEl, deferChatTranscripts} = require('./subagent_tab_helpers');
+const {deferChatTranscripts} = require('./subagent_tab_helpers');
 
 const {test, report} = h.makeRunner();
 
 // The two registry chats whose transcripts the daemon deferred.
 const DEFERRED = ['tab-b', 'tab-c'];
 
-// The boot chat (tabA, first in the list, on screen) with a sub-agent
-// tab so the strip is shown, plus two registry chats whose transcripts
-// the daemon deferred (they are fetched the first time they come on
-// screen).
-function pageWithDeferredTabs() {
-  const {win, posted} = h.makePage();
+// The boot chat (on screen, with a running sub-agent), two registry
+// chats whose transcripts the daemon deferred (tab-c runs), and three
+// files the boot chat opened.  `chats` lists every tab that is not a
+// file, in tab order.
+function pageWithFiles(opts) {
+  const {win, posted} = h.makePage(opts);
   const tabA = win._testApi.getActiveTabId();
   win._testApi.endLaunch();
   h.send(win, {
@@ -38,6 +41,7 @@ function pageWithDeferredTabs() {
     ],
   });
   deferChatTranscripts(win);
+  h.send(win, {type: 'status', running: true, tabId: 'tab-c'});
   h.send(win, {
     type: 'openSubagentTab',
     tab_id: 'sub-a',
@@ -45,150 +49,139 @@ function pageWithDeferredTabs() {
     description: 'a sub-agent',
     task_id: 'sub-task-a',
     taskIndex: 0,
-    isSubagentTab: true,
   });
-  assert.strictEqual(win._testApi.getActiveTabId(), tabA, 'tabA is on screen');
+  const chats = harness.tabIds(win);
+  const files = ['a.py', 'b.py', 'c.py'].map(name => {
+    const path = '/ws/' + name;
+    h.send(win, {
+      type: 'fileContent',
+      tabId: tabA,
+      path,
+      name,
+      content: 'print(1)\n',
+      version: 'v1',
+    });
+    return win._testApi.openTabs().find(t => t.contentPath === path).id;
+  });
   assert.strictEqual(
     h.scopedFetches(posted, DEFERRED).length,
     0,
-    'precondition: the deferred tabs were not fetched',
+    'precondition: the deferred chats were not fetched',
   );
-  return {win, posted, tabA};
+  return {win, posted, tabA, chats, files};
 }
 
-function pickMenuItem(win, tabA, label) {
-  const tab = tabEl(win, tabA);
-  tab.focus();
-  h.pickTabMenuItem(win, tab, label);
+/** The strip entry of content tab *id* (on either tab row). */
+function fileTabEl(win, id) {
+  const el = Array.from(h.contentTabStrips(win)).find(
+    t => t.dataset.tabId === id,
+  );
+  assert.ok(el, `file tab ${id} is on a tab row`);
+  return el;
+}
+
+/**
+ * How many content views were brought on screen while *act* ran (the
+ * view the action found on screen is not one).
+ */
+function viewsShownDuring(win, act) {
+  const watch = new win.MutationObserver(() => {});
+  watch.observe(h.byId(win, 'content-tab-area'), {
+    attributes: true,
+    attributeFilter: ['style'],
+    attributeOldValue: true,
+    subtree: true,
+  });
+  act();
+  const records = watch
+    .takeRecords()
+    .filter(r => r.target.classList.contains('content-tab-view'));
+  watch.disconnect();
+  const hidden = style => /display:\s*none/.test(style || '');
+  const shown = new Set();
+  records.forEach((rec, i) => {
+    const next = records.slice(i + 1).find(r => r.target === rec.target);
+    const after = next ? next.oldValue : rec.target.getAttribute('style');
+    if (hidden(rec.oldValue) && !hidden(after)) shown.add(rec.target);
+  });
+  return shown.size;
+}
+
+/** No chat or sub-agent tab was closed, nor a deferred chat fetched. */
+function assertChatsUntouched(posted) {
+  assert.deepStrictEqual(h.ofType(posted, 'closeTab'), [], 'no chat closed');
+  assert.deepStrictEqual(
+    h.scopedFetches(posted, DEFERRED),
+    [],
+    'no deferred chat was brought on screen',
+  );
 }
 
 async function main() {
-  await test('Close All closes the active tab last, fetching nothing', () => {
-    const {win, posted, tabA} = pageWithDeferredTabs();
-    pickMenuItem(win, tabA, 'Close All');
-    const ids = win._testApi.openTabs().map(t => t.id);
-    assert.ok(!ids.includes(tabA) && !ids.includes('tab-b'), 'all closed');
-    assert.ok(!ids.includes('tab-c') && !ids.includes('sub-a'), 'all closed');
-    assert.strictEqual(ids.length, 1, 'one fresh chat replaces them');
+  await test('Close All closes every content tab and no chat', () => {
+    const {win, posted, chats, files} = pageWithFiles();
+    h.rightClick(win, fileTabEl(win, files[0]));
     assert.deepStrictEqual(
-      h.scopedFetches(posted, DEFERRED),
-      [],
-      'no transcript was fetched for a tab closed by the same action',
+      h.all(win, '#tab-context-menu .tab-ctx-item').map(el => el.textContent),
+      ['Close', 'Close Others', 'Close All'],
+      'no entry does what another one does',
     );
+    h.pickTabMenuItem(win, fileTabEl(win, files[0]), 'Close All');
+    assert.deepStrictEqual(
+      harness.tabIds(win),
+      chats,
+      'the chats and the sub-agent stay, idle or running',
+    );
+    assertChatsUntouched(posted);
     win.close();
   });
 
-  // A running sub-agent keeps its idle chat open under Close Inactive
-  // (tabCloseActions_sweep1030), so sub-a stops first in these two.
-  await test('Close Inactive closes the tab on screen last', () => {
-    const {win, posted, tabA} = pageWithDeferredTabs();
-    h.send(win, {type: 'status', running: false, tabId: 'sub-a'});
-    pickMenuItem(win, tabA, 'Close Inactive');
-    assert.strictEqual(win._testApi.openTabs().length, 1, 'one fresh chat');
-    assert.deepStrictEqual(h.scopedFetches(posted, DEFERRED), []);
+  await test('Close Others keeps the clicked file and every chat', () => {
+    const {win, posted, chats, files} = pageWithFiles();
+    h.pickTabMenuItem(win, fileTabEl(win, files[1]), 'Close Others');
+    assert.deepStrictEqual(harness.tabIds(win), [...chats, files[1]]);
+    assertChatsUntouched(posted);
     win.close();
   });
 
-  await test('Close Inactive keeps a running tab, fetched only once', () => {
-    const {win, posted, tabA} = pageWithDeferredTabs();
-    h.send(win, {type: 'status', running: false, tabId: 'sub-a'});
-    h.send(win, {type: 'status', running: true, tabId: 'tab-c'});
-    pickMenuItem(win, tabA, 'Close Inactive');
-    const ids = win._testApi.openTabs().map(t => t.id);
-    assert.strictEqual(ids.join(','), 'tab-c', 'only the running tab survives');
-    assert.strictEqual(win._testApi.getActiveTabId(), 'tab-c');
-    const fetches = h.scopedFetches(posted, DEFERRED);
-    assert.strictEqual(fetches.length, 1, 'the survivor is fetched once');
-    assert.strictEqual(fetches[0].tabId, 'tab-c');
-    win.close();
-  });
-
-  // The active tab is the sub-agent under tabA: closing tabA (earlier in
-  // the batch) takes sub-a along, so the active tab goes before B and C
-  // unless the batch is ordered by what each close takes along.
-  function pageWithSubagentOnScreen() {
-    const page = pageWithDeferredTabs();
-    h.click(page.win, tabEl(page.win, 'sub-a'));
+  // The stacked (phone) layout shows a file in place of the chat: the
+  // file on screen is the first of the three here.
+  function fileScreen() {
+    const page = pageWithFiles({narrow: true});
+    page.win._testApi.switchToTab(page.files[0]);
     assert.strictEqual(
       page.win._testApi.getActiveTabId(),
-      'sub-a',
-      'the sub-agent tab is on screen',
+      page.files[0],
+      'precondition: the first file is on screen',
     );
     return page;
   }
 
-  await test('Close All from an active sub-agent tab fetches nothing', () => {
-    const {win, posted} = pageWithSubagentOnScreen();
-    pickMenuItem(win, 'sub-a', 'Close All');
-    const ids = win._testApi.openTabs().map(t => t.id);
-    assert.strictEqual(ids.length, 1, 'one fresh chat replaces them');
-    for (const id of ['tab-b', 'tab-c', 'sub-a'])
-      assert.ok(!ids.includes(id), `${id} closed`);
-    assert.deepStrictEqual(
-      h.scopedFetches(posted, DEFERRED),
-      [],
-      'no transcript was fetched for a tab closed by the same action',
+  await test('Close All closes the file on screen last', () => {
+    const {win, posted, tabA, chats, files} = fileScreen();
+    const shown = viewsShownDuring(win, () =>
+      h.pickTabMenuItem(win, fileTabEl(win, files[0]), 'Close All'),
     );
-    win.close();
-  });
-
-  await test('Close Inactive from an active sub-agent tab fetches nothing', () => {
-    const {win, posted, tabA} = pageWithSubagentOnScreen();
-    for (const id of [tabA, 'sub-a', 'tab-b', 'tab-c'])
-      h.send(win, {type: 'status', running: false, tabId: id});
-    pickMenuItem(win, 'sub-a', 'Close Inactive');
-    const ids = win._testApi.openTabs().map(t => t.id);
-    assert.strictEqual(ids.length, 1, 'one fresh chat replaces them');
-    for (const id of ['tab-b', 'tab-c', 'sub-a'])
-      assert.ok(!ids.includes(id), `${id} closed`);
-    assert.deepStrictEqual(h.scopedFetches(posted, DEFERRED), []);
-    win.close();
-  });
-
-  await test('Close Inactive keeps the running root of the active sub-agent', () => {
-    const {win, posted, tabA} = pageWithSubagentOnScreen();
-    h.send(win, {type: 'status', running: true, tabId: tabA});
-    h.send(win, {type: 'status', running: false, tabId: 'sub-a'});
-    pickMenuItem(win, 'sub-a', 'Close Inactive');
-    const ids = win._testApi.openTabs().map(t => t.id);
-    assert.strictEqual(ids.join(','), tabA, 'only the running root survives');
-    assert.strictEqual(win._testApi.getActiveTabId(), tabA);
-    assert.deepStrictEqual(h.scopedFetches(posted, DEFERRED), []);
-    win.close();
-  });
-
-  // "Close Others" keeps the clicked tab.  From a sub-agent tab the
-  // "others" include its parent chat, and closing a chat takes its
-  // descendants along: the kept tab must therefore spare its ancestors.
-  await test('Close Others from a sub-agent tab keeps that tab and its chat', () => {
-    const {win, tabA} = pageWithSubagentOnScreen();
-    h.send(win, {type: 'status', running: true, tabId: 'sub-a'});
-    pickMenuItem(win, 'sub-a', 'Close Others');
-    const ids = win._testApi.openTabs().map(t => t.id);
-    assert.strictEqual(
-      ids.join(','),
-      tabA + ',sub-a',
-      'only tab-b and tab-c close',
-    );
+    assert.strictEqual(shown, 0, 'no file about to close came on screen');
+    assert.deepStrictEqual(harness.tabIds(win), chats);
     assert.strictEqual(
       win._testApi.getActiveTabId(),
-      'sub-a',
-      'still on screen',
+      tabA,
+      'the chat that opened the files comes back',
     );
+    assertChatsUntouched(posted);
     win.close();
   });
 
-  await test('Close Others from a root chat closes every other tab', () => {
-    const {win, tabA} = pageWithDeferredTabs();
-    win._testApi.switchToTab('tab-b');
-    pickMenuItem(win, 'tab-b', 'Close Others');
-    const ids = win._testApi.openTabs().map(t => t.id);
-    assert.strictEqual(
-      ids.join(','),
-      'tab-b',
-      `${tabA}, sub-a and tab-c close`,
+  await test('Close Others from a file off screen brings that file on screen', () => {
+    const {win, posted, chats, files} = fileScreen();
+    const shown = viewsShownDuring(win, () =>
+      h.pickTabMenuItem(win, fileTabEl(win, files[2]), 'Close Others'),
     );
-    assert.strictEqual(win._testApi.getActiveTabId(), 'tab-b');
+    assert.strictEqual(shown, 1, 'only the kept file came on screen');
+    assert.deepStrictEqual(harness.tabIds(win), [...chats, files[2]]);
+    assert.strictEqual(win._testApi.getActiveTabId(), files[2]);
+    assertChatsUntouched(posted);
     win.close();
   });
 

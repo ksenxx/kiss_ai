@@ -19,7 +19,12 @@ the two were not atomic with respect to each other:
 2.  a setup-failure ``result`` recorded by the launcher's broadcast and
     then copied live to every viewer subscribed to the provisional task
     id reached a viewer that attached in between twice (replayed AND
-    copied).
+    copied);
+3.  a late charge of a finished task shown before the replay's place
+    in the send queues was reserved, and not in the transcript the
+    replay read (read before the charge, or before the charge wrote
+    its event; or what the run recorded, which no late charge is in),
+    was wiped by the replay.
 
 Everything is real: one daemon, real WSS clients A and B, B receiving a
 connection-scoped replay.  The interleavings are forced with trace
@@ -44,10 +49,21 @@ from typing import Any
 from websockets.asyncio.client import ClientConnection
 
 import kiss.agents.sorcar.persistence as th
-from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
+from kiss.agents.sorcar import daemon_client, local_endpoint
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent, _retire_printer_task
+from kiss.core.locked import locked_call
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.json_printer import JsonPrinter
+from kiss.server.server import (
+    _ending_with_row_totals,
+    _extra_dict,
+    _replay_events,
+    _stored_replay_events,
+)
+from kiss.server.task_runner import _rows_of_run, _run_row_id
+from kiss.server.task_update import charge_side_channel_usage
+from kiss.tests.server.pause import Pause, Pauses
 from kiss.tests.server.test_web_server_tab_mirroring import (
     TabMirroringBase,
 )
@@ -94,6 +110,28 @@ def _text(view: list[dict[str, Any]]) -> str:
     return "".join(
         str(ev.get("text", "")) for ev in view if ev.get("type") == "text_delta"
     )
+
+
+def _shown_totals(messages: list[dict[str, Any]], tab_id: str) -> list[tuple[float, int, int]]:
+    """The cost, tokens and steps *tab_id* shows after each of *messages* that sets them.
+
+    In the order received.  A replay sets them to those of its last
+    usage event (zeros when it has none), a live usage event to its own.
+    """
+    shown: list[tuple[float, int, int]] = []
+    for ev in messages:
+        if ev.get("tabId") != tab_id:
+            continue
+        if ev.get("type") == "task_events":
+            usage = [e for e in ev.get("events") or [] if e.get("type") == "usage_info"]
+            last = usage[-1] if usage else {}
+        elif ev.get("type") == "usage_info":
+            last = ev
+        else:
+            continue
+        cost = float(last.get("cost", "$0").lstrip("$"))
+        shown.append((cost, last.get("total_tokens", 0), last.get("total_steps", 0)))
+    return shown
 
 
 def _hook(
@@ -155,8 +193,13 @@ class TestReplayBoundary(TabMirroringBase):
             out.append(ev)
         raise AssertionError("sentinel never arrived")
 
-    async def _running_task_viewed_by_a(self) -> tuple[str, str]:
-        """Register a running task shown on tab-t by client A."""
+    async def _running_task_viewed_by_a(self, lazy: bool = False) -> tuple[str, str]:
+        """Register a running task shown on tab-t by client A.
+
+        With *lazy* A's page loads transcripts in pieces: the replay
+        another page asks for in pieces is one frame for both, and is
+        sent whole unless A's page takes pieces too.
+        """
         assert self.server is not None
         printer = self.server._printer
         task_id, chat_id = th._add_task("Running task")
@@ -168,7 +211,7 @@ class TestReplayBoundary(TabMirroringBase):
         ))
         printer.ensure_recording_for_task(task_id)
         ws_a = await self._connect_ok()
-        await self._ready(ws_a)
+        await self._send(ws_a, {"type": "ready", "tabId": "", "restoredTabs": [], "lazy": lazy})
         await self._send(ws_a, {
             "type": "openTab", "tabId": "tab-t", "title": "new chat",
         })
@@ -913,6 +956,841 @@ class TestReplayBoundary(TabMirroringBase):
         self.assertIn("[D]", texts)
         self.assertNotIn("tabId", events[-1])
         agent_state.agent_states.clear()
+
+    def _assert_cost_rises_to(
+        self, messages: list[dict[str, Any]], tab_id: str, final: float, lazy: bool = False,
+    ) -> None:
+        """*tab_id* never shows a total below one it showed before, and ends on the cost *final*.
+
+        Every transcript it was sent came in pieces if *lazy*, else whole.
+        """
+        shown = _shown_totals(messages, tab_id)
+        for totals in zip(*shown):  # its costs, its tokens, its steps
+            self.assertEqual(list(totals), sorted(totals), messages)
+        self.assertEqual([cost for cost, _, _ in shown[-1:]], [final], messages)
+        in_pieces = {
+            any(e.get("type") == "lazy_steps" for e in m["events"])
+            for m in messages
+            if m.get("type") == "task_events" and m.get("tabId") == tab_id
+        }
+        self.assertEqual(in_pieces, {lazy}, messages)
+
+    async def _through(
+        self, ws: ClientConnection, wanted: str, timeout: float = 10.0,
+    ) -> list[dict[str, Any]]:
+        """Every message *ws* receives through the first *wanted* one, or within *timeout*."""
+        out: list[dict[str, Any]] = []
+        deadline = time.monotonic() + timeout
+        while (left := deadline - time.monotonic()) > 0:
+            try:
+                out.append(json.loads(await asyncio.wait_for(ws.recv(), timeout=left)))
+            except TimeoutError:
+                break
+            if out[-1].get("type") == wanted:
+                break
+        return out
+
+    async def _finished_task_on_tab_c(
+        self, lazy: bool,
+    ) -> tuple[str, dict[str, Any], ClientConnection]:
+        """A finished task that cost $1.00, shown on tab-c of a client as on the tab that ran it.
+
+        Returns:
+            The task, the ``resumeSession`` that replays it into the tab
+            (in pieces with *lazy*), and the client.
+        """
+        assert self.server is not None
+        task_id, chat_id = th._add_task(
+            "finished task", "",
+            {"model": "finished-task-model", "cost": 1.0, "tokens": 100, "steps": 2,
+             "endTs": int(time.time() * 1000)},
+        )
+        th._append_chat_event(th.usage_totals_event(task_id, 100, 1.0, 2), task_id=task_id)
+        th._append_chat_event({"type": "result", "text": "done"}, task_id=task_id)
+        ws = await self._connect_ok()
+        await self._send(ws, {"type": "ready", "tabId": "", "restoredTabs": [], "lazy": lazy})
+        await self._send(ws, {"type": "openTab", "tabId": "tab-c", "title": "new chat"})
+        self.assertIsNotNone(await self._wait_for_snapshot_with(ws, present={"tab-c"}))
+        # A task's tab stays subscribed to it after its end: its late charges reach the tab.
+        self.server._printer.subscribe_tab(task_id, "tab-c")
+        resume = {
+            "type": "resumeSession", "chatId": chat_id, "tabId": "tab-c", "taskId": task_id,
+            "replayId": "late-charge", "lazy": lazy,
+        }
+        return task_id, resume, ws
+
+    def _late_charge(
+        self, task_id: str, tab_id: str = "tab-c", times: int = 1, cost: float = 0.25,
+    ) -> None:
+        """Charge the finished task *cost*, 40 tokens and a step more, as a side channel of it
+        does after its end."""
+        assert self.server is not None
+        for _ in range(times):
+            charge_side_channel_usage(
+                self.server._printer, None, task_id, cost, 40, 1, tab_id=tab_id,
+            )
+
+    def _run_broadcasts(self, task_id: str, *events: dict[str, Any]) -> None:
+        """Broadcast *events* as the run of *task_id* does."""
+        assert self.server is not None
+        printer = self.server._printer
+        printer._thread_local.task_id = task_id
+        for event in events:
+            printer.broadcast(event)
+        printer._thread_local.task_id = None
+
+    def _end_run(self, task_id: str, spent: float) -> None:
+        """End the run of *task_id* as its worker does: its result, then its row with *spent*."""
+        assert self.server is not None
+        printer = self.server._printer
+        printer._thread_local.task_id = task_id
+        printer.broadcast({"type": "result", "text": "all done"})
+        printer.stop_recording()
+        printer._thread_local.task_id = None
+        th._save_task_extra(
+            {"cost": spent, "tokens": int(100 * spent), "steps": 2,
+             "endTs": int(time.time() * 1000)},
+            task_id=task_id,
+        )
+        state = agent_state.get(task_id)
+        assert state is not None
+        state.is_task_active = False
+
+    async def _replayed_after(self, change: Callable[[str], Any]) -> list[dict[str, Any]]:
+        """What tab-c gets when *change* lands between a whole replay's row read and its frame."""
+        task_id, resume, ws = await self._finished_task_on_tab_c(lazy=False)
+        # ``_extra_dict``: the replay's first step once it has read the row.
+        with Pause(
+            _extra_dict.__code__, lambda v: "finished-task-model" in str(v["extra"]),
+        ) as hold:
+            await self._send(ws, resume)
+            self.assertTrue(await asyncio.to_thread(hold.paused.wait, 10))
+            await asyncio.to_thread(change, task_id)
+        return await self._through(ws, "replayDone") + await self._drain(ws)
+
+    async def test_3_late_charge_after_the_row_was_read_is_in_the_replay(self) -> None:
+        """A charge between a whole replay's reading of the row and its frame is not wiped.
+
+        The tab is sent the charge's totals, then the replay's
+        transcript, which replaces what it shows: read with the row,
+        before the charge, it left the tab on the older cost.
+        """
+        messages = await self._replayed_after(self._late_charge)
+        self._assert_cost_rises_to(messages, "tab-c", 1.25)
+
+    async def test_3_task_deleted_after_the_row_was_read_has_no_transcript(self) -> None:
+        """A task deleted in that window is replayed without the transcript it had."""
+        messages = await self._replayed_after(th._delete_task)
+        frames = [m["events"] for m in messages if m.get("type") == "task_events"]
+        self.assertEqual(len(frames), 1, messages)
+        self.assertNotIn("done", [ev.get("text") for ev in frames[0]])
+
+    async def _charge_in_flight_is_replayed(self, lazy: bool) -> None:
+        """A charge that has sent its totals and not yet written them is not wiped by a replay.
+
+        The charge is held between the two; the replay of the task
+        asked meanwhile runs as far as it can.  Its transcript replaces
+        the totals the tab was sent, so it must hold them.
+        """
+        task_id, resume, ws = await self._finished_task_on_tab_c(lazy)
+        charge = threading.Thread(target=self._late_charge, args=(task_id,), daemon=True)
+        with Pause(
+            th._append_chat_event.__code__,
+            lambda v: v["task_id"] == task_id and v["event"].get("type") == "usage_info",
+        ) as hold:
+            charge.start()
+            self.assertTrue(await asyncio.to_thread(hold.paused.wait, 10))
+            await self._send(ws, resume)
+            # Arrives unless the replay waits for the charge.
+            messages = await self._through(ws, "replayDone", timeout=1.5)
+        await asyncio.to_thread(charge.join, 10)
+        self.assertFalse(charge.is_alive())
+        if not any(m.get("type") == "replayDone" for m in messages):
+            messages += await self._through(ws, "replayDone")
+        messages += await self._drain(ws)
+        self._assert_cost_rises_to(messages, "tab-c", 1.25, lazy)
+
+    async def test_3_charge_in_flight_is_in_a_whole_replay(self) -> None:
+        """The transcript sent whole waits for the charge's event."""
+        await self._charge_in_flight_is_replayed(lazy=False)
+
+    async def test_3_charge_in_flight_is_in_a_replay_in_pieces(self) -> None:
+        """So does the first piece of a transcript loaded in pieces."""
+        await self._charge_in_flight_is_replayed(lazy=True)
+
+    async def _ended_run_charge_is_replayed(
+        self, held_in: str, lazy: bool, spent: float = 1.0, charge: float = 0.25,
+    ) -> None:
+        """A run that ends and is charged while its replay is held in *held_in* shows the charge.
+
+        The replay attached to the run while it ran: its transcript is
+        what the run recorded (its own totals, if it *spent* anything),
+        which no late charge is in, and the tab, subscribed by the
+        attach, was sent the charge's totals first.  The charge costs
+        *charge* and adds tokens and a step: those of a free model
+        ($0) are shown, and replayed, like any other's.
+        """
+        assert self.server is not None
+        task_id, chat_id = await self._running_task_viewed_by_a(lazy)
+        ws_b, _ = await self._connect_b()
+
+        def end_and_charge() -> None:
+            self._end_run(task_id, spent)
+            self._late_charge(task_id, "tab-t", cost=charge)
+
+        if spent:
+            await asyncio.to_thread(
+                self._run_broadcasts, task_id, th.usage_totals_event(task_id, 100, spent, 2),
+            )
+        with Pause(
+            getattr(type(self.server._agent_server), held_in).__code__,
+            lambda v: v["tab_id"] == "tab-t" and v["source"].task_id == task_id,
+        ) as hold:
+            await self._send(ws_b, {
+                "type": "resumeSession", "chatId": chat_id, "tabId": "tab-t", "taskId": task_id,
+                "replayId": "ended-run", "lazy": lazy,
+            })
+            self.assertTrue(await asyncio.to_thread(hold.paused.wait, 10))
+            await asyncio.to_thread(end_and_charge)
+        messages = await self._through(ws_b, "replayDone") + await self._drain(ws_b)
+        self._assert_cost_rises_to(messages, "tab-t", spent + charge, lazy)
+        self.assertEqual(
+            _shown_totals(messages, "tab-t")[-1], (spent + charge, int(100 * spent) + 40, 3),
+        )
+
+    async def test_3_run_ended_and_charged_before_its_frame(self) -> None:
+        """Between the attach and the frame: the frame holds the row's totals."""
+        await self._ended_run_charge_is_replayed("_broadcast_viewer_running", lazy=False)
+
+    async def test_3_run_without_spend_ended_and_charged_before_its_frame(self) -> None:
+        """So does the frame of a run that recorded no totals of its own."""
+        await self._ended_run_charge_is_replayed(
+            "_broadcast_viewer_running", lazy=False, spent=0.0,
+        )
+
+    async def test_3_run_ended_and_charged_before_its_frame_in_pieces(self) -> None:
+        """So does the outline of a transcript loaded in pieces."""
+        await self._ended_run_charge_is_replayed("_broadcast_viewer_running", lazy=True)
+
+    async def test_3_run_ended_and_charged_before_its_terminal_frame(self) -> None:
+        """After a frame without the result: the transcript sent again with it holds them."""
+        await self._ended_run_charge_is_replayed("_finalize_viewer_attach", lazy=False)
+
+    async def test_3_run_ended_and_charged_before_its_terminal_frame_in_pieces(self) -> None:
+        """So does that transcript's outline."""
+        await self._ended_run_charge_is_replayed("_finalize_viewer_attach", lazy=True)
+
+    async def test_3_run_ended_and_charged_for_free_before_its_frame(self) -> None:
+        """The frame holds the row's tokens and steps when the charge cost nothing."""
+        await self._ended_run_charge_is_replayed(
+            "_broadcast_viewer_running", lazy=False, charge=0.0,
+        )
+
+    async def test_3_run_ended_and_charged_for_free_before_its_frame_in_pieces(self) -> None:
+        """So does the outline of a transcript loaded in pieces."""
+        await self._ended_run_charge_is_replayed("_broadcast_viewer_running", lazy=True, charge=0.0)
+
+    async def test_3_run_ended_and_charged_for_free_before_its_terminal_frame(self) -> None:
+        """So does the transcript sent again with the result."""
+        await self._ended_run_charge_is_replayed("_finalize_viewer_attach", lazy=False, charge=0.0)
+
+    async def test_3_run_ended_and_charged_for_free_before_its_terminal_frame_in_pieces(
+        self,
+    ) -> None:
+        """So does that transcript's outline."""
+        await self._ended_run_charge_is_replayed("_finalize_viewer_attach", lazy=True, charge=0.0)
+
+    async def _run_without_a_row_on_tab_pre(
+        self, lazy: bool,
+    ) -> tuple[ChatSorcarAgent, AgentState, ClientConnection, dict[str, Any]]:
+        """A run that has no row yet, on tab-pre of a client.
+
+        Returns:
+            Its agent and state, the client, and the ``resumeSession``
+            that names the run by its provisional key.
+        """
+        agent = ChatSorcarAgent("rb-pre-row")
+        agent._tab_id = "tab-pre"
+        state = AgentState(
+            "pre-row-run", agent=agent, chat_id="pre-row-chat", tab_id="tab-pre",
+            is_task_active=True,
+        )
+        agent_state.register(state)
+        ws = await self._connect_ok()
+        await self._send(ws, {"type": "ready", "tabId": "", "restoredTabs": [], "lazy": lazy})
+        await self._send(ws, {"type": "openTab", "tabId": "tab-pre", "title": "new chat"})
+        self.assertIsNotNone(await self._wait_for_snapshot_with(ws, present={"tab-pre"}))
+        resume = {
+            "type": "resumeSession", "chatId": "pre-row-chat", "tabId": "tab-pre",
+            "taskId": "pre-row-run", "replayId": "pre-row", "lazy": lazy,
+        }
+        return agent, state, ws, resume
+
+    def _given_its_row(self, agent: ChatSorcarAgent, cost: float) -> str:
+        """Give the run of *agent* its row, as ``ChatSorcarAgent.run`` does; it then spends *cost*.
+
+        The runner subscribes the launching tab to the row.
+        """
+        assert self.server is not None
+        printer = self.server._printer
+        task_id, _ = th._add_task("pre-row task", "pre-row-chat")
+        agent._last_task_id = task_id
+        printer._thread_local.task_id = task_id
+        printer.agent_task_allocated(agent, task_id, "pre-row-chat")
+        printer.start_recording()
+        printer.subscribe_tab(task_id, "tab-pre")
+        self._run_broadcasts(
+            task_id,
+            {"type": "task_settings", "settings": {"task_id": task_id, "model": "m"}},
+            {"type": "text_delta", "text": "[X]"},
+            th.usage_totals_event(task_id, int(100 * cost), cost, 2),
+        )
+        return task_id
+
+    async def _run_given_its_row_ended_and_charged(
+        self, held_in: str, lazy: bool, cleaned: bool = False, at_attach: bool = False,
+    ) -> None:
+        """A run attached to before it had a row shows the late charge of the row it got since.
+
+        The replay names the run by its provisional key, attaches to it
+        and is held in *held_in*.  The run then gets its row, records
+        its totals, ends and is charged late: the tab was sent all of
+        it, and the replay's transcript, what the run recorded under
+        its row (what the row has stored, once the worker has *cleaned*
+        the recording up), must end with that row's totals.  Read under
+        the key of the attach, there was no row and the transcript put
+        the tab back on the totals the run ended with.
+
+        With *at_attach* the replay is a chat's and names no task, and
+        the run gets its row as the replay attaches, which subscribes
+        the tab under the row: read for the task the replay names,
+        there was no row either.
+        """
+        assert self.server is not None
+        printer = self.server._printer
+        vs = type(self.server._agent_server)
+        agent, state, ws, resume = await self._run_without_a_row_on_tab_pre(lazy)
+        rows: list[str] = []
+
+        def given_its_row(attach: dict[str, Any]) -> bool:
+            if at_attach and attach["new_tab_id"] == "tab-pre" and not rows:
+                rows.append(self._given_its_row(agent, 1.0))
+            return False  # a step at the attach's entry: nothing is held there
+
+        def end_and_charge() -> None:
+            task_id = rows[0] if rows else self._given_its_row(agent, 1.0)
+            self._end_run(task_id, 1.0)
+            if cleaned:
+                printer.cleanup_task(task_id)
+            with agent_state.STATE_LOCK:
+                state.task_thread = None  # the allocation named its thread the run's
+            self._late_charge(task_id, "tab-pre")
+
+        if at_attach:
+            del resume["taskId"]
+        hold = Pause(getattr(vs, held_in).__code__, lambda v: v["tab_id"] == "tab-pre")
+        with Pauses(Pause(vs._attach_viewer_to_running_chat.__code__, given_its_row), hold):
+            await self._send(ws, resume)
+            self.assertTrue(await asyncio.to_thread(hold.paused.wait, 10))
+            await asyncio.to_thread(end_and_charge)
+        messages = await self._through(ws, "replayDone") + await self._drain(ws)
+        self._assert_cost_rises_to(messages, "tab-pre", 1.25, lazy)
+        self.assertEqual(_shown_totals(messages, "tab-pre")[-1], (1.25, 140, 3))
+
+    async def test_3_run_given_its_row_ended_and_charged_before_its_frame(self) -> None:
+        """The frame of a run named by its provisional key holds the totals of the run's row."""
+        await self._run_given_its_row_ended_and_charged("_broadcast_viewer_running", lazy=False)
+
+    async def test_3_run_given_its_row_ended_and_charged_before_its_frame_in_pieces(self) -> None:
+        """So does the outline of a transcript loaded in pieces."""
+        await self._run_given_its_row_ended_and_charged("_broadcast_viewer_running", lazy=True)
+
+    async def test_3_run_given_its_row_ended_and_charged_before_its_terminal_frame(self) -> None:
+        """So does the transcript sent again with the result."""
+        await self._run_given_its_row_ended_and_charged("_finalize_viewer_attach", lazy=False)
+
+    async def test_3_run_given_its_row_ended_and_charged_before_its_terminal_frame_in_pieces(
+        self,
+    ) -> None:
+        """So does that transcript's outline."""
+        await self._run_given_its_row_ended_and_charged("_finalize_viewer_attach", lazy=True)
+
+    async def test_3_run_given_its_row_ended_cleaned_up_and_charged_before_its_frame(self) -> None:
+        """So does the frame of what the row has stored, once the recording is freed."""
+        await self._run_given_its_row_ended_and_charged(
+            "_broadcast_viewer_running", lazy=False, cleaned=True,
+        )
+
+    async def test_3_run_given_its_row_ended_cleaned_up_and_charged_before_its_frame_in_pieces(
+        self,
+    ) -> None:
+        """So does the outline of that stored transcript."""
+        await self._run_given_its_row_ended_and_charged(
+            "_broadcast_viewer_running", lazy=True, cleaned=True,
+        )
+
+    async def test_3_run_given_its_row_at_the_attach_ended_and_charged_before_its_frame(
+        self,
+    ) -> None:
+        """So does the frame of a chat's replay, whose run got its row as the replay attached."""
+        await self._run_given_its_row_ended_and_charged(
+            "_broadcast_viewer_running", lazy=False, at_attach=True,
+        )
+
+    async def test_4_run_given_its_row_while_its_replay_reads_is_shown_once(self) -> None:
+        """A run that gets its row while its replay reads for its old key is replayed as the row.
+
+        The replay of a run without a row reads what the run's key has
+        stored, where it is held while the run gets its row and records
+        its first events, which the tab is sent.  The replay then reads
+        again, for the row, and its transcript, sent behind those
+        events, is what the run has recorded under the row: the
+        recording of the key first read for is empty, and would leave
+        the tab without the events and their totals.
+        """
+        agent, _, ws, resume = await self._run_without_a_row_on_tab_pre(lazy=False)
+        with Pause(
+            _stored_replay_events.__code__,
+            lambda v: v["session"].get("task_id") == "pre-row-run",
+        ) as hold:
+            await self._send(ws, resume)
+            self.assertTrue(await asyncio.to_thread(hold.paused.wait, 10))
+            await asyncio.to_thread(self._given_its_row, agent, 0.5)
+        messages = await self._through(ws, "replayDone") + await self._drain(ws)
+        self._assert_cost_rises_to(messages, "tab-pre", 0.5)
+        shown = [
+            [ev.get("text") for ev in m.get("events") or [m] if ev.get("type") == "text_delta"]
+            for m in messages
+            if m.get("tabId") == "tab-pre" and m.get("type") in ("text_delta", "task_events")
+        ]
+        self.assertEqual(shown, [["[X]"], ["[X]"]], messages)  # sent live, then in the transcript
+        agent_state.agent_states.clear()
+
+    async def _run_recorded_and_retired_behind_its_stored_read(self, lazy: bool) -> None:
+        """What a run records, then frees, behind its replay's stored read is in the replay.
+
+        The replay attaches to a sub-agent's run that has recorded
+        nothing, reads what the row has stored and is held before it
+        takes its place in the send queues.  The run then records its
+        totals and its result, which the tab is sent, and retires: its
+        recording is freed, so the place finds nothing to copy.  The
+        transcript read before all that, sent in its stead, put the tab
+        back on no totals at all.
+        """
+        assert self.server is not None
+        printer = self.server._printer
+        task_id, chat_id = th._add_task("retiring task")
+        agent = ChatSorcarAgent("rb-retiring")
+        agent._last_task_id = task_id
+
+        def record_and_retire() -> None:
+            # What ``ChatSorcarAgent.run`` does, to its end, for a run the server did not start.
+            printer._thread_local.task_id = task_id
+            printer.start_recording()
+            printer.broadcast(th.usage_totals_event(task_id, 100, 1.0, 2))
+            printer.broadcast({"type": "result", "text": "retired"})
+            _retire_printer_task(agent, printer, task_id)
+            printer._thread_local.task_id = None
+
+        # The run's start: the printer registers it under its row.
+        await asyncio.to_thread(printer.agent_task_allocated, agent, task_id, chat_id)
+        ws = await self._connect_ok()
+        await self._send(ws, {"type": "ready", "tabId": "", "restoredTabs": [], "lazy": lazy})
+        await self._send(ws, {"type": "openTab", "tabId": "tab-r", "title": "new chat"})
+        self.assertIsNotNone(await self._wait_for_snapshot_with(ws, present={"tab-r"}))
+        with Pause(
+            JsonPrinter.replay_snapshot.__wrapped__.__code__,  # type: ignore[attr-defined]
+            lambda v: v["task_id"] == task_id and v["tab_id"] == "tab-r",
+        ) as hold:
+            await self._send(ws, {
+                "type": "resumeSession", "chatId": chat_id, "tabId": "tab-r", "taskId": task_id,
+                "replayId": "retiring", "lazy": lazy,
+            })
+            self.assertTrue(await asyncio.to_thread(hold.paused.wait, 10))
+            await asyncio.to_thread(record_and_retire)
+        messages = await self._through(ws, "replayDone") + await self._drain(ws)
+        self._assert_cost_rises_to(messages, "tab-r", 1.0, lazy)
+        self.assertEqual(_shown_totals(messages, "tab-r")[-1], (1.0, 100, 2))
+        frames = [m["events"] for m in messages if m.get("type") == "task_events"]
+        self.assertTrue(any(ev.get("type") == "result" for ev in frames[0]), messages)
+
+    async def test_4_run_recorded_and_retired_behind_its_stored_read_is_shown(self) -> None:
+        """The frame holds what the run stored between the replay's reading and its place."""
+        await self._run_recorded_and_retired_behind_its_stored_read(lazy=False)
+
+    async def test_4_run_recorded_and_retired_behind_its_stored_read_is_shown_in_pieces(
+        self,
+    ) -> None:
+        """So does the outline of a transcript loaded in pieces."""
+        await self._run_recorded_and_retired_behind_its_stored_read(lazy=True)
+
+    async def test_4_what_a_finished_run_sent_last_is_in_its_replay_before_it_is_written(
+        self,
+    ) -> None:
+        """A replay of a finished task waits for the events still queued for its transcript.
+
+        A run's events are written to its transcript by a background
+        thread.  The tab was sent the last of them, and the replay's
+        transcript, read while the writer was behind, replaced it with
+        a transcript that lacked it.
+        """
+        task_id, resume, ws = await self._finished_task_on_tab_c(lazy=False)
+        agent = ChatSorcarAgent("rb-finished")
+        agent._last_task_id = task_id
+        # The tab's state once its run is over: what is still broadcast is filed under the row.
+        agent_state.register(
+            AgentState(task_id, agent=agent, chat_id=resume["chatId"], tab_id="tab-c"),
+        )
+        with Pause(
+            th._persist_batch_with_retry.__code__,
+            lambda v: any(item[0] == task_id for item in v["batch"]),
+        ) as hold:
+            await asyncio.to_thread(
+                self._run_broadcasts, task_id, {"type": "text_delta", "text": "[tail]"},
+            )
+            self.assertTrue(await asyncio.to_thread(hold.paused.wait, 10))
+            await self._send(ws, resume)
+            messages = await self._through(ws, "replayDone", timeout=1.0)
+        if not any(m.get("type") == "replayDone" for m in messages):
+            messages += await self._through(ws, "replayDone")  # the replay waited for the writer
+        frames = [m["events"] for m in messages if m.get("type") == "task_events"]
+        self.assertEqual(len(frames), 1, messages)
+        self.assertIn("[tail]", _text(frames[0]))
+        agent_state.agent_states.clear()
+
+    async def test_4_recovering_client_is_not_put_back_by_the_row_of_its_running_block(
+        self,
+    ) -> None:
+        """A recovering client gets a running block from its recording, not from its row.
+
+        The client's replay is held as it turns to the run's row, with
+        the tab attached, while the run sends totals the events table
+        has not been written yet.  The row's frame, sent behind them,
+        put the client back on the totals the table had.
+        """
+        assert self.server is not None
+        task_id, chat_id = await self._running_task_viewed_by_a(lazy=False)
+        agent = ChatSorcarAgent("rb-recovering")
+        agent._last_task_id = task_id
+        with agent_state.STATE_LOCK:
+            agent_state.agent_states[task_id].agent = agent  # its events are filed under the row
+        stored = th.usage_totals_event(task_id, 50, 0.5, 1)
+        await asyncio.to_thread(self._run_broadcasts, task_id, stored)
+        await asyncio.to_thread(th._flush_chat_events, task_id)
+        ws_b, _ = await self._connect_b()
+        row_spend = type(self.server._agent_server)._replay_row_spend.__code__
+        writer = Pause(
+            th._persist_batch_with_retry.__code__,
+            lambda v: any(item[0] == task_id for item in v["batch"]),
+        )
+        hold = Pause(row_spend, lambda v: v["tab_id"] == "tab-t")
+        with Pauses(writer, hold):
+            await self._send(ws_b, {
+                "type": "resumeSession", "chatId": chat_id, "tabId": "tab-t", "taskId": task_id,
+                "recovery": True, "scoped": True, "replayId": "recovering", "lazy": False,
+            })
+            self.assertTrue(await asyncio.to_thread(hold.paused.wait, 10))
+            await asyncio.to_thread(
+                self._run_broadcasts, task_id, th.usage_totals_event(task_id, 100, 1.0, 2),
+            )
+            self.assertTrue(await asyncio.to_thread(writer.paused.wait, 10))
+            hold.release()  # the replay goes on while the writer is behind
+            messages = await self._through(ws_b, "replayDone")
+        self._assert_cost_rises_to(messages, "tab-t", 1.0)
+        self.assertEqual(_shown_totals(messages, "tab-t")[-1], (1.0, 100, 2))
+
+    async def _block_begun_since_the_attach_is_kept(self, cleaned: bool) -> None:
+        """A recovering client is not put back by the rows of a run that began its next block.
+
+        Block 2's row is committed, and the run still has block 1's
+        key, when the client's replay lists the run's rows and attaches
+        the tab.  Block 2 then begins and sends its totals and its
+        result.  The replay sent block 2's row as the events table had
+        it when read, behind newer totals of the block (the client was
+        put back on the older ones), and block 1's frames last, which
+        made block 1 the client's task again and dropped block 2's
+        result.  (Review L6j2 round 4; the client is the real
+        ``daemon_client`` one.)
+
+        Args:
+            cleaned: Block 1's recording is freed when its row is
+                finished, as the runner frees it; else it is kept, and
+                is what the replay attached under block 1's key sends.
+        """
+        assert self.server is not None
+        agent, state, _, _ = await self._run_without_a_row_on_tab_pre(lazy=False)
+        token = state.task_id
+        state.client_run_token = token
+        state.server_owned = True
+        chat_id, tab_id = state.chat_id, state.tab_id
+        first, second = (_run_row_id(token, block) for block in (0, 1))
+        printer, server = self.server._printer, self.server._agent_server
+        began, sent, go, over = (threading.Event() for _ in range(4))
+        errors: list[str] = []
+
+        def begin(row: str, previous: str | None = None) -> None:
+            """What ``ChatSorcarAgent.run`` and the runner do as a block gets its row."""
+            th._add_task("a block", chat_id, task_id=row)
+            agent._last_task_id = row
+            printer._thread_local.task_id = row
+            printer.agent_task_allocated(agent, row, chat_id)
+            printer.start_recording()
+            server._on_run_task_id_allocated(
+                row, chat_id, source_tab_id=tab_id, start_ms=int(time.time() * 1000),
+                client_task_id=token, previous_task_id=previous,
+            )
+            printer.broadcast({"type": "task_settings", "settings": {"task_id": row, "model": "m"}})
+
+        def run_blocks() -> None:
+            try:
+                begin(first)
+                printer.broadcast(th.usage_totals_event(first, 25, 0.25, 1))
+                printer.broadcast({"type": "result", "text": "block 1 done"})
+                _retire_printer_task(agent, printer, first)
+                th._append_chat_event({"type": "task_done", "run_continues": True}, task_id=first)
+                locked_call(
+                    th.TASK_USAGE_LOCK, th._save_task_extra,
+                    {"cost": 0.25, "tokens": 25, "steps": 1, "endTs": int(time.time() * 1000)},
+                    task_id=first,
+                )
+                if cleaned:
+                    printer.cleanup_task(first)
+                begin(second, first)
+                printer.broadcast(th.usage_totals_event(second, 50, 0.5, 1))
+                th._flush_chat_events(second)
+                began.set()
+                assert go.wait(15)
+                printer.broadcast(th.usage_totals_event(second, 100, 1.0, 2))
+                printer.broadcast({"type": "result", "text": "block 2 done"})
+                th._flush_chat_events(second)
+                sent.set()
+                assert over.wait(15)
+            except BaseException as exc:
+                errors.append(repr(exc))
+                began.set()
+                sent.set()
+            finally:
+                printer._thread_local.task_id = None
+
+        def send_more(_entered: dict[str, Any]) -> bool:
+            """Block 2 sends its last totals and its result while the entering thread waits."""
+            go.set()
+            sent.wait(10)
+            return False
+
+        keyed = Pause(JsonPrinter.agent_task_allocated.__code__, lambda v: v["task_id"] == second)
+        attached = Pause(
+            type(server)._broadcast_viewer_running.__code__, lambda v: v["tab_id"] == tab_id,
+        )
+        # Block 2 sends them where a replay has read block 2's row and not
+        # sent it yet, or else ahead of the frame of the block it attached to.
+        row_read = Pause(
+            _replay_events.__code__,
+            lambda v: v["task_id"] == "" and v["session"].get("task_id") == second and send_more(v),
+        )
+        cut = Pause(type(server)._enter_replay_cut.__code__, send_more)
+        endpoint = Path(self.tmpdir) / "sorcar-local.json"
+        sock = await asyncio.to_thread(local_endpoint.connect, endpoint)
+        inbox = daemon_client._Inbox(sock, endpoint, tab_id)
+        seen = daemon_client._Observed(chat_id=chat_id, task_id=first, run_token=token)
+        charged: dict[str, dict[str, Any]] = {}
+        shown: list[tuple[float, int, int]] = []  # block 2's totals, as the client has them
+        worker = threading.Thread(target=run_blocks, daemon=True)
+        try:
+            with Pauses(keyed, attached, row_read, cut):
+                worker.start()
+                self.assertTrue(await asyncio.to_thread(keyed.paused.wait, 10), errors)
+                self.assertEqual(_rows_of_run(th._chat_task_tree(chat_id), first), [first, second])
+                await asyncio.to_thread(sock.close)
+                await asyncio.to_thread(inbox.reconnect, 10.0, seen)
+                self.assertTrue(await asyncio.to_thread(attached.paused.wait, 10))
+                self.assertEqual(state.task_id, first)  # attached under block 1's key
+                keyed.release()
+                self.assertTrue(await asyncio.to_thread(began.wait, 10))
+                self.assertEqual(errors, [])
+                attached.release()
+                event: dict[str, Any] = {}
+                while event.get("type") != "replayDone":
+                    received = await asyncio.to_thread(inbox.recv_event, 10.0)
+                    event = received or {}
+                    if event.get("tabId") != tab_id:
+                        continue
+                    if event.get("type") == "task_events":
+                        inbox.absorb_replay(event, seen, charged)
+                    else:
+                        seen.absorb(event, charged)
+                    if second in seen.totals:
+                        spent = seen.totals[second]
+                        shown.append((spent["cost"], spent["total_tokens"], spent["step_count"]))
+        finally:
+            go.set()
+            over.set()
+            await asyncio.to_thread(worker.join, 10)
+            await asyncio.to_thread(inbox.ws.close)
+            state.task_thread = None
+            agent_state.agent_states.clear()
+        self.assertEqual(errors, [])
+        self.assertEqual(_rows_of_run(th._chat_task_tree(chat_id), first), [first, second])
+        self.assertEqual(shown, sorted(shown), "block 2's totals went back")
+        self.assertEqual(shown[-1], (1.0, 100, 2))
+        self.assertEqual(seen.task_id, second)
+        self.assertEqual((seen.result or {}).get("text"), "block 2 done")
+
+    async def test_4_recovering_client_keeps_what_a_block_begun_since_its_attach_sent(
+        self,
+    ) -> None:
+        """The next block's row is not replayed behind what that block sent since the attach."""
+        await self._block_begun_since_the_attach_is_kept(cleaned=True)
+
+    async def test_4_recovering_client_keeps_it_after_the_recording_of_the_block_before(
+        self,
+    ) -> None:
+        """Nor is the recording of the block before, where the replay attached under its key."""
+        await self._block_begun_since_the_attach_is_kept(cleaned=False)
+
+    async def _charged_twice_behind_its_frame(self, lazy: bool) -> None:
+        """Charges made once a replay's place in the send queues is reserved follow its frame.
+
+        The replay attached to the run, which then ended, and reserved
+        its frame's place.  A first charge sends its totals behind that
+        place; a second has updated the row and not sent its own yet.
+        A frame that took the row's totals of that moment showed the
+        second charge, then the tab was put back on the first one's.
+        """
+        assert self.server is not None
+        server = type(self.server._agent_server)
+        task_id, chat_id = await self._running_task_viewed_by_a(lazy)
+        ws_b, _ = await self._connect_b()
+        await asyncio.to_thread(
+            self._run_broadcasts, task_id, th.usage_totals_event(task_id, 100, 1.0, 2),
+        )
+        attached = Pause(
+            server._broadcast_viewer_running.__code__,
+            lambda v: v["tab_id"] == "tab-t" and v["source"].task_id == task_id,
+        )
+        # The frame's last step before it is sent, its place long reserved.
+        reserved = Pause(_ending_with_row_totals.__code__, lambda v: True)
+        sending = Pause(
+            JsonPrinter.broadcast_transient.__code__,
+            lambda v: v["event"].get("cost") == "$1.5000",
+        )
+        second = threading.Thread(target=self._late_charge, args=(task_id, "tab-t"), daemon=True)
+        with Pauses(attached, reserved, sending):
+            await self._send(ws_b, {
+                "type": "resumeSession", "chatId": chat_id, "tabId": "tab-t", "taskId": task_id,
+                "replayId": "charged-twice", "lazy": lazy,
+            })
+            self.assertTrue(await asyncio.to_thread(attached.paused.wait, 10))
+            await asyncio.to_thread(self._end_run, task_id, 1.0)
+            attached.release()
+            self.assertTrue(await asyncio.to_thread(reserved.paused.wait, 10))
+            await asyncio.to_thread(self._late_charge, task_id, "tab-t")
+            second.start()
+            self.assertTrue(await asyncio.to_thread(sending.paused.wait, 10))
+            reserved.release()
+            messages = await self._through(ws_b, "replayDone")
+        await asyncio.to_thread(second.join, 10)
+        self.assertFalse(second.is_alive())
+        messages += await self._drain(ws_b)
+        self._assert_cost_rises_to(messages, "tab-t", 1.5, lazy)
+        agent_state.agent_states.clear()
+
+    async def test_4_charges_behind_the_frame_of_an_ended_run_follow_it(self) -> None:
+        """The frame of what the run recorded ends with the row's totals of its reservation."""
+        await self._charged_twice_behind_its_frame(lazy=False)
+
+    async def test_4_charges_behind_the_frame_of_an_ended_run_follow_it_in_pieces(self) -> None:
+        """So does the outline of a transcript loaded in pieces."""
+        await self._charged_twice_behind_its_frame(lazy=True)
+
+    async def _cleaned_up_run_charged_behind_its_frame(self, lazy: bool) -> None:
+        """Charges behind the frame of a run its worker has cleaned up follow that frame.
+
+        The worker freed the run's recording and has not left yet: the
+        replay attaches to it, and its frame is the stored transcript.
+        Read once the frame's place was reserved, the transcript held
+        the two charges made meanwhile, whose own totals then put the
+        tab back on the first one's.  The replay is held where it reads
+        the transcript; the charges are over within the wait unless
+        they wait for the replay.
+        """
+        task_id, resume, ws = await self._finished_task_on_tab_c(lazy)
+        agent_state.register(AgentState(
+            task_id, chat_id=resume["chatId"], tab_id="tab-c", is_task_active=True,
+        ))
+        charges = threading.Thread(
+            target=self._late_charge, args=(task_id, "tab-c", 2), daemon=True,
+        )
+        reads = _replay_events if lazy else th._load_chat_events_by_task_id
+        with Pause(
+            reads.__code__, lambda v: v["task_id"] == task_id and v.get("with_events", True),
+        ) as hold:
+            await self._send(ws, resume)
+            self.assertTrue(await asyncio.to_thread(hold.paused.wait, 10))
+            charges.start()
+            await asyncio.to_thread(charges.join, 1.5)
+        await asyncio.to_thread(charges.join, 10)
+        self.assertFalse(charges.is_alive())
+        messages = await self._through(ws, "replayDone") + await self._drain(ws)
+        self._assert_cost_rises_to(messages, "tab-c", 1.5, lazy)
+        agent_state.agent_states.clear()
+
+    async def test_4_charges_behind_the_frame_of_a_cleaned_up_run_follow_it(self) -> None:
+        """The stored transcript an attached replay sends is read before its reservation."""
+        await self._cleaned_up_run_charged_behind_its_frame(lazy=False)
+
+    async def test_4_charges_behind_the_frame_of_a_cleaned_up_run_follow_it_in_pieces(self) -> None:
+        """So is the outline of a transcript loaded in pieces."""
+        await self._cleaned_up_run_charged_behind_its_frame(lazy=True)
+
+    async def _first_events_are_shown_once(self, lazy: bool) -> None:
+        """What a run records while its replay reads the stored transcript is shown once.
+
+        The run had recorded nothing when the replay attached to it, so
+        the replay reads the stored transcript, where it is held while
+        the run records its first events and they are stored.  Read
+        once the frame's place was reserved, the transcript held those
+        events, which the tab then got again behind the frame: its
+        text twice, its older totals after its newer ones.
+        """
+        task_id, chat_id = await self._running_task_viewed_by_a(lazy)
+        agent = ChatSorcarAgent("rb-first-events")
+        agent._last_task_id = task_id
+        state = agent_state.get(task_id)
+        assert state is not None
+        state.agent = agent  # the run's events are stored
+        ws_b, _ = await self._connect_b()
+        reads = _replay_events if lazy else th._load_chat_events_by_task_id
+        with Pause(
+            reads.__code__, lambda v: v["task_id"] == task_id and v.get("with_events", True),
+        ) as hold:
+            await self._send(ws_b, {
+                "type": "resumeSession", "chatId": chat_id, "tabId": "tab-t", "taskId": task_id,
+                "replayId": "first-events", "lazy": lazy,
+            })
+            self.assertTrue(await asyncio.to_thread(hold.paused.wait, 10))
+            await asyncio.to_thread(
+                self._run_broadcasts, task_id,
+                {"type": "text_delta", "text": "[X]"},
+                th.usage_totals_event(task_id, 50, 0.5, 1),
+                th.usage_totals_event(task_id, 100, 1.0, 2),
+            )
+            await asyncio.to_thread(th._flush_chat_events, task_id)
+            stored = await asyncio.to_thread(th._load_chat_events_by_task_id, task_id)
+            assert stored is not None
+            self.assertIn("[X]", str(stored["events"]))
+        messages = await self._through(ws_b, "replayDone") + await self._drain(ws_b)
+        self.assertEqual(_text(_rendered(messages, "tab-t")).count("[X]"), 1, messages)
+        self._assert_cost_rises_to(messages, "tab-t", 1.0, lazy)
+        agent_state.agent_states.clear()
+
+    async def test_4_first_events_of_a_run_are_shown_once(self) -> None:
+        """The stored transcript holds nothing the run recorded behind the frame."""
+        await self._first_events_are_shown_once(lazy=False)
+
+    async def test_4_first_events_of_a_run_are_shown_once_in_pieces(self) -> None:
+        """Nor does the outline of a transcript loaded in pieces."""
+        await self._first_events_are_shown_once(lazy=True)
 
 
 def test_stop_recording_keeps_only_attachable_runs() -> None:

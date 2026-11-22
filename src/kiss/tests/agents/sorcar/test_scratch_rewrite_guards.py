@@ -311,7 +311,8 @@ def test_an_unquoted_value_with_a_blank_is_split_as_bash_splits_it(tmp_path: Pat
     command = 'T="tmp/out notes.md"; sed -i "s/one/one\\ntwo/" $T'
     # bash hands sed two operands, the second the tracked file: refused
     assert rewrite_guard(command, str(tmp_path), lambda path: path.endswith("notes.md")) is not None
-    assert [w.literal for w in _program("sed", command).argv()][-1] is False
+    assert [(w.text, w.literal) for w in _program("sed", command).argv()][-2:] == [
+        ("tmp/out", True), ("notes.md", True)]
     _created(tmp_path, command)
     assert (tmp_path / "notes.md").read_text() == "one\ntwo\n"
     # double-quoted, the value is the one operand it reads as

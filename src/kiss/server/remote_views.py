@@ -29,7 +29,11 @@ announced, focused, to every client of the machine's daemon, and the
 stream relays it to every surface here the same way.  A stream lost
 while a tab is still bound to its machine is opened again after
 :data:`REOPEN_DELAY` (a machine that drops every socket costs one
-connection per delay, not a connect loop).  A stream that opens asks
+connection per delay, not a connect loop).  A stream does not outlive
+the registration it was opened for: once the name is registered again
+(another daemon, a new password) or removed, the next command asking
+for the machine's stream ends it as a lost one
+(:meth:`RemoteViews._stream_for`).  A stream that opens asks
 the machine for the pages its browser already has open
 (``browserList``, answered with the ``browserTabs`` snapshot a
 ``ready`` gets, or with an ``error`` by an older daemon) and shows
@@ -686,32 +690,48 @@ class RemoteViews:
     def _stream_for(self, machine_name: str) -> RemoteViewStream:
         """The stream of the registered machine *machine_name*, opened when needed.
 
+        The stream is the machine's as the registry names it now.  One
+        opened for an earlier registration of the name (another daemon
+        registered under it since, a new password) or for a machine
+        removed since is ended as a lost one is (:meth:`dropped`: its
+        terminals, opens and pages are told), so no open reaches the
+        daemon the name stood for before.
+
         Connecting blocks (up to the link's timeout) outside the lock;
         a stream another command opened meanwhile wins, and the one
         opened here is closed, as it is when the daemon stopped
-        meanwhile (:meth:`close_all` leaves nothing behind).
+        meanwhile (:meth:`close_all` leaves nothing behind) or the
+        registration changed during the handshake (one that starts
+        after the change is refused by the machine's link).
 
         Raises:
             MachineError: When the machine is not registered,
-                unreachable, or rejects the password, or the daemon is
+                unreachable, or rejects the password, its registration
+                changed while the stream connected, or the daemon is
                 stopping.
         """
         with self._lock:
             stream = self._streams.get(machine_name)
             closing = self._closing
+        # Read after the stream was: an older reading would end the stream
+        # another command has just opened for the registration as it is.
+        machine = registered_machine(machine_name)
         if stream is not None:
-            return stream
+            if stream.machine == machine:
+                return stream
+            self.dropped(stream, lost=True, text=f"{machine_name}: the machine registry changed")
+            stream.close()
         if closing:
             raise MachineError(f"{machine_name}: this daemon is stopping")
-        machine = registered_machine(machine_name)
         if machine is None:
             raise MachineError(f"{machine_name} is not a registered machine")
         stream = RemoteViewStream(machine, self)
+        unchanged = registered_machine(machine_name) == machine
         lost = False
         with self._lock, stream.lock:
             winner = self._streams.get(machine_name)
             closing = self._closing
-            if winner is None and not closing:
+            if winner is None and not closing and unchanged:
                 lost = stream.retired  # dropped before it could be registered
                 if not lost:
                     self._streams[machine_name] = stream
@@ -722,10 +742,13 @@ class RemoteViews:
             stream._registration_done.set()
         if winner is not None:
             stream.close()
-            return winner
+            return self._stream_for(machine_name)  # checked against the registry like any other
         if closing:
             stream.close()
             raise MachineError(f"{machine.name}: this daemon is stopping")
+        if not unchanged:
+            stream.close()
+            raise MachineError(f"{machine.name}: the machine registry changed, try again")
         if lost:
             raise MachineError(f"lost the connection to {machine.name}")
         stream.request_pages()
@@ -865,7 +888,7 @@ class RemoteViews:
         """Send one frame of a remote daemon to the connection *conn_id* only."""
         self._backend._printer._send_to_conn(conn_id, text)
 
-    def dropped(self, stream: RemoteViewStream, lost: bool) -> None:
+    def dropped(self, stream: RemoteViewStream, lost: bool, text: str = "") -> None:
         """A stream ended: forget it, and when *lost* end its terminals, opens and pages here.
 
         A stream lost while a tab is still bound to its machine is
@@ -873,9 +896,17 @@ class RemoteViews:
         bound then (the machine may have dropped the socket alone; a
         machine that is gone takes the tabs' own streams with it,
         which unbinds them).
+
+        Args:
+            stream: The stream that ended.
+            lost: Whether what it showed ends with it (its relay ended
+                unasked, or its machine's registration changed), as
+                opposed to a stream closed idle or with the daemon.
+            text: What the pages showing its terminals and awaiting its
+                opens are told (``""``: the connection was lost).
         """
         name = stream.machine.name
-        text = f"lost the connection to {name}"
+        text = text or f"lost the connection to {name}"
         with self._lock, stream.lock:
             registered = self._streams.get(name) is stream
             if registered:

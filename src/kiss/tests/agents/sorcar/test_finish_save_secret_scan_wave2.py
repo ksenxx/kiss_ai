@@ -341,6 +341,35 @@ def test_a_replay_refresh_rescans_events_committed_after_its_scan() -> None:
     assert "secret" in _tags(task_id)
 
 
+def test_a_result_saved_between_the_scan_and_the_write_still_tags_secret() -> None:
+    """A result saved after the unlocked scan lands no event: the write scans the row it reads."""
+    task_id, _ = th._add_task("list the files")
+    th._save_task_result("done", task_id, success=True)
+    th._save_task_extra({"endTs": 1_900_000_000_000}, task_id)
+    assert _tags(task_id) == ["work"]
+    scanned, resume = threading.Event(), threading.Event()
+    seen: list[str] = []
+    refresher = threading.Thread(
+        target=_finalize_paused_after_each_scan,
+        args=(partial(th._refresh_finished_rows, {task_id}), scanned, resume, seen),
+        daemon=True,
+    )
+    refresher.start()
+    try:
+        assert scanned.wait(30)
+        # Another save of the task's end lands between the refresh's scan and its write.
+        th._save_task_result(f"export GITHUB_TOKEN={_TOKEN}", task_id, success=True)
+        th._save_task_extra({"endTs": 1_900_000_000_000}, task_id)
+        assert "secret" in _tags(task_id)
+    finally:
+        resume.set()
+        refresher.join(60)
+    assert not refresher.is_alive()
+
+    assert seen == ["writer free", "reader free"]  # no event is read under the locks for it
+    assert "secret" in _tags(task_id)
+
+
 def test_secret_scan_runs_with_both_locks_free_and_tags_the_task() -> None:
     task_id, _ = th._add_task("list the files")
     _insert_events(task_id, ["x" * 200] * 20 + [f"export GITHUB_TOKEN={_TOKEN}"])

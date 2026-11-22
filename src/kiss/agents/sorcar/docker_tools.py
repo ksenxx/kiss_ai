@@ -20,6 +20,7 @@ from kiss.agents.sorcar.docker_manager import (
     PendingAppend,
     PendingEdit,
     PendingRewrite,
+    ToolScript,
 )
 from kiss.agents.sorcar.edit_matching import nearest_region, reindent, tolerant_matches
 from kiss.agents.sorcar.useful_tools import _edit_pairs
@@ -280,7 +281,13 @@ def _python_edit_command(
     *old_len* bytes are ``old``.  The caller (:meth:`DockerTools.Edit`)
     removes it once the replacement ran, whatever its outcome.  A path
     that is not a regular file is answered as a missing one, as the
-    host ``Edit`` answers it (reading a FIFO would block).  An LF
+    host ``Edit`` answers it (reading a FIFO would block).  A symlink
+    is resolved once, before the read: the file it named then is the
+    one read and published, whatever the link names by the time the
+    new text is ready (resolved again to publish, a link repointed
+    meanwhile had the file it named by then overwritten with the
+    edited text of the first; the staged ``Write`` keeps its first
+    resolution the same way, :func:`_store_commands`).  An LF
     ``old`` missing from a CRLF file is retried as CRLF (``new`` made
     CRLF with it) and the ``new`` of a one-line ``old`` found as it is
     takes the file's CRLF too, unless *exact*.  With *at*, the ``old``
@@ -324,10 +331,11 @@ def _python_edit_command(
         f"old = blob[:{old_len}].decode()\n"
         f"new = blob[{old_len}:].decode()\n"
         f"path = sys.argv[1]\n"
+        f"real = os.path.realpath(path)\n"
         f"try:\n"
-        f"    if not os.path.isfile(path):\n"
+        f"    if not os.path.isfile(real):\n"
         f"        raise FileNotFoundError\n"
-        f"    content = open(path, encoding='utf-8', newline='').read()\n"
+        f"    content = open(real, encoding='utf-8', newline='').read()\n"
         f"except FileNotFoundError:\n"
         f"    print(f'Error: File not found: {{path}}'); sys.exit(1)\n"
         f"ra = {ra}\n"
@@ -349,7 +357,6 @@ def _python_edit_command(
         f"        print(f'Error: String appears {{count}} times (not unique). "
         f"Use replace_all=True to replace all occurrences.'); sys.exit(1)\n"
         f"    new_content = content.replace(old, new) if ra else content.replace(old, new, 1)\n"
-        f"real = os.path.realpath(path)\n"
         f"st = os.stat(real)\n"
         f"tmp = os.path.join(os.path.dirname(real), '.' + uuid.uuid4().hex + '.tmp')\n"
         f"try:\n"
@@ -387,7 +394,8 @@ def _perl_edit_command(
     """The Edit replacement as a Perl one-liner, for containers without Python.
 
     Reads the same *payload* file as :func:`_python_edit_command`, as
-    raw bytes, opens a regular file only, matches as it does (an LF
+    raw bytes, opens a regular file only (the one a symlink names when
+    the editor begins, which is the one published), matches as it does (an LF
     ``old`` is retried as CRLF against a CRLF file and the ``new`` of
     a one-line ``old`` made CRLF, unless *exact*; the ``old`` at byte
     *at* first) and publishes the same way (a sibling file renamed
@@ -419,8 +427,8 @@ def _perl_edit_command(
         f"open(my $pf, \"<:raw\", $payload) or die \"cannot read $payload\";\n"
         f"local $/; my $blob = <$pf>; close $pf;\n"
         f"my $old = substr($blob, 0, {old_len}); my $new = substr($blob, {old_len});\n"
-        f"my $fh;\n"
-        f"(-f $path and open($fh, \"<:raw\", $path))\n"
+        f"my $fh; my $real = Cwd::realpath($path);\n"
+        f"(defined $real and -f $real and open($fh, \"<:raw\", $real))\n"
         f"  or do {{ print \"Error: File not found: $path\\n\"; exit 1 }};\n"
         f"my $content = <$fh>; close $fh;\n"
         f"my $count = 1;\n"
@@ -439,7 +447,7 @@ def _perl_edit_command(
         f"  if ({ra}) {{ $content =~ s/\\Q$old\\E/$new/g }}\n"
         f"  else {{ $content =~ s/\\Q$old\\E/$new/ }}\n"
         f"}}\n"
-        f"my $real = Cwd::realpath($path); my @st = stat($real);\n"
+        f"my @st = stat($real);\n"
         f"my $tmp = $real;\n"
         f"$tmp =~ s{{[^/]*$}}{{sprintf(\".%08x%08x.tmp\", rand(2**32), rand(2**32))}}e;\n"
         f"my $staged = $st[3] <= 1 && -w $real "
@@ -520,6 +528,16 @@ class DockerTools:
         # showing): the content-keyed dedupe of :meth:`Read`.
         self._reads_shown: dict[str, tuple[int, int, int, str]] = {}
 
+    def _run(self, script: str, description: str) -> str:
+        """Run *script*, one of the tools' own, in the container and return its output.
+
+        Every script goes out as a
+        :class:`~kiss.agents.sorcar.docker_manager.ToolScript`, so that the
+        Docker tool streams nothing of it (a store's marker, the text read)
+        into the panel of the call, whose result is then recorded whole.
+        """
+        return self.bash(ToolScript(script), description)
+
     def reset_reads(self) -> None:
         """Forget which file windows the model has already been shown.
 
@@ -585,28 +603,36 @@ class DockerTools:
         if mime_type in READ_TOOL_BINARY_MIME_TYPES:
             return self._read_binary(file_path, mime_type or "")
         path = _operand(file_path)
-        # awk takes a relative operand shaped ``name=value`` (date=2024-01-01/part.csv)
-        # for a variable assignment and reads its empty standard input: a ./ makes it a path.
-        counted = shlex.quote(file_path if file_path.startswith("/") else f"./{file_path}")
+        # The file is opened once and read once: ``tee`` hands the same
+        # bytes to the window (descriptor 3, this shell's output) and to
+        # the line count (descriptor 4, ``awk``), so the count is the
+        # one of the lines shown.  Counted by one open and windowed by
+        # another, a file replaced in between was answered with the new
+        # lines under the old count.  The window's reader drains its
+        # copy (``tee`` would end at a closed pipe, the count cut short);
+        # a reader that failed says so on descriptor 5, into the count,
+        # which is then no number.
         cmd = (
             f'FILE={path}\n'
             f'if [ ! -f "$FILE" ]; then echo "Error: File not found: $FILE"; exit 1; fi\n'
-            f'TOTAL=$(awk \'END{{print NR}}\' {counted}) || '
-            f'{{ echo "Error: cannot read $FILE"; exit 1; }}\n'
-            f'if [ "$TOTAL" -eq 0 ]; then echo "(file is empty)"; exit 0; fi\n'
             f'START={start_line}\n'
             f'MAX={max_lines}\n'
+            f'{{ TOTAL=$({{ {{ {{ cat "$FILE" || echo unread >&5; }} | '
+            f'{{ tee /dev/fd/4 || echo unread >&5; }} | '
+            f'{{ tail -n +"$START" | head -n "$MAX"; cat > /dev/null; }} >&3; }} 4>&1 | '
+            f"awk 'END{{print NR}}'; }} 5>&1); }} 3>&1\n"
+            f'case "$TOTAL" in ""|*[!0-9]*) echo "Error: cannot read $FILE"; exit 1;; esac\n'
+            f'if [ "$TOTAL" -eq 0 ]; then echo "(file is empty)"; exit 0; fi\n'
             f'if [ "$START" -gt "$TOTAL" ]; then\n'
             f'  echo "Error: start_line=$START is past EOF (file has $TOTAL lines)."\n'
             f'  exit 0\n'
             f'fi\n'
-            f'tail -n +"$START" "$FILE" | head -n "$MAX"\n'
             f'REMAINING=$((TOTAL - START + 1 - MAX))\n'
             f'if [ "$REMAINING" -gt 0 ]; then\n'
             f'  echo "[truncated: $REMAINING more lines]"\n'
             f'fi'
         )
-        result = self.bash(cmd, f"Read {file_path}")
+        result = self._run(cmd, f"Read {file_path}")
         if not _is_window(result):
             return result
         return self._dedupe(result, file_path, start_line, max_lines, force)
@@ -701,10 +727,10 @@ class DockerTools:
                 # touches the target.
                 if index == len(commands) - 1:
                     result = locked_call(
-                        _FILE_WRITE_LOCK, self.bash, command, f"{description}{part}",
+                        _FILE_WRITE_LOCK, self._run, command, f"{description}{part}",
                     )
                 else:
-                    result = self.bash(command, f"{description}{part}")
+                    result = self._run(command, f"{description}{part}")
             except BaseException:
                 self._discard(discard, f"{description} (discard)")
                 raise
@@ -714,7 +740,7 @@ class DockerTools:
             if _WRITE_OK in result.splitlines():
                 continue
             if discard is not None and STOPPED_MESSAGE not in result:
-                self.bash(discard, f"{description} (discard)")
+                self._run(discard, f"{description} (discard)")
             return result
         return None
 
@@ -729,7 +755,7 @@ class DockerTools:
         if command is None:
             return
         try:
-            self.bash(command, description)
+            self._run(command, description)
         except Exception:
             logger.debug("%s did not run", description, exc_info=True)
 
@@ -931,7 +957,7 @@ class DockerTools:
             return _failure(failure)
         try:
             result = locked_call(
-                _FILE_WRITE_LOCK, self.bash,
+                _FILE_WRITE_LOCK, self._run,
                 _python_edit_command(file_path, payload, len(old_bytes), replace_all, exact, at),
                 f"Edit {file_path}",
             )
@@ -939,7 +965,7 @@ class DockerTools:
                 # Images without Python (Rust, R, C toolchains) still have
                 # perl-base, so the same replacement is done in Perl.
                 result = locked_call(
-                    _FILE_WRITE_LOCK, self.bash,
+                    _FILE_WRITE_LOCK, self._run,
                     _perl_edit_command(
                         file_path, payload, len(old_bytes), replace_all, exact, at,
                     ),
@@ -952,5 +978,5 @@ class DockerTools:
         # included; after a Stop the removal would be killed the same way
         # (as in _store), so only the uniquely named payload file stays.
         if STOPPED_MESSAGE not in result:
-            self.bash(f"rm -f {payload}", f"Edit {file_path} (discard)")
+            self._run(f"rm -f {payload}", f"Edit {file_path} (discard)")
         return result if _edited(result) else _failure(result)

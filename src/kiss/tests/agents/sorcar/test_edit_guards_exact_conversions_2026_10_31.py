@@ -601,6 +601,74 @@ def test_python_universal_newlines_convert_only_for_a_file_without_cr(
     assert out.startswith("Applied as Edit(") and source.read_bytes() == b"new\nkept\n", out
 
 
+def test_python_default_encoding_converts_only_ascii_text(
+    tools: UsefulTools, tmp_path: Path,
+) -> None:
+    """An ``encoding`` left out is the interpreter's, which need not be UTF-8; Edit's is.
+
+    Under a locale of another encoding (ASCII here: the C locale with
+    python's UTF-8 mode and locale coercion off) the program fails on a
+    file holding a non-ASCII character and leaves it alone, and fails on
+    a non-ASCII replacement once it has truncated the file, where the
+    Edit writes UTF-8: such a rewrite is not converted (the python
+    heredoc is refused as before, naming the Edit).  ASCII text is read
+    and written alike in every locale's encoding, and I/O calls naming
+    UTF-8 are the Edit for any text.  The oracle is python3 run by bash.
+    """
+    source = tmp_path / "a.py"
+    ascii_locale = {"LC_ALL": "C", "PYTHONUTF8": "0", "PYTHONCOERCECLOCALE": "0"}
+    heredoc = "python3 - <<'EOF'\n{}EOF".format
+    default = heredoc(_READ + "s = s.replace('old', 'new')\n" + _WRITE)
+    accented = heredoc(_READ + "s = s.replace('old', 'caf\u00e9')\n" + _WRITE)
+    source.write_bytes(b"old\n")
+    tools.Read(str(source))  # shown once: every rewrite below may be applied as its Edit
+    for command, content, left in (
+        (default, "old caf\u00e9\n".encode(), "old caf\u00e9\n".encode()),  # the read fails
+        (accented, b"old\n", b""),  # the write fails, the file already truncated
+    ):
+        source.write_bytes(content)
+        run = subprocess.run(
+            ["bash", "-c", command], cwd=tmp_path, check=False, capture_output=True, text=True,
+            env={**os.environ, **ascii_locale},
+        )
+        assert run.returncode == 1 and "UnicodeError" in run.stderr.replace("Decode", "").replace(
+            "Encode", ""), run.stderr
+        assert source.read_bytes() == left
+        source.write_bytes(content)
+        out = tools.Bash(command, "rewrite")
+        assert out == rewrite_guard(command), out
+        assert source.read_bytes() == content, "the refused rewrite left the file alone"
+        edit = mechanical_edit(command, str(tmp_path))
+        assert edit is not None and edit.default_encoding and edit.text_dependent
+        assert edit.edits_for(content.decode()) is None
+    # ASCII text: the default encoding writes what the Edit writes, whatever the locale.
+    source.write_bytes(b"old\n")
+    _bash(default, tmp_path, **ascii_locale)
+    assert source.read_bytes() == b"new\n"
+    source.write_bytes(b"old\n")
+    out = tools.Bash(default, "rewrite")
+    assert out.startswith("Applied as Edit(") and source.read_bytes() == b"new\n", out
+    # An encoding left out, or None, on either call is the interpreter's; UTF-8 named
+    # on both is the Edit for any text.
+    for read, write, interpreters in (
+        ("open('a.py', encoding='utf-8').read()", "open('a.py', 'w', encoding=None).write(s)",
+         True),
+        ("Path('a.py').read_text()", "Path('a.py').write_text(s, encoding='utf-8')", True),
+        ("open('a.py', encoding='utf-8', newline='').read()",
+         "Path('a.py').write_text(s, encoding='UTF8')", False),
+    ):
+        program = f"from pathlib import Path\ns = {read}\ns = s.replace('old', 'new')\n{write}\n"
+        edit = mechanical_edit(heredoc(program), str(tmp_path))
+        assert edit is not None and edit.default_encoding is interpreters, program
+        assert edit.text_dependent is interpreters, program
+    source.write_bytes("old caf\u00e9\n".encode())
+    _bash(heredoc(program), tmp_path, **ascii_locale)
+    assert source.read_bytes() == "new caf\u00e9\n".encode()
+    source.write_bytes("old caf\u00e9\n".encode())
+    out = tools.Bash(heredoc(program), "rewrite")
+    assert out.startswith("Applied as Edit(") and source.read_bytes() == "new caf\u00e9\n".encode()
+
+
 def test_a_pair_with_a_bare_newline_is_not_converted_over_a_crlf_file(
     tools: UsefulTools, tmp_path: Path,
 ) -> None:

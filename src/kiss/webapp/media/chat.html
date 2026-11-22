@@ -3,6 +3,10 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="{{VIEWPORT}}">
+  <!-- The chat's background, for the browsers that colour their own
+       bars with it (Android's status bar); applyRemoteTheme in
+       main.js keeps it on the palette on screen. -->
+  <meta name="theme-color" content="#fafafa">
   {{HEAD_SCRIPT}}
   <link href="{{STYLE_HREF}}" rel="stylesheet">
   <link id="hljs-theme" href="{{HLJS_CSS_HREF}}" rel="stylesheet">
@@ -17,6 +21,11 @@
   <link href="{{BRAND_STYLE_HREF}}" rel="stylesheet">
 </head>
 <body {{BODY_CLASS_ATTR}}>
+  <!-- What an iPhone colours the top of its screen with, around the
+       camera ("The phone's status bar" in the remote skin's style
+       sheet).  First in the page and never hidden: it must be there
+       from the first frame on. -->
+  <div id="statusbar-tint" aria-hidden="true"></div>
   <div id="kiss-server-loading" role="status" aria-live="polite">
     <div class="kiss-server-loading-inner">
       <div class="kiss-server-loading-spinner" aria-hidden="true"></div>
@@ -62,6 +71,12 @@
       <span id="chat-machine-wrap" class="chat-header-select"><span class="chat-header-select-label" aria-hidden="true"></span><select id="chat-machine" title="The machine this chat's next task runs on" aria-label="Machine"></select></span>
       <span id="chat-header-sep" aria-hidden="true" hidden>&gt;</span>
       <span id="chat-workdir-wrap" class="chat-header-select"><span class="chat-header-select-label" aria-hidden="true"></span><select id="chat-workdir" title="The working directory the next task runs in" aria-label="Working directory"></select></span>
+      <!-- The project of the chat on screen (main.js renderChatProject):
+           shown once a project exists, for a chat that runs on this
+           machine.  A pick moves the chat into that project, whose
+           settings its tasks then run with. -->
+      <span id="chat-project-sep" aria-hidden="true" hidden>&middot;</span>
+      <span id="chat-project-wrap" class="chat-header-select" hidden><span class="chat-header-select-label" aria-hidden="true"></span><select id="chat-project" title="The project this chat is in" aria-label="Project"></select></span>
     </div>
 
     <div id="tab-status-bar">
@@ -96,6 +111,7 @@
             <div id="ghost-overlay"></div>
             <div id="listening-overlay">Listening ...</div>
             <textarea id="task-input" placeholder="{{INPUT_PLACEHOLDER}}" rows="1" {{ENTERKEYHINT}}></textarea>
+            <button id="input-save-btn" type="button" data-tooltip="Save this text so it survives a crash or a lost connection" aria-label="Save input" style="display:none;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg></button>
             <button id="input-clear-btn" aria-label="Clear input" style="display:none;">&times;</button>
           </div>
         </div>
@@ -115,14 +131,21 @@
             <button id="new-chat-btn" data-tooltip="New chat" aria-label="New chat">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 15a3 3 0 0 1-3 3H6.5L2 22V5a3 3 0 0 1 3-3h14a3 3 0 0 1 3 3z"/><path d="M15.5 5.5v6"/><path d="M12.5 8.5h6"/></svg>
             </button>
-            <button id="tricks-btn" class="toggle-btn" data-tooltip="Inject promptlet" aria-label="Inject promptlet">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m18 2 4 4"/><path d="m17 7 3-3"/><path d="M19 9 8.7 19.3c-1 1-2.5 1-3.4 0l-.6-.6c-1-1-1-2.5 0-3.4L15 5"/><path d="m9 11 4 4"/><path d="m6 18-2 2"/><path d="m14 4 6 6"/></svg>
+            <!-- The mic (voice.js, "Dictation"): while it is on, what
+                 the user says is typed at the cursor of the text box,
+                 in English.  No wake word is needed. -->
+            <button id="dictate-btn" class="toggle-btn" type="button" aria-pressed="false" data-tooltip="Dictate: speak and your words are typed at the cursor, in English" aria-label="Dictate">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
             </button>
             <div id="more-menu-wrap">
               <button id="more-btn" data-tooltip="More actions" aria-label="More actions" aria-haspopup="true" aria-expanded="false" aria-controls="more-menu">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" stroke="none"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg>
               </button>
               <div id="more-menu" role="menu" aria-label="More actions">
+                <button id="tricks-btn" class="more-menu-item" role="menuitem" aria-haspopup="dialog" data-tooltip="Inject promptlet" aria-label="Inject promptlet">
+                  <span class="more-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m18 2 4 4"/><path d="m17 7 3-3"/><path d="M19 9 8.7 19.3c-1 1-2.5 1-3.4 0l-.6-.6c-1-1-1-2.5 0-3.4L15 5"/><path d="m9 11 4 4"/><path d="m6 18-2 2"/><path d="m14 4 6 6"/></svg></span>
+                  <span class="more-item-label">Inject promptlet</span>
+                </button>
                 <button id="voice-btn" class="toggle-btn more-menu-item" role="menuitem" data-tooltip="Voice trigger: listen for the phrase 'Hey Sorcar'" aria-label="Voice trigger: listen for the phrase 'Hey Sorcar'">
                   <span class="more-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg></span>
                   <span class="more-item-label">Voice trigger</span>
@@ -135,36 +158,6 @@
                   <span class="more-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg></span>
                   <span class="more-item-label">Attach files</span>
                 </button>
-                <button id="autocommit-btn" class="more-menu-item" role="menuitem" data-tooltip="git commit" aria-label="Git commit">
-                  <span class="more-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><line x1="1.05" y1="12" x2="7" y2="12"/><line x1="17.01" y1="12" x2="22.96" y2="12"/><line x1="12" y1="1.05" x2="12" y2="7"/><line x1="12" y1="17.01" x2="12" y2="22.96"/></svg></span>
-                  <span class="more-item-label">Git Commit</span>
-                </button>
-                <button id="browser-btn" class="more-menu-item" role="menuitem" data-tooltip="Open the browser of the machine running {{PRODUCT_NAME}} as a tab" aria-label="Open browser">
-                  <span class="more-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg></span>
-                  <span class="more-item-label">Browser</span>
-                </button>
-                <button id="terminal-btn" class="more-menu-item" role="menuitem" data-tooltip="Open a terminal on the machine running {{PRODUCT_NAME}} as a tab" aria-label="Open terminal">
-                  <span class="more-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg></span>
-                  <span class="more-item-label">Terminal</span>
-                </button>
-                <!-- Appearance: #theme-btn flips between the light and
-                     dark palettes (its label names the mode it switches
-                     TO), #contrast-btn flips between the low- and
-                     high-contrast variants the same way, and
-                     #theme-auto-btn picks the palette by the time of day
-                     on this device.  main.js fills the labels. -->
-                <button id="theme-btn" class="more-menu-item" role="menuitem">
-                  <span class="more-item-icon"></span>
-                  <span class="more-item-label">Dark mode</span>
-                </button>
-                <button id="contrast-btn" class="more-menu-item" role="menuitem">
-                  <span class="more-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 2a10 10 0 0 1 0 20z" fill="currentColor" stroke="none"/></svg></span>
-                  <span class="more-item-label">High contrast</span>
-                </button>
-                <button id="theme-auto-btn" class="more-menu-item" role="menuitemcheckbox" aria-checked="false" data-tooltip="Light by day, dark by night (7 pm to 7 am on this device's clock)">
-                  <span class="more-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></span>
-                  <span class="more-item-label">Auto mode</span>
-                </button>
                 <!-- Downloads /webclip.mobileconfig, a signed profile
                      that puts a full-screen icon for the webapp on an
                      iPhone or iPad Home Screen.  Safari on the phone
@@ -173,10 +166,6 @@
                 <button id="webclip-btn" class="more-menu-item" role="menuitem" data-tooltip="Add a full-screen {{PRODUCT_NAME}} icon to an iPhone or iPad Home Screen: open this menu in Safari on the phone, allow the download, then install the profile under Settings &gt; Profile Downloaded" aria-label="Add to iPhone Home Screen">
                   <span class="more-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="2" width="14" height="20" rx="2"/><line x1="12" y1="8" x2="12" y2="14"/><line x1="9" y1="11" x2="15" y2="11"/><line x1="11" y1="18" x2="13" y2="18"/></svg></span>
                   <span class="more-item-label">iPhone Home Screen</span>
-                </button>
-                <button id="settings-btn" class="more-menu-item" role="menuitem" data-tooltip="Settings" aria-label="Settings">
-                  <span class="more-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></span>
-                  <span class="more-item-label">Settings</span>
                 </button>
               </div>
             </div>
@@ -217,81 +206,65 @@
       <div id="sidebar-body">
         <div id="sidebar-views">
       <div id="sidebar-tab-history-panel" class="sidebar-section">
-        <!-- The refresh button at the row's right end reloads the whole
-             app page (the same as the browser's reload). -->
-        <div class="sidebar-hdr chats-hdr"><span>Chats</span><button type="button" id="chats-refresh-btn" aria-label="Refresh the app" data-tooltip="Refresh the app"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></button></div>
+        <!-- The refresh button, in a row of its own over the Projects
+             row, reloads the whole app page (the same as the browser's
+             reload).  Projects opens the Projects page
+             (media/projects.js) as a tab of the chat window; its icon
+             is the tray under two shorter bars of Claude Desktop's
+             Projects row. -->
+        <div class="sidebar-refresh-row"><button type="button" id="chats-refresh-btn" aria-label="Refresh the app" data-tooltip="Refresh the app"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></button></div>
+        <button type="button" id="projects-row" class="projects-row"><svg width="1em" height="1em" viewBox="0 0 256 256" fill="none" stroke="currentColor" stroke-width="16" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="40" y="96" width="176" height="112" rx="8"/><line x1="56" y1="64" x2="200" y2="64"/><line x1="72" y1="32" x2="184" y2="32"/></svg><span>Projects</span></button>
         <div class="history-search-row">
           <div class="search-wrap">
-            <input type="text" id="history-search" placeholder="Search chats..." aria-label="Search chats">
+            <input type="text" id="history-search" placeholder="Search prompts..." aria-label="Search prompts">
             <button class="search-clear-btn" id="history-search-clear" aria-label="Clear search" style="display:none;">&times;</button>
           </div>
-          <!-- Flat list / grouped-by-chat switch: pressed = the legacy
-               flat list (newest first, a per-chat color bar on each
-               row), released = collapsible per-chat panels. -->
-          <button type="button" id="history-view-toggle" aria-pressed="false" aria-label="Show tasks as a flat list" data-tooltip="Flat list"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg></button>
+          <!-- Filter and group: every filter of the list and the choice
+               between chat panels and a flat list, in the menu below
+               (main.js, "The Filter and group menu").  A row names a
+               setting and its current value and opens that setting's
+               submenu.  The hidden hf-* controls hold the state: an
+               option row sets its control and is painted from it. -->
+          <button type="button" id="history-filter-btn" popovertarget="history-filter-menu" aria-haspopup="menu" aria-expanded="false" aria-controls="history-filter-menu" aria-label="Filter and group" data-tooltip="Filter and group"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><line x1="4" y1="7" x2="20" y2="7"/><line x1="7" y1="12" x2="17" y2="12"/><line x1="10" y1="17" x2="14" y2="17"/></svg></button>
         </div>
-        <div id="history-filters-panel" class="history-filters-panel">
-          <button type="button" id="history-filters-toggle" class="history-filters-toggle" aria-expanded="false" aria-controls="history-filters-body"><svg class="history-filters-chevron" width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg><span>Filters</span></button>
-          <div id="history-filters-body" class="history-filters-body" hidden>
-        <div class="history-filter-bar">
-          <div class="history-filter-chips" role="group" aria-label="Filter tasks by status">
-            <label class="hf-chip hf-chip-running" title="Show running tasks">
-              <input type="checkbox" id="hf-running" checked><span class="hf-chip-dot status-spinner" aria-hidden="true"></span><span>Running</span>
-            </label>
-            <label class="hf-chip hf-chip-errored" title="Show tasks that finished with error">
-              <input type="checkbox" id="hf-errors" checked><span class="hf-chip-dot status-cross" aria-hidden="true"></span><span>Errored</span>
-            </label>
-            <label class="hf-chip hf-chip-succeeded" title="Show successfully completed tasks">
-              <input type="checkbox" id="hf-completed" checked><span class="hf-chip-dot status-tick" aria-hidden="true"></span><span>Succeeded</span>
-            </label>
-            <label class="hf-chip hf-chip-favorite" title="Show only favourite tasks and the tasks of favourite chats">
-              <input type="checkbox" id="hf-favorite"><svg class="hf-chip-icon" viewBox="0 0 16 16" fill="currentColor" stroke="none" aria-hidden="true"><path d="M8 1.6l1.9 3.9 4.3.62-3.1 3.03.73 4.28L8 11.4l-3.83 2.03.73-4.28-3.1-3.03 4.3-.62z"/></svg><span>Favorites</span>
-            </label>
-            <!-- Off by default: the tasks the cron scheduler launched
-                 (history rows with is_cron) stay hidden until it is on. -->
-            <label class="hf-chip hf-chip-cron" title="Show the tasks run by scheduled automations (cron jobs)">
-              <input type="checkbox" id="hf-cron"><svg class="hf-chip-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="6.2"/><path d="M8 4.4V8l2.4 1.6"/></svg><span>Cron</span>
-            </label>
+        <div id="history-filter-menu" class="fg-menu" popover="auto" role="menu" aria-label="Filter and group">
+          <button type="button" class="fg-row" data-fg="status" role="menuitem" aria-haspopup="menu" aria-expanded="false" popovertarget="fg-status" popovertargetaction="show"><span class="fg-row-name">Status</span><span class="fg-row-value"></span></button>
+          <div id="fg-status" class="fg-menu fg-submenu" data-fg="status" popover="auto" role="menu" aria-label="Status">
+            <input type="checkbox" id="hf-running" checked hidden>
+            <input type="checkbox" id="hf-errors" checked hidden>
+            <input type="checkbox" id="hf-completed" checked hidden>
+            <button type="button" class="fg-option" role="menuitemcheckbox" data-for="hf-running"><span class="status-spinner" aria-hidden="true"></span>Running</button>
+            <button type="button" class="fg-option" role="menuitemcheckbox" data-for="hf-errors"><span class="status-cross" aria-hidden="true"></span>Errored</button>
+            <button type="button" class="fg-option" role="menuitemcheckbox" data-for="hf-completed"><span class="status-tick" aria-hidden="true"></span>Succeeded</button>
           </div>
-          <div class="history-filter-daterange" role="group" aria-label="Filter tasks by date range">
-            <span class="history-filter-date-group"><label for="hf-from" class="history-filter-date-lbl">From</label><input type="date" id="hf-from" class="history-filter-date" title="From date" aria-label="From date"><button type="button" id="hf-from-btn" class="history-filter-date-btn" title="Pick From date" aria-label="Pick From date"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><rect x="1.75" y="2.75" width="12.5" height="11.5" rx="1.5"/><path d="M1.75 6.25h12.5M5 1v3M11 1v3"/></svg></button></span>
-            <span class="hf-daterange-sep" aria-hidden="true">&#8594;</span>
-            <span class="history-filter-date-group"><label for="hf-to" class="history-filter-date-lbl">To</label><input type="date" id="hf-to" class="history-filter-date" title="To date" aria-label="To date"><button type="button" id="hf-to-btn" class="history-filter-date-btn" title="Pick To date" aria-label="Pick To date"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><rect x="1.75" y="2.75" width="12.5" height="11.5" rx="1.5"/><path d="M1.75 6.25h12.5M5 1v3M11 1v3"/></svg></button></span>
-            <button type="button" id="hf-date-clear" class="hf-date-clear" title="Clear date range" aria-label="Clear date range" style="display:none;">&times;</button>
+          <button type="button" class="fg-row" data-fg="favorites" role="menuitem" aria-haspopup="menu" aria-expanded="false" popovertarget="fg-favorites" popovertargetaction="show"><span class="fg-row-name">Favorites</span><span class="fg-row-value"></span></button>
+          <div id="fg-favorites" class="fg-menu fg-submenu" data-fg="favorites" popover="auto" role="menu" aria-label="Favorites">
+            <input type="checkbox" id="hf-favorite" hidden>
+            <button type="button" class="fg-option" role="menuitemradio" data-for="hf-favorite" data-checked="0">All</button>
+            <button type="button" class="fg-option" role="menuitemradio" data-for="hf-favorite" data-checked="1">Only favorites</button>
+          </div>
+          <!-- Off by default: the tasks the cron scheduler launched
+               (history rows with is_cron) stay hidden until it is on. -->
+          <button type="button" class="fg-row" data-fg="cron" role="menuitem" aria-haspopup="menu" aria-expanded="false" popovertarget="fg-cron" popovertargetaction="show"><span class="fg-row-name">Cron tasks</span><span class="fg-row-value"></span></button>
+          <div id="fg-cron" class="fg-menu fg-submenu" data-fg="cron" popover="auto" role="menu" aria-label="Cron tasks">
+            <input type="checkbox" id="hf-cron" hidden>
+            <button type="button" class="fg-option" role="menuitemradio" data-for="hf-cron" data-checked="0">Hidden</button>
+            <button type="button" class="fg-option" role="menuitemradio" data-for="hf-cron" data-checked="1">Shown</button>
+          </div>
+          <button type="button" class="fg-row" data-fg="date" role="menuitem" aria-haspopup="dialog" aria-expanded="false" popovertarget="fg-date" popovertargetaction="show"><span class="fg-row-name">Date</span><span class="fg-row-value"></span></button>
+          <div id="fg-date" class="fg-menu fg-submenu" data-fg="date" popover="auto" role="dialog" aria-label="Date">
+            <span class="history-filter-date-group"><label for="hf-from" class="history-filter-date-lbl">From</label><input type="date" id="hf-from" class="history-filter-date" aria-label="From date"><button type="button" id="hf-from-btn" class="history-filter-date-btn" aria-label="Pick From date"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><rect x="1.75" y="2.75" width="12.5" height="11.5" rx="1.5"/><path d="M1.75 6.25h12.5M5 1v3M11 1v3"/></svg></button></span>
+            <span class="history-filter-date-group"><label for="hf-to" class="history-filter-date-lbl">To</label><input type="date" id="hf-to" class="history-filter-date" aria-label="To date"><button type="button" id="hf-to-btn" class="history-filter-date-btn" aria-label="Pick To date"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><rect x="1.75" y="2.75" width="12.5" height="11.5" rx="1.5"/><path d="M1.75 6.25h12.5M5 1v3M11 1v3"/></svg></button></span>
+            <button type="button" id="hf-date-clear" class="fg-clear" style="display:none;">Clear dates</button>
           </div>
           <!-- Agent-script (SEA) filter: the options are rebuilt from the
                loaded rows on every history render (see
                refreshHistorySeaOptions in main.js). -->
-          <div class="history-filter-sea" role="group" aria-label="Filter tasks by SEA">
-            <label for="hf-sea" class="history-filter-date-lbl">SEA</label>
-            <select id="hf-sea" class="history-filter-sea-select" title="Show only tasks run by this SEA" aria-label="SEA">
+          <button type="button" class="fg-row" data-fg="sea" role="menuitem" aria-haspopup="menu" aria-expanded="false" popovertarget="fg-sea" popovertargetaction="show"><span class="fg-row-name">SEA</span><span class="fg-row-value"></span></button>
+          <div id="fg-sea" class="fg-menu fg-submenu" data-fg="sea" popover="auto" role="menu" aria-label="SEA">
+            <select id="hf-sea" aria-label="SEA" hidden>
               <option value="">All</option>
               <option value="__none__">None</option>
-            </select>
-          </div>
-          <!-- Machine filter: the local daemon or one of the remote
-               machines registered with /machine. Hidden until a remote
-               machine is registered (refreshHistoryMachineOptions in
-               main.js rebuilds it from every history reply). -->
-          <div class="history-filter-sea" role="group" aria-label="Filter tasks by machine" hidden>
-            <label for="hf-machine" class="history-filter-date-lbl">Machine</label>
-            <select id="hf-machine" class="history-filter-sea-select" title="Show only tasks of this machine" aria-label="Machine">
-              <option value="">All</option>
-            </select>
-          </div>
-          <!-- WORKDIR filter: the same directories as the chat
-               header's working-directory drop-down (the current one,
-               then the ones adopted before, newest first).  The
-               options arrive as `workDirs` on page one of every
-               history view (refreshHistoryWorkDirOptions in
-               main.js); the daemon
-               applies the chosen directory in SQL, so the whole
-               history of a project is listed, not only the rows
-               already loaded. -->
-          <div class="history-filter-sea history-filter-workdir" role="group" aria-label="Filter tasks by working directory">
-            <label for="hf-workdir" class="history-filter-date-lbl">Workdir</label>
-            <select id="hf-workdir" class="history-filter-sea-select" title="Show only tasks that ran in this working directory" aria-label="Workdir">
-              <option value="">All</option>
             </select>
           </div>
           <!-- Tag filter: one of the classification tags the daemon
@@ -300,10 +273,10 @@
                they live inside their parent's transcript).  The daemon
                applies it in SQL, so a rare tag is found on every page,
                not only among the rows already loaded. -->
-          <div class="history-filter-tag">
-            <label for="hf-tag" class="history-filter-date-lbl">Tag</label>
-            <select id="hf-tag" class="history-filter-tag-select" title="Show only tasks carrying this tag" aria-label="Filter tasks by tag">
-              <option value="" selected>All tags</option>
+          <button type="button" class="fg-row" data-fg="tag" role="menuitem" aria-haspopup="menu" aria-expanded="false" popovertarget="fg-tag" popovertargetaction="show"><span class="fg-row-name">Tag</span><span class="fg-row-value"></span></button>
+          <div id="fg-tag" class="fg-menu fg-submenu" data-fg="tag" popover="auto" role="menu" aria-label="Tag">
+            <select id="hf-tag" aria-label="Tag" hidden>
+              <option value="" selected>All</option>
               <option value="work">work</option>
               <option value="personal">personal</option>
               <option value="secret">secret</option>
@@ -327,13 +300,72 @@
               <option value="failed">failed</option>
             </select>
           </div>
-        </div>
+          <!-- Machine filter: the local daemon or one of the remote
+               machines registered with /machine.  The row is hidden
+               until a remote machine is registered
+               (refreshHistoryMachineOptions in main.js rebuilds the
+               options from every history reply). -->
+          <button type="button" class="fg-row" data-fg="machine" role="menuitem" aria-haspopup="menu" aria-expanded="false" popovertarget="fg-machine" popovertargetaction="show" hidden><span class="fg-row-name">Machine</span><span class="fg-row-value"></span></button>
+          <div id="fg-machine" class="fg-menu fg-submenu" data-fg="machine" popover="auto" role="menu" aria-label="Machine">
+            <select id="hf-machine" aria-label="Machine" hidden>
+              <option value="">All</option>
+            </select>
+          </div>
+          <!-- Work dir filter: the same directories as the chat
+               header's working-directory drop-down (the current one,
+               then the ones adopted before, newest first).  The
+               options arrive as `workDirs` on page one of every
+               history view (refreshHistoryWorkDirOptions in main.js);
+               the daemon applies the chosen directory in SQL, so the
+               whole history of a project is listed, not only the rows
+               already loaded. -->
+          <button type="button" class="fg-row" data-fg="workdir" role="menuitem" aria-haspopup="menu" aria-expanded="false" popovertarget="fg-workdir" popovertargetaction="show"><span class="fg-row-name">Work dir</span><span class="fg-row-value"></span></button>
+          <div id="fg-workdir" class="fg-menu fg-submenu" data-fg="workdir" popover="auto" role="menu" aria-label="Work dir">
+            <select id="hf-workdir" aria-label="Work dir" hidden>
+              <option value="">All</option>
+            </select>
+          </div>
+          <div class="fg-sep" role="separator"></div>
+          <!-- Group by: Project = the chats of a project under the
+               project's foldable row and every other chat as a
+               per-chat panel, Chat = collapsible per-chat panels,
+               None = the flat list (newest first). -->
+          <button type="button" class="fg-row" data-fg="group" role="menuitem" aria-haspopup="menu" aria-expanded="false" popovertarget="fg-group" popovertargetaction="show"><span class="fg-row-name">Group by</span><span class="fg-row-value"></span></button>
+          <div id="fg-group" class="fg-menu fg-submenu" data-fg="group" popover="auto" role="menu" aria-label="Group by">
+            <input type="radio" name="hf-group" id="hf-group-project" checked hidden>
+            <input type="radio" name="hf-group" id="hf-group-chat" hidden>
+            <input type="radio" name="hf-group" id="hf-group-none" hidden>
+            <button type="button" class="fg-option" role="menuitemradio" data-for="hf-group-project">Project</button>
+            <button type="button" class="fg-option" role="menuitemradio" data-for="hf-group-chat">Chat</button>
+            <button type="button" class="fg-option" role="menuitemradio" data-for="hf-group-none">None</button>
           </div>
         </div>
         <div id="history-list">
           <div class="sidebar-empty">No conversations yet</div>
         </div>
       </div>
+        </div>
+      </div>
+      <!-- The strip under the Chats list: the user name at the left,
+           the appearance and settings buttons at the right.
+           #theme-btn flips between the light and dark palettes (its
+           icon and name say which one it switches TO), #contrast-btn
+           flips between the low- and high-contrast variants the same
+           way, #theme-auto-btn picks the palette by the time of day on
+           this device (pressed while on); main.js fills the icon of
+           the first and the names of the first two.  A button with
+           data-font-step moves the size of all text by that many px.
+           The strip under the task-info panel (#meta-footer) holds the
+           buttons that act on the chat's machine and folder. -->
+      <div id="sidebar-footer">
+        <span id="sidebar-user"></span>
+        <div class="strip-tools" role="group" aria-label="Appearance and settings">
+          <button type="button" id="theme-btn" class="sidebar-tool-btn" aria-label="Dark mode"></button>
+          <button type="button" id="contrast-btn" class="sidebar-tool-btn" aria-label="High contrast"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 2a10 10 0 0 1 0 20z" fill="currentColor" stroke="none"/></svg></button>
+          <button type="button" id="theme-auto-btn" class="sidebar-tool-btn" aria-pressed="false" data-tooltip="Auto mode: light by day, dark by night (7 pm to 7 am on this device's clock)" aria-label="Auto mode"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></button>
+          <button type="button" class="sidebar-tool-btn" data-font-step="-1" data-tooltip="Decrease font size" aria-label="Decrease font size"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m2 19 5.5-13 5.5 13"/><path d="M4 14.5h7"/><path d="M16 8h6"/></svg></button>
+          <button type="button" class="sidebar-tool-btn" data-font-step="1" data-tooltip="Increase font size" aria-label="Increase font size"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m2 19 5.5-13 5.5 13"/><path d="M4 14.5h7"/><path d="M16 8h6"/><path d="M19 5v6"/></svg></button>
+          <button type="button" id="settings-btn" class="sidebar-tool-btn" data-tooltip="Settings" aria-label="Settings"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
         </div>
       </div>
       <div id="sidebar-resizer" role="separator" aria-orientation="vertical" aria-label="Resize history panel" aria-controls="sidebar" tabindex="0"></div>
@@ -354,12 +386,16 @@
            expanded, drags the boundary between them.  By default
            every expanded section gets an equal share of the height;
            the last expanded section fills whatever height the others
-           leave.  Every section starts expanded, except on the first
-           load after an install or an update, which shows only
-           Recommendations (resetMetaSectionsForVersion).  To add a panel, append one
+           leave.  A section with no .meta-section-toggle is PINNED
+           open (Recommendations, a bare card): it never folds, and its
+           body is as tall as its content, at most an equal share,
+           instead of taking one.  Every section starts expanded,
+           except on the first load after an install or an update,
+           which folds every section that can fold
+           (resetMetaSectionsForVersion).  To add a panel, put one
            more <section class="meta-section"> (a unique id, a header
            with a .meta-section-toggle, a .meta-section-body) followed
-           by its .meta-section-resizer. -->
+           by its .meta-section-resizer before #meta-footer. -->
       <section class="meta-section" id="meta-section-info">
         <div class="sidebar-hdr meta-section-hdr">
           <button type="button" class="meta-section-toggle" aria-expanded="true" aria-controls="meta-list"><svg class="meta-section-chevron" viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg><span>Task Info</span></button>
@@ -384,28 +420,35 @@
                caller's settings (task_settings keys sea, kind,
                tool_profile, timeout, overridden); hidden for a plain run. -->
           <li class="meta-item" id="meta-agent-item" hidden><span class="meta-label">Agent:</span><span id="meta-agent" class="meta-value">&mdash;</span></li>
+          <!-- The task's tags (a taskTags reply): a chip each with a
+               remove button, then a select of the names left to add,
+               once the task has ended (main.js, renderMetaTags). -->
+          <li class="meta-item"><span class="meta-label">Tags:</span><span id="meta-tags" class="meta-value">&mdash;</span></li>
         </ul>
       </section>
       <div class="meta-section-resizer" role="separator" aria-orientation="horizontal" aria-label="Resize the Task Info section" aria-controls="meta-list" tabindex="0"></div>
-      <!-- Task update section: the RUNNING task's task update — the
+      <!-- Task Progress section: the RUNNING task's task update — the
            /ask agent's (src/kiss/agents/seas/ask/ask_sea.py) short answer
            to what the task has done so far and its partial results.
            main.js polls getTaskUpdate while the task runs; the daemon
            runs the agent once the task is a minute old, every 10
            minutes after that, and when the refresh button (header,
-           right) is pressed.  While there is
+           right) is pressed.  #meta-info-eta is the time the task has
+           left by the update's estimate, counted down by main.js
+           between updates.  While there is
            nothing to show — no running task — main.js keeps the
            `visible` class off and the whole section, header included,
            stays hidden. -->
-      <section class="meta-section" id="meta-info" aria-label="Task update">
+      <section class="meta-section" id="meta-info" aria-label="Task Progress">
         <div class="sidebar-hdr meta-section-hdr meta-info-hdr">
-          <button type="button" class="meta-section-toggle" aria-expanded="true" aria-controls="meta-info-content"><svg class="meta-section-chevron" viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg><span>Task update</span></button>
-          <button type="button" id="meta-info-refresh" class="meta-section-refresh" title="Run the task update now" aria-label="Refresh task update"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9"/><path fill="currentColor" d="M14.5 1.5v5h-5z"/></svg></button>
+          <button type="button" class="meta-section-toggle" aria-expanded="true" aria-controls="meta-info-content"><svg class="meta-section-chevron" viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg><span>Task Progress</span></button>
+          <button type="button" id="meta-info-refresh" class="meta-section-refresh" title="Update the task progress now" aria-label="Refresh task progress"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9"/><path fill="currentColor" d="M14.5 1.5v5h-5z"/></svg></button>
         </div>
         <div id="meta-info-status" class="meta-info-status" aria-live="polite"></div>
+        <div id="meta-info-eta" class="meta-info-eta" role="timer"></div>
         <div id="meta-info-content" class="md-body meta-section-body"></div>
       </section>
-      <div class="meta-section-resizer" role="separator" aria-orientation="horizontal" aria-label="Resize the Task update section" aria-controls="meta-info-content" tabindex="0"></div>
+      <div class="meta-section-resizer" role="separator" aria-orientation="horizontal" aria-label="Resize the Task Progress section" aria-controls="meta-info-content" tabindex="0"></div>
       <!-- Explorer section (remote webapp only; main.js lifts `hidden`
            under body.remote-chat): the workspace's folders and files as
            an expandable tree (listDir -> dirListing).  A file click
@@ -445,44 +488,85 @@
         </div>
       </section>
       <div class="meta-section-resizer" role="separator" aria-orientation="horizontal" aria-label="Resize the Source Control section" aria-controls="scm-body" tabindex="0"></div>
-      <!-- Schedule, Machines and Apps sections: global, not per task
-           (the sidebarpanels block of main.js polls the daemon for
-           them).  Schedule lists the scheduled cron jobs, each with
+      <!-- Schedule, Machines, Skills and Connectors sections: global,
+           not per task (the sidebarpanels block of main.js polls the
+           daemon for them).  Schedule lists the scheduled cron jobs, each with
            edit / run / pause / copy / delete buttons, and its header's
            + opens an in-place form that schedules a new job; Machines lists
            the local machine and every registered remote one with its
-           reachability; Apps lists every third-party agent with its
-           authentication state, and a click on an app that is not
+           reachability.  The body of each of the two starts with a
+           line that gives an example of the slash command that does
+           what the + does (.meta-section-example): it scrolls away
+           with the list under it, so it takes none of the panel's
+           height (a body with no more than a row's room shows its
+           rows instead: main.css), and its command inserts itself
+           into the message box on a click, Enter or Space, as an id
+           of the Task Info list does (data-insert-id).  Skills
+           lists the skills the agent can use (the
+           `skills` reply to getSkills) under a search of the skills on
+           the internet (searchSkills -> skillSearch), where a found
+           skill's + has the daemon check it for vulnerabilities and
+           add it (installSkill -> skillInstall); Connectors (the
+           #meta-apps section) lists every third-party agent with its
+           authentication state, and a click on one that is not
            connected launches a new task that connects it. -->
       <section class="meta-section" id="meta-schedule" aria-label="Schedule">
         <div class="sidebar-hdr meta-section-hdr">
-          <button type="button" class="meta-section-toggle" aria-expanded="true" aria-controls="meta-schedule-list"><svg class="meta-section-chevron" viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg><span>Schedule</span></button>
+          <button type="button" class="meta-section-toggle" aria-expanded="true" aria-controls="meta-schedule-body"><svg class="meta-section-chevron" viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg><span>Schedule</span></button>
           <button type="button" id="meta-schedule-add" class="meta-section-refresh" title="Schedule a new job" aria-label="Add job"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M12 4v16M4 12h16"/></svg></button>
           <button type="button" id="meta-schedule-refresh" class="meta-section-refresh" title="Reload the scheduled jobs" aria-label="Refresh schedule"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9"/><path fill="currentColor" d="M14.5 1.5v5h-5z"/></svg></button>
         </div>
         <div id="meta-schedule-status" class="meta-info-status" aria-live="polite">Loading&hellip;</div>
-        <ul id="meta-schedule-list" class="meta-section-body sidebar-panel-list"></ul>
+        <div id="meta-schedule-body" class="meta-section-body">
+          <div class="meta-section-example">Example: <span class="meta-example-cmd" role="button" tabindex="0" data-insert-id="/cron every weekday at 9am summarize my unread email" data-tooltip="Insert into the message box" aria-label="/cron every weekday at 9am summarize my unread email: insert into the message box">/cron every weekday at 9am summarize my unread email</span></div>
+          <ul id="meta-schedule-list" class="sidebar-panel-list"></ul>
+        </div>
       </section>
-      <div class="meta-section-resizer" role="separator" aria-orientation="horizontal" aria-label="Resize the Schedule section" aria-controls="meta-schedule-list" tabindex="0"></div>
+      <div class="meta-section-resizer" role="separator" aria-orientation="horizontal" aria-label="Resize the Schedule section" aria-controls="meta-schedule-body" tabindex="0"></div>
       <section class="meta-section" id="meta-machines" aria-label="Machines">
         <div class="sidebar-hdr meta-section-hdr">
-          <button type="button" class="meta-section-toggle" aria-expanded="true" aria-controls="meta-machines-list"><svg class="meta-section-chevron" viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg><span>Machines</span></button>
+          <button type="button" class="meta-section-toggle" aria-expanded="true" aria-controls="meta-machines-body"><svg class="meta-section-chevron" viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg><span>Machines</span></button>
           <button type="button" id="meta-machines-add" class="meta-section-refresh" title="Add a machine" aria-label="Add machine"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M12 4v16M4 12h16"/></svg></button>
           <button type="button" id="meta-machines-refresh" class="meta-section-refresh" title="Check the machines again" aria-label="Refresh machines"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9"/><path fill="currentColor" d="M14.5 1.5v5h-5z"/></svg></button>
         </div>
         <div id="meta-machines-status" class="meta-info-status" aria-live="polite">Checking&hellip;</div>
-        <ul id="meta-machines-list" class="meta-section-body sidebar-panel-list"></ul>
+        <div id="meta-machines-body" class="meta-section-body">
+          <div class="meta-section-example">Example: <span class="meta-example-cmd" role="button" tabindex="0" data-insert-id="/machine add user@host" data-tooltip="Insert into the message box" aria-label="/machine add user@host: insert into the message box">/machine add user@host</span></div>
+          <ul id="meta-machines-list" class="sidebar-panel-list"></ul>
+        </div>
       </section>
-      <div class="meta-section-resizer" role="separator" aria-orientation="horizontal" aria-label="Resize the Machines section" aria-controls="meta-machines-list" tabindex="0"></div>
-      <section class="meta-section" id="meta-apps" aria-label="Apps">
+      <div class="meta-section-resizer" role="separator" aria-orientation="horizontal" aria-label="Resize the Machines section" aria-controls="meta-machines-body" tabindex="0"></div>
+      <section class="meta-section" id="meta-skills" aria-label="Skills">
         <div class="sidebar-hdr meta-section-hdr">
-          <button type="button" class="meta-section-toggle" aria-expanded="true" aria-controls="meta-apps-list"><svg class="meta-section-chevron" viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg><span>Apps</span></button>
-          <button type="button" id="meta-apps-refresh" class="meta-section-refresh" title="Check the apps' sign-in state again" aria-label="Refresh apps"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9"/><path fill="currentColor" d="M14.5 1.5v5h-5z"/></svg></button>
+          <button type="button" class="meta-section-toggle" aria-expanded="true" aria-controls="meta-skills-body"><svg class="meta-section-chevron" viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg><span>Skills</span></button>
+          <button type="button" id="meta-skills-refresh" class="meta-section-refresh" title="Reload the available skills" aria-label="Refresh skills"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9"/><path fill="currentColor" d="M14.5 1.5v5h-5z"/></svg></button>
+        </div>
+        <!-- The search row stays put above the scrolling body, which
+             lists what the search found (#meta-skills-found, shown
+             once a search was made) over the available skills. -->
+        <div id="meta-skills-search" class="skills-search" role="search">
+          <input type="text" id="meta-skills-query" placeholder="Search skills on the internet" aria-label="Search skills on the internet" autocomplete="off" spellcheck="false" enterkeyhint="search">
+          <button type="button" id="meta-skills-search-btn" class="skills-search-btn" title="Search skills" aria-label="Search skills"><svg viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg></button>
+        </div>
+        <div id="meta-skills-body" class="meta-section-body">
+          <div id="meta-skills-found" hidden>
+            <div class="skills-found-hdr"><span id="meta-skills-found-title" aria-live="polite"></span><button type="button" id="meta-skills-clear" class="skills-clear" title="Clear the search results" aria-label="Clear the search results">Clear</button></div>
+            <ul id="meta-skills-results" class="sidebar-panel-list" aria-label="Skills found"></ul>
+          </div>
+          <div id="meta-skills-status" class="meta-info-status" aria-live="polite">Loading&hellip;</div>
+          <ul id="meta-skills-list" class="sidebar-panel-list" aria-label="Available skills"></ul>
+        </div>
+      </section>
+      <div class="meta-section-resizer" role="separator" aria-orientation="horizontal" aria-label="Resize the Skills section" aria-controls="meta-skills-body" tabindex="0"></div>
+      <section class="meta-section" id="meta-apps" aria-label="Connectors">
+        <div class="sidebar-hdr meta-section-hdr">
+          <button type="button" class="meta-section-toggle" aria-expanded="true" aria-controls="meta-apps-list"><svg class="meta-section-chevron" viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg><span>Connectors</span></button>
+          <button type="button" id="meta-apps-refresh" class="meta-section-refresh" title="Check the connectors' sign-in state again" aria-label="Refresh connectors"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9"/><path fill="currentColor" d="M14.5 1.5v5h-5z"/></svg></button>
         </div>
         <div id="meta-apps-status" class="meta-info-status" aria-live="polite">Checking&hellip;</div>
         <ul id="meta-apps-list" class="meta-section-body sidebar-panel-list"></ul>
       </section>
-      <div class="meta-section-resizer" role="separator" aria-orientation="horizontal" aria-label="Resize the Apps section" aria-controls="meta-apps-list" tabindex="0"></div>
+      <div class="meta-section-resizer" role="separator" aria-orientation="horizontal" aria-label="Resize the Connectors section" aria-controls="meta-apps-list" tabindex="0"></div>
       <!-- Spend section: global too.  The sidebarpanels block of
            main.js draws the task history's all-time cost, a daily
            cost heatmap (weeks as columns, Monday first, latest week
@@ -499,20 +583,34 @@
         </div>
       </section>
       <div class="meta-section-resizer" role="separator" aria-orientation="horizontal" aria-label="Resize the Spend section" aria-controls="meta-spend-body" tabindex="0"></div>
-      <!-- Recommendations section: global too.  The sidebarpanels block
-           of main.js lists the five next tasks the 6-hourly
-           /recommendations cron job suggested from the last day's task
-           history (the daemon's recommendations reply); activating a
-           row opens a new chat with that task in the composer. -->
-      <section class="meta-section" id="meta-recommendations" aria-label="Recommendations">
-        <div class="sidebar-hdr meta-section-hdr">
-          <button type="button" class="meta-section-toggle" aria-expanded="true" aria-controls="meta-recommendations-list"><svg class="meta-section-chevron" viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg><span>Recommendations</span></button>
-          <button type="button" id="meta-recommendations-refresh" class="meta-section-refresh" title="Reload the recommendations" aria-label="Refresh recommendations"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9"/><path fill="currentColor" d="M14.5 1.5v5h-5z"/></svg></button>
-        </div>
-        <div id="meta-recommendations-status" class="meta-info-status" aria-live="polite">Loading&hellip;</div>
+      <!-- Recommendations section: global too, and pinned open (it has
+           no header, so no toggle): one card and nothing else.  The
+           sidebarpanels block of main.js shows the next tasks the
+           6-hourly /recommendations cron job suggested from the last
+           day's task history (the daemon's recommendations reply) one
+           at a time, the next one sliding in every 30 seconds.  The
+           card sits on the bottom strip, the panel's free height
+           above it.  Activating the task on show opens a new chat
+           with it in the composer.  The section is hidden while there
+           is no task to show. -->
+      <section class="meta-section" id="meta-recommendations" aria-label="Recommendations" hidden>
         <ul id="meta-recommendations-list" class="meta-section-body sidebar-panel-list"></ul>
       </section>
       <div class="meta-section-resizer" role="separator" aria-orientation="horizontal" aria-label="Resize the Recommendations section" aria-controls="meta-recommendations-list" tabindex="0"></div>
+      <!-- The strip under the sections, the twin of the Chats strip
+           (#sidebar-footer): the buttons that act on the machine and
+           the folder of the chat on screen.  #terminal-btn and
+           #browser-btn open a tab there; #autocommit-btn commits the
+           folder's changes and #create-pr-btn pushes its branch and
+           opens a pull request, each disabled while its request runs. -->
+      <div id="meta-footer">
+        <div id="meta-tools" class="strip-tools" role="group" aria-label="Machine and repository actions">
+          <button type="button" id="terminal-btn" class="sidebar-tool-btn" data-tooltip="Open a terminal on the machine running {{PRODUCT_NAME}} as a tab" aria-label="Open terminal"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg></button>
+          <button type="button" id="browser-btn" class="sidebar-tool-btn" data-tooltip="Open the browser of the machine running {{PRODUCT_NAME}} as a tab" aria-label="Open browser"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg></button>
+          <button type="button" id="autocommit-btn" class="sidebar-tool-btn" data-tooltip="Git commit" aria-label="Git commit"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><line x1="1.05" y1="12" x2="7" y2="12"/><line x1="17.01" y1="12" x2="22.96" y2="12"/><line x1="12" y1="1.05" x2="12" y2="7"/><line x1="12" y1="17.01" x2="12" y2="22.96"/></svg></button>
+          <button type="button" id="create-pr-btn" class="sidebar-tool-btn" data-tooltip="Create pull request" aria-label="Create pull request"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M13 6h3a2 2 0 0 1 2 2v7"/><line x1="6" y1="9" x2="6" y2="21"/></svg></button>
+        </div>
+      </div>
       <div id="meta-resizer" role="separator" aria-orientation="vertical" aria-label="Resize task info panel" aria-controls="meta-panel" tabindex="0"></div>
     </div>
     <div id="meta-overlay"></div>
@@ -578,6 +676,15 @@
               <svg class="icon-eye-off" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:none;"><path d="M17.94 17.94A10.94 10.94 0 0 1 12 19c-7 0-11-7-11-7a19.7 19.7 0 0 1 4.22-5.06"/><path d="M9.9 4.24A10.94 10.94 0 0 1 12 4c7 0 11 7 11 7a19.7 19.7 0 0 1-3.16 4.19"/><path d="M14.12 14.12A3 3 0 0 1 9.88 9.88"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
             </button>
           </template>
+          <!-- default_work_dir: the folder a new chat starts in.  The
+               list is the chat header's (the folders selected so far,
+               then "Choose ..."); the folder picked in the header
+               afterwards overrides it for the tasks that follow.  A
+               setting of this machine: hidden while the sheet shows a
+               registered machine's settings. -->
+          <label class="config-label" id="cfg-default-work-dir-row">Default working directory:
+            <select id="cfg-default-work-dir" class="default-workdir-select" title="The folder a new chat starts in. The folder picked at the top of the chat overrides it."></select>
+          </label>
           <label class="config-label">Max budget per task ($)
             <input type="number" id="cfg-max-budget" min="0" step="1">
           </label>
@@ -615,7 +722,7 @@
               <input type="checkbox" id="cfg-chrome-bridge">
               Drive my Chrome
             </label>
-            <button type="button" id="cfg-chrome-bridge-help-btn" class="config-help-btn" popovertarget="cfg-chrome-bridge-help" title="How to set up Drive my Chrome" aria-label="How to set up Drive my Chrome">?</button>
+            <button type="button" class="config-help-btn" popovertarget="cfg-chrome-bridge-help" title="How to set up Drive my Chrome" aria-label="How to set up Drive my Chrome">?</button>
           </div>
           <div id="cfg-chrome-bridge-help" class="config-help auth-modal-content" popover role="dialog" aria-labelledby="cfg-chrome-bridge-help-title" aria-describedby="cfg-chrome-bridge-help-text">
             <div id="cfg-chrome-bridge-help-title" class="auth-modal-title">Drive my Chrome</div>
@@ -842,6 +949,9 @@
   <script src="{{BROWSER_TAB_SRC}}"></script>
   <script src="{{TERMINAL_TAB_SRC}}"></script>
   <script src="{{PDF_VIEW_SRC}}"></script>
+  <!-- The Projects page (the sidebar's Projects row opens it as a tab):
+       one settings panel per project. -->
+  <script src="{{PROJECTS_SRC}}"></script>
   <!-- Phone layout of the remote page: a horizontal swipe steps
        between the chats, chat, file and task-info screens. -->
   <script src="{{MOBILE_SWIPE_SRC}}"></script>

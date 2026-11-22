@@ -469,6 +469,79 @@ def test_files_git_assumes_unchanged_are_still_saved(tmp_path: Path) -> None:
     assert _git(repo, "ls-files", "-v") == flags  # the real index keeps its bits
 
 
+def _written(path: Path) -> tuple[int, int]:
+    """The inode and the modification time of what is at *path*: a rewrite changes them."""
+    status = os.lstat(path)
+    return status.st_ino, status.st_mtime_ns
+
+
+@posix_only("the filter is a sed command")
+def test_a_rollback_writes_files_as_the_attributes_it_restores_have_them(tmp_path: Path) -> None:
+    """A restored file is converted by the checkpoint's ``.gitattributes``, not the replaced ones.
+
+    Git converts a file it writes (a smudge filter, line endings) by the
+    ``.gitattributes`` of the working tree.  Every file to replace was
+    written out before any was put in place, under the attributes being
+    rolled back: a file returned in its stored form, or with the other
+    line endings, next to the restored attributes that say otherwise.
+    Attributes deleted since (``e``) are the checkpoint's as well: git
+    reads them from the tree it writes.
+
+    A file renormalised along with its attributes (``same``) is the
+    same blob in both snapshots, which no comparison of the trees lists:
+    it was left as it was, in the stored form or with the other line
+    endings.  A file the changed attributes do not concern is not
+    written (``a.py``), and neither is what git converts nothing of: a
+    symbolic link, and an embedded repository, which no rollback touches.
+    """
+    repo = _repo(tmp_path / "repo")
+    _git(repo, "config", "filter.saved.clean", "sed s/WORKING/STORED/")
+    _git(repo, "config", "filter.saved.smudge", "sed s/STORED/WORKING/")
+    saved = {
+        ".gitattributes": b"*.dat filter=saved\n",
+        "kept.dat": b"WORKING kept\n",
+        "same.dat": b"WORKING same\n",
+        "gone.dat": b"WORKING gone\n",
+        "d/.gitattributes": b"* text eol=crlf\r\n",
+        "d/kept.txt": b"one\r\ntwo\r\n",
+        "d/same.txt": b"seven\r\n",
+        "d/gone.txt": b"three\r\n",
+        "e/.gitattributes": b"* text eol=crlf\r\n",
+        "e/kept.txt": b"five\r\n",
+        "e/same.txt": b"eight\r\n",
+    }
+    changed = {
+        ".gitattributes": b"*.dat -filter\n",
+        "kept.dat": b"STORED as it is\n",
+        "same.dat": b"STORED same\n",
+        "d/.gitattributes": b"* text eol=lf\n",
+        "d/kept.txt": b"four\n",
+        "d/same.txt": b"seven\n",
+        "e/kept.txt": b"six\n",
+        "e/same.txt": b"eight\n",
+    }
+    gone = ["gone.dat", "d/gone.txt", "e/.gitattributes"]
+    for name, content in saved.items():
+        (repo / name).parent.mkdir(exist_ok=True)
+        (repo / name).write_bytes(content)
+    (repo / "link.dat").symlink_to("kept.dat")
+    _repo(repo / "d" / "sub")
+    unwritten = {name: _written(repo / name) for name in ("a.py", "link.dat", "d/sub/a.py")}
+    tools = UsefulTools(work_dir=str(repo))
+    tools.checkpoint("v1")
+    for name in gone:
+        (repo / name).unlink()
+    for name, content in changed.items():
+        (repo / name).write_bytes(content)
+    assert tools.rollback("v1").startswith("Rolled ")
+    assert {name: (repo / name).read_bytes() for name in saved} == saved
+    # ...and back, to attributes that turn the filter off again.
+    assert tools.rollback("before-rollback").startswith("Rolled ")
+    assert {name: (repo / name).read_bytes() for name in changed} == changed
+    assert not any((repo / name).exists() for name in gone)
+    assert {name: _written(repo / name) for name in unwritten} == unwritten
+
+
 def test_git_gc_keeps_a_checkpoint_until_it_is_replaced_or_closed(tmp_path: Path) -> None:
     """Each saved tree has a ref of its own, so ``git gc`` in any worktree leaves it alone."""
     main = _repo(tmp_path / "main")

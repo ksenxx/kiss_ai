@@ -30,6 +30,7 @@ import asyncio
 import sqlite3
 import threading
 from collections.abc import Iterator
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
@@ -169,7 +170,7 @@ def _run_parent(
 
 def _child_rows(env: IsolatedKissHome) -> list[str]:
     """The task texts of every persisted sub-task of the parent."""
-    with sqlite3.connect(env.kiss_home / "history.db") as db:
+    with closing(sqlite3.connect(env.kiss_home / "history.db")) as db:
         rows = [
             (str(a), str(b or ""), str(c))
             for a, b, c in db.execute("SELECT id, parent_task_id, task FROM task_history")
@@ -499,10 +500,15 @@ def test_another_model_or_effort_is_allowed_without_pieces() -> None:
         assert isinstance(_plan("probe the host", caller=caller, model=same), str), same
     caller.model_name = "claude-fable-5-2-high"
     assert isinstance(_plan("probe the host", caller=caller, model="claude-fable-5-2"), str)
-    # A name outside the catalog carries its effort in its suffix only.
+    # An ``-xhigh`` alias the catalog does not list is run at that effort by the Codex CLI...
     caller.model_name = "codex/gpt-6-astra-xhigh"
     assert isinstance(_plan("probe the host", caller=caller, model="codex/gpt-6-astra"), dict)
     assert isinstance(_plan("probe the host", caller=caller, model="codex/gpt-6-astra-xhigh"), str)
+    # ...and by no other adapter: Claude Code gets ``--model opus`` and no ``--effort`` either way.
+    caller.model_name = "cc/opus"
+    refused = _plan("probe the host", caller=caller, model="cc/opus-xhigh")
+    assert isinstance(refused, str), refused
+    assert "a sub-agent on cc/opus-xhigh is this task's own model at its own effort" in refused
 
 
 def test_the_effort_a_model_configuration_asks_for_outranks_the_catalogs(tmp_path: Path) -> None:

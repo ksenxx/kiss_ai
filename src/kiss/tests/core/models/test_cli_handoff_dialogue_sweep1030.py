@@ -18,7 +18,9 @@ The prompt is built by the real adapters (no CLI process is started).
 
 from __future__ import annotations
 
+import copy
 import json
+from collections.abc import Callable
 from typing import Any
 
 import pytest
@@ -29,10 +31,21 @@ from kiss.core.context_compaction import (
     dropped_chars,
     plan_compaction,
 )
+from kiss.core.models.anthropic_model import AnthropicModel
 from kiss.core.models.claude_code_model import ClaudeCodeModel
 from kiss.core.models.codex_mcp_bridge import ToolBridge
 from kiss.core.models.codex_model import CodexModel
-from kiss.core.models.model import CLITextModel, _parse_text_based_tool_calls, render_tool_call
+from kiss.core.models.model import (
+    Attachment,
+    CLITextModel,
+    Model,
+    _parse_text_based_tool_calls,
+    encode_binary_attachment,
+    hand_off_conversation,
+    render_tool_call,
+)
+from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
+from kiss.core.models.openai_compatible_model2 import OpenAICompatibleModel2
 
 _RESPONSES_CONVERSATION: list[dict[str, Any]] = [
     {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Fix a.py"}]},
@@ -377,4 +390,105 @@ def test_a_digest_two_calls_of_a_turn_share_tells_neither(cli_model: CLITextMode
     assert cli_model._build_prompt().startswith(
         f"[User]: Go\n\n[Assistant]: {text}\n[Tool Call] Bash({stubbed})\n\n"
         "[Tool Result]: ok\n\n[Tool Result]: ok\n\n"
+    )
+
+
+_IMAGE = Attachment(b"\x89PNG\r\n\x1a\n" + b"pixels of the hand-off", "image/png")
+_PDF = Attachment(b"%PDF-1.4\npages of the hand-off", "application/pdf")
+
+
+def _anthropic_model() -> Model:
+    return AnthropicModel("claude-opus-4-6", api_key="test-key")
+
+
+def _chat_completions_model() -> Model:
+    return OpenAICompatibleModel("gpt-4o", base_url="http://127.0.0.1:9/v1", api_key="test-key")
+
+
+def _responses_model() -> Model:
+    return OpenAICompatibleModel2("gpt-4o", base_url="http://127.0.0.1:9/v1", api_key="test-key")
+
+
+@pytest.mark.parametrize(
+    "api_model",
+    [_anthropic_model, _chat_completions_model, _responses_model],
+    ids=["anthropic", "chat-completions", "responses"],
+)
+def test_the_media_an_api_model_embedded_reach_the_cli_after_a_hand_off(
+    api_model: Callable[[], Model], cli_model: CLITextModel
+) -> None:
+    """A switch to a CLI model hands it the image and the PDF of the conversation.
+
+    The API adapters keep what the user attached as content blocks of the
+    message (Anthropic ``image`` / ``document`` blocks, OpenAI ``image_url``
+    / ``file`` data URLs), not under ``attachments``, the one place the CLI
+    prompt read: after the switch the prompt said ``[image attachment
+    omitted]`` and no file was handed over.  Codex takes no PDF, which
+    stays declared as omitted.
+    """
+    old = api_model()
+    old.initialize("What is attached?", [_IMAGE, _PDF])
+    embedded = copy.deepcopy(old.conversation)
+    hand_off_conversation(old, cli_model)
+    prompt, attachments = cli_model._prompt_and_attachments()
+
+    if isinstance(cli_model, ClaudeCodeModel):
+        assert attachments == {"[Image #1]": _IMAGE, "[Document #2]": _PDF}
+        assert prompt == "[Image #1]\n[Document #2]\nWhat is attached?"
+    else:
+        omitted = "document" if api_model is _anthropic_model else "file"
+        assert attachments == {"[Image #1]": _IMAGE}
+        assert prompt == f"[Image #1]\n[{omitted} attachment omitted]\nWhat is attached?"
+    assert old.conversation == embedded, "the hand-off changed the source conversation"
+
+
+def test_an_image_a_tool_returned_to_claude_reaches_the_cli_after_a_hand_off(
+    cli_model: CLITextModel,
+) -> None:
+    """Anthropic keeps the bytes a tool returned inside its ``tool_result`` block."""
+    old = _anthropic_model()
+    old.initialize("Read shot.png")
+    call = {"type": "tool_use", "id": "toolu_1", "name": "Read", "input": {"file_path": "shot.png"}}
+    old.conversation.append({"role": "assistant", "content": [call]})
+    shot = "shot.png: " + encode_binary_attachment("image/png", _IMAGE.data)
+    old.add_function_results_to_conversation_and_return([("Read", {"result": shot})])
+    hand_off_conversation(old, cli_model)
+    prompt, attachments = cli_model._prompt_and_attachments()
+
+    assert attachments == {"[Image #1]": _IMAGE}
+    assert prompt == (
+        "[User]: Read shot.png\n\n"
+        '[Assistant]: [Tool Call] Read({"file_path": "shot.png"})\n\n'
+        f"[User]: shot.png: [attached image/png, {len(_IMAGE.data)} bytes]\n[Image #1]"
+    )
+
+
+def test_embedded_media_holding_no_file_stays_declared_as_omitted(cli_model: CLITextModel) -> None:
+    """A remote image, or a block that is untyped, malformed or not decodable, is no file."""
+    png = {"type": "base64", "media_type": "image/png", "data": "A"}
+    untyped = {"type": "base64", "media_type": None, "data": "QQ=="}
+    cli_model.conversation = [
+        {
+            "role": "user",
+            "content": [
+                "Compare these:",
+                {"type": "image", "source": {"type": "url", "url": "https://example.com/a.png"}},
+                {"type": "image_url", "image_url": {"url": "https://example.com/b.png"}},
+                {"type": "image", "source": png},
+                {"type": "image", "source": "https://example.com/c.png"},
+                {"type": "image_url", "image_url": "https://example.com/d.png"},
+                {"type": "file", "file": {"file_data": None}},
+                {"type": "document", "source": untyped},
+                {"type": "tool_result", "tool_use_id": "toolu_1", "content": "a text result"},
+            ],
+        }
+    ]
+    prompt, attachments = cli_model._prompt_and_attachments()
+
+    assert attachments == {}
+    assert prompt == (
+        "Compare these:\n[image attachment omitted]\n[image_url attachment omitted]\n"
+        "[image attachment omitted]\n[image attachment omitted]\n"
+        "[image_url attachment omitted]\n[file attachment omitted]\n"
+        "[document attachment omitted]\na text result"
     )

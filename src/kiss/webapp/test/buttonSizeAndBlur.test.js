@@ -9,6 +9,7 @@ const assert = require('assert');
 const {installTokenisedCss} = require('./designTokens');
 const {
   makePage: makeChatPage,
+  send: deliver,
   showTips,
   loadRemoteCss,
 } = require('./simplify2_harness');
@@ -27,6 +28,18 @@ function installRemoteTokenCss(win) {
 
 function makePage(beforeScripts = installTokenCss) {
   return makeChatPage({beforeScripts, extraScripts: ['tips.js']});
+}
+
+// The daemon opens a file in a tab and shows it: the tab bar's X button
+// is a content tab's (a chat tab has none).
+function openFileTab(win) {
+  deliver(win, {
+    type: 'fileContent',
+    name: 'a.md',
+    path: '/w/a.md',
+    content: '# a',
+    tabId: win._testApi.getActiveTabId(),
+  });
 }
 
 function cssRule(win, selector) {
@@ -125,6 +138,7 @@ function testCloseButtonsAreBigger() {
   const {win} = makePage();
   const doc = win.document;
 
+  openFileTab(win);
   assert.ok(
     doc.querySelector('.chat-tab-close'),
     'tab bar must render a tab-header X button',
@@ -195,6 +209,7 @@ function testButtonsLoseFocusAfterClick() {
     'tricks-btn',
     'voice-btn',
     'input-clear-btn',
+    'input-save-btn',
     'model-search-clear',
     'history-search-clear',
   ]) {
@@ -204,11 +219,13 @@ function testButtonsLoseFocusAfterClick() {
     clickAndAssertBlurred(win, el, '#' + id);
   }
 
+  // The X goes first: the new-chat button leaves the file tab it is on.
+  openFileTab(win);
   for (const sel of [
+    '.chat-tab-close',
     '#new-chat-btn',
     '#more-btn',
     '#settings-btn',
-    '.chat-tab-close',
   ]) {
     const el = doc.querySelector(sel);
     assert.ok(el, sel + ' must exist');

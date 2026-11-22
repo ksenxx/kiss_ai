@@ -20,6 +20,7 @@ import re
 import sqlite3
 import threading
 from collections.abc import Iterator
+from contextlib import closing
 from typing import Any
 
 import pytest
@@ -68,7 +69,7 @@ def daemon(env: IsolatedKissHome, monkeypatch: pytest.MonkeyPatch) -> Iterator[s
 
 def _task_rows(env: IsolatedKissHome) -> list[tuple[str, str, str]]:
     """Return ``(task_id, parent_task_id, task)`` of every persisted task."""
-    with sqlite3.connect(env.kiss_home / "history.db") as db:
+    with closing(sqlite3.connect(env.kiss_home / "history.db")) as db:
         return [
             (str(a), str(b or ""), str(c))
             for a, b, c in db.execute("SELECT id, parent_task_id, task FROM task_history")

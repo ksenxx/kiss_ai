@@ -198,6 +198,10 @@ class StandInModelServer:
         """
         self.responder = responder
         server = ThreadingHTTPServer(("127.0.0.1", 0), self.handler_class)
+        # The connection ``select`` announced may be gone when the serving loop
+        # accepts it (accept(2)); an accept with no deadline then blocks for good
+        # and ``shutdown``, which waits for the loop, with it.
+        server.socket.settimeout(0.5)
         server.responder = responder  # type: ignore[attr-defined]
         self._server = server
         self._thread = threading.Thread(target=server.serve_forever, daemon=True)

@@ -251,7 +251,8 @@ class TestMachinesAndCronActions(IsolatedAsyncioTestCase):
         # The label is as fresh as the daemon's knowledge, not as the
         # cached ping: a host name learnt meanwhile (a history fetch)
         # shows on the cached report.
-        mach.note_host(mach.Machine(name="127.0.0.1"), "renamed-host")
+        registered = next(m for m in mach.load_machines() if m.name == "127.0.0.1")
+        mach.note_host(registered, "renamed-host")
         cached = await self._machines()
         self.assertEqual(sidebar_panels._machines_pinged_at, down_at, "the same ping")
         rows = {row["name"]: row for row in cached["machines"]}

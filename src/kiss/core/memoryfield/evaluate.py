@@ -57,6 +57,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from kiss.core.config import kiss_home
+from kiss.core.file_lock import exclusive_file_lock
 from kiss.core.html_to_markdown import html_to_markdown
 from kiss.core.kiss_tmp import kiss_tmp_dir
 from kiss.core.memoryfield.index import (
@@ -225,8 +226,10 @@ def build_memory_from_tasks(memory: MemoryDir, tasks: list[PastTask]) -> list[st
 def _delete_pages(memory: MemoryDir, names: Iterable[str]) -> None:
     """Delete the pages *names* of the evaluation corpus *memory*.
 
-    A page that is gone already is one that another evaluation of the same
-    corpus directory, cleaning up at the same time, deleted first.
+    A page that is gone already is one that another build of the same
+    corpus directory, cleaning up at the same time, deleted first
+    (:func:`main` runs one evaluation of a directory at a time; a caller
+    of :func:`build_memory_from_tasks` may not).
     """
     for name in names:
         with suppress(FileNotFoundError):
@@ -606,6 +609,9 @@ def format_results_table(results: dict[str, RetrieverResult], n_probes: int) -> 
 def main(argv: list[str] | None = None) -> int:
     """Command-line entry point.
 
+    Evaluations of one corpus directory run one at a time: a second one
+    waits for the first to finish.
+
     Args:
         argv: Arguments (defaults to ``sys.argv[1:]``).
 
@@ -632,9 +638,26 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--rebuild", action="store_true", help="rewrite pages and indexes")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-
-    tasks = load_past_tasks(args.db, args.limit, args.min_result_chars)
     memory = MemoryDir(args.memory_dir)
+    # Held from the pruning of the corpus to the report: another evaluation
+    # of the directory, of other tasks, would delete the pages this one still
+    # reads.  The lock is beside the directory, like the lock of its writes.
+    lock = Path(f"{memory.root}.evaluate.lock")
+    with exclusive_file_lock(lock, blocking=False) as alone:
+        if alone:
+            return _evaluate(args, memory)
+    logger.info("Waiting for another evaluation of the corpus in %s to finish", memory.root)
+    with exclusive_file_lock(lock):
+        return _evaluate(args, memory)
+
+
+def _evaluate(args: argparse.Namespace, memory: MemoryDir) -> int:
+    """Build the corpus of *args* in *memory*, run the probes and publish the report.
+
+    The caller holds the lock of the corpus directory (see :func:`main`).
+    Returns the process exit code.
+    """
+    tasks = load_past_tasks(args.db, args.limit, args.min_result_chars)
     if args.rebuild:
         _delete_pages(memory, memory.page_names())
     before = set(memory.page_names())

@@ -12,6 +12,7 @@ const {
   recordTimers,
   fireTimers,
   stubClipboard,
+  rowsByTitle,
 } = require('./simplify2_harness');
 
 // The 1500 ms flash-revert timers (wireCopyButton in panelCopy.js) are
@@ -39,6 +40,22 @@ const SESSION = {
   endTs: 1_700_000_100_000,
 };
 
+// Two more tasks, each a row with a copy button of its own.
+const SECOND = {
+  ...SESSION,
+  id: 'chatDEF',
+  task_id: 43,
+  title: 'second task',
+  preview: 'second task',
+};
+const THIRD = {
+  ...SESSION,
+  id: 'chatGHI',
+  task_id: 44,
+  title: 'third task',
+  preview: 'third task',
+};
+
 async function run() {
   const {win} = makePage();
   const doc = win.document;
@@ -46,9 +63,15 @@ async function run() {
 
   const {writes: copied} = stubClipboard(win);
 
-  send(win, {type: 'history', sessions: [SESSION], offset: 0});
+  send(win, {type: 'history', sessions: [SESSION, SECOND, THIRD], offset: 0});
 
-  const rowBtn = doc.querySelector('.sidebar-item-copy');
+  assert.strictEqual(
+    doc.querySelectorAll('#history-list .sidebar-item-copy').length,
+    3,
+    'every history row renders one .sidebar-item-copy button',
+  );
+  const rows = rowsByTitle(win);
+  const rowBtn = rows['my task'].querySelector('.sidebar-item-copy');
   assert.ok(rowBtn, 'history row renders a .sidebar-item-copy button');
   const idleSvg = rowBtn.innerHTML;
   rowBtn.click();
@@ -57,49 +80,48 @@ async function run() {
   assert.ok(rowBtn.classList.contains('copied'), 'row button flashes');
   assert.notStrictEqual(rowBtn.innerHTML, idleSvg, 'icon swaps to check');
 
-  const chatBtn = doc.querySelector('.ids-copy-btn.ids-copy-chat');
-  const taskBtn = doc.querySelector('.ids-copy-btn.ids-copy-task');
-  assert.ok(chatBtn, 'ids line renders a chat-id copy button');
-  assert.ok(taskBtn, 'ids line renders a task-id copy button');
-  assert.strictEqual(chatBtn.dataset.tooltip, 'Copy chat id');
-  assert.strictEqual(taskBtn.dataset.tooltip, 'Copy task id');
-  chatBtn.click();
-  taskBtn.click();
+  const secondBtn = rows['second task'].querySelector('.sidebar-item-copy');
+  const thirdBtn = rows['third task'].querySelector('.sidebar-item-copy');
+  secondBtn.click();
+  thirdBtn.click();
   await sleep(0);
   assert.deepStrictEqual(
     copied.slice(1),
-    ['chatABC', '42'],
-    'id buttons copy the raw id strings',
+    ['second task', 'third task'],
+    'each row button copies the title of its own row',
   );
-  assert.ok(chatBtn.classList.contains('copied'), 'chat button flashes');
-  assert.ok(taskBtn.classList.contains('copied'), 'task button flashes');
+  assert.ok(secondBtn.classList.contains('copied'), 'second button flashes');
+  assert.ok(thirdBtn.classList.contains('copied'), 'third button flashes');
   assert.strictEqual(timers.length, 3, 'one flash timer per button');
 
   const firstClick = timers.slice();
   rowBtn.click();
-  chatBtn.click();
+  secondBtn.click();
   await sleep(0);
   // audit0903: every copy button restarts its flash timer on re-click,
   // so the first click's timers of the re-clicked buttons are cleared
   // and firing them (as the clock would at 1.5 s) cuts no second flash
-  // short; only the untouched task button reverts.
+  // short; only the untouched third button reverts.
   fireTimers(firstClick);
   assert.ok(
     rowBtn.classList.contains('copied'),
     'row second click resets its timer',
   );
   assert.ok(
-    chatBtn.classList.contains('copied'),
-    'id second click resets its timer',
+    secondBtn.classList.contains('copied'),
+    'second row second click resets its timer',
   );
   assert.ok(
-    !taskBtn.classList.contains('copied'),
-    'untouched task flash reverts',
+    !thirdBtn.classList.contains('copied'),
+    'untouched third flash reverts',
   );
 
   fireTimers(timers.slice(3));
   assert.ok(!rowBtn.classList.contains('copied'), 'reset row timer reverts');
-  assert.ok(!chatBtn.classList.contains('copied'), 'reset id timer reverts');
+  assert.ok(
+    !secondBtn.classList.contains('copied'),
+    'reset second row timer reverts',
+  );
   assert.strictEqual(rowBtn.innerHTML, idleSvg, 'row icon reverts to copy svg');
 
   win.close();

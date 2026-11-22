@@ -283,10 +283,10 @@ class TestLazyReplay(_DatabaseCase):
             }],
         )
         self.assertEqual(own(first, "lazy_steps"), [{"type": "lazy_steps", "steps": 4}])
-        # The tool calls left out: the stand-in counts the two fan-outs among them.
+        # The tool calls left out: one stand-in for the run of them.
         self.assertEqual(
             own(first, "lazy_gap"),
-            [{"type": "lazy_gap", "of": "tool_call", "ts": 1794000001000, "fanouts": 2}],
+            [{"type": "lazy_gap", "of": "tool_call", "ts": 1794000001000}],
         )
         # The Trajectory panel is opened: the summaries and what none of them folded.
         outline = self.server.task_events_piece(task_id, -1)
@@ -302,12 +302,16 @@ class TestLazyReplay(_DatabaseCase):
         # A summary is opened: the panels it folded.
         segments = [self.server.task_events_piece(task_id, seg) for seg in (0, 1)]
         self.assertEqual([kinds(piece) for piece in segments], SEGMENTS)
+        # The stand-in of the result that opened the piece's first panel carries
+        # that result's own time: the first summary's, which the outline sent.
+        # (The thought after it is stamped later, often in the next millisecond.)
+        opened_at = next(ev["ts"] for ev in outline if ev.get("tool_name") == "summary")
         self.assertEqual(
             own(segments[1], "lazy_gap")[:3],
             [
-                {"type": "lazy_gap", "of": "stop", "fanouts": 1},
+                {"type": "lazy_gap", "of": "stop"},
                 {"type": "lazy_gap", "of": "tool_call", "ts": 1794000001000},
-                {"type": "lazy_gap", "of": "tool_result", "ts": segments[1][3]["ts"]},
+                {"type": "lazy_gap", "of": "tool_result", "ts": opened_at},
             ],
         )
         # Every event of the whole replay is in exactly one piece, but
@@ -641,7 +645,8 @@ class TestFirstPieceKept(_DatabaseCase):
             writer.execute("ROLLBACK")
             writer.close()
         self.assertEqual(self._kept(task_id), [])
-        self.assertEqual(db.execute("PRAGMA busy_timeout").fetchone()[0], 30000)
+        # Back to a slice of that wait (the statement repeats it for 30 s).
+        self.assertEqual(db.execute("PRAGMA busy_timeout").fetchone()[0], th._BUSY_SLICE_MS)
         self.assertEqual(self._resume(chat_id, task_id), first)
         self.assertEqual(len(self._kept(task_id)), 1)
 
@@ -655,7 +660,7 @@ class TestFirstPieceKept(_DatabaseCase):
         self.assertEqual(
             _first_piece_events(task_id, kept),
             [
-                {"type": "lazy_gap", "of": "tool_call", "ts": 1794000001000, "fanouts": 2},
+                {"type": "lazy_gap", "of": "tool_call", "ts": 1794000001000},
                 {"type": "trajectory", "count": 10, "lazy": {"taskId": task_id, "upto": LAST}},
                 {"type": "lazy_steps", "steps": 4},
             ],

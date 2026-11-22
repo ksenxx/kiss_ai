@@ -437,6 +437,67 @@ class TestSigninWindow(SigninHookCase):
         await self._wait_for_event(reader, "signinDone")
         self.assertEqual((self.home / "pasted").read_text(), "x" * signin.PASTE_LIMIT + "\n")
 
+    async def test_a_paste_reaches_only_the_login_of_its_own_click(self) -> None:
+        """Another window's paste, and an earlier click's, never reach the running hook.
+
+        Window A's login is replaced by window B's.  A paste of A's that
+        was on its way is answered to A and leaves B's hook alone,
+        whether it names no click or one counted like B's (every page
+        counts its clicks from 1, so the tokens of two windows collide);
+        B's own earlier click is told from its current one by the token.
+        """
+        self._install_hook()
+        reader_a, _ = await self._ready("tab-a")
+        reader_b, _ = await self._ready("tab-b")
+        for reader, provider, attempt in (
+            (reader_a, "google", "signin-1"),
+            (reader_b, "google", "signin-1"),
+            (reader_b, "apple", "signin-2"),
+        ):
+            await self._send(
+                reader, {"type": "signinLogin", "provider": provider, "attempt": attempt}
+            )
+            await self._wait_for_event(reader, "signinUrl")
+        ended = await self._wait_for_event(reader_a, "signinError")
+        self.assertEqual(ended["error"], signin.ENDED_ELSEWHERE)
+        for reader, token in (
+            (reader_a, {"attempt": "signin-2"}),
+            (reader_a, {}),
+            (reader_b, {"attempt": "signin-1"}),
+        ):
+            await self._send(reader, {"type": "signinPaste", "text": "bad", **token})
+            error = await self._wait_for_event(reader, "signinError")
+            self.assertIn("No sign-in is in progress", str(error["error"]))
+            self.assertEqual(error.get("attempt"), token.get("attempt"))
+        self.assertFalse((self.home / "pasted").exists())
+        # B's login is untouched: its own paste ends it.
+        await self._send(reader_b, {"type": "signinPaste", "text": "ok", "attempt": "signin-2"})
+        await self._wait_for_event(reader_b, "signinDone")
+        self.assertEqual((self.home / "pasted").read_text(), "ok\n")
+
+    async def test_a_page_that_reconnected_pastes_into_the_login_it_started(self) -> None:
+        """The page keeps its paste row over a reconnect, so its new connection may paste.
+
+        That connection has clicked nothing: it is told by the attempt
+        alone, and a paste naming none or another one is refused.
+        """
+        self._install_hook()
+        reader, _ = await self._ready("tab-a")
+        await self._send(
+            reader, {"type": "signinLogin", "provider": "google", "attempt": "signin-1"}
+        )
+        await self._wait_for_event(reader, "signinUrl")
+        self._readers_writers[reader].close()
+        await self._readers_writers[reader].wait_closed()
+        again, _ = await self._ready("tab-a")
+        for token in ({}, {"attempt": "signin-2"}):
+            await self._send(again, {"type": "signinPaste", "text": "bad", **token})
+            error = await self._wait_for_event(again, "signinError")
+            self.assertIn("No sign-in is in progress", str(error["error"]))
+        await self._send(again, {"type": "signinPaste", "text": "ok", "attempt": "signin-1"})
+        await self._wait_for_event(again, "signinDone")
+        self.assertEqual((self.home / "pasted").read_text(), "ok\n")
+
     async def test_shutdown_ends_the_running_login(self) -> None:
         self._install_hook()
         reader, _ = await self._ready("tab-a")

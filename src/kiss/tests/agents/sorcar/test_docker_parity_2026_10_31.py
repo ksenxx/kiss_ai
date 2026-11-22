@@ -10,9 +10,11 @@ rewrite of a file; it now raises the same
 the agent makes the ``Write``/``Edit`` through its hook and events.  The
 container ``Bash`` closure of ``SorcarAgent`` applies the host's sleep
 rule with ``ContainerJobs``: a long foreground ``sleep`` waits on the
-running job instead.  ``DockerTools.Read`` of an image or PDF fetches
-the bytes (``DockerManager.read_bytes``) and returns the attachment
-encoding the host ``Read`` returns, instead of raw bytes as text.
+running job instead, where the container's shell would run the system's
+sleep (``DockerManager.sleep_probe``).  ``DockerTools.Read`` of an image
+or PDF fetches the bytes (``DockerManager.read_bytes``) and returns the
+attachment encoding the host ``Read`` returns, instead of raw bytes as
+text.
 
 Every test runs against a real ``python:3.11-slim`` container through the
 real ``SorcarAgent`` tool set and a real ``KISSAgent`` dispatch (no model:
@@ -26,14 +28,22 @@ import base64
 import functools
 import json
 import os
+import shlex
+import threading
 import time
 from collections.abc import Iterator
 from typing import Any
 
+import docker
 import pytest
 
 from kiss.agents.sorcar.container_jobs import JOBS_DIR, ContainerJobs
-from kiss.agents.sorcar.docker_manager import STOPPED_MESSAGE, DockerManager, fetched_bytes
+from kiss.agents.sorcar.docker_manager import (
+    ATTACH_PREFIX,
+    STOPPED_MESSAGE,
+    DockerManager,
+    fetched_bytes,
+)
 from kiss.agents.sorcar.docker_tools import DockerTools
 from kiss.agents.sorcar.edit_guards import (
     HEREDOC_UNRESOLVED_VERDICT,
@@ -46,7 +56,7 @@ from kiss.agents.sorcar.useful_tools import CD_VERDICT
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.models.model import encode_binary_attachment, parse_binary_attachments
 from kiss.core.printer import Printer
-from kiss.core.tool_verdict import ALLOW, Verdict, call_text, refuse
+from kiss.core.tool_verdict import ALLOW, ToolRedirect, Verdict, call_text, refuse
 from kiss.tests.agents.sorcar.docker_test_containers import IMAGE, is_docker_available
 
 pytestmark = pytest.mark.skipif(not is_docker_available(), reason="Docker daemon is not running")
@@ -65,6 +75,14 @@ PYTHON_TWO_REPLACES = (
     "open(p, 'w').write(s)\n"
     "EOF"
 )
+#: A ``sleep`` that fails for the 31 seconds asked of it below and sleeps for any other.
+FAKE_SLEEP = '#!/bin/sh\n[ "$1" != 31 ] || exit 7\nexec /usr/bin/sleep "$@"\n'
+#: A startup file that hides itself and gives a failing ``sleep`` to that command alone: a
+#: shell it ran in, asked what it runs for ``sleep``, would answer with the system's.
+STARTUP_FILE = (
+    "unset BASH_ENV SSH_CLIENT\n"
+    'case $BASH_EXECUTION_STRING in "sleep 31"*) sleep() { return 7; } ;; esac\n'
+)
 
 
 @pytest.fixture(scope="module")
@@ -76,6 +94,17 @@ def env() -> Iterator[DockerManager]:
         yield manager
     finally:
         manager.close()
+
+
+@pytest.fixture
+def panel(env: DockerManager) -> Iterator[list[str]]:
+    """The pieces *env* streams into the panel of a call, in order."""
+    pieces: list[str] = []
+    env.stream_callback = pieces.append
+    try:
+        yield pieces
+    finally:
+        env.stream_callback = None
 
 
 class _RecordingPrinter(Printer):
@@ -221,8 +250,17 @@ def test_container_rewrites_are_made_as_write_and_edit_through_the_agent(
     assert h.hook_calls[-1][0] == "Bash"
 
 
-def test_container_long_sleep_waits_on_the_running_job(env: DockerManager) -> None:
-    """``sleep 60; cmd`` with a job running waits on the job, then runs ``cmd``; no job: as is."""
+def test_container_long_sleep_waits_on_the_running_job(
+    env: DockerManager, panel: list[str],
+) -> None:
+    """``sleep 60; cmd`` with a job running waits on the job, then runs ``cmd``; no job: as is.
+
+    The panel shows the output of the commands alone.  What the tool's
+    own scripts print (a started job's pid, the ids of the running jobs,
+    the report of a wait) was streamed there too, which marked the call
+    as shown: its result, the notice of the started job or the refusal
+    of the sleep, was then recorded without that text.
+    """
     h = _Harness(env)
     bash = h.tools["Bash"]
     assert h.jobs.last_running() is None
@@ -238,9 +276,17 @@ def test_container_long_sleep_waits_on_the_running_job(env: DockerManager) -> No
     began = time.monotonic()
     out = bash("sleep 60; echo after", "wait", timeout_seconds=120)
     assert time.monotonic() - began < 40, "the sleep was not replaced by the wait on the job"
-    assert out == f"after\nWaited on job {job_id} for up to 60 s instead of sleeping (exited 0).\n"
+    waited = f"\nWaited on job {job_id} for up to 60 s instead of sleeping (exited 0).\n"
+    assert out == "after\n" + waited
+    assert "".join(panel) == "quick\nafter\n"
     assert h.jobs.last_running() is None
     assert h.jobs.wait("deadbeef", 1) == "status unknown"
+    # The note starts a line of its own (audit 2026-11-21 G1): it was glued to the exit
+    # code of a failed command, and to output that ends no line.
+    job_id = bash("sleep 2", "job", background=True).split()[3]
+    waited = f"\nWaited on job {job_id} for up to 40 s instead of sleeping (exited 0).\n"
+    assert bash("sleep 40; printf out; exit 2", "wait", timeout_seconds=120) == (
+        "out\n[exit code: 2]" + waited)
     # on_timeout="background" after the wait: the rest starts as a job and is waited for.
     started = bash("sleep 3; echo done", "job", background=True)
     job_id = started.split()[3]
@@ -249,6 +295,12 @@ def test_container_long_sleep_waits_on_the_running_job(env: DockerManager) -> No
         f"Waited on job {job_id} for up to 50 s instead of sleeping (exited 0).\n",
     )
     assert "status: exited 0" in out and "late" in out.splitlines()
+    # A sleep past the deadline is refused with the running job named.  The look for that
+    # job, like the reports above, is the tool's to read: none of it is shown.
+    job_id = bash("sleep 8", "job", background=True).split()[3]
+    refused = bash("sleep 600; echo never", "never", timeout_seconds=10)
+    assert refused.startswith("REFUSED: ") and f"bash_job('{job_id}'" in refused, refused
+    assert "".join(panel) == "quick\nafter\nout"
     # A job that cannot start (a file sits where the jobs dir goes) is an error, not a job.
     try:
         env.Bash(f"mv {JOBS_DIR} {JOBS_DIR}.bak && touch {JOBS_DIR}", "block", 30, 500)
@@ -256,6 +308,73 @@ def test_container_long_sleep_waits_on_the_running_job(env: DockerManager) -> No
         assert out.startswith("Error: could not start the background job"), out
     finally:
         env.Bash(f"rm -f {JOBS_DIR}; mv {JOBS_DIR}.bak {JOBS_DIR}", "unblock", 30, 500)
+
+
+def _long_sleep(manager: DockerManager, bash: Any, extra: dict[str, str]) -> str:
+    """The result of ``sleep 31 && echo RAN`` with *extra* as the exec's own environment."""
+    manager.exec_env = extra
+    try:
+        return str(bash("sleep 31 && echo RAN", "poll", timeout_seconds=35))
+    finally:
+        manager.exec_env = {}
+
+
+def test_container_long_sleep_runs_as_written_unless_its_shell_runs_the_systems_sleep() -> None:
+    """A long sleep is spent on the job only where the command's shell runs the system's sleep.
+
+    The container tool took every leading ``sleep N`` for the system's
+    (S16/F3): with another ``sleep`` first on the exec's ``PATH`` the
+    wait stood for a command that fails at once, and the rest of it ran.
+    It now asks the container (``DockerManager.sleep_probe``): the
+    environment the exec's shell is started with (the container's, then
+    the exec's own) must name no text bash runs first, and that shell
+    must find the system's sleep, asked in POSIX mode (asked before it,
+    an exported function ``set`` answered for the shell).
+
+    The container is the test's own: its ``BASH_ENV`` names a startup
+    file and it runs as ``nobody`` (root's bash takes no ``PS4`` from
+    the environment).
+    """
+    container = docker.from_env().containers.run(
+        IMAGE, "sleep infinity", detach=True, user="nobody", working_dir="/tmp",
+        environment={"BASH_ENV": "/tmp/fake/.bashrc"},
+    )
+    try:
+        with DockerManager(f"{ATTACH_PREFIX}{container.id}") as manager:
+            manager.Bash(
+                f"mkdir /tmp/fake && printf %s {shlex.quote(FAKE_SLEEP)} > /tmp/fake/sleep && "
+                f"chmod +x /tmp/fake/sleep && printf %s {shlex.quote(STARTUP_FILE)} > "
+                "/tmp/fake/.bashrc", "seed", 30, 500,
+            )
+            h = _Harness(manager)
+            bash = h.tools["Bash"]
+            # The exec's own (empty) BASH_ENV counts, not the container's: no text runs
+            # first, the shell finds the system's sleep and the sleep is spent on the job.
+            # What that shell writes to stderr (it has no such locale) is not its answer.
+            short = bash("sleep 4", "job", background=True).split()[3]
+            out = _long_sleep(manager, bash, {"BASH_ENV": "", "LC_ALL": "no_SUCH.locale"})
+            assert out.startswith("RAN\n") and "setlocale" in out and out.endswith(
+                f"Waited on job {short} for up to 31 s instead of sleeping (exited 0).\n",
+            ), out
+            job = bash("sleep 300", "job", background=True).split()[3]
+            # Nothing of the exec's own: the startup file the container's BASH_ENV names.
+            assert _long_sleep(manager, bash, {}) == "[exit code: 7]"
+            for extra in (
+                {"PATH": "/tmp/fake:/usr/bin:/bin"},  # another sleep first on the PATH
+                {"PATH": "fake:/usr/bin:/bin"},  # a relative entry: the question fails
+                {"SSH_CLIENT": "sshd", "HOME": "/tmp/fake"},  # the ~/.bashrc under sshd
+                # a traced prompt that hashes the fake for a command that begins with sleep
+                {"SHELLOPTS": "xtrace",
+                 "PS4": "${BASH_CMDS[${BASH_EXECUTION_STRING:0:5}]:=/tmp/fake/sleep}+ "},
+                # exported functions: a sleep, and a set that answers the question
+                {"BASH_FUNC_sleep%%": '() { [ "$1" != 31 ] || return 7; command sleep "$@"; }',
+                 "BASH_FUNC_set%%": "() { echo /bin/sleep; exit 0; }"},
+            ):
+                out = _long_sleep(manager, bash, {"BASH_ENV": "", **extra})
+                assert "RAN" not in out and out.endswith("[exit code: 7]"), (extra, out)
+            assert h.jobs.last_running() == job, "a sleep above had no job to be spent on"
+    finally:
+        container.remove(force=True)
 
 
 def test_container_read_attaches_images_and_pdfs(env: DockerManager) -> None:
@@ -435,6 +554,87 @@ def test_a_container_cd_through_a_link_leaves_a_target_only_the_shell_knows(
     walked = "cd /tmp/x5/plain/a/../b; cat > fresh <<'EOF'\nowned\nEOF"
     assert h.call("Bash", command=walked, description="walked") == ""
     assert _cat(env, "/tmp/x5/plain/b/fresh") == "owned\n"
+
+
+def test_a_container_cd_before_a_here_document_is_judged_by_the_containers_cdpath(
+    env: DockerManager, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``cd b7sub; cat > guarded <<EOF``: bash looks ``b7sub`` up in its shell's ``CDPATH``.
+
+    The here-document guard asked this process's (item B7 of FX45b): with ``/tmp/b7far`` in
+    the container's and none here, the copy was judged a new file of ``/tmp/b7sub`` and ran,
+    onto the existing ``guarded`` of ``/tmp/b7far/b7sub``; with one here and none in the
+    container, a copy creating a file was refused.  The container says what its shells
+    inherit, as it does for a delete, and one that does not say runs nothing.
+
+    So were the conversions judged (LH2): the copy after ``cd b7sub &&`` was made as a
+    ``Write`` of ``/tmp/b7sub/guarded`` and a ``sed -i`` as an ``Edit`` of it, and with a
+    ``CDPATH`` here only neither was made.  And a ``<<`` that the text spells apart for the
+    shell it starts (``bash -c '... <''<EOF'``, ``eval``) was asked about nowhere: it ran.
+    """
+    h = _Harness(env)
+    env.Bash(
+        "rm -rf /tmp/b7sub /tmp/b7far && mkdir -p /tmp/b7sub /tmp/b7far/b7sub"
+        " && printf 'ORIGINAL\\n' > /tmp/b7far/b7sub/guarded", "seed", 30, 500,
+    )
+    copy = "cd b7sub; cat > guarded <<'EOF'\nowned\nEOF"
+    spelled = "'cd b7sub; cat > guarded <''<EOF\nowned\nEOF'"
+    copies = (copy, copy.replace(";", " &&"), f"bash -c {spelled}", f"eval {spelled}")
+    sed = "cd b7sub && sed -i 's/owned/a\\nb/' guarded"
+    refusal = HEREDOC_UNRESOLVED_VERDICT.format(path="guarded")
+    monkeypatch.delenv("CDPATH", raising=False)
+    try:
+        env.exec_env = {"CDPATH": "/tmp/b7far"}
+        landed = env.Bash("cd b7sub && pwd -P", "the shell itself", 30, 500)
+        assert landed.split()[-1] == "/tmp/b7far/b7sub", landed
+        assert h.call("Bash", command=sed, description="sed") == rewrite_guard(sed)
+        report = h.tools["run_commands_parallel"](
+            json.dumps(["cd b7sub && cat > guarded <<EOF\nowned\nEOF", *copies[2:]]))
+        assert report.startswith("3 commands: 0 succeeded, 3 failed"), report
+        assert report.count(refusal) == 3, report
+        # Each answer is an exec in the container: a command asks for it once, whichever of
+        # its guards need it (a second ``printf`` of the answer fails here).
+        env.exec_env["BASH_FUNC_printf%%"] = (
+            '() { [ "$1" != %s ] || mkdir /tmp/b7asked || exit 7; builtin printf "$@"; }')
+        for asked in copies:
+            assert h.call("Bash", command=asked, description="copy") == refusal, asked
+            assert env.Bash("rmdir /tmp/b7asked", "asked once", 30, 500) == "", asked
+        # A container that does not say what its ``CDPATH`` is (the ``printf`` of that answer
+        # alone fails there), or is stopped before it says, names no directory for the copy.
+        # Only a command that writes a file through a here-document asks: not one that holds
+        # ``<<`` in a quoted word or in a comment, starts a shell that writes none, or copies
+        # one into ``/dev/null``.
+        env.exec_env["BASH_FUNC_printf%%"] = '() { [ "$1" != %s ] || exit 7; builtin printf "$@"; }'
+        for rest in ("", " && : '<<'", " # <<"):
+            assert env.Bash(f"cd b7sub && pwd -P{rest}", "unasked", 30, 500) == landed, rest
+        nowhere = "cd b7sub && cat > /dev/null <<'EOF'\nx\nEOF\npwd -P"
+        for whole in ("bash -c 'cd b7sub && pwd -P'", nowhere):
+            assert env.Bash(whole, "unasked", 30, 500) == landed, whole
+        # Nor does a conversion that no ``cd`` bash looks up leads to: it is made unasked.
+        for unasked in ("cat > /tmp/b7sub/n <<'EOF'\nx\nEOF", "cd /tmp/b7sub && sed -i s/x/y/ n"):
+            with pytest.raises(ToolRedirect):
+                env.Bash(unasked, "unasked", 30, 500)
+        for asked in copies:
+            assert h.call("Bash", command=asked, description="unanswered") == (
+                "Error: the command did not run: "
+                "the environment did not say what its CDPATH is (status 7)."), asked
+        env.stop_event = threading.Event()
+        env.stop_event.set()
+        for asked in copies:
+            stopped = h.call("Bash", command=asked, description="stopped")
+            assert stopped == f"{STOPPED_MESSAGE}\n[exit code: -1]", (asked, stopped)
+        # This process's ``CDPATH`` is not the container's: the copy creates its file there,
+        # and the conversions after ``cd b7sub &&`` are made on that file.
+        env.stop_event, env.exec_env = None, {}
+        monkeypatch.setenv("CDPATH", "/tmp/b7far")
+        assert h.call("Bash", command=copy, description="create") == ""
+        for made, call in ((copies[1], "Write"), (sed, "Edit")):
+            out = h.call("Bash", command=made, description="made")
+            assert out.startswith(f'Applied as {call}(file_path="/tmp/b7sub/guarded", '), out
+    finally:
+        env.stop_event, env.exec_env = None, {}
+    assert _cat(env, "/tmp/b7far/b7sub/guarded") == "ORIGINAL\n"
+    assert _cat(env, "/tmp/b7sub/guarded") == "a\nb\n"
 
 
 def test_the_rest_of_a_compound_container_rewrite_runs_after_the_applied_call(

@@ -15,6 +15,7 @@
 //     workDir: '/path/the/shell/starts/in',   // '' = the daemon's work dir
 //     machine: 'box',       // a registered machine the shell runs on,
 //                           // '' (default) = the daemon's own machine
+//     fontSize: 13,         // the text size in px (default 13)
 //   });
 //   view.el                 -> element to mount in the content area
 //   view.setVisible(bool)   -> shown: load xterm, open the shell, fit, focus
@@ -26,6 +27,7 @@
 //                              the re-attach
 //   view.reconnect()        -> the WebSocket came back: re-attach the shell
 //   view.retheme()          -> the page theme changed
+//   view.setFontSize(px)    -> the text size changed
 //   view.dispose()          -> drop the terminal (the daemon is told
 //                              separately, through terminalClose)
 //
@@ -169,6 +171,7 @@
     let resizeTimer = null;
     let visible = false;
     let starting = false;
+    let fontSize = opts.fontSize || 13;
     // Output that arrived before xterm was ready (a re-attached shell
     // may print before the terminal exists on this page).
     let pending = [];
@@ -257,7 +260,7 @@
           if (view.disposed || term) return;
           term = new global.Terminal({
             cursorBlink: true,
-            fontSize: 13,
+            fontSize: fontSize,
             // main.css's --font-mono: the editor font with the platform
             // monospace fallback chain (a custom property's computed
             // value has its var() references substituted).
@@ -394,6 +397,16 @@
 
     view.retheme = function () {
       if (term) term.options.theme = themeFromPage();
+    };
+
+    // A terminal that is not loaded yet starts at the new size; a
+    // loaded one is refitted, since its grid holds more or fewer cells
+    // now (a hidden one when it is shown again, see setVisible).
+    view.setFontSize = function (px) {
+      fontSize = px;
+      if (!term) return;
+      term.options.fontSize = px;
+      if (visible) fit.fit();
     };
 
     view.dispose = function () {

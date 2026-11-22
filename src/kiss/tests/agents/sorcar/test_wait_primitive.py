@@ -17,13 +17,14 @@ import ctypes
 import functools
 import inspect
 import os
+import queue
 import re
 import signal
 import subprocess
 import sys
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import suppress
 from pathlib import Path
 from types import FrameType
@@ -33,6 +34,7 @@ import pytest
 
 from kiss.agents.sorcar.useful_tools import (
     _SUPERVISE_LOG_MATCHER,
+    BackgroundJob,
     UsefulTools,
     _log_matches,
     _run_log_matcher,
@@ -41,6 +43,7 @@ from kiss.agents.sorcar.useful_tools import (
 )
 from kiss.core import tool_interrupt
 from kiss.core.processes import kill_process_tree, popen_process_group
+from kiss.tests.lock_injection import stop_as_it_takes_its_lock, stranded_threads
 
 
 def _job_id(started: str) -> str:
@@ -481,6 +484,60 @@ def test_matcher_dies_with_its_owner(tmp_path: Path) -> None:
         assert _nothing_names(log), "the matcher outlived an owner killed while it backtracked"
     finally:
         _kill_naming(log)
+
+
+def _wait_for_job_under_profile(
+    tools: UsefulTools, job_id: str, profile: Any,
+    outcome: queue.SimpleQueue[BaseException | None], leave: threading.Event,
+) -> None:
+    """Thread body: ``bash_job(job_id, "wait")`` under the profile hook, reporting what it raises.
+
+    The thread then lives until *leave* is set: a lock it left held names
+    its ident as the owner, which the next thread started would be given.
+    """
+    sys.setprofile(profile)
+    try:
+        tools.bash_job(job_id, "wait", timeout_seconds=20)
+        outcome.put(None)
+    except BaseException as exc:  # noqa: BLE001 — the injected Stop is expected
+        outcome.put(exc)
+    finally:
+        sys.setprofile(None)
+    leave.wait(60)
+
+
+@pytest.mark.timeout(120)
+def test_a_stop_as_a_wait_reads_the_jobs_verdict_strands_no_watcher(tmp_path: Path) -> None:
+    """The server's Stop landing where a wait has taken the lock of a job's verdict strands nothing.
+
+    ``bash_job(wait)`` polls the job's exit status, which asks the future
+    of the watcher's verdict whether it is done: a ``threading.Condition``
+    entered, whose lock stays held when the Stop is raised as
+    ``__enter__`` returns (gh-74174).  The watcher then never got its
+    verdict in, and a call about the job from another thread (the chat's
+    next task) waited for that lock for good, deaf to its own Stop.
+    """
+    tools = UsefulTools(work_dir=str(tmp_path))
+    before = threading.enumerate()
+    job_id = _job_id(tools.Bash("sleep 30", "sleeper", background=True))
+    outcome: queue.SimpleQueue[BaseException | None] = queue.SimpleQueue()
+    leave = threading.Event()
+    profile = stop_as_it_takes_its_lock(Future.done, BackgroundJob.returncode)
+    waiter = threading.Thread(
+        target=_wait_for_job_under_profile, args=(tools, job_id, profile, outcome, leave),
+        daemon=True,
+    )
+    killer = threading.Thread(target=tools.bash_job, args=(job_id, "kill"), daemon=True)
+    waiter.start()
+    try:
+        assert type(outcome.get(timeout=30)) is KeyboardInterrupt
+        killer.start()
+        killer.join(30)
+        assert not killer.is_alive(), "the next call waits for a lock the Stop left held"
+    finally:
+        leave.set()
+    waiter.join(10)
+    assert stranded_threads(before) == []
 
 
 def test_long_foreground_sleep_is_refused(tmp_path: Path) -> None:

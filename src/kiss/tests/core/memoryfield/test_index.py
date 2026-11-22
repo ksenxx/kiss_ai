@@ -359,13 +359,17 @@ def test_index_connections_are_closed_and_hold_no_transaction(tmp_path: Path) ->
     memory = MemoryDir(tmp_path)
     memory.write("one", "Alpha beta gamma.")
     index = VectorIndex(memory, embed=hashed_embedding)
-    with warnings.catch_warnings():
-        warnings.simplefilter("error", ResourceWarning)
+    gc.collect()  # a connection an earlier test of the process left unclosed warns here
+    # An unclosed connection warns from its finalizer, where a warning turned
+    # into an error is only printed: the warnings are recorded and read.
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", ResourceWarning)
         for _ in range(50):
             index.sync()
             index.search("alpha")
             index.count()
-        gc.collect()
+        gc.collect()  # an unclosed connection warns when it is collected
+    assert [str(w.message) for w in caught if "sqlite3.Connection" in str(w.message)] == []
     # A concurrent writer is not blocked by a reader-style search having run.
     with closing(sqlite3.connect(index.path, timeout=0.1)) as conn, conn:
         conn.execute("INSERT INTO meta (key, value) VALUES ('probe', '1')")

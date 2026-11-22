@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import ast
 import sqlite3
+from collections.abc import Iterator
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -33,11 +35,12 @@ CREATE TABLE task_history (
 """
 
 
-def legacy_db() -> sqlite3.Connection:
-    """Return an in-memory database with a first-release task table."""
-    conn = sqlite3.connect(":memory:", isolation_level=None)
-    conn.executescript(LEGACY_DDL)
-    return conn
+@pytest.fixture
+def conn() -> Iterator[sqlite3.Connection]:
+    """An in-memory database with a first-release task table, closed when the test ends."""
+    with closing(sqlite3.connect(":memory:", isolation_level=None)) as legacy_db:
+        legacy_db.executescript(LEGACY_DDL)
+        yield legacy_db
 
 
 def add(
@@ -82,16 +85,17 @@ def test_module_is_stdlib_only() -> None:
 )
 def test_added_columns_are_the_daemons(table: str, columns: tuple[tuple[str, str], ...]) -> None:
     """Every added column is in the daemon's CREATE TABLE, with the same declaration."""
-    conn = sqlite3.connect(":memory:")
-    persistence._init_tables(conn)
-    declared = {
-        row[1]: (row[2], row[3], row[4]) for row in conn.execute(f"PRAGMA table_info({table})")
-    }
+    with closing(sqlite3.connect(":memory:")) as current:
+        persistence._init_tables(current)
+        declared = {
+            row[1]: (row[2], row[3], row[4])
+            for row in current.execute(f"PRAGMA table_info({table})")
+        }
     for name, declaration in columns:
         assert name in declared, name
-        probe = sqlite3.connect(":memory:")
-        probe.execute(f"CREATE TABLE t (x {declaration})")
-        (_, _, kind, notnull, default, _) = probe.execute("PRAGMA table_info(t)").fetchone()
+        with closing(sqlite3.connect(":memory:")) as probe:
+            probe.execute(f"CREATE TABLE t (x {declaration})")
+            (_, _, kind, notnull, default, _) = probe.execute("PRAGMA table_info(t)").fetchone()
         assert (kind, notnull, default) == declared[name], name
 
 
@@ -102,9 +106,8 @@ def test_the_preamble_starts_with_the_marker() -> None:
     assert not cron_agent.UNATTENDED_CHILD_PREAMBLE.startswith(history_columns.CRON_TASK_MARKER)
 
 
-def test_add_missing_columns_reports_what_it_added() -> None:
+def test_add_missing_columns_reports_what_it_added(conn: sqlite3.Connection) -> None:
     """A first-release table gets every added column once; a current one none."""
-    conn = legacy_db()
     assert add_task_columns(conn) == [
         name for name, _ in history_columns.ADDED_TASK_COLUMNS
     ]
@@ -113,11 +116,10 @@ def test_add_missing_columns_reports_what_it_added() -> None:
     assert {name for name, _ in history_columns.ADDED_TASK_COLUMNS} <= present
 
 
-def test_backfill_recognises_the_marker_not_the_whole_preamble() -> None:
+def test_backfill_recognises_the_marker_not_the_whole_preamble(conn: sqlite3.Connection) -> None:
     """A row from a release whose preamble was worded differently after the
     first sentence is still a cron run; a row that merely quotes the
     sentence is not."""
-    conn = legacy_db()
     add(conn, "current", cron_agent.PROMPT_PREAMBLE + "check the mail")
     add(conn, "older", history_columns.CRON_TASK_MARKER + " Do not ask questions. Check the mail")
     add(conn, "rundir", "/good_morning", work_dir="/home/u/.kiss/cron/runs/good-1")
@@ -141,9 +143,8 @@ def test_backfill_recognises_the_marker_not_the_whole_preamble() -> None:
     }
 
 
-def test_backfill_only_ever_sets_the_flag() -> None:
+def test_backfill_only_ever_sets_the_flag(conn: sqlite3.Connection) -> None:
     """Running it again, or over rows written with the flag, changes nothing."""
-    conn = legacy_db()
     add(conn, "cron", history_columns.CRON_TASK_MARKER + " Check the mail.")
     add(conn, "plain", "an ordinary task")
     add_task_columns(conn)
@@ -154,9 +155,8 @@ def test_backfill_only_ever_sets_the_flag() -> None:
     assert flags(conn) == {"cron": 1, "plain": 1}
 
 
-def test_complete_rows_runs_the_backfills_it_is_asked_for() -> None:
+def test_complete_rows_runs_the_backfills_it_is_asked_for(conn: sqlite3.Connection) -> None:
     """Only the named columns with a backfill run; the rest are ignored."""
-    conn = legacy_db()
     add(conn, "cron", history_columns.CRON_TASK_MARKER + " Check the mail.")
     add_task_columns(conn)
 

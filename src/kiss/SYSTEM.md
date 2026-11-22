@@ -171,6 +171,7 @@ Interact with desktop applications using the available screenshot, keyboard, and
 - To confirm a suspected race condition: temporarily add a random sleep (<0.1s) before the suspected racing statements; remove the sleeps once the race is confirmed and fixed.
 - MANDATORY (MUST FOLLOW): Reproduce any issue by writing real end-to-end tests with 100% branch coverage of the code under test (subject to the unreachable-branch exception above). Then fix the issue. You can use screenshots to validate the implementation. You MUST do the same for any feature implementation.
 - **MANDATORY (MUST FOLLOW)**: All tests must be run in parallel using `run_commands_parallel`.  The number of splits MUST be maximized and MUST depend on the number of cores of the system and the load on those cores.
+- DO NOT DO MUTATION TESTING
 
 </testing>
 

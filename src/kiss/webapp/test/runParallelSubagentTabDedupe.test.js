@@ -16,15 +16,18 @@
 //     AgentServer._open_persisted_subagent_tabs
 //     ("<parentTabId>__sub_<subTaskId>"), and
 //   * whatever tab id the page itself asked to resume the sub-agent
-//     on (media/main.js mints a fresh one when a collapsed
-//     run_parallel panel is expanded again).
+//     on (media/main.js mints the deterministic one when the spawn is
+//     announced: subagentTabIdFor).
 //
 // All three name the SAME sub-agent -- the sub-agent's task id is the
 // only stable identity.  A client that keys tabs on the tab id alone
 // therefore stacks a second (third, ...) tab for one sub-agent.  These
 // tests pin the invariant: whatever id the daemon uses, a sub-agent
-// task never occupies more than one open tab, and the run_parallel
-// panel's collapsed state still decides whether that one tab exists.
+// task never occupies more than one open tab.  An announcement under
+// another id renames the tab (the retired id is released, the tabs and
+// files below follow the rename), a repeated spawn opens no second
+// one, a finished sub-agent has none, and neither has the sub-agent of
+// a parent this page does not show.
 //
 // The page runs on the REAL webapp transport (media/transport.js
 // driving a fake WebSocket), so the frames the daemon would see are
@@ -39,13 +42,12 @@ const {send} = require('./simplify2_harness');
 const {makeWebappClient} = require('./transport_page_helpers');
 const {
   subagentTabEls,
-  togglePanel,
-  clickClose,
   finishFanOut,
   announceFinished,
   openSubTabIds,
   bootParallelRun,
   spawnSubagent,
+  contentTabFor,
 } = require('./subagent_tab_helpers');
 
 // ---------------------------------------------------------------------------
@@ -111,7 +113,6 @@ function testPersistedReplayIdsDoNotDuplicate() {
       task_id: taskId,
       taskIndex: i,
       isSubagentTab: true,
-      isDone: false,
     });
     send(win, {
       type: 'task_events',
@@ -145,67 +146,22 @@ function testPersistedReplayIdsDoNotDuplicate() {
   console.log('  ok - persisted replay ids reuse one tab');
 }
 
-// The fan-out finishes (tabs close, the panel folds), the user expands
-// it (the page re-mints the deterministic tab ids and resumes) and
-// only then does the daemon's replay burst for the finished sub-agents
-// arrive under those same deterministic ids.
-function testReplayAfterExpandDoesNotDuplicate() {
-  const {
-    win,
-    panel,
-    parentId,
-    taskIds,
-    subTabIds: liveTabIds,
-  } = bootParallelRun(2, makeWebappClient(), {replay: true});
-
-  finishFanOut(win, liveTabIds);
-  assert.strictEqual(subagentTabEls(win).length, 0, 'done closes tabs');
-  assert.ok(panel.classList.contains('collapsed'), 'finished panel folds');
-  togglePanel(win, panel);
-  assert.strictEqual(subagentTabEls(win).length, 2, 'expand reopens tabs');
-
-  const reopenedIds = openSubTabIds(win);
-  taskIds.forEach((taskId, i) => {
-    const replayId = parentId + '__sub_' + taskId;
-    assert.ok(
-      reopenedIds.includes(replayId),
-      'the reopened tab must reuse the deterministic id, so the ' +
-        'replay burst below lands on it instead of forcing a retag',
-    );
-    send(win, {
-      type: 'openSubagentTab',
-      tab_id: replayId,
-      parent_tab_id: parentId,
-      description: 'sub ' + (i + 1),
-      task_id: taskId,
-      taskIndex: i,
-      isSubagentTab: true,
-      isDone: true,
-    });
-    send(win, {
-      type: 'task_events',
-      tabId: replayId,
-      task: 'sub ' + (i + 1),
-      task_id: taskId,
-      events: [],
-    });
-  });
-
-  assertOneTabPerSubagent(win, taskIds, 'replay after expand');
-  assert.ok(
-    !panel.classList.contains('collapsed'),
-    'the panel must stay uncollapsed while its sub-agent tabs are open',
-  );
-  win.close();
-  console.log('  ok - replay after expand reuses one tab');
-}
-
 // A duplicate `new_tab` for a sub-agent that already has a tab must not
-// open a second one.  (The collapsed-panel registration is
-// testExpandAfterMixedRegistrationDoesNotDuplicate's.)
+// open a second one, whatever id that tab has by now (the daemon
+// announced the first sub-agent under another one).  (Mixed with the
+// daemon's own announcement, it is
+// testMixedRegistrationDoesNotDuplicate's.)
 function testRepeatedNewTabDoesNotDuplicate() {
   const {win, parentId, taskIds} = bootParallelRun(2, makeWebappClient(), {
     replay: true,
+  });
+  send(win, {
+    type: 'openSubagentTab',
+    tab_id: 'task-parent__sub_0',
+    parent_tab_id: parentId,
+    description: 'sub 1',
+    task_id: taskIds[0],
+    taskIndex: 0,
   });
 
   for (const taskId of taskIds) {
@@ -221,26 +177,19 @@ function testRepeatedNewTabDoesNotDuplicate() {
   console.log('  ok - a repeated new_tab reuses one tab');
 }
 
-// Expanding a panel that learned about the same sub-agent twice (once
-// as a live tab, once while collapsed) must still open one tab each.
-function testExpandAfterMixedRegistrationDoesNotDuplicate() {
+// A page that hears of each running sub-agent again (its spawn
+// re-delivered, then the daemon's own announcement of it) must still
+// show one tab each, and none once the sub-agents have finished.
+function testMixedRegistrationDoesNotDuplicate() {
   const {
     win,
-    panel,
     parentId,
     taskIds,
     subTabIds: liveTabIds,
   } = bootParallelRun(2, makeWebappClient(), {replay: true});
 
-  togglePanel(win, panel);
-  assert.ok(panel.classList.contains('collapsed'), 'panel collapses');
-  assert.strictEqual(
-    subagentTabEls(win).length,
-    2,
-    'collapsing keeps the RUNNING sub-agent tabs open',
-  );
-  // While collapsed the daemon keeps addressing the running sub-agents,
-  // under both id schemes.
+  // The daemon keeps addressing the running sub-agents, as spawns and
+  // as open tabs.
   taskIds.forEach((taskId, i) => {
     send(win, {
       type: 'new_tab',
@@ -258,42 +207,32 @@ function testExpandAfterMixedRegistrationDoesNotDuplicate() {
       isSubagentTab: true,
     });
   });
-  assertOneTabPerSubagent(win, taskIds, 'mixed regs, collapsed');
-  togglePanel(win, panel);
-  assertOneTabPerSubagent(win, taskIds, 'expand after mixed regs');
+  assertOneTabPerSubagent(win, taskIds, 'mixed regs');
 
-  // Once finished, the sub-agents are history: the collapsed panel keeps
-  // them closed however the daemon re-announces them.
-  togglePanel(win, panel);
+  // Once finished, the sub-agents are history: they stay closed
+  // however the daemon re-announces their end.
   finishFanOut(win, liveTabIds);
   assert.strictEqual(subagentTabEls(win).length, 0, 'done closes tabs');
-  announceFinished(win, parentId, taskIds, deterministicId(parentId));
+  announceFinished(win, taskIds, deterministicId(parentId));
   assert.strictEqual(
     subagentTabEls(win).length,
     0,
-    'nothing may open a finished sub-agent tab while the run_parallel ' +
-      'panel is collapsed',
+    'nothing may open a finished sub-agent tab',
   );
-
-  togglePanel(win, panel);
-  assertOneTabPerSubagent(win, taskIds, 'expand after finish');
   win.close();
-  console.log('  ok - mixed registrations expand to one tab');
+  console.log('  ok - mixed registrations keep one tab');
 }
 
 // The daemon may re-announce a sub-agent tab under a THIRD id (e.g. the
-// parent tab is reopened in a new window and replays) while the panel
-// is collapsed: a running sub-agent moves onto that id (one tab each),
-// a finished one stays closed, and expanding yields one each.
-function testCollapsedStaysClosedAcrossIdSchemes() {
-  const {win, panel, parentId, taskIds} = bootParallelRun(
-    2,
-    makeWebappClient(),
-    {replay: true},
-  );
+// parent tab is reopened in a new window and replays): a running
+// sub-agent moves onto that id (one tab each), a finished one stays
+// closed.
+function testFinishedStaysClosedAcrossIdSchemes() {
+  const {win, parentId, taskIds} = bootParallelRun(2, makeWebappClient(), {
+    replay: true,
+  });
   const thirdId = (taskId, i) => 'task-parent__sub_' + i;
 
-  togglePanel(win, panel);
   taskIds.forEach((taskId, i) => {
     send(win, {
       type: 'openSubagentTab',
@@ -313,201 +252,22 @@ function testCollapsedStaysClosedAcrossIdSchemes() {
 
   finishFanOut(win, taskIds.map(thirdId));
   assert.strictEqual(subagentTabEls(win).length, 0, 'done closes tabs');
-  announceFinished(win, parentId, taskIds, thirdId);
+  announceFinished(win, taskIds, thirdId);
   assert.strictEqual(
     subagentTabEls(win).length,
     0,
-    'a collapsed run_parallel panel must keep every finished sub-agent ' +
-      'tab closed',
+    'every finished sub-agent tab must stay closed',
   );
-
-  togglePanel(win, panel);
-  assertOneTabPerSubagent(win, taskIds, 'expand after 3rd id');
   win.close();
-  console.log('  ok - collapsed panel ignores every id form');
+  console.log('  ok - a finished sub-agent stays closed in every id form');
 }
 
-// A sub-agent tab the user closed by hand stays closed: a running one
-// when the daemon re-delivers its spawn (`new_tab`, always a live
-// child), a finished one when the daemon re-announces it (nor may a
-// sibling be duplicated).  The collapse/expand contract itself is
-// pinned by runParallelPanelTabsSync.test.js.
-function testNewTabDoesNotRevivHandClosedSubagent() {
-  const {
-    win,
-    panel,
-    parentId,
-    taskIds,
-    subTabIds: liveTabIds,
-  } = bootParallelRun(2, makeWebappClient(), {replay: true});
-
-  clickClose(win, liveTabIds[0]);
-  assert.strictEqual(
-    subagentTabEls(win).length,
-    1,
-    'closing a RUNNING sub-agent tab by hand closes that tab alone',
-  );
-  send(win, {
-    type: 'new_tab',
-    task_id: taskIds[0],
-    parent_tab_id: parentId,
-    taskId: '',
-  });
-  assert.deepStrictEqual(
-    openSubTabIds(win),
-    [liveTabIds[1]],
-    'a re-delivered new_tab must not reopen the running sub-agent tab ' +
-      'the user closed by hand',
-  );
-
-  finishFanOut(win, liveTabIds);
-  togglePanel(win, panel);
-  assertOneTabPerSubagent(win, taskIds, 'reopened history');
-  announceFinished(win, parentId, taskIds, deterministicId(parentId));
-  clickClose(win, liveTabIds[0]);
-  assert.strictEqual(
-    subagentTabEls(win).length,
-    1,
-    'closing one of two finished sub-agent tabs must leave the sibling open',
-  );
-
-  announceFinished(win, parentId, taskIds, deterministicId(parentId));
-  assert.strictEqual(
-    subagentTabEls(win).length,
-    1,
-    'RESURRECTED SUB-AGENT TAB: a re-announcement reopened the finished sub-agent tab the ' +
-      'user closed by hand: ' +
-      JSON.stringify(openSubTabIds(win)),
-  );
-  assert.ok(
-    !panel.classList.contains('collapsed'),
-    'the panel must stay uncollapsed while a sibling tab is open',
-  );
-
-  // Collapsing and expanding is the way back: it reopens the whole
-  // fan-out, hand-closed sub-agents included.
-  togglePanel(win, panel);
-  togglePanel(win, panel);
-  assertOneTabPerSubagent(win, taskIds, 'expand after hand close');
-  win.close();
-  console.log('  ok - re-announce cannot revive a closed sub tab');
-}
-
-// Two run_parallel calls in one task: a sub-agent spawned late belongs
-// to the call that requested it. A live spawn always gets its tab, so
-// the ownership shows once the FIRST fan-out finishes: expanding the
-// first panel reopens the late child, the second panel never touches it.
-function testLateSpawnHonoursItsOwnPanel() {
-  // The first call fanned out to three tasks but only two have started.
-  const client = makeWebappClient();
-  const {
-    win,
-    panel,
-    parentId,
-    subTabIds: liveTabIds,
-  } = bootParallelRun(2, client, {replay: true, declared: 3});
-  const all = client.drain;
-
-  togglePanel(win, panel);
-  assert.ok(panel.classList.contains('collapsed'), 'first fan-out folds');
-  assert.strictEqual(
-    subagentTabEls(win).length,
-    2,
-    'collapsing the first fan-out keeps its running sub-agent tabs open',
-  );
-
-  // A second run_parallel call renders a second, uncollapsed panel.
-  send(win, {
-    type: 'tool_call',
-    name: 'run_parallel',
-    tabId: parentId,
-    extras: {tasks: JSON.stringify(['sub 3'])},
-  });
-  const panels = Array.from(
-    win.document.querySelectorAll('#output .ev.tc.tc-run-parallel'),
-  );
-  assert.strictEqual(panels.length, 2, 'the task must show two fan-outs');
-  const second = panels[1];
-  assert.ok(
-    !second.classList.contains('collapsed'),
-    'the second fan-out starts uncollapsed',
-  );
-
-  let before = all().length;
-  // The first fan-out's third sub-agent starts only now.
-  send(win, {
-    type: 'new_tab',
-    task_id: 'sub-task-late',
-    parent_tab_id: parentId,
-    taskId: '',
-  });
-  const lateId = parentId + '__sub_sub-task-late';
-  assert.deepStrictEqual(
-    openSubTabIds(win).sort(),
-    [...liveTabIds, lateId].sort(),
-    'INVARIANT VIOLATED: a live sub-agent spawned into a fan-out whose panel is ' +
-      'collapsed must still get its tab: ' +
-      JSON.stringify(openSubTabIds(win)),
-  );
-  assert.ok(
-    all()
-      .slice(before)
-      .some(m => m.type === 'resumeSession' && m.taskId === 'sub-task-late'),
-    'the late sub-agent must be resumed right away',
-  );
-  assert.ok(
-    panel.classList.contains('collapsed'),
-    'the late spawn does not unfold the first panel the user collapsed',
-  );
-
-  // The second fan-out's own sub-agent gets a tab too.
-  send(win, {
-    type: 'new_tab',
-    task_id: 'sub-task-3',
-    parent_tab_id: parentId,
-    taskId: '',
-  });
-  const thirdId = parentId + '__sub_sub-task-3';
-  assert.strictEqual(
-    subagentTabEls(win).length,
-    4,
-    'the uncollapsed second fan-out must open its own sub-agent tab',
-  );
-
-  // The first fan-out finishes: only ITS three tabs close, and expanding
-  // its (already collapsed) panel resumes exactly those three.
-  finishFanOut(win, [...liveTabIds, lateId]);
-  assert.deepStrictEqual(
-    openSubTabIds(win),
-    [thirdId],
-    "finishing the first fan-out must leave the second fan-out's " +
-      'running child open',
-  );
-  assert.ok(
-    !second.classList.contains('collapsed'),
-    'the second fan-out stays uncollapsed: it owns a running child',
-  );
-  before = all().length;
-  togglePanel(win, panel);
-  assert.deepStrictEqual(
-    all()
-      .slice(before)
-      .filter(m => m.type === 'resumeSession')
-      .map(m => m.taskId)
-      .sort(),
-    ['sub-task-1', 'sub-task-2', 'sub-task-late'],
-    'expanding the first fan-out must reopen its late child with its ' +
-      'own two, and nothing of the second fan-out',
-  );
-  assert.strictEqual(subagentTabEls(win).length, 4, 'one tab per sub-agent');
-  win.close();
-  console.log('  ok - a late spawn honours its own panel');
-}
-
-// Renaming a sub-agent's tab must tell the host to release the retired
-// id (the daemon opened the new id as an extra viewer of the same
-// sub-agent, so the old one would otherwise keep host state alive).
-function testRetagReleasesTheOldTabId() {
+// A sub-agent's tab is the daemon's view of the sub-agent: renaming it
+// tells the daemon nothing (`closeTab` is for a chat's own tab).  The
+// retired id stays the daemon's until the sub-agent ends, and the
+// daemon names it as the parent of what the sub-agent starts next: the
+// page opens that tab below the renamed one.
+function testRetagTellsTheDaemonNothing() {
   const client = makeWebappClient();
   const {
     win,
@@ -540,35 +300,35 @@ function testRetagReleasesTheOldTabId() {
     [replayId],
     'the sub-agent must move onto the id the daemon now uses',
   );
-  assert.ok(
+  assert.deepStrictEqual(
     all()
       .slice(before)
-      .some(m => m.type === 'closeTab' && m.tabId === liveTabIds[0]),
-    'STALE HOST STATE: the host was never told to release the retired sub-agent tab ' +
-      'id ' +
-      liveTabIds[0],
+      .filter(m => m.type === 'closeTab'),
+    [],
+    "the rename of a sub-agent's tab is not reported to the daemon",
   );
-  assert.ok(
-    !all()
-      .slice(before)
-      .some(m => m.type === 'closeTab' && m.tabId === replayId),
-    'the surviving sub-agent tab must not be closed',
+  const nested = spawnSubagent(client, liveTabIds[0], 'nested-task', 'nested', 0);
+  send(win, {type: 'status', running: false, tabId: nested});
+  send(win, {type: 'subagentDone', tab_id: replayId});
+  assert.deepStrictEqual(
+    openSubTabIds(win),
+    [],
+    'a sub-agent started under the retired id hangs below the renamed tab',
   );
   win.close();
-  console.log('  ok - a retag releases the retired tab id');
+  console.log('  ok - a retag tells the daemon nothing');
 }
 
-// A sub-agent that ran a fan-out of its own owns that fan-out's panel
-// (its `_rpParentTabId`).  Renaming the sub-agent's tab must move the
-// panel's owner too: a nested child reopened from the panel afterwards
-// is otherwise resumed under a parent id that no longer exists and
-// lands as a root tab of its own instead of in the chat's group.
-function testRetagMovesNestedFanOut() {
+// What hangs below a sub-agent's tab names that tab as its parent: the
+// tab of a sub-agent it started (a fan-out of its own), a file it
+// opened.  Renaming the sub-agent's tab must take them along: left on
+// the retired id, each hangs off a tab that no longer exists and lands
+// as a root tab of its own instead of in the chat's group.
+function testRetagMovesTabsAndFilesBelow() {
   const client = makeWebappClient();
   const {win, parentId, taskIds, subTabIds} = bootParallelRun(1, client, {
     replay: true,
   });
-  const all = client.drain;
   const sub = subTabIds[0];
   send(win, {type: 'status', running: true, tabId: sub, taskId: 2});
   send(win, {
@@ -578,6 +338,14 @@ function testRetagMovesNestedFanOut() {
     extras: {tasks: JSON.stringify(['nested'])},
   });
   const nested = spawnSubagent(client, sub, 'nested-task', 'nested', 0);
+  send(win, {
+    type: 'fileContent',
+    tabId: sub,
+    path: '/w/notes.md',
+    name: 'notes.md',
+    content: 'notes',
+  });
+  assert.ok(contentTabFor(win, 'notes.md'), 'sanity: the file opened');
   const newId = 'task-parent-task__sub_0';
   send(win, {
     type: 'openSubagentTab',
@@ -589,36 +357,21 @@ function testRetagMovesNestedFanOut() {
     isSubagentTab: true,
   });
   assert.deepStrictEqual(openSubTabIds(win), [newId, nested], 'sanity');
-  send(win, {type: 'subagentDone', tab_id: nested});
   const tabs = () => win._testApi.openTabs();
-  assert.ok(!tabs().some(t => t.id === nested), 'the finished child closed');
-  win._testApi.switchToTab(newId);
-  const nestedPanel = win.document.querySelector('#output .tc-run-parallel');
-  assert.ok(nestedPanel, 'the nested fan-out panel is on screen');
-  assert.ok(
-    nestedPanel.classList.contains('collapsed'),
-    'STALE OWNER: the nested fan-out did not fold when its last child closed',
-  );
-  const before = all().length;
-  togglePanel(win, nestedPanel, all);
-  const resume = all()
-    .slice(before)
-    .find(m => m.type === 'resumeSession' && m.taskId === 'nested-task');
-  assert.ok(resume, 'expanding the panel reopens the nested child');
   assert.strictEqual(
-    resume.parentTabId,
-    newId,
-    'the child is resumed under the renamed parent',
-  );
-  const reopened = tabs().find(t => t.id === resume.tabId);
-  assert.ok(reopened, 'the reopened child has a tab');
-  assert.strictEqual(
-    reopened.rootId,
+    tabs().find(t => t.id === nested).rootId,
     parentId,
-    'the reopened child stays in the chat\'s group',
+    "the nested child stays in the chat's group",
   );
+  assert.strictEqual(
+    contentTabFor(win, 'notes.md').rootId,
+    parentId,
+    "the file stays in the chat's group",
+  );
+  send(win, {type: 'subagentDone', tab_id: nested});
+  assert.ok(!tabs().some(t => t.id === nested), 'the finished child closed');
   win.close();
-  console.log('  ok - a retag moves the nested fan-out to the new id');
+  console.log('  ok - a retag moves the tabs and files below to the new id');
 }
 
 // Sub-agent broadcasts (new_tab with taskId '', openSubagentTab) reach
@@ -652,18 +405,15 @@ function testUnknownParentSpawnsNoPhantomTab() {
     'PHANTOM RESUME: new_tab for a parent this client does not own must not resume ' +
       'the foreign sub-agent',
   );
-  for (const isDone of [false, true]) {
-    send(win, {
-      type: 'openSubagentTab',
-      tab_id: foreignParent + '__sub_foreign-task',
-      parent_tab_id: foreignParent,
-      description: 'foreign sub',
-      task_id: 'foreign-task',
-      taskIndex: 0,
-      isSubagentTab: true,
-      isDone,
-    });
-  }
+  send(win, {
+    type: 'openSubagentTab',
+    tab_id: foreignParent + '__sub_foreign-task',
+    parent_tab_id: foreignParent,
+    description: 'foreign sub',
+    task_id: 'foreign-task',
+    taskIndex: 0,
+    isSubagentTab: true,
+  });
   // The tab strip shows only the active group, so a foreign tab would
   // never appear there: the registry is the only place it could hide.
   assert.deepStrictEqual(
@@ -679,14 +429,11 @@ function testUnknownParentSpawnsNoPhantomTab() {
 const SCENARIOS = [
   testUnknownParentSpawnsNoPhantomTab,
   testPersistedReplayIdsDoNotDuplicate,
-  testReplayAfterExpandDoesNotDuplicate,
   testRepeatedNewTabDoesNotDuplicate,
-  testExpandAfterMixedRegistrationDoesNotDuplicate,
-  testCollapsedStaysClosedAcrossIdSchemes,
-  testNewTabDoesNotRevivHandClosedSubagent,
-  testLateSpawnHonoursItsOwnPanel,
-  testRetagReleasesTheOldTabId,
-  testRetagMovesNestedFanOut,
+  testMixedRegistrationDoesNotDuplicate,
+  testFinishedStaysClosedAcrossIdSchemes,
+  testRetagTellsTheDaemonNothing,
+  testRetagMovesTabsAndFilesBelow,
 ];
 
 function main() {

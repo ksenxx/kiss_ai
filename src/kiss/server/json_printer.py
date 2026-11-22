@@ -41,6 +41,7 @@ from kiss.core.locked import locked_call
 from kiss.core.models.model import Attachment
 from kiss.core.printer import (
     Printer,
+    bash_status_lines,
     cost_fields,
     event_cost,
     extract_extras,
@@ -48,6 +49,7 @@ from kiss.core.printer import (
     parse_result_yaml,
     truncate_result,
 )
+from kiss.core.tool_interrupt import call_without_injection
 from kiss.server import agent_state
 
 logger = logging.getLogger(__name__)
@@ -493,12 +495,14 @@ def with_synthesized_events(
     trailing ``usage_info`` totals event is appended when the stream
     carries neither a ``usage_info`` nor a ``result`` event but the row
     has a spend (:func:`_usage_info_event_from_session`).  It is appended
-    too to a finished stream without a ``result`` whose last
-    ``usage_info`` shows less than the row: a killed task whose cost the
-    orphan sweep raised past its last usage event
+    too to a finished stream that ends on a lower cost than the row's
+    (:func:`_row_cost_past_shown`): a killed task whose cost the orphan
+    sweep raised past its last usage event
     (``persistence._floor_orphan_costs``), so the reopened chat shows
-    the row's cost.  When nothing can be synthesized the list is
-    returned unchanged.
+    the row's cost.  A ``result`` event earlier in the stream does not
+    stand for the end of the task: a task that ran on after a
+    ``finish(is_continue=True)`` has one from every session it closed.
+    When nothing can be synthesized the list is returned unchanged.
 
     Args:
         events: The task's replay events (already coalesced or raw).
@@ -513,19 +517,25 @@ def with_synthesized_events(
         settings = _task_settings_event_from_session(session)
         if settings is not None:
             out = [settings, *out]
-    if "result" not in types:
-        usage = _usage_info_event_from_session(session)
-        if usage is not None and (
-            "usage_info" not in types or _row_cost_past_last_usage(events, session, usage)
-        ):
-            out = [*out, usage]
+    usage = _usage_info_event_from_session(session)
+    if usage is not None and (
+        not types & {"usage_info", "result"} or _row_cost_past_shown(events, session, usage)
+    ):
+        out = [*out, usage]
     return out
 
 
-def _row_cost_past_last_usage(
+def _row_cost_past_shown(
     events: list[dict[str, Any]], session: dict[str, Any], usage: dict[str, Any],
 ) -> bool:
-    """Whether finished *session*'s row cost (*usage*) exceeds its last ``usage_info``'s."""
+    """Whether finished *session*'s row cost (*usage*) exceeds the cost a replay of *events* shows.
+
+    The page's header takes the cost of each ``usage_info`` and ``result``
+    event that carries one, so a replay ends on the cost of the last such
+    event, whichever of the two it is.  ``False`` for a running task (its
+    events are still coming) and for a stream no event of which carries
+    a cost.
+    """
     extra = _session_extra(session)
     try:
         finished = extra is not None and int(extra.get("endTs") or 0) > 0
@@ -533,14 +543,24 @@ def _row_cost_past_last_usage(
         finished = False
     if not finished:
         return False
-    last = next((ev for ev in reversed(events) if ev.get("type") == "usage_info"), None)
-    if last is None:
-        return False
-    shown = event_cost(last)
-    if shown is None:  # an older event carries its cost only in its "Budget: $x" text
-        match = _USAGE_TEXT_COST_RE.search(str(last.get("text") or ""))
+    for event in reversed(events):
+        shown = _shown_cost(event)
+        if shown is not None:
+            return float(usage["cost_usd"]) > shown + 1e-9
+    return False
+
+
+def _shown_cost(event: dict[str, Any]) -> float | None:
+    """The cost replayed *event* puts in the chat header, ``None`` when it sets none."""
+    kind = event.get("type")
+    if kind not in ("usage_info", "result"):
+        return None
+    shown = event_cost(event)
+    if shown is None and kind == "usage_info":
+        # An older event carries its cost only in its "Budget: $x" text.
+        match = _USAGE_TEXT_COST_RE.search(str(event.get("text") or ""))
         shown = float(match.group(1).replace(",", "")) if match else None
-    return shown is not None and float(usage["cost_usd"]) > shown + 1e-9
+    return shown
 
 
 _USAGE_TEXT_COST_RE = re.compile(r"Budget:\s*\$([0-9][\d,]*\.?\d*)")
@@ -892,11 +912,13 @@ class JsonPrinter(Printer):
         # ``_CommandsMixin._apply_new_work_dir``; the web printer fills
         # a ``configData`` without one from it.
         self.work_dir = ""
-        # The agent server's word on whether a tab still shows a
-        # sub-agent's task (or nothing yet): asked before that
-        # sub-agent's end is told to the tab its page derives for it
+        # The agent server's end of a tab's view of a sub-agent (tab id,
+        # the sub-agent's task id, the model it was launched with): it
+        # tells the tab that the sub-agent is over and forgets the tab,
+        # unless the tab shows something else by then.  Called for each
+        # tab a page can hold when the sub-agent ends
         # (``sorcar_agent._notify_subagent_done``).
-        self.subagent_view_kept: Callable[[str, str], bool] | None = None
+        self.end_subagent_view: Callable[[str, str, str], None] | None = None
         # Every printer lock is an RLock taken through ``locked_call``:
         # the runner's Stop injects KeyboardInterrupt into task threads,
         # and a plain ``with lock:`` leaks the lock when it lands right
@@ -2126,7 +2148,10 @@ class JsonPrinter(Printer):
         if fragment and not flush_now and bs.timer is None:
             bs.timer = threading.Timer(0.1, partial(self.flush_bash_output, key))
             bs.timer.daemon = True
-            bs.timer.start()
+            # On the task's thread, for each burst of a command's output: a
+            # Stop raised as the start takes the lock of the thread's event
+            # would leave the timer never run and no later one started.
+            call_without_injection(bs.timer.start)
         return bs, flush_now
 
     def _end_bash_stream(self, key: str) -> bool:
@@ -2704,7 +2729,11 @@ class JsonPrinter(Printer):
         ``tool_result`` event carries
         ``tool_name`` (downstream consumers key panel labels and
         highlighting on it), ``finish`` results are suppressed, and
-        already-streamed bash output is deduplicated.
+        already-streamed bash output is deduplicated: the result of a
+        call streamed whole keeps only the tool's own lines
+        (:func:`~kiss.core.printer.bash_status_lines`), without which
+        the transcript of a failed command reads as that of one that
+        passed.
 
         Args:
             content: The tool's return value.
@@ -2716,9 +2745,9 @@ class JsonPrinter(Printer):
             interrupted: ``True`` when the user stopped the tool call
                 through its panel's Stop button.  The event is flagged
                 ``interrupted`` and keeps its content even for a Bash
-                call whose output was streamed (normally blanked as a
-                duplicate), so the panel can show that the call was
-                cut short rather than ending silently.
+                call whose output was streamed (normally cut to the
+                tool's status as a duplicate), so the panel can show
+                that the call was cut short rather than ending silently.
         """
         self._flush_bash()
         show_result = tool_name != "finish"
@@ -2729,7 +2758,8 @@ class JsonPrinter(Printer):
         # this call's stale cutoff.
         started = locked_call(self._lock, self._tool_call_started.pop, self._task_key(), None)
         result_content = (
-            "" if streamed and not interrupted else truncate_result(str(content))
+            "\n".join(bash_status_lines(str(content))) if streamed and not interrupted
+            else truncate_result(str(content))
         )
         if show_result:
             event: dict[str, Any] = {

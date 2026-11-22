@@ -7,9 +7,10 @@
 
 // End-to-end (jsdom) tests for the two refresh buttons of media/main.js:
 //
-//   * the Chats row of the sidebar ends with a button that reloads the
-//     whole app page (the browser's reload, which the standalone app
-//     window and a home-screen app have no address bar for);
+//   * the first row of the Chats sidebar, above the Projects row and
+//     the search box, holds a button that reloads the whole app page
+//     (the browser's reload, which the standalone app window and a
+//     home-screen app have no address bar for);
 //   * every content tab that shows something on disk (a code file, a
 //     .md / .html file, a PDF or image, a report, a folder listing) has
 //     a button at its top right that re-reads it from disk through
@@ -29,6 +30,11 @@ const {
   flushMicrotasks,
   reloadCountingConsole,
 } = require('./simplify2_harness');
+const {
+  writeReport,
+  reportRequests,
+  answerReport,
+} = require('./subagent_tab_helpers');
 
 function makePage() {
   const reloads = [];
@@ -55,23 +61,31 @@ function refreshBtns(win) {
   );
 }
 
-function testChatsRowRefreshButtonReloadsTheApp() {
+function testSidebarRefreshButtonReloadsTheApp() {
   const {win, reloads} = makePage();
-  const hdr = win.document.querySelector(
-    '#sidebar-tab-history-panel .sidebar-hdr',
-  );
-  assert.ok(hdr, 'the Chats header row exists');
+  const row = win.document.getElementById(
+    'sidebar-tab-history-panel',
+  ).firstElementChild;
   assert.ok(
-    hdr.classList.contains('chats-hdr'),
-    'the row is the flex Chats row',
+    row.classList.contains('sidebar-refresh-row'),
+    "the refresh row is the panel's first",
   );
-  assert.strictEqual(hdr.firstElementChild.textContent.trim(), 'Chats');
-  const btn = hdr.querySelector('#chats-refresh-btn');
-  assert.ok(btn, 'the Chats row holds the refresh button');
+  const btn = row.querySelector('#chats-refresh-btn');
+  assert.ok(btn, 'the row holds the refresh button');
   assert.strictEqual(
-    hdr.lastElementChild,
+    row.lastElementChild,
     btn,
     "the button is at the row's right end",
+  );
+  // The row is the button alone (the panel has no "Chats" title row);
+  // the Projects row comes under it and the search box follows.
+  assert.strictEqual(row.textContent.trim(), '');
+  assert.strictEqual(row.parentNode.querySelector('.sidebar-hdr'), null);
+  const projects = row.nextElementSibling;
+  assert.strictEqual(projects.id, 'projects-row');
+  assert.ok(
+    projects.nextElementSibling.querySelector('#history-search'),
+    'the search box follows the Projects row',
   );
   assert.strictEqual(btn.getAttribute('aria-label'), 'Refresh the app');
   assert.ok(btn.querySelector('svg'), 'the button shows an icon');
@@ -79,7 +93,9 @@ function testChatsRowRefreshButtonReloadsTheApp() {
   click(win, btn);
   assert.strictEqual(reloads.length, 1, 'the click reloads the page');
   win.close();
-  console.log('  ok - the Chats row refresh button reloads the app');
+  console.log(
+    '  ok - the refresh button, in the row above Projects, reloads the app',
+  );
 }
 
 async function testEditableFileButtonSitsInSaveBarAndReloadsFromDisk() {
@@ -179,7 +195,8 @@ async function testMarkdownButtonInBarAndBareHtmlButtonFloats() {
     'after the Edit source / Preview toggle and Save',
   );
 
-  // A read-only .html (no version stamp: a bare iframe, no Save bar).
+  // A read-only .html (no version stamp): its bar holds the path and
+  // "Open in Browser", nothing to save.
   send(win, {
     type: 'fileContent',
     path: '/ws/page.html',
@@ -188,27 +205,25 @@ async function testMarkdownButtonInBarAndBareHtmlButtonFloats() {
   });
   btns = refreshBtns(win);
   assert.strictEqual(btns.length, 2, 'the second tab has its own button');
-  const floating = Array.from(btns).find(b => !b.closest('.content-save-bar'));
-  assert.ok(floating, 'the bare html view gets a button outside any bar');
-  assert.ok(
-    floating.classList.contains('content-refresh-overlay'),
-    'it floats over the view',
+  const bar = btns[1].closest('.content-save-bar');
+  assert.ok(bar, 'the read-only html view has a bar too');
+  assert.strictEqual(bar.querySelector('.content-save-btn'), null);
+  assert.strictEqual(
+    btns[1].previousElementSibling.className,
+    'content-browser-btn',
+    'after Open in Browser',
   );
-  assert.ok(
-    floating.parentNode.classList.contains('content-tab-view'),
-    'it is a direct child of the tab view',
-  );
+  assert.ok(!btns[1].classList.contains('content-refresh-overlay'));
   // An editor is only created once the Monaco loader's promise resolves.
   await flushMicrotasks();
   assert.strictEqual(created.length, 0, 'no editor for the two previews');
   win.close();
-  console.log(
-    '  ok - a .md button sits in the bar, a bare .html button floats',
-  );
+  console.log('  ok - a .md and a read-only .html button sit in their bars');
 }
 
-function testBinaryReportAndDirectoryFloatVirtualHasNone() {
+function testBinaryAndDirectoryFloatReportInBarVirtualHasNone() {
   const {win, posted} = makePage();
+  const chat = win._testApi.getActiveTabId();
   send(win, {
     type: 'fileContent',
     path: '/ws/pic.png',
@@ -220,14 +235,15 @@ function testBinaryReportAndDirectoryFloatVirtualHasNone() {
   assert.strictEqual(refreshBtns(win).length, 1, 'an image tab has a button');
   assert.ok(refreshBtns(win)[0].classList.contains('content-refresh-overlay'));
 
-  send(win, {
-    type: 'fileContent',
-    path: '/ws/report.md',
-    name: 'report.md',
-    content: '<h1>report</h1>',
-    isReport: true,
-  });
+  // A finished task's report is the file itself, as the daemon read it.
+  writeReport(win, 'reports/report.md', '# report', {tabId: chat});
+  send(win, {type: 'task_done', success: true, tabId: chat});
+  answerReport(win, reportRequests(posted)[0], '# report');
   assert.strictEqual(refreshBtns(win).length, 2, 'a report tab has a button');
+  assert.ok(
+    refreshBtns(win)[1].closest('.content-save-bar'),
+    "a report is its file's own view: the button is in the Save bar",
+  );
 
   send(win, {
     type: 'fileContent',
@@ -259,16 +275,16 @@ function testBinaryReportAndDirectoryFloatVirtualHasNone() {
   );
   win.close();
   console.log(
-    '  ok - image, report and folder buttons float; a virtual tab has none',
+    "  ok - image and folder buttons float, a report's is in its bar; a virtual tab has none",
   );
 }
 
 (async () => {
   try {
-    testChatsRowRefreshButtonReloadsTheApp();
+    testSidebarRefreshButtonReloadsTheApp();
     await testEditableFileButtonSitsInSaveBarAndReloadsFromDisk();
     await testMarkdownButtonInBarAndBareHtmlButtonFloats();
-    testBinaryReportAndDirectoryFloatVirtualHasNone();
+    testBinaryAndDirectoryFloatReportInBarVirtualHasNone();
     console.log('refreshButtons.test.js: all tests passed');
   } catch (err) {
     console.error('FAIL:', err && err.stack ? err.stack : err);

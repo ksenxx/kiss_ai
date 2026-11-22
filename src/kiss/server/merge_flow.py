@@ -90,13 +90,16 @@ def _stage_all(work_path: Path) -> tuple[str, str]:
     """Run ``git add -A`` in *work_path* and identify the commit it would make.
 
     Returns:
-        ``(snapshot, "")`` where *snapshot* is ``"<HEAD> <index tree>"``:
-        the object ids ``git rev-parse HEAD`` (empty on an unborn branch)
-        and ``git write-tree`` print.  Two equal snapshots denote the same
-        commit, parent and content alike, however large the change; the
-        bounded diff text handed to the LLM cannot tell that, as a change
-        past its cap leaves it unchanged.  ``("", <reason>)`` when staging
-        failed.
+        ``(snapshot, "")`` where *snapshot* is ``"<branch> <HEAD> <index
+        tree>"``: the ref ``git symbolic-ref HEAD`` prints (empty on a
+        detached HEAD) and the object ids ``git rev-parse HEAD`` (empty
+        on an unborn branch) and ``git write-tree`` print.  Two equal
+        snapshots denote the same commit, destination, parent and
+        content alike, however large the change; the bounded diff text
+        handed to the LLM cannot tell that, as a change past its cap
+        leaves it unchanged, and neither does a checkout of another
+        branch at the same commit, which keeps parent and staged tree.
+        ``("", <reason>)`` when staging failed.
     """
     add_result = _git("add", "-A", cwd=str(work_path))
     if add_result.returncode != 0:
@@ -104,8 +107,9 @@ def _stage_all(work_path: Path) -> tuple[str, str]:
     tree_result = _git("write-tree", cwd=str(work_path))
     if tree_result.returncode != 0:
         return "", _git_error_line(tree_result, "git write-tree failed")
+    branch = _git("symbolic-ref", "-q", "HEAD", cwd=str(work_path)).stdout.strip()
     head = _git("rev-parse", "--verify", "-q", "HEAD", cwd=str(work_path)).stdout.strip()
-    return f"{head} {tree_result.stdout.strip()}", ""
+    return f"{branch} {head} {tree_result.stdout.strip()}", ""
 
 
 def _is_valid_baseline(git_dir: str, sha: str) -> bool:
@@ -122,25 +126,6 @@ def _is_valid_baseline(git_dir: str, sha: str) -> bool:
     return check.returncode == 0 and check.stdout.strip() == "commit"
 
 
-def _flatten_changed(
-    listing: list[tuple[GitWorktree, list[str] | None]], primary: GitWorktree | None,
-) -> list[str]:
-    """Merge per-worktree file lists into one.
-
-    Files of *primary* (the worktree the task's work dir is in) stay
-    relative to it; files of any other worktree are prefixed with that
-    repository's root.  A worktree whose files could not be listed
-    (``None``, see :meth:`_MergeFlowMixin._changed_files_of`)
-    contributes nothing; callers that may discard check for it with
-    :func:`_unreadable_worktrees` first.
-    """
-    files: list[str] = []
-    for wt, names in listing:
-        prefix = "" if wt is primary else f"{wt.repo_root}/"
-        files.extend(prefix + name for name in names or ())
-    return sorted(set(files))
-
-
 def _unreadable_worktrees(
     listing: list[tuple[GitWorktree, list[str] | None]],
 ) -> list[GitWorktree]:
@@ -152,6 +137,77 @@ def _pending_worktrees(agent: Any) -> list[GitWorktree]:
     """Every worktree pending on *agent* (``[]`` for no agent or a non-worktree one)."""
     worktrees = getattr(agent, "worktrees", None)
     return list(worktrees) if isinstance(worktrees, list) else []
+
+
+COMMIT_TOAST = "manual-commit"
+"""The kind of a Git Commit's toasts (:func:`_press_toast`)."""
+
+
+def _press_toast(
+    printer: JsonPrinter, kind: str, tab_id: str, severity: str, message: str,
+) -> None:
+    """Show *message* as the toast of *tab_id*'s button press on every surface.
+
+    Every toast of one press ("Auto-generating commit message…",
+    "Committing on <machine>…", the outcome) has the same stable id,
+    so each replaces the one before in place (the page dedups toasts
+    by id) instead of stacking.
+
+    Args:
+        printer: The daemon's printer.
+        kind: What was pressed: :data:`COMMIT_TOAST` for Git Commit,
+            ``pr_flow.PR_TOAST`` for Create PR.
+        tab_id: The tab that pressed the button.
+        severity: ``"info"`` or ``"error"``.
+        message: The toast's text.
+    """
+    printer.broadcast({
+        "type": "notification",
+        "id": f"{kind}:{tab_id}",
+        "severity": severity,
+        "message": message,
+        "tabId": tab_id,
+    })
+
+
+def _report_press(printer: JsonPrinter, kind: str, event: dict[str, Any], reply_to: str) -> None:
+    """Send the outcome *event* of a tab's button press (Git Commit, Create PR).
+
+    The outcome is a toast, info on success and error on failure, plus
+    *event*, which re-arms the button.
+
+    Args:
+        printer: The daemon's printer.
+        kind: The kind of the press's toasts (:func:`_press_toast`).
+        event: The outcome, with its ``tabId``, ``success`` and ``message``.
+        reply_to: The connection id of a daemon-link peer whose
+            forwarded press this is: the event goes to that connection
+            alone, as the reply to its request, and nothing is
+            broadcast here.
+    """
+    if reply_to:
+        # Another daemon's forwarded press: the outcome is its reply
+        # alone, and that daemon tells its own clients (a tab of its
+        # bound to this machine relays this daemon's tab-stamped
+        # events, so a broadcast here would reach them a second time).
+        printer.broadcast({**event, "connId": reply_to})
+        return
+    severity = "info" if event["success"] else "error"
+    _press_toast(printer, kind, event["tabId"], severity, event["message"])
+    printer.broadcast(event)
+
+
+def _machine_outcome(machine: str, reply: dict[str, Any]) -> tuple[bool, str]:
+    """Read *machine*'s *reply* to a button press forwarded to it.
+
+    Returns:
+        ``(success, message)``.  A link error already names the machine
+        ("box (https://…) did not answer: …"); the machine's own
+        outcome is prefixed with it.
+    """
+    error = str(reply.get("error") or "")
+    message = error or f"{machine}: {reply.get('message') or ''}"
+    return bool(reply.get("success")) and not error, message
 
 
 class _MergeFlowMixin:
@@ -212,37 +268,17 @@ class _MergeFlowMixin:
             event["commitMessage"] = commit_message
         if work_dir:
             event["workDir"] = work_dir
-        if reply_to:
-            # Another daemon's forwarded commit: the outcome is its
-            # reply alone, and that daemon tells its own clients (a
-            # tab of its bound to this machine relays this daemon's
-            # tab-stamped events, so a broadcast here would reach them
-            # a second time).
-            self.printer.broadcast({**event, "connId": reply_to})
-            return
-        self._commit_toast(tab_id, "info" if success else "error", message)
-        self.printer.broadcast(event)
+        _report_press(self.printer, COMMIT_TOAST, event, reply_to)
 
     def _commit_toast(self, tab_id: str, severity: str, message: str) -> None:
         """Show *message* as *tab_id*'s Git Commit toast on every surface.
 
-        Every toast of one commit ("Auto-generating commit message…",
-        "Committing on <machine>…", the outcome) has the same stable
-        id, so each replaces the one before in place (the page dedups
-        toasts by id) instead of stacking.
-
         Args:
             tab_id: The tab that pressed Git Commit.
             severity: ``"info"`` or ``"error"``.
-            message: The toast's text.
+            message: The toast's text (:func:`_press_toast`).
         """
-        self.printer.broadcast({
-            "type": "notification",
-            "id": f"manual-commit:{tab_id}",
-            "severity": severity,
-            "message": message,
-            "tabId": tab_id,
-        })
+        _press_toast(self.printer, COMMIT_TOAST, tab_id, severity, message)
 
     def _commit_main_tree(self, tab_id: str, work_dir: str = "", reply_to: str = "") -> None:
         """Stage-all + generate-message + commit the tab's working tree.
@@ -371,14 +407,12 @@ class _MergeFlowMixin:
         reply = sidebar_panels.machine_autocommit(
             machine, {"type": "autocommitAction", "tabId": tab_id, "workDir": work_dir},
         )
-        # A link error already names the machine ("box (https://…) did
-        # not answer: …"); the machine's own outcome is prefixed with it.
-        error = str(reply.get("error") or "")
+        success, message = _machine_outcome(machine, reply)
         self._broadcast_autocommit_done(
             tab_id,
-            success=bool(reply.get("success")) and not error,
+            success=success,
             committed=bool(reply.get("committed")),
-            message=error or f"{machine}: {reply.get('message') or ''}",
+            message=message,
             commit_message=reply.get("commitMessage"),
             work_dir=str(reply.get("workDir") or work_dir),
         )
@@ -452,7 +486,7 @@ class _MergeFlowMixin:
         if wt_agent is None or not wt_agent._wt_pending:
             return False
         listing = self._list_pending(wt_agent)
-        changed = _flatten_changed(listing, wt_agent._wt)
+        changed = any(files for _wt, files in listing)
         # A worktree whose changes git could not enumerate is not
         # empty, it is unknown: it is kept and presented, never
         # auto-discarded (its branch and files may hold the only copy of
@@ -489,7 +523,7 @@ class _MergeFlowMixin:
                 # ``_emit_pending_worktree``) probed under it above.
                 if prev_thread is not threading.current_thread():
                     listing = self._list_pending(wt_agent)
-                    changed = _flatten_changed(listing, wt_agent._wt)
+                    changed = any(files for _wt, files in listing)
                     unreadable = _unreadable_worktrees(listing)
                 if not changed and not unreadable:
                     wt_agent.discard()

@@ -33,7 +33,7 @@ import yaml
 from websockets.asyncio.server import ServerConnection
 from websockets.exceptions import ConnectionClosed
 
-from kiss.agents.sorcar import agent_dispatch, cron_agent
+from kiss.agents.sorcar import agent_dispatch, cron_agent, sea_apply
 from kiss.agents.sorcar.agent_dispatch import (
     DEFAULT_AGENT_PATH,
     live_agent_jobs,
@@ -120,6 +120,14 @@ def _settle(parent: SorcarAgent, daemon: HoldingDaemon) -> None:
 
 def _budgets(daemon: HoldingDaemon) -> list[float]:
     return [float(command["maxBudget"]) for command in daemon.run_commands]
+
+
+def _granted(daemon: HoldingDaemon) -> list[float]:
+    """What each sub-task may spend once the daemon applied the cap it was sent."""
+    commands = [dict(command) for command in daemon.run_commands]
+    for command in commands:
+        sea_apply.cap_budget(command)
+    return [float(command["maxBudget"]) for command in commands]
 
 
 def test_overlapping_non_blocking_children_split_what_is_left(
@@ -434,9 +442,101 @@ def test_fan_out_siblings_split_the_unreserved_remainder_equally(
         entries = yaml.safe_load(out)
         assert len(entries) == 2 and all("still running" in e for e in entries), out
         assert wait_until(lambda: len(daemon.run_commands) == 3, 10.0), daemon.run_commands
-        # (10 - 5) / (2 + 1): the siblings of one call never subtract
-        # each other, whichever thread resolves its budget first.
+        # (10 - 5) / (2 + 1) each, whichever thread resolves its budget
+        # first: the other takes that share off and splits the rest
+        # with the caller alone.
         assert _budgets(daemon) == pytest.approx([5.0, 5.0 / 3, 5.0 / 3])
+    finally:
+        _settle(parent, daemon)
+
+
+def _fan_out(run_parallel: Any, tasks: list[str], max_budget: str, out: list[str]) -> None:
+    """Thread body: one ``run_parallel`` call whose children are still held when it returns."""
+    out.append(run_parallel(
+        json.dumps(tasks), DEFAULT_AGENT_PATH, max_budget=max_budget, timeout="0.5",
+    ))
+
+
+def test_the_children_of_one_fan_out_reserve_against_each_other(
+    tmp_path: Path,
+    daemon: HoldingDaemon,
+) -> None:
+    """Audit 2026-11-21 S1/F1: a fan-out's children never counted each other's budget.
+
+    That is safe only while nothing else changes between their
+    resolutions.  A $9 parent starts a fan-out of two; the first child
+    resolves its $3 share; another call then takes the $6 left with an
+    explicit budget; the second child, launched after it, saw that $6
+    alone and was handed (9 - 6) / 3 = $1 more: $10 against $9.  And
+    two children given ``max_budget="9"`` were each admitted for the
+    whole $9.  Every budget now comes out of what all the other live
+    jobs leave: the late child gets the exhaustion error, and the two
+    explicit ones share the $9.
+    """
+    parent = _parent(9.0)
+    run_agent = make_run_agent_tool(str(tmp_path), parent)
+    run_parallel = make_run_parallel_tool(str(tmp_path), parent)
+    out: list[str] = []
+    call = threading.Thread(target=_fan_out, args=(run_parallel, ["A1", "A2"], "", out))
+    try:
+        # The launch loop of the fan-out, held between its two children.
+        with Pause(
+            agent_dispatch.new_agent_job.__code__, lambda loc: "A2" in loc["kwargs"]["prompt"],
+        ) as held:
+            call.start()
+            assert held.paused.wait(30.0)
+            assert wait_until(lambda: len(daemon.run_commands) == 1, 10.0), daemon.run_commands
+            notice = run_agent("B", DEFAULT_AGENT_PATH, max_budget="6", wait="false", timeout="60")
+            assert notice.startswith("Started the "), notice
+        call.join(30.0)
+        assert not call.is_alive()
+        entries = yaml.safe_load(out[0])
+        assert "still running" in entries[0], out
+        assert "reserve-parent has no remaining budget" in entries[1], out
+        assert "$9.0000 of its remainder is reserved" in entries[1], out
+        assert _granted(daemon) == pytest.approx([3.0, 6.0])
+        assert agent_dispatch.reserved_budget(live_agent_jobs(parent)) == pytest.approx(9.0)
+    finally:
+        _settle(parent, daemon)
+
+    # Two children that each ask for the whole remainder share it; a
+    # request the remainder covers for both is granted as asked.
+    for asked, granted in (("9", 4.5), ("2", 2.0)):
+        daemon.gate.clear()
+        sent = len(daemon.run_commands)
+        try:
+            _fan_out(run_parallel, ["first", "second"], asked, out)
+            entries = yaml.safe_load(out[-1])
+            assert len(entries) == 2 and all("still running" in e for e in entries), out
+            assert wait_until(lambda: len(daemon.run_commands) == sent + 2, 10.0)
+            assert _budgets(daemon)[sent:] == pytest.approx([float(asked)] * 2)
+            assert _granted(daemon)[sent:] == pytest.approx([granted] * 2)
+            assert agent_dispatch.reserved_budget(live_agent_jobs(parent)) == pytest.approx(
+                2 * granted)
+        finally:
+            _settle(parent, daemon)
+
+    # What a sibling's cap leaves (a review holds $10 of its $30 share)
+    # stays with the caller: the other child gets the call's even split,
+    # (90 - 0) / 3, not (90 - 10) / 2, whichever of them resolves first.
+    parent = _parent(90.0)
+    run_parallel = make_run_parallel_tool(str(tmp_path), parent)
+    daemon.gate.clear()
+    sent = len(daemon.run_commands)
+    tasks = ["Review the diff for bugs", "Implement the feature"]
+    call = threading.Thread(target=_fan_out, args=(run_parallel, tasks, "", out))
+    try:
+        with Pause(
+            agent_dispatch.new_agent_job.__code__,
+            lambda loc: "Implement" in loc["kwargs"]["prompt"],
+        ) as held:
+            call.start()
+            assert held.paused.wait(30.0)
+            assert wait_until(lambda: len(daemon.run_commands) == sent + 1, 10.0)
+        call.join(30.0)
+        assert not call.is_alive()
+        assert wait_until(lambda: len(daemon.run_commands) == sent + 2, 10.0), out
+        assert _granted(daemon)[sent:] == pytest.approx([10.0, 30.0])
     finally:
         _settle(parent, daemon)
 

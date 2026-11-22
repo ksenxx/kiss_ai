@@ -9,9 +9,8 @@
 // in and whatever the client's own workspace directory (configWorkDir)
 // is. The workspace still scopes the history filter and the Explorer
 // views, never the tabs: a task running anywhere stays open on every
-// surface until the user closes its tab. Chats are picked in the Chats
-// panel (`_testApi.switchToTab`); only the group on screen is rendered,
-// on the strip #tab-list.
+// surface. Chats are picked in the Chats panel (`_testApi.switchToTab`);
+// only the group on screen is rendered, on the strip #tab-list.
 
 'use strict';
 
@@ -237,9 +236,6 @@ function testOneContentTabPerPathAcrossWorkspaces() {
   });
   assert.strictEqual(tabBarIds(win).length, 3, 'one content tab for the path');
 }
-
-// "Close Others" closing every other shown tab (there is no hidden tab
-// a bulk close could spare) is pinned by tabMenuCloseAllActiveLast.
 
 function testReadySendsCanonicalWorkDir() {
   // Restart recovery must serialize the registry's CANONICAL work dir

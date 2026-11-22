@@ -7,9 +7,8 @@
 // media/main.js: runs lazyChatLoading.test.js under V8 coverage and
 // requires every line of the `lazypanel-coverage` regions (the panels
 // a lazily loaded transcript left with the daemon, their loading and
-// their share export, and the call sites that place a sub-agent whose
-// fan-out panel is not loaded yet and settle a lost prompt) to have
-// executed.
+// their share export, and the events that tell whether a lost prompt
+// ran) to have executed.
 
 'use strict';
 
@@ -20,6 +19,6 @@ gateRegions({
   mark: 'lazypanel',
   label: 'lazy chat loading',
   targets: [
-    {file: 'main.js', sourceUrl: 'lazypanel-main.js', regions: 7},
+    {file: 'main.js', sourceUrl: 'lazypanel-main.js', regions: 2},
   ],
 });

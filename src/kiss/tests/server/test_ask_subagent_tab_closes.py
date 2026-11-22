@@ -18,11 +18,9 @@ client, and it must not come back:
    than the client's ``resumeSession``): the child's replay must close
    the tab, not re-open it as a finished sub-agent tab;
 3. parent replay (every client ``ready``, reload, reconnect, history
-   click re-announces the parent's persisted sub-agent rows): a
-   finished ``/ask`` child must be announced as closed, never as an
-   open finished tab.  ``run_parallel`` / ``run_agent`` children keep
-   their finished tabs (their fan-out panel owns them); the ``/ask``
-   child has no such owner, which is what made it reappear.
+   click walks the parent's persisted sub-agent rows): a finished
+   ``/ask`` child must be announced as closed, never as an open tab,
+   like every other finished sub-agent.
 
 Only the LLM boundary (``RelentlessAgent.run``) is stubbed; the daemon
 runs the parent, accepts the ``/ask`` over its own local endpoint,
@@ -335,7 +333,7 @@ class AskSubagentTabClosesTest(DaemonLocalHarness):
                 ),
                 what="openSubagentTab for the running child",
             )
-            assert announced[0].get("isDone") is False
+            assert announced[0]["task_id"] == child_task_id
             assert self._events_for_tab(
                 received, "subagentDone", parent_sub_tab,
             ) == []

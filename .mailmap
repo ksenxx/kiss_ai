@@ -1,0 +1,7 @@
+# Commit identities that are not anyone's real identity, mapped to the one
+# they stand for. scripts/release.sh publishes release commits and tags under
+# the mapped identity, so GitHub does not credit whoever owns the address.
+#
+# "Test <test@test.com>" leaked into this checkout's .git/config on 2026-06-27
+# from a `git config user.email` run inside a linked worktree.
+ksenxx <ksenxx@users.noreply.github.com> Test <test@test.com>

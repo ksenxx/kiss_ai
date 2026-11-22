@@ -6,18 +6,17 @@
 // End-to-end jsdom tests for the tab that is picked when a finished
 // sub-agent tab CLOSES while the user is standing on it.
 //
-// `subagentDone` parks the sub-agent's report in a background content
-// tab and then closes the sub-agent tab.  Closing the tab the user is
+// `subagentDone` closes the sub-agent tab; the report the sub-agent
+// wrote waits for the end of the task that runs it (the daemon is asked
+// for nothing and no content tab opens).  Closing the tab the user is
 // on has to hand the user to some other tab - but the parent task is
-// still running, so that other tab must never be the report that was
-// just appended.  It must be a pre-existing chat tab, ideally the
-// parent chat tab the sub-agent was spawned from.
+// still running, so that other tab must never be a content tab.  It
+// must be a pre-existing chat tab, ideally the parent chat tab the
+// sub-agent was spawned from.
 //
 // The page is the stacked (phone-width) remote webapp: a content tab
 // shown replaces the chat on screen, and the tab strip lists content
-// tabs on the file screen only.  A parked report therefore shows up in
-// the tab registry (and on the file screen, one swipe left) but never
-// on the chat screen's strip.
+// tabs on the file screen only.
 //
 // The real media/chat.html + panelCopy.js + api.js + mobileSwipe.js +
 // main.js are booted in jsdom; nothing under test is mocked.
@@ -34,6 +33,7 @@ const {
 const {
   bootParallelRun,
   writeReport,
+  reportRequests,
   contentTabs,
   contentTabFor,
   stripContentTabEls,
@@ -51,12 +51,29 @@ function makePage() {
   });
 }
 
+// The finished sub-agent's report waits for its task's end: the daemon
+// is not asked for it, so no content tab can take the closed tab's
+// place.
+function assertReportNotOpened(win, posted) {
+  assert.deepStrictEqual(
+    reportRequests(posted),
+    [],
+    "the daemon must not be asked for a sub-agent's report",
+  );
+  assert.strictEqual(
+    contentTabs(win).length,
+    0,
+    "BUG - a sub-agent's report must open no content tab: the parent " +
+      'task is still running',
+  );
+}
+
 function testSoleSubagentReportDoesNotBecomeActiveOnClose() {
   // The reproduction: ONE sub-agent, the user is watching it, it writes
-  // a report and finishes.  Its tab closes and the freshly appended
-  // report tab sits right where the sub-agent tab used to be, so the
-  // adjacency rule hands the user the report.
-  const {win, parentId, subTabIds} = bootParallelRun(1, makePage());
+  // a report and finishes.  Its tab closes; a report tab appended right
+  // where the sub-agent tab used to be would be what the adjacency
+  // rule hands the user.
+  const {win, posted, parentId, subTabIds} = bootParallelRun(1, makePage());
 
   const subEl = tabEl(win, subTabIds[0]);
   assert.ok(subEl, 'the sub-agent tab must be in the tab bar');
@@ -72,14 +89,7 @@ function testSoleSubagentReportDoesNotBecomeActiveOnClose() {
   });
   send(win, {type: 'subagentDone', tab_id: subTabIds[0]});
 
-  const reportTab = contentTabFor(win, 'sub1.md');
-  assert.ok(reportTab, 'the sub-agent report must open a content tab');
-  assert.notStrictEqual(
-    activeTabId(win),
-    reportTab.id,
-    'BUG - closing the finished sub-agent tab must not hand the user ' +
-      'the report it just parked: the parent task is still running',
-  );
+  assertReportNotOpened(win, posted);
   assert.strictEqual(
     stripContentTabEls(win).length,
     0,
@@ -103,7 +113,7 @@ function testSubagentReportNotActiveWithSiblingStillRunning() {
   // Two sub-agents, the user is on the first.  It finishes with a
   // report; the user must land on the parent chat tab (not on the
   // running sibling next to it), never on the report.
-  const {win, parentId, subTabIds} = bootParallelRun(2, makePage());
+  const {win, posted, parentId, subTabIds} = bootParallelRun(2, makePage());
 
   clickTab(win, tabEl(win, subTabIds[0]));
   assert.strictEqual(activeTabId(win), subTabIds[0], 'precondition');
@@ -111,13 +121,7 @@ function testSubagentReportNotActiveWithSiblingStillRunning() {
   writeReport(win, 'reports/sub1.md', '# one', {tabId: subTabIds[0]});
   send(win, {type: 'subagentDone', tab_id: subTabIds[0]});
 
-  const reportTab = contentTabFor(win, 'sub1.md');
-  assert.ok(reportTab, 'the report content tab must exist');
-  assert.notStrictEqual(
-    activeTabId(win),
-    reportTab.id,
-    'BUG - the parked report must not become active',
-  );
+  assertReportNotOpened(win, posted);
   assert.strictEqual(
     activeTabId(win),
     parentId,
@@ -134,7 +138,7 @@ function testDeepSubagentLandsOnItsParentChatTab() {
   // user is on it, the user should land on its own parent chat tab, not
   // on the report and not on some unrelated tab.
   const page = makePage();
-  const {win, parentId, subTabIds} = bootParallelRun(1, page);
+  const {win, posted, parentId, subTabIds} = bootParallelRun(1, page);
   const grandId = spawnSubagent(
     page,
     subTabIds[0],
@@ -149,13 +153,7 @@ function testDeepSubagentLandsOnItsParentChatTab() {
   writeReport(win, 'reports/grand.md', '# grand', {tabId: grandId});
   send(win, {type: 'subagentDone', tab_id: grandId});
 
-  const reportTab = contentTabFor(win, 'grand.md');
-  assert.ok(reportTab, 'the grandchild report must open a content tab');
-  assert.notStrictEqual(
-    activeTabId(win),
-    reportTab.id,
-    'BUG - the grandchild report must not become active',
-  );
+  assertReportNotOpened(win, posted);
   assert.strictEqual(
     activeTabId(win),
     subTabIds[0],
@@ -234,7 +232,11 @@ function testUserOpenedContentTabSurvivesAndIsNotStolen() {
     contentTabFor(win, 'notes.txt'),
     'the user-opened file tab must survive',
   );
-  assert.ok(contentTabFor(win, 'sub1.md'), 'the report tab must exist');
+  assert.strictEqual(
+    contentTabs(win).length,
+    1,
+    "the user's file stays the only content tab: the report opens none",
+  );
 
   win.close();
   console.log('  ok - no content tab is stolen when a sub-agent closes');
@@ -266,8 +268,41 @@ function testUserFileOpenStillFocusesAfterSubagentDone() {
   console.log('  ok - a user-opened file still focuses after subagentDone');
 }
 
-// That the parked report stays reachable (one swipe left puts it on the
-// file screen, rendered) is pinned by subagentReportNoTabSwitch.test.js.
+function testFileOfAFinishedSubagentShowsItsParentsRun() {
+  // A file reached from a sub-agent's tab stays on screen when the
+  // sub-agent finishes and stands for the parent chat from then on: the
+  // run under it (Task Info, usage, clock, Stop) is the parent's.
+  const {win, parentId, subTabIds} = bootParallelRun(1, makePage());
+  const text = id => win.document.getElementById(id).textContent;
+  const stop = win.document.getElementById('stop-btn');
+  const settings = {task_id: 'p1', model: 'parent-model'};
+  send(win, {type: 'task_settings', tabId: parentId, settings});
+  send(win, {type: 'usage_info', tabId: parentId, total_tokens: 1234, cost: 0.5});
+  send(win, {type: 'status', running: true, tabId: subTabIds[0]});
+  clickTab(win, tabEl(win, subTabIds[0]));
+  assert.notStrictEqual(text('meta-task-id'), 'p1', 'precondition');
+  const file = {path: '/tmp/notes.txt', name: 'notes.txt', content: 'x'};
+  send(win, {type: 'fileContent', tabId: subTabIds[0], ...file});
+  const fileTab = contentTabFor(win, 'notes.txt');
+  assert.strictEqual(activeTabId(win), fileTab.id, 'precondition');
+
+  send(win, {type: 'subagentDone', tab_id: subTabIds[0], task_id: 'sub-task-1'});
+  assert.strictEqual(activeTabId(win), fileTab.id, 'the file stays on screen');
+  assert.match(text('status-text'), /^Running/, "the parent's clock ticks");
+  assert.strictEqual(stop.style.display, 'flex', "Stop is the parent's");
+  assert.strictEqual(text('meta-task-id'), 'p1', "Task Info is the parent's");
+  assert.strictEqual(text('meta-model'), 'parent-model');
+  assert.strictEqual(text('status-tokens'), 'Tokens: 1.23K', 'and the numbers');
+
+  send(win, {type: 'status', running: false, tabId: parentId});
+  assert.doesNotMatch(text('status-text'), /^Running/, 'the clock stops with it');
+  assert.strictEqual(stop.style.display, 'none');
+  win.close();
+  console.log("  ok - a finished sub-agent's file shows its parent's run");
+}
+
+// That no report is parked on the file screen for a swipe to find is
+// pinned by subagentReportNoTabSwitch.test.js.
 
 function main() {
   console.log('subagentDoneAdjacencyNoReport.test.js');
@@ -277,6 +312,7 @@ function main() {
   testClosingActiveSubagentWithoutReportStillPicksChatTab();
   testUserOpenedContentTabSurvivesAndIsNotStolen();
   testUserFileOpenStillFocusesAfterSubagentDone();
+  testFileOfAFinishedSubagentShowsItsParentsRun();
   console.log('subagentDoneAdjacencyNoReport.test.js: all tests passed');
 }
 

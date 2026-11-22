@@ -27,7 +27,6 @@ function testPhantomSubagentTabNotMaterialised() {
     description: 'leaked sub-agent',
     task_id: 'sub-task-9',
     isSubagentTab: true,
-    isDone: false,
   });
   assert.strictEqual(
     tabRecord(win, 'phantom-sub-1'),
@@ -64,7 +63,6 @@ function testOwnedTabConversionStillWorks() {
     description: 'converted sub-agent',
     task_id: 'sub-task-9',
     isSubagentTab: true,
-    isDone: true,
   });
   const rec = tabRecord(win, ownedTabId);
   assert.ok(rec, 'the owned tab still exists');
@@ -73,7 +71,6 @@ function testOwnedTabConversionStillWorks() {
     'the owned tab was converted into a sub-agent tab',
   );
   assert.strictEqual(rec.title, 'converted sub-agent');
-  assert.ok(rec.isDone, 'the converted tab carries isDone');
   console.log('  ok - blank-parent openSubagentTab still converts the owned tab');
 }
 

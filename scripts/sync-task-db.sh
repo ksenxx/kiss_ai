@@ -177,6 +177,9 @@ SNAPSHOT="$TMP_DIR/history.db"
 # needs (see "What is done to the rows before they travel" below).
 PREPARE_DELTA="$TMP_DIR/prepare-delta.sh"
 OMIT_LIVE_TASKS="$TMP_DIR/omit-live-tasks.py"
+# Run on a whole-database snapshot before it travels (see "What never
+# travels" below).
+OMIT_PROJECTS="$TMP_DIR/omit-projects.py"
 export RELOCATE OMIT_LIVE_TASKS RUNNING_TASKS LIVE_TASK_WINDOW
 
 # One exit path for everything that has to be undone, armed before any of it
@@ -287,8 +290,36 @@ snapshot_local_db() {
     python3 -c 'import sqlite3, sys
 con = sqlite3.connect(sys.argv[1], timeout=60)
 con.execute("VACUUM INTO ?", (sys.argv[2],))
-con.close()' "$DB" "$SNAPSHOT"
+con.close()' "$DB" "$SNAPSHOT" \
+        && python3 "$OMIT_PROJECTS" "$SNAPSHOT"
 }
+
+# ---------------------------------------------------------------------------
+# What never travels
+#
+# The projects of the Projects page are a machine's own: the ``projects``
+# table, whose settings can hold API keys, and the project each chat is in
+# (``chat_summaries.project_id``).  A delta holds neither.  A snapshot is a
+# copy of the whole database, so this helper takes both out of it, on the
+# machine that made it, before it is sent anywhere -- here for the fallback's
+# upload, on the remote for a first sync's download.  ``secure_delete`` has
+# the deleted rows overwritten with zeros; without it their bytes, keys
+# included, would stay in the file's free pages.
+# ---------------------------------------------------------------------------
+cat > "$OMIT_PROJECTS" <<'PY'
+"""Take the sending machine's projects out of the snapshot named by argv[1]."""
+import sqlite3
+import sys
+
+con = sqlite3.connect(sys.argv[1], timeout=60)
+con.execute("PRAGMA secure_delete = ON")
+with con:
+    if con.execute("PRAGMA table_info(projects)").fetchall():
+        con.execute("DELETE FROM projects")
+    if any(c[1] == "project_id" for c in con.execute("PRAGMA table_info(chat_summaries)")):
+        con.execute("UPDATE chat_summaries SET project_id = ''")
+con.close()
+PY
 
 # ---------------------------------------------------------------------------
 # What is done to the rows before they travel
@@ -475,6 +506,11 @@ download_remote_db() {
             || [[ ! "$expected" =~ ^[0-9]+$ ]]; then
         incomplete "Could not snapshot the task database on $TARGET" \
                    "(no space in ~/.kiss, or a stuck writer?) — nothing brought back."
+        return 0
+    fi
+    if ! ssh "$TARGET" "python3 - \"$REMOTE_SNAPSHOT\"" < "$OMIT_PROJECTS"; then
+        incomplete "Could not take $TARGET's projects out of its snapshot" \
+                   "— nothing brought back, so their API keys stay there."
         return 0
     fi
     # What the snapshot holds is exactly what travels, so pass 2's fallback

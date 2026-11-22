@@ -34,10 +34,14 @@ const {
   msgs,
   assertJsonEqual,
   CHOOSE,
+  LRM,
   optionLabels,
   currentDir,
   pick,
   errorNotifications,
+  rootRows,
+  answerListing,
+  answerWorkDirCheck,
 } = require('./workdir_helpers');
 const {
   click,
@@ -55,13 +59,34 @@ const RECENTS = [
   {path: '/home/u/middle', ts: NOW - 2 * 86400},
 ];
 
+/** The folders the Explorer asked the daemon to list, in order. */
+function explorerLists(posted) {
+  return msgs(posted, 'listDir')
+    .filter(m => !String(m.token).startsWith('workdir:'))
+    .map(m => m.path);
+}
+
+/** The top-level folders of the Explorer's tree on screen. */
+function explorerShows(win) {
+  return rootRows(win).map(r => r.dataset.explorerPath);
+}
+
+/** Whether the Explorer's tree is kept out of reach, awaiting a folder. */
+function explorerHeld(win) {
+  const tree = byId(win, 'explorer-tree');
+  return tree.hasAttribute('inert') && tree.classList.contains('is-held');
+}
+
 // A26_astra-2: the listing proves the folder exists, not that the
 // daemon adopted it (config.json may refuse the write: a permission
 // error, the config lock).  The pick asks for the daemon's answer, the
 // configData of the directory it ended on, so a refusal (a `notice`,
 // and the unchanged configuration) takes the optimistic adoption back:
 // the drop-down, the Explorer's root and the recent list are the
-// daemon's again.
+// daemon's again.  The Explorer asks for the picked folder ahead and
+// keeps the tree it shows, out of reach, until that folder answers, so
+// a refusal finds the daemon's directory still on screen: the tree is
+// put back in reach as it is and nothing is listed again.
 function testRefusedAdoptionIsTakenBack() {
   const {win, posted} = makePage({desktop: true});
   send(win, {
@@ -69,11 +94,9 @@ function testRefusedAdoptionIsTakenBack() {
     config: {work_dir: '/work/ws', recent_work_dirs: RECENTS},
   });
   showSection(win, 'meta-explorer');
-  const explorerLists = () =>
-    msgs(posted, 'listDir')
-      .filter(m => !String(m.token).startsWith('workdir:'))
-      .map(m => m.path);
-  assert.deepStrictEqual(explorerLists(), ['/work/ws'], 'precondition');
+  assert.deepStrictEqual(explorerLists(posted), ['/work/ws'], 'precondition');
+  assert.deepStrictEqual(explorerShows(win), ['/work/ws'], 'precondition');
+  assert.ok(!explorerHeld(win), 'precondition');
   pick(win, '/home/u/middle');
   const check = msgs(posted, 'listDir').find(m =>
     String(m.token).startsWith('workdir:'),
@@ -92,7 +115,13 @@ function testRefusedAdoptionIsTakenBack() {
     'BUG - the pick does not ask the daemon whether it adopted the folder',
   );
   assert.strictEqual(currentDir(win), '/home/u/middle', 'adopted at once');
-  assert.deepStrictEqual(explorerLists(), ['/work/ws', '/home/u/middle']);
+  assert.deepStrictEqual(explorerLists(posted), ['/work/ws', '/home/u/middle']);
+  assert.deepStrictEqual(
+    explorerShows(win),
+    ['/work/ws'],
+    'the tree on screen is kept until the picked folder answers',
+  );
+  assert.ok(explorerHeld(win), 'the kept tree is out of reach meanwhile');
 
   // The daemon could not record it: it keeps /work/ws and says so.
   send(win, {
@@ -105,10 +134,35 @@ function testRefusedAdoptionIsTakenBack() {
   });
   assert.strictEqual(currentDir(win), '/work/ws', 'the refusal is taken back');
   assert.deepStrictEqual(
-    explorerLists(),
-    ['/work/ws', '/home/u/middle', '/work/ws'],
+    explorerShows(win),
+    ['/work/ws'],
     "the Explorer browses the daemon's directory again",
   );
+  assert.ok(!explorerHeld(win), 'the tree is back in reach');
+  assert.deepStrictEqual(
+    explorerLists(posted),
+    ['/work/ws', '/home/u/middle'],
+    'the tree never left the directory: nothing is listed again',
+  );
+  // The refused folder answers late: its listing is nobody's.
+  const ahead = msgs(posted, 'listDir').filter(
+    m => m.path === '/home/u/middle' && !String(m.token).startsWith('workdir:'),
+  );
+  assert.strictEqual(ahead.length, 1);
+  send(win, {
+    type: 'dirListing',
+    token: ahead[0].token,
+    path: '/home/u/middle',
+    root: '/home/u/middle',
+    entries: [],
+  });
+  assert.deepStrictEqual(
+    explorerShows(win),
+    ['/work/ws'],
+    'the late listing of the refused folder does not take the tree over',
+  );
+  assert.ok(!explorerHeld(win));
+  assert.deepStrictEqual(explorerLists(posted), ['/work/ws', '/home/u/middle']);
   const sub = submitPrompt(win, posted, 'list the files');
   assert.strictEqual(
     sub.workDir,
@@ -137,6 +191,64 @@ function testRefusedAdoptionIsTakenBack() {
   assert.strictEqual(currentDir(win), '/home/u/newest');
 }
 
+// The same refusal when the picked folder answered first: the Explorer
+// had moved to it, so the refusal keeps that tree, out of reach, while
+// the daemon's directory is asked again, and shows the directory once
+// it answers.
+function testRefusedAdoptionAfterTheExplorerMovedIsTakenBack() {
+  const {win, posted} = makePage({desktop: true});
+  send(win, {
+    type: 'configData',
+    config: {work_dir: '/work/ws', recent_work_dirs: RECENTS},
+  });
+  showSection(win, 'meta-explorer');
+  pick(win, '/home/u/middle');
+  answerWorkDirCheck(win, posted, '/home/u/middle');
+  assert.strictEqual(msgs(posted, 'setWorkDir').length, 1);
+  assert.deepStrictEqual(explorerShows(win), ['/work/ws'], 'kept meanwhile');
+  answerListing(win, posted, '/home/u/middle', '', []);
+  assert.deepStrictEqual(
+    explorerShows(win),
+    ['/home/u/middle'],
+    'the Explorer moved to the picked folder when it answered',
+  );
+  assert.ok(!explorerHeld(win), 'the rebuilt tree is in reach');
+
+  // The daemon could not record it: it keeps /work/ws and says so.
+  send(win, {
+    type: 'notice',
+    text: 'That folder cannot be used as the working directory; keeping /work/ws.',
+  });
+  send(win, {
+    type: 'configData',
+    config: {work_dir: '/work/ws', recent_work_dirs: RECENTS},
+  });
+  assert.strictEqual(currentDir(win), '/work/ws', 'the refusal is taken back');
+  assert.deepStrictEqual(
+    explorerLists(posted),
+    ['/work/ws', '/home/u/middle', '/work/ws'],
+    "the daemon's directory is asked again",
+  );
+  assert.deepStrictEqual(
+    explorerShows(win),
+    ['/home/u/middle'],
+    "kept until the daemon's directory answers",
+  );
+  assert.ok(explorerHeld(win), 'the refused folder is out of reach meanwhile');
+  answerListing(win, posted, '/work/ws', '', []);
+  assert.deepStrictEqual(
+    explorerShows(win),
+    ['/work/ws'],
+    "the Explorer browses the daemon's directory again",
+  );
+  assert.ok(!explorerHeld(win), 'the tree is back in reach');
+  assert.deepStrictEqual(
+    explorerLists(posted),
+    ['/work/ws', '/home/u/middle', '/work/ws'],
+    'nothing else is listed',
+  );
+}
+
 /** Submit *text* from the composer; the posted `submit` message. */
 function submitPrompt(win, posted, text) {
   const before = msgs(posted, 'submit').length;
@@ -162,9 +274,14 @@ function testHeaderShowsMachineThenDirectory() {
   const sep = byId(win, 'chat-header-sep');
   assert.strictEqual(
     Array.from(header.children, el => el.id).join(','),
-    'chat-machine-wrap,chat-header-sep,chat-workdir-wrap',
-    'machine, ">", directory -- in that order',
+    'chat-machine-wrap,chat-header-sep,chat-workdir-wrap,chat-project-sep,chat-project-wrap',
+    'machine, ">", directory -- in that order -- then the project',
   );
+  // The project's drop-down is off the row while no project exists
+  // (projectsPage.test.js covers it).
+  for (const id of ['chat-project-sep', 'chat-project-wrap']) {
+    assert.strictEqual(win.getComputedStyle(byId(win, id)).display, 'none', id);
+  }
   assert.strictEqual(sep.textContent, '>');
   // Each select lies, transparent, over the label of its
   // .chat-header-select span, which shows the selected entry; the
@@ -790,21 +907,29 @@ function testConfigDataRepaintsTheDropDown() {
 
 function testPhoneCutsTheBeginningOfALongPath() {
   // On a phone a path too long for the header loses its beginning,
-  // not its last folder: the drop-down is laid out right to left (the
+  // not its last folder: the label that shows the selected entry (the
+  // select lies over it, transparent) is laid out right to left (the
   // ellipsis lands on the left) and every shown label is fenced by
   // left-to-right marks so "/" and "..." keep their places.  The
   // option values and texts stay the bare paths.
-  const LRM = '\u200e';
   const dir = '/home/u/projects/some/deeply/nested/repo-name';
+  const shownLabel = (win, id) => byId(win, id).previousElementSibling;
+  const direction = (win, id) =>
+    win.getComputedStyle(shownLabel(win, id)).direction;
   const phone = makePage().win;
   installTokenisedCss(phone, 'main.css', {applyMedia: /\(width < 900px\)/});
   send(phone, {type: 'configData', config: {work_dir: dir}});
   const select = byId(phone, 'chat-workdir');
-  // Chromium draws the closed drop-down in its selected option's
-  // direction, so the options inherit the right-to-left one.
-  for (const el of [select, select.options[0]]) {
-    assert.strictEqual(phone.getComputedStyle(el).direction, 'rtl');
-  }
+  assert.strictEqual(direction(phone, 'chat-workdir'), 'rtl');
+  assert.strictEqual(
+    shownLabel(phone, 'chat-workdir').textContent,
+    LRM + dir + LRM,
+  );
+  assert.notStrictEqual(
+    direction(phone, 'chat-machine'),
+    'rtl',
+    'a long machine name still loses its end',
+  );
   assert.deepStrictEqual(
     Array.from(select.options, o => o.label),
     [LRM + dir + LRM, LRM + 'Choose ...' + LRM],
@@ -813,11 +938,13 @@ function testPhoneCutsTheBeginningOfALongPath() {
   assert.strictEqual(currentDir(phone), dir);
   const desktop = makePage().win;
   installTokenisedCss(desktop, 'main.css');
+  send(desktop, {type: 'configData', config: {work_dir: dir}});
   assert.notStrictEqual(
-    desktop.getComputedStyle(byId(desktop, 'chat-workdir')).direction,
+    direction(desktop, 'chat-workdir'),
     'rtl',
     'wider screens keep the plain left-to-right layout',
   );
+  assert.strictEqual(currentDir(desktop), dir);
 }
 
 function testOrphanedFileTabBrowsesTheGlobalDir() {
@@ -841,12 +968,9 @@ function testOrphanedFileTabBrowsesTheGlobalDir() {
   );
   assert.ok(fileTab, 'the file opened as a content tab');
   click(win, fileTab);
-  click(
-    win,
-    win.document.querySelector(
-      '#tab-list .chat-tab[data-tab-id="' + owner + '"] .chat-tab-close',
-    ),
-  );
+  // The chat closes on another surface: the registry drops its tab.
+  send(win, {type: 'tabs_state', tabs: [{tabId: owner, chatId: 'chat-1'}]});
+  send(win, {type: 'tabs_state', tabs: []});
   assert.ok(!openTabIds(win).includes(owner), 'the owning chat is closed');
   // Opening the file slid the task-info panel off the desktop layout;
   // its views reload the moment the drawer brings the panel back.
@@ -917,6 +1041,10 @@ const tests = [
   [
     'a pick the daemon refuses after its listing is taken back',
     testRefusedAdoptionIsTakenBack,
+  ],
+  [
+    'a refused pick the Explorer had moved to is taken back',
+    testRefusedAdoptionAfterTheExplorerMovedIsTakenBack,
   ],
 ];
 

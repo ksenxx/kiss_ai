@@ -30,6 +30,12 @@ the URL) and otherwise uses the platform opener (``open`` on macOS,
 for the browser to finish (only a few seconds to catch an opener that
 fails at once) and never raises; a headless environment simply yields
 ``False``.
+
+:func:`open_with_default_app` hands a FILE of this machine to the
+application its type is associated with, through the same platform
+opener (never ``$BROWSER``, which names a browser): the chat page's
+links to files no tab can show open that way.  It never starts a
+program.
 """
 
 from __future__ import annotations
@@ -140,7 +146,10 @@ def _claim(url: str, surface: str, once: bool = True) -> str | None:
         same page is in flight this waits for its outcome: a success is
         shared, a failure (the claim is released) lets this caller open
         the page itself.  So concurrent callers never open a second
-        copy, nor report a page that never appeared.
+        copy, nor report a page that never appeared: a wait that runs
+        out (:data:`_SETTLE_TIMEOUT`) while a launch that replaced the
+        one waited for is still in flight returns :data:`NOT_OPENED`,
+        and the launch stays its owner's.
     """
     deadline = time.monotonic() + _SETTLE_TIMEOUT
     return locked_call(_lock, _claim_locked, url, surface, once, deadline)
@@ -167,8 +176,10 @@ def _claim_locked(url: str, surface: str, once: bool, deadline: float) -> str | 
         ):
             _recent[url] = _Opening(now, surface)
             return None
-        if opening.settled or now >= deadline:
+        if opening.settled:
             return opening.surface
+        if now >= deadline:
+            return NOT_OPENED
         # In slices: a Stop injected into this thread is raised between two waits.
         _lock.wait(min(ACQUIRE_SLICE_SECONDS, deadline - now))
         once = True  # joined the launch in flight: share its outcome, do not repeat it
@@ -247,7 +258,7 @@ def _launch_commands(url: str) -> list[list[str]]:
         The candidate command lines; empty when ``$BROWSER`` is malformed.
     """
     if not os.environ.get("BROWSER", "").strip():
-        return [["open", url]] if sys.platform == "darwin" else [["xdg-open", url]]
+        return [_platform_opener(url)]
     commands = []
     for argv in browser_commands_from_env():
         if any("%s" in arg for arg in argv):
@@ -255,6 +266,19 @@ def _launch_commands(url: str) -> list[list[str]]:
         else:
             commands.append([*argv, url])
     return commands
+
+
+def _platform_opener(target: str) -> list[str]:
+    """Return the command line of the platform opener for *target*.
+
+    Args:
+        target: A URL or a file's path.
+
+    Returns:
+        ``open`` on macOS, ``xdg-open`` elsewhere, with *target*.
+        Windows has no opener executable (see :func:`_launch_platform`).
+    """
+    return ["open" if sys.platform == "darwin" else "xdg-open", target]
 
 
 def _popen_args(command: list[str]) -> list[str] | str:
@@ -355,14 +379,129 @@ def _launch_default(url: str) -> bool:
     if is_headless_environment():
         return False
     if sys.platform == "win32" and not os.environ.get("BROWSER", "").strip():  # pragma: no cover
+        return _launch_platform(url)
+    return any(_launch(command) for command in _launch_commands(url))
+
+
+def _launch_platform(target: str) -> bool:
+    """Open *target* through the platform's shell association.
+
+    Args:
+        target: A URL or a file's path.
+
+    Returns:
+        Whether the opener looks successful (see :func:`_launch`).
+    """
+    if sys.platform == "win32":  # pragma: no cover
         # Windows has no opener executable; the shell association is
         # only reachable through os.startfile (not testable on Linux).
         try:
-            os.startfile(url)  # type: ignore[attr-defined]
+            os.startfile(target)  # type: ignore[attr-defined]
         except OSError:
             return False
         return True
-    return any(_launch(command) for command in _launch_commands(url))
+    return _launch(_platform_opener(target))
+
+
+# How a program begins: a native executable (ELF, PE/DOS ``MZ``, Mach-O
+# in its 32-bit, 64-bit, byte-swapped and universal forms) and a script
+# that names its interpreter (``#!``).
+_PROGRAM_MAGICS = (
+    b"\x7fELF",
+    b"MZ",
+    b"\xfe\xed\xfa\xce",
+    b"\xfe\xed\xfa\xcf",
+    b"\xce\xfa\xed\xfe",
+    b"\xcf\xfa\xed\xfe",
+    b"\xca\xfe\xba\xbe",
+    b"#!",
+)
+
+
+# The file name extensions a desktop's shell runs rather than shows, the
+# same on every platform (Wine gives a Linux or macOS desktop Windows'
+# own): Java archives and launchers, Python and shell scripts, the
+# launchers, locations and terminal scripts of Linux and macOS, and
+# Windows' programs, scripts, installers, help files, shortcuts and
+# registry entries (its default PATHEXT among them).
+_PROGRAM_SUFFIXES = frozenset(
+    (
+        ".jar .jnlp .py .pyw .pyc .pyo .pyz .pyzw .sh"
+        " .desktop .command .tool .terminal .fileloc .inetloc .webloc"
+        " .com .exe .bat .cmd .vbs .vbe .js .jse .wsf .wsh .msc"
+        " .msi .msp .application .appref-ms .scr .pif .cpl .lnk .url .hta .chm .reg"
+    ).split()
+)
+
+
+def _is_program(path: Path) -> bool:
+    """Whether opening the file *path* would run it rather than show it.
+
+    True for an extension a shell runs (:data:`_PROGRAM_SUFFIXES`, on
+    Windows those of ``%PATHEXT%`` too) and for a native executable or
+    a ``#!`` script, told by its first bytes (:data:`_PROGRAM_MAGICS`).
+    The execute permission bit says nothing about a named type (a
+    document copied out of a zip or from a Windows share often carries
+    it), so it counts only where the shell itself goes by it: macOS
+    runs a file that has no extension in Terminal when the bit is set.
+
+    Args:
+        path: The file.
+
+    Returns:
+        Whether the file is a program.
+
+    Raises:
+        OSError: *path* cannot be read.
+    """
+    suffix = path.suffix.lower()
+    if suffix in _PROGRAM_SUFFIXES:
+        return True
+    if sys.platform == "win32":  # pragma: no cover
+        if suffix and suffix in os.environ.get("PATHEXT", "").lower().split(os.pathsep):
+            return True
+    # O_NONBLOCK: a FIFO that took the file's name must not hold the caller.
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0))
+    try:
+        if sys.platform == "darwin" and not suffix:  # pragma: no cover
+            if os.fstat(fd).st_mode & 0o111:
+                return True
+        return os.read(fd, 4).startswith(_PROGRAM_MAGICS)
+    finally:
+        os.close(fd)
+
+
+def open_with_default_app(path: Path) -> bool:
+    """Try to open the file *path* with the application this machine opens its type with.
+
+    The platform's shell association picks the application (``open`` on
+    macOS, ``os.startfile`` on Windows, ``xdg-open`` elsewhere).  A
+    program is never started (:func:`_is_program`): the caller opens
+    files a transcript links to, and a click on a link must not run
+    code.  The check and the opener both name the file by its path (an
+    application opens a path, not a descriptor), so this keeps a click
+    from starting a program that is there; it is no barrier against a
+    process that replaces the file in between, which already runs with
+    this user's rights.  Never raises.
+
+    Args:
+        path: An existing regular file, resolved: its own name tells
+            its type.
+
+    Returns:
+        ``True`` when the opener exited 0 within the grace period or is
+        still running after it; ``False`` when this process runs
+        headless (no display, Docker, ``KISS_HEADLESS=1``), the file is
+        a program or cannot be read, or the opener could not be started
+        or failed right away (no application for the type).
+    """
+    if is_headless_environment():
+        return False
+    try:
+        program = _is_program(path)
+    except OSError:
+        return False
+    return not program and _launch_platform(str(path))
 
 
 def _open_default(url: str, once: bool) -> str:
@@ -395,7 +534,8 @@ def _open_on(
 
     Returns:
         *surface* when *launch* succeeded, the surface another caller's
-        recent or in-flight launch of the same page used (see
+        recent or in-flight launch of the same page used or
+        :data:`NOT_OPENED` when the wait for it ran out (see
         :func:`_claim`), or ``None`` when this launch failed: the claim
         is released and the caller may try another surface.
     """

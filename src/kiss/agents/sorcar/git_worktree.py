@@ -706,16 +706,58 @@ def _git_step(repo: Path, env: dict[str, str], *args: str, input: str | None = N
     Raises:
         _GitStepError: git failed; its error is logged.
     """
-    result = _git(*args, cwd=repo, env=env, input=input)
+    no_hooks = ["-c", f"core.hooksPath={os.devnull}"] if "GIT_INDEX_FILE" in env else []
+    result = _git(*no_hooks, *args, cwd=repo, env=env, input=input)
     if result.returncode != 0:
         logger.warning("git %s failed in %s: %s", " ".join(args), repo, result.stderr.strip())
         raise _GitStepError
     return result.stdout
 
 
-def _leading_dirs(path: str) -> list[str]:
-    """Return the directories the repository-relative *path* lies in, outermost first."""
-    return [path[:end] for end, char in enumerate(path) if char == "/"]
+@contextmanager
+def _own_index(repo: Path, tree: str) -> Iterator[dict[str, str]]:
+    """Yield the environment of a scratch index that holds *tree*, for git commands in *repo*.
+
+    It starts as a copy of the index of *repo*, date included: its
+    stat data tells an untouched file without reading it, and its date
+    which of them to read anyway (one written within the same second).
+    The index of *repo* is not touched.
+
+    Raises:
+        _GitStepError: git could not read *tree* into it; its error is logged.
+    """
+    index = _git("rev-parse", "--git-path", "index", cwd=repo)
+    with tempfile.TemporaryDirectory() as scratch:
+        env = {"GIT_INDEX_FILE": os.path.join(scratch, "index")}
+        with contextlib.suppress(OSError):  # without the copy every file is read
+            shutil.copy2(repo / index.stdout.removesuffix("\n"), env["GIT_INDEX_FILE"])
+        _git_step(repo, env, "read-tree", "--reset", tree)
+        yield env
+
+
+@contextmanager
+def _locked_index(repo: Path) -> Iterator[tuple[Path, Path]]:
+    """Own Git's index.lock through native creation, interruption, and atomic publication.
+
+    Link a known inode into index.lock exclusively. A Stop immediately after the
+    native link can still identify and remove our lock; a pre-existing foreign
+    lock never matches it. The candidate lives beside index so its final rename
+    is atomic even when the ordinary scratch directory is on another filesystem.
+    """
+    index = Path(_git_step(repo, {}, "rev-parse", "--git-path", "index").strip())
+    if not index.is_absolute():
+        index = repo / index
+    lock = Path(str(index) + ".lock")
+    with tempfile.TemporaryDirectory(prefix="kiss-index-", dir=index.parent) as scratch:
+        owner = Path(scratch) / "owner"
+        owner.touch()
+        try:
+            os.link(owner, lock)
+            yield index, lock
+        finally:
+            with contextlib.suppress(FileNotFoundError):
+                if lock.samefile(owner):
+                    lock.unlink()
 
 
 def _end_git(
@@ -1005,6 +1047,10 @@ def _under_symlink(root: Path, rel: str) -> bool:
 #: (``repo_lock``), and each access is one dict operation.
 _merge_stash_labels: dict[Path, str] = {}
 
+# Exported stages, not a later snapshot of the live index: rollback must keep
+# unrelated user staging and refuse an overlapping user resolution.
+_merge_index_stages: dict[Path, str] = {}
+
 #: What the conflicted merge of a repository wrote, from
 #: :meth:`GitWorktreeOps.begin_conflicted_merge` until it is committed or
 #: taken back: the tree, conflict markers included, and the paths left
@@ -1079,12 +1125,15 @@ class GitWorktreeOps:
 
         Returns:
             Branch name string, or ``None`` if HEAD is detached or empty.
+            Read off the branch's full ref: the abbreviated name of a
+            branch that shares its name with a tag is ``heads/<name>``,
+            and a checkout of that detaches ``HEAD`` on the tag.
         """
-        result = _git("rev-parse", "--abbrev-ref", "HEAD", cwd=repo)
-        branch = result.stdout.strip()
-        if not branch or branch == "HEAD":
+        result = _git("rev-parse", "--symbolic-full-name", "HEAD", cwd=repo)
+        ref = result.stdout.strip()
+        if result.returncode != 0 or not ref.startswith("refs/heads/"):
             return None
-        return branch
+        return ref.removeprefix("refs/heads/")
 
     @staticmethod
     def create(repo: Path, branch: str, wt_dir: Path) -> bool:
@@ -1346,8 +1395,13 @@ class GitWorktreeOps:
         return GitWorktreeOps._git_commit(wt_dir, message, no_verify=no_verify)
 
     @staticmethod
-    def _git_commit(wt_dir: Path, message: str, *, no_verify: bool = False) -> bool:
-        """:meth:`commit_staged` without the index check, for callers that just did it."""
+    def _git_commit(
+        wt_dir: Path, message: str, *, no_verify: bool = False, env: dict[str, str] | None = None,
+    ) -> bool:
+        """:meth:`commit_staged` without the index check, for callers that just did it.
+
+        *env* names the index to commit instead of the one of *wt_dir* (:func:`_own_index`).
+        """
         # The message goes on stdin: an argv string is capped at the
         # kernel's single-argument limit (128 KiB on Linux).
         # ``--cleanup=whitespace`` is git's default for a message that
@@ -1357,7 +1411,7 @@ class GitWorktreeOps:
         cmd = ["commit", "--cleanup=whitespace", "-F", "-"]
         if no_verify:
             cmd.append("--no-verify")
-        result = _git(*cmd, cwd=wt_dir, input=message)
+        result = _git(*cmd, cwd=wt_dir, env=env, input=message)
         if result.returncode != 0:
             logger.warning(
                 "git commit failed: %s",
@@ -1455,6 +1509,19 @@ class GitWorktreeOps:
     def staged_diff(wt_dir: Path) -> str:
         """Return the staged diff text, bounded for use in an LLM prompt.
 
+        Args:
+            wt_dir: Worktree directory (must have staged changes).
+
+        Returns:
+            The diff text (see :meth:`prompt_diff`), or empty string if
+            no staged changes.
+        """
+        return GitWorktreeOps.prompt_diff(wt_dir, "--cached")
+
+    @staticmethod
+    def prompt_diff(wt_dir: Path, changes: str) -> str:
+        """Return the text of ``git diff <changes>``, bounded for use in an LLM prompt.
+
         At most :data:`COMMIT_MESSAGE_DIFF_LIMIT_BYTES` of the patch are
         ever read (see :func:`_git_stdout_head`).  When the patch is
         larger, the result starts with a truncation note carrying the
@@ -1465,18 +1532,20 @@ class GitWorktreeOps:
         list itself is too long to enumerate.
 
         Args:
-            wt_dir: Worktree directory (must have staged changes).
+            wt_dir: Worktree directory.
+            changes: What to diff: ``--cached`` (the staged changes) or
+                a revision range (``origin/main...HEAD``).
 
         Returns:
-            The diff text, or empty string if no staged changes.
+            The diff text, or empty string when *changes* is empty.
         """
         max_bytes = COMMIT_MESSAGE_DIFF_LIMIT_BYTES
-        patch, truncated = _git_stdout_head("diff", "--cached", cwd=wt_dir, max_bytes=max_bytes)
+        patch, truncated = _git_stdout_head("diff", changes, cwd=wt_dir, max_bytes=max_bytes)
         if not truncated:
             return patch.strip()
-        totals = _git("diff", "--cached", "--shortstat", cwd=wt_dir).stdout.strip()
+        totals = _git("diff", changes, "--shortstat", cwd=wt_dir).stdout.strip()
         stat, _ = _git_stdout_head(
-            "diff", "--cached", "--stat", cwd=wt_dir, max_bytes=max_bytes // 4,
+            "diff", changes, "--stat", cwd=wt_dir, max_bytes=max_bytes // 4,
         )
         return (
             f"[Patch truncated to its first {max_bytes:,} bytes; "
@@ -1605,7 +1674,9 @@ class GitWorktreeOps:
         an untracked-file restore failed, or a conflicted merge);
         blindly re-applying the same stash on top of that state risks
         a double-apply, so in that case the stash is left for the
-        caller to surface to the user.  An applied entry is dropped.
+        caller to surface to the user.  An applied entry is dropped
+        and forgotten, also when a Stop cuts the drop: a caller whose
+        pop a Stop cut calls again, and the entry is not given back twice.
 
         Args:
             repo: Git repo root path.
@@ -1641,8 +1712,13 @@ class GitWorktreeOps:
                 return False
             if _git("stash", "apply", applied, cwd=repo).returncode != 0:
                 return False
-        GitWorktreeOps._drop_stash(repo, label, entry)
-        _merge_stash_labels.pop(repo, None)
+        try:
+            GitWorktreeOps._drop_stash(repo, label, entry)
+        except BaseException:  # a Stop, perhaps before the drop's thread started
+            GitWorktreeOps._drop_stash(repo, label, entry)
+            raise
+        finally:
+            _merge_stash_labels.pop(repo, None)
         return True
 
     @staticmethod
@@ -1860,8 +1936,10 @@ class GitWorktreeOps:
     def _commit_staged_merge(
         repo: Path,
         branch: str,
+        tree: str | None,
         user_prompt: str | None = None,
         task_result: str | None = None,
+        expected_head: str | None = None,
     ) -> MergeResult:
         """Commit the staged result of a squash merge, if any.
 
@@ -1871,10 +1949,15 @@ class GitWorktreeOps:
         (e.g. a rejecting pre-commit hook) the merge is taken back by
         git's own check of each file (:meth:`_undo_merge`), not by a
         hard reset: an editor may have saved any tracked file meanwhile.
+        *tree* tells whether there is anything to commit, not the
+        index: what the user staged meanwhile is no change of the
+        merge's.
 
         Args:
             repo: Git repo root path.
             branch: The worktree branch the changes came from.
+            tree: The tree the merge staged, or ``None`` when it staged
+                nothing (see :meth:`_apply_branch`).
             user_prompt: The user's task prompt, appended to the merge
                 commit message when not already present (see
                 :meth:`_merge_commit_message`), or ``None``.
@@ -1889,10 +1972,9 @@ class GitWorktreeOps:
             merge agent is run on it (see
             :func:`~kiss.agents.sorcar.merge_conflict_resolver.resolve_merge_conflict`).
         """
-        if not GitWorktreeOps.has_staged_changes(repo):
-            return MergeResult.SUCCESS
-        if GitWorktreeOps._commit_merge(
-            repo, branch, user_prompt=user_prompt, task_result=task_result,
+        if tree is None or GitWorktreeOps._commit_merge(
+            repo, branch, tree, user_prompt=user_prompt, task_result=task_result,
+            expected_head=expected_head,
         ):
             return MergeResult.SUCCESS
         if GitWorktreeOps._undo_merge(repo, branch):
@@ -1903,23 +1985,42 @@ class GitWorktreeOps:
     def _commit_merge(
         repo: Path,
         branch: str,
+        tree: str,
         user_prompt: str | None = None,
         task_result: str | None = None,
+        expected_head: str | None = None,
     ) -> bool:
-        """Commit a staged merge whose index the caller has verified is non-empty.
+        """Commit *tree*, the tree a merge staged, which the caller has verified changes something.
 
         The commit of :meth:`_commit_staged_merge`, also used directly
         by :meth:`finish_conflicted_merge`, which has already checked
-        the index: one ``git diff --cached --quiet`` per merge commit
-        instead of three.
+        the index.
+
+        *tree* is committed from an index of its own
+        (:func:`_own_index`; ``git commit`` and its hooks work on it),
+        not from the index of *repo*: a ``git add`` of the user's takes
+        none of the merge's locks, and one that landed before the
+        commit went into it, under the task's message.  What the user
+        staged stays staged.  The index of *repo* then follows whatever
+        a hook added to the commit, where it still holds the entry of
+        *tree* (``read-tree -i -m``).
 
         Returns:
-            Whether the merge was committed.
+            Whether the merge was committed; not when git cannot read
+            *tree* (``""``: it could not write the index as one).
         """
         msg = GitWorktreeOps._merge_commit_message(
             repo, branch, user_prompt=user_prompt, task_result=task_result,
         )
-        return GitWorktreeOps._git_commit(repo, msg)
+        committed = False
+        with contextlib.suppress(_GitStepError), _own_index(repo, tree) as env:
+            if expected_head is not None and GitWorktreeOps.head_sha(repo) != expected_head:
+                return False
+            committed = GitWorktreeOps._git_commit(repo, msg, env=env)
+        if committed:
+            _merge_index_stages.pop(repo, None)
+            _git("read-tree", "-i", "-m", tree, "HEAD", cwd=repo)
+        return committed
 
     @staticmethod
     def squash_merge_branch(
@@ -1980,13 +2081,15 @@ class GitWorktreeOps:
         if index_before is None:
             logger.warning("the index of %s holds no tree; not merging %s", repo, branch)
             return MergeResult.CONFLICT
+        expected_head = GitWorktreeOps.head_sha(repo)
         try:
-            conflicted = GitWorktreeOps._apply_branch(repo, branch, baseline)
+            conflicted, tree = GitWorktreeOps._apply_branch(repo, branch, baseline)
             if conflicted == []:
                 return GitWorktreeOps._commit_staged_merge(
-                    repo, branch, user_prompt=user_prompt, task_result=task_result,
+                    repo, branch, tree, user_prompt=user_prompt, task_result=task_result,
+                    expected_head=expected_head,
                 )
-            if conflicted:  # ``None``: git applied nothing, the tree is as the user has it
+            if conflicted:  # operational refusals are handled at their publication boundary
                 GitWorktreeOps._undo_merge(repo, branch)
             return MergeResult.CONFLICT
         except BaseException:
@@ -2023,11 +2126,9 @@ class GitWorktreeOps:
         The files the merge wrote go back to ``HEAD`` by git's own
         check of each (:meth:`_move_written_files`), from the tree the
         merge wrote: ``AUTO_MERGE``, conflict markers included, or the
-        tree of *branch* where git recorded none (a fast-forward:
-        ``merge --squash`` of a branch ahead of ``HEAD``).  Then the
-        index is reset, and the merge's ``MERGE_MSG`` / ``SQUASH_MSG``
-        with it; what the user staged meanwhile is an unstaged edit
-        from then on.  A file that no longer is what the merge wrote
+        tree of *branch* where git recorded none. Only the task's index
+        entries follow: unrelated user staging stays staged. A file that no
+        longer is what the merge wrote
         (an editor that saves a file takes none of the merge's locks)
         is never reset: the checkout then stays as it is, conflicts
         included, for the user to settle, and an index that holds them
@@ -2074,7 +2175,11 @@ class GitWorktreeOps:
             Whether files and index hold *head*.
         """
         if GitWorktreeOps._move_written_files(repo, written, head):
-            if _git("reset", "-q", head, cwd=repo).returncode == 0:
+            if GitWorktreeOps._publish_index(
+                repo, written, head, source_stages=_merge_index_stages.get(repo, ""),
+            ):
+                _merge_index_stages.pop(repo, None)
+                _git("update-ref", "-d", "AUTO_MERGE", cwd=repo)
                 return True
             GitWorktreeOps._move_written_files(repo, head, written)
         return False
@@ -2103,23 +2208,22 @@ class GitWorktreeOps:
                 return None
 
     @staticmethod
-    def _move_written_files(repo: Path, written: str, target: str) -> bool:
+    def _move_written_files(
+        repo: Path, written: str, target: str, *, rollback: bool = True,
+    ) -> bool:
         """Turn the working files of tree *written* into those of tree *target*, unless one changed.
 
-        Git's own check of each file decides, as late as git itself
-        looks before it writes (``read-tree -m -u``), in an index of
-        its own that holds *written*: a file the two trees differ in
-        that is no longer what *written* holds (it was saved since, or
-        git cannot read it to tell) refuses the whole move, and nothing
-        is written; so does a file found where the move creates one
-        (:meth:`_guarded_tree`).  Only a write that fails after that
-        check (a required filter, the disk) stops git half-way, with
-        the files it replaced so far.  That index starts as a copy of
-        the index of *repo*, date included: its stat data tells an
-        untouched file without reading it, and its date which of them
-        to read anyway (one written within the same second).  The index
-        of *repo* is not touched, nor is a file both trees hold alike,
-        whatever it holds now.
+        A private index guards modifications/removals with ``read-tree -m -u``.
+        New paths are created separately with non-forcing ``checkout-index``: an
+        occupied path (including a directory populated during checkout) refuses
+        creation, whether ignored or not. Unchanged paths and the live index
+        are untouched. On partial creation, take back only copies still matching
+        the prepared content, using this same non-clobbering move in reverse.
+
+        Like git itself, modifying/deleting an existing tracked file still has
+        a check-to-write window against an editor saving that same file. A failed
+        filter or interrupted filesystem operation can leave applied files; the
+        caller retains the task branch and reports a refusal, never success.
 
         Args:
             repo: Git repo root path.
@@ -2129,75 +2233,75 @@ class GitWorktreeOps:
         Returns:
             Whether the files were moved; when not, what refused is logged.
         """
-        index = _git("rev-parse", "--git-path", "index", cwd=repo)
-        with tempfile.TemporaryDirectory() as scratch:
-            env = {"GIT_INDEX_FILE": os.path.join(scratch, "index")}
-            with contextlib.suppress(OSError):  # without the copy every file is read
-                shutil.copy2(repo / index.stdout.removesuffix("\n"), env["GIT_INDEX_FILE"])
-            try:
-                _git_step(repo, env, "read-tree", "--reset", written)
+        try:
+            with _own_index(repo, written) as env:
                 _git_step(repo, env, "update-index", "-q", "--refresh")
-                source = GitWorktreeOps._guarded_tree(repo, env, written, target)
-                _git_step(repo, env, "read-tree", "-m", "-u", source, target)
-            except _GitStepError:
-                return False
+                created = GitWorktreeOps._created_paths(repo, env, written, target)
+                intermediate = (
+                    GitWorktreeOps._tree_without(repo, target, created) if created else target
+                )
+                _git_step(repo, env, "read-tree", "-m", "-u", written, intermediate)
+                if not created:
+                    return True
+                _git_step(repo, env, "read-tree", "-m", intermediate, target)
+                try:
+                    _git_step(
+                        repo, env, "checkout-index", "-u", "-z", "--stdin",
+                        input="".join(f"{path}\0" for path in created),
+                    )
+                except BaseException:
+                    # checkout-index can create earlier paths before refusing a later
+                    # one. Take back only copies it demonstrably wrote, never the
+                    # occupied path that refused it. A changed copy stays too.
+                    if rollback:
+                        _git_step(repo, env, "update-index", "-q", "--refresh")
+                        different = _git_step(
+                            repo, env, "diff-files", "--name-only", "-z",
+                        ).split("\0")
+                        partial = GitWorktreeOps._tree_without(
+                            repo, target, [p for p in created if p in different],
+                        )
+                        GitWorktreeOps._move_written_files(repo, partial, written, rollback=False)
+                    raise
+        except _GitStepError:
+            return False
         return True
 
     @staticmethod
-    def _guarded_tree(repo: Path, env: dict[str, str], written: str, target: str) -> str:
-        """Return *written* as a tree whose move to *target* writes over no file git ignores.
+    def _created_paths(
+        repo: Path, env: dict[str, str], source: str, target: str,
+    ) -> list[str]:
+        """Return the non-submodule paths a move from *source* to *target* creates.
 
-        ``read-tree -m -u`` refuses to create a file where it finds one
-        git does not track, unless git ignores that one: it is written
-        over, or removed with the directory a file takes the place of.
-        So each path the move creates gets a placeholder, in the index
-        *env* names and in the tree returned: a symbolic link no file
-        on disk is.  Git then checks the path like any tracked file,
-        as it writes, and whatever it finds there refuses the move.  A
-        submodule is left to git's own rule: its checkout may be there.
-        A path that takes the place of files the move removes (a file
-        for a directory or the reverse, a name in another case) cannot
-        hold a placeholder beside them: what git does not track there
-        is listed before the move instead, and refuses it.
+        Submodules follow git's own rule: their checkout may already be there.
 
         Raises:
-            _GitStepError: git failed, or such a listing is not empty.
+            _GitStepError: git failed; its error is logged.
         """
         fields = _git_step(
-            repo, env, "diff", "--raw", "-z", "--no-renames", "--diff-filter=AD",
-            written, target, "--",
+            repo, env, "diff", "--raw", "-z", "--no-renames", "--diff-filter=A",
+            source, target, "--",
         ).split("\0")
-        changes = list(zip(fields[::2], fields[1::2]))  # (":<modes> <ids> <A or D>", path)
-        removed = {path.casefold() for change, path in changes if change.endswith("D")}
-        replaced = removed.union(*map(_leading_dirs, removed))
-        placeholders: list[str] = []
-        clashing: list[str] = []
-        for change, path in changes:
-            if change.endswith("A") and change.split()[1] != "160000":
-                folded = path.casefold()
-                clash = folded in replaced or not removed.isdisjoint(_leading_dirs(folded))
-                (clashing if clash else placeholders).append(path)
-        if clashing:
-            others = _git_step(
-                repo, env, "--literal-pathspecs", "ls-files", "--others", "--directory",
-                "--no-empty-directory", "-z", "--", *clashing,
+        return [
+            path for change, path in zip(fields[::2], fields[1::2])
+            if change.split()[1] != "160000"
+        ]
+
+    @staticmethod
+    def _tree_without(repo: Path, tree: str, paths: list[str]) -> str:
+        """Return *tree* without the entries of *paths*, built in an index of its own.
+
+        Raises:
+            _GitStepError: git failed; its error is logged.
+        """
+        with tempfile.TemporaryDirectory() as scratch:
+            env = {"GIT_INDEX_FILE": os.path.join(scratch, "index")}
+            _git_step(repo, env, "read-tree", tree)
+            _git_step(
+                repo, env, "update-index", "--force-remove", "-z", "--stdin",
+                input="".join(f"{path}\0" for path in paths),
             )
-            if others:
-                logger.warning(
-                    "the files of %s are not moved: git does not track %s",
-                    repo, others.replace("\0", " ").strip(),
-                )
-                raise _GitStepError
-        if not placeholders:
-            return written
-        blob = _git_step(
-            repo, env, "hash-object", "-w", "--stdin", input="kiss: git wrote no file here\n",
-        ).strip()
-        _git_step(
-            repo, env, "update-index", "-z", "--index-info",
-            input="".join(f"120000 {blob}\t{path}\0" for path in placeholders),
-        )
-        return _git_step(repo, env, "write-tree").strip()
+            return _git_step(repo, env, "write-tree").strip()
 
     @staticmethod
     def _diff_name_only(repo: Path, *flags: str) -> list[str]:
@@ -3495,7 +3599,8 @@ class GitWorktreeOps:
     @staticmethod
     def _settle_baseline_conflicts(
         repo: Path, branch: str, baseline: str, conflicted: list[str],
-    ) -> list[str]:
+        written: str, stages: str,
+    ) -> tuple[list[str], str | None]:
         """Give the paths a pick left unmerged while ``HEAD == baseline^`` *branch*'s entries.
 
         ``-X theirs`` settles hunks, not a path one side lacks: a file
@@ -3521,36 +3626,36 @@ class GitWorktreeOps:
             The paths still unmerged; empty when all are settled.
         """
         if not GitWorktreeOps._baseline_induced(repo, branch, baseline, conflicted):
-            return conflicted
-        if _git(
-            "--literal-pathspecs", "reset", "-q", branch,
-            "--pathspec-from-file=-", "--pathspec-file-nul",
-            cwd=repo, input="\0".join(conflicted),
-        ).returncode != 0:
-            return GitWorktreeOps.unresolved_paths(repo) or conflicted
-        # To the tree the index holds now; without one (git failed) nothing moves.
-        settled = _git("write-tree", cwd=repo).stdout.strip()
-        if GitWorktreeOps._move_written_files(repo, "AUTO_MERGE", settled):
-            _git("update-ref", "AUTO_MERGE", settled, cwd=repo)
-        return GitWorktreeOps.unresolved_paths(repo)
+            return conflicted, None
+        try:
+            with _own_index(repo, written) as env:
+                _git_step(
+                    repo, env, "--literal-pathspecs", "reset", "-q", branch,
+                    "--pathspec-from-file=-", "--pathspec-file-nul",
+                    input="\0".join(conflicted),
+                )
+                settled = _git_step(repo, env, "write-tree").strip()
+            if not GitWorktreeOps._publish_index(repo, written, settled, source_stages=stages):
+                return conflicted, None
+            _merge_index_stages.pop(repo, None)
+            if GitWorktreeOps._move_written_files(repo, written, settled):
+                _git("update-ref", "AUTO_MERGE", settled, cwd=repo)
+            return [], settled
+        except _GitStepError:
+            return conflicted, None
 
     @staticmethod
-    def _apply_branch(repo: Path, branch: str, baseline: str | None) -> list[str] | None:
+    def _apply_branch(
+        repo: Path, branch: str, baseline: str | None,
+    ) -> tuple[list[str] | None, str | None]:
         """Apply *branch* onto HEAD without committing.
 
-        With a *baseline* the agent's net change (``baseline..branch``)
-        is ONE ``cherry-pick --no-commit`` of the
-        :meth:`_squashed_commit`, with ``-X theirs`` and
-        :meth:`_settle_baseline_conflicts` when :meth:`_theirs_option`
-        allows them; without one, ``git merge --squash``.  Either
-        runs without ``rerere``: a recorded resolution it replays
-        into a conflicted file is not what the merge wrote there (see
-        :meth:`_undo_merge`), and staged by
-        ``rerere.autoupdate`` it leaves git failed with a merge
-        applied and nothing unmerged.  And either merges with
-        ``ort``, whatever ``pull.twohead`` names: the strategy the
-        pick and :meth:`merge_has_content_conflict` use anyway, and
-        the one that records what it wrote (``AUTO_MERGE``).
+        Every merge, clean or conflicted, is computed apart by
+        :meth:`_merged_tree`. Only its changed files are published, through
+        :meth:`_move_written_files`, and its index entries through
+        :meth:`_publish_index`. Conflicted results retain Git's exact stages
+        for the resolver. Baseline-induced conflicts settle from another
+        private index; the commit tree is never discovered from the live index.
 
         Args:
             repo: Git repo root path, checked out on the target branch.
@@ -3559,60 +3664,230 @@ class GitWorktreeOps:
                 a legacy worktree.
 
         Returns:
-            The repository-relative paths left unmerged; an empty list
-            when the change applied cleanly and is staged; ``None``
-            when nothing was applied: git failed for a reason other
-            than conflicts, or was not run because a git operation of
-            the user's is under way (:meth:`operation_in_progress`).
+            The repository-relative paths left unmerged, and the tree
+            the merge staged for its commit.  The paths are an empty
+            list when the change applied cleanly, and the tree is then
+            ``None`` when it changes nothing; the paths are ``None``
+            on operational refusal. A filesystem/filter failure may leave
+            partially applied files (:meth:`_move_written_files`); it is
+            never success. An existing git operation or unborn HEAD also
+            refuses the merge without running it.
         """
         if GitWorktreeOps.operation_in_progress(repo):
             logger.warning("a git operation is under way in %s; not merging %s", repo, branch)
-            return None
-        theirs: list[str] = []
-        if baseline:
-            squashed = GitWorktreeOps._squashed_commit(repo, branch, baseline)
-            if squashed is None:
-                return None
-            theirs = GitWorktreeOps._theirs_option(repo, baseline)
-            args = ["cherry-pick", "--no-commit", *theirs, squashed]
-        else:
-            args = ["merge", "--squash", branch]
-        result = _git("-c", "rerere.enabled=false", "-c", "pull.twohead=ort", *args, cwd=repo)
-        if result.returncode == 0:
-            return []
-        conflicted = GitWorktreeOps.unresolved_paths(repo)
-        if baseline and theirs and conflicted:
-            conflicted = GitWorktreeOps._settle_baseline_conflicts(
-                repo, branch, baseline, conflicted,
-            )
-            if not conflicted:
-                return []
-        logger.warning(
-            "applying %s onto HEAD of %s failed: %s", branch, repo, result.stderr.strip(),
-        )
-        return conflicted or None
+            return None, None
+        head = _git("rev-parse", "HEAD", "HEAD^{tree}", cwd=repo)
+        if head.returncode != 0:
+            logger.warning("HEAD of %s names no commit; not merging %s", repo, branch)
+            return None, None
+        commit, tree = head.stdout.split()
+        theirs = GitWorktreeOps._theirs_option(repo, baseline) if baseline else []
+        prepared = GitWorktreeOps._merged_tree(repo, commit, branch, baseline, theirs)
+        if prepared is None:
+            return None, None
+        merged, stages = prepared
+        if merged == tree and not stages:
+            return [], None
+        if not baseline and _git("update-ref", "ORIG_HEAD", commit, cwd=repo).returncode:
+            return None, None
+        if GitWorktreeOps.head_sha(repo) != commit:
+            return None, None
+        _merge_index_stages[repo] = stages
+        try:
+            if not GitWorktreeOps._move_written_files(repo, tree, merged):
+                _merge_index_stages.pop(repo, None)
+                return None, None
+            if GitWorktreeOps.head_sha(repo) != commit:
+                _merge_index_stages.pop(repo, None)
+                GitWorktreeOps._move_written_files(repo, merged, tree)
+                return None, None
+            _git("update-ref", "AUTO_MERGE", merged, cwd=repo)
+            conflicted = sorted(GitWorktreeOps._index_entries(stages))
+            # ``git merge --squash <branch>`` named itself to its hooks, unless the
+            # caller's environment named an action already; a pick did not.
+            hook_env = None if baseline else {
+                "GIT_REFLOG_ACTION": os.environ.get("GIT_REFLOG_ACTION", f"merge {branch}"),
+            }
+            if not GitWorktreeOps._publish_index(repo, tree, merged, stages, hook_env=hook_env):
+                _merge_index_stages.pop(repo, None)
+                if GitWorktreeOps._move_written_files(repo, merged, tree):
+                    _git("update-ref", "-d", "AUTO_MERGE", cwd=repo)
+                return None, None
+            if baseline and theirs and conflicted:
+                conflicted, settled = GitWorktreeOps._settle_baseline_conflicts(
+                    repo, branch, baseline, conflicted, merged, stages,
+                )
+                if not conflicted:
+                    return [], settled
+            if not baseline and not conflicted:
+                _git(
+                    "hook", "run", "--ignore-missing", "post-merge", "--", "1",
+                    cwd=repo, env=hook_env,
+                )
+            return conflicted, merged if not conflicted else None
+        except BaseException:
+            # Files can be published before either AUTO_MERGE or the live index
+            # changes. The outer index-only Stop check cannot see this window.
+            GitWorktreeOps._take_back(repo, merged, commit)
+            raise
 
     @staticmethod
-    def _squashed_commit(repo: Path, branch: str, baseline: str) -> str | None:
-        """Return a synthetic commit holding *branch*'s tree with *baseline* as parent.
+    def _index_entries(output: str) -> dict[str, str]:
+        """Group NUL-delimited index records by their literal path."""
+        entries: dict[str, str] = {}
+        for record in output.split("\0"):
+            if record:
+                path = record.split("\t", 1)[1]
+                entries[path] = entries.get(path, "") + record + "\0"
+        return entries
 
-        Cherry-picking it applies the agent's net change
-        (``baseline..branch``) as one three-way merge, whatever the
-        branch's history (see :meth:`squash_merge_from_baseline`).
-        The commit is referenced by nothing and is garbage-collected
-        in due course.
+    @staticmethod
+    def _publish_index(
+        repo: Path, source: str, target: str, stages: str = "", source_stages: str = "",
+        hook_env: dict[str, str] | None = None,
+    ) -> bool:
+        """Replace only the merge's index entries, under Git's index lock.
+
+        Unrelated staging survives. An overlapping entry changed since preparation
+        refuses publication. Conflict stages come from Git's isolated merge, never
+        from a snapshot of the user's index. User hooks run once, after publication,
+        with *hook_env* added to their environment.
+        """
+        try:
+            with _own_index(repo, source) as env:
+                before = GitWorktreeOps._index_entries(
+                    _git_step(repo, env, "ls-files", "--stage", "-z"),
+                )
+                unmerged = GitWorktreeOps._index_entries(source_stages)
+                resolved = {path: before.get(path) for path in unmerged}
+                before.update(unmerged)
+                _git_step(repo, env, "read-tree", "--reset", target)
+                after = GitWorktreeOps._index_entries(
+                    _git_step(repo, env, "ls-files", "--stage", "-z"),
+                )
+                after.update(GitWorktreeOps._index_entries(stages))
+                changed = {p for p in before.keys() | after.keys() if before.get(p) != after.get(p)}
+                if not changed:
+                    return True
+                with _locked_index(repo) as (index, lock):
+                    shutil.copy2(index, env["GIT_INDEX_FILE"])
+                    actual = GitWorktreeOps._index_entries(
+                        _git_step(repo, env, "ls-files", "--stage", "-z"),
+                    )
+                    if any(
+                        actual.get(p) not in (before.get(p), after.get(p))
+                        and (p not in resolved or actual.get(p) != resolved[p])
+                        for p in changed
+                    ):
+                        logger.warning(
+                            "the user staged an overlapping change in %s; not replacing it", repo,
+                        )
+                        return False
+                    oid = _git_step(repo, env, "rev-parse", f"{source}^{{tree}}").strip()
+                    records = "".join(f"0 {'0' * len(oid)}\t{p}\0" for p in sorted(changed))
+                    records += "".join(after.get(p, "") for p in sorted(changed))
+                    _git_step(repo, env, "update-index", "-z", "--index-info", input=records)
+                    updated = GitWorktreeOps._index_entries(
+                        _git_step(repo, env, "ls-files", "--stage", "-z"),
+                    )
+                    # Git also removes incompatible ancestors/descendants when
+                    # inserting a file. Those collateral changes are not ours.
+                    if any(
+                        actual.get(p) != updated.get(p)
+                        for p in (actual.keys() | updated.keys()) - changed
+                    ):
+                        logger.warning(
+                            "staged directory/file overlap in %s; not replacing it", repo,
+                        )
+                        return False
+                    shutil.copy2(env["GIT_INDEX_FILE"], lock)
+                    os.replace(lock, index)
+            _git(
+                "hook", "run", "--ignore-missing", "post-index-change", "--", "1", "0",
+                cwd=repo, env=hook_env,
+            )
+            return True
+        except (OSError, _GitStepError) as exc:
+            logger.warning("cannot publish the merge index in %s: %s", repo, exc)
+            return False
+
+    @staticmethod
+    def _merged_tree(
+        repo: Path, head: str, branch: str, baseline: str | None, theirs: list[str],
+    ) -> tuple[str, str] | None:
+        """Compute the written tree and NUL-delimited conflict stages apart from main.
+
+        Exit 1 from merge-tree is a usable conflicted result, not permission to
+        merge on main. Older Git computes the same record in a disposable detached
+        worktree, with hooks and recorded-resolution replay disabled.
+        """
+        args = ["merge-tree", "--write-tree", "-z"]
+        if baseline:
+            args += [f"--merge-base={baseline}", *theirs]
+        result = _git(*args, head, branch, cwd=repo)
+        if result.returncode in (0, 1):
+            records = result.stdout.split("\0\0", 1)[0].split("\0")
+            if records[0]:
+                return records[0], "".join(f"{r}\0" for r in records[1:] if r)
+        with tempfile.TemporaryDirectory(prefix="kiss-merge-") as scratch:
+            work = Path(scratch) / "work"
+            config = [
+                "-c", f"core.hooksPath={os.devnull}",
+                "-c", "rerere.enabled=false", "-c", "pull.twohead=ort",
+            ]
+            try:
+                result = _git(*config, "worktree", "add", "--detach", str(work), head, cwd=repo)
+                if result.returncode:
+                    return None
+                if baseline:
+                    squashed = GitWorktreeOps._squashed_commit(
+                        repo, branch, f"{branch}^{{tree}}", baseline,
+                    )
+                    if squashed is None:
+                        return None
+                    args = ["cherry-pick", "--no-commit", *theirs, squashed]
+                else:
+                    args = [
+                        "merge", "--squash", "--no-autostash", "--no-verify-signatures", branch,
+                    ]
+                result = _git(*config, *args, cwd=work)
+                stages = _git_step(work, {}, *config, "ls-files", "--unmerged", "-z")
+                if result.returncode != 0 and not stages:
+                    logger.warning("isolated merge failed: %s", result.stderr.strip())
+                    return None
+                # Only this disposable checkout is staged. Its conflict-marker
+                # files give the written tree even on Git without AUTO_MERGE.
+                _git_step(work, {}, *config, "add", "-A")
+                return _git_step(work, {}, *config, "write-tree").strip(), stages
+            except _GitStepError:
+                return None
+            finally:
+                _git(*config, "worktree", "remove", "--force", str(work), cwd=repo)
+
+    @staticmethod
+    def _squashed_commit(repo: Path, branch: str, tree: str, parent: str) -> str | None:
+        """Return a synthetic commit that holds *tree* with *parent* as its parent.
+
+        With *branch*'s tree on its baseline: cherry-picking it applies
+        the agent's net change (``baseline..branch``) as one three-way
+        merge in the old-Git fallback, whatever the branch's history
+        (see :meth:`squash_merge_from_baseline`). The commit is
+        referenced by nothing and is garbage-collected in due course;
+        it is made under a name of its own, so a repository without a
+        ``user.name`` fails where it did, at the merge's commit.
 
         Args:
             repo: Git repo root path.
-            branch: The worktree branch.
-            baseline: The worktree's baseline commit SHA.
+            branch: The worktree branch, for the commit's message.
+            tree: The tree-ish the commit holds.
+            parent: The commit-ish it follows.
 
         Returns:
             The commit's SHA, or ``None`` when ``commit-tree`` failed.
         """
         squashed = _git(
-            "commit-tree", f"{branch}^{{tree}}", "-p", baseline,
-            "-m", f"kiss: squashed {branch}", cwd=repo,
+            "-c", "user.name=kiss", "-c", "user.email=kiss@localhost",
+            "commit-tree", tree, "-p", parent, "-m", f"kiss: squashed {branch}", cwd=repo,
         )
         if squashed.returncode != 0:
             logger.warning("commit-tree for %s failed: %s", branch, squashed.stderr.strip())
@@ -3659,7 +3934,7 @@ class GitWorktreeOps:
         if index_before is None:
             return None
         try:
-            conflicted = GitWorktreeOps._apply_branch(repo, branch, baseline)
+            conflicted = GitWorktreeOps._apply_branch(repo, branch, baseline)[0]
             if conflicted is not None:
                 _conflicted_merges[repo] = GitWorktreeOps._written_tree(repo, branch), conflicted
             return conflicted
@@ -3830,8 +4105,29 @@ class GitWorktreeOps:
         # one found now is the resolver's (a ``git cherry-pick
         # --continue`` half-way), and ``--quit`` keeps the index.
         _git("cherry-pick", "--quit", cwd=repo)
+        info = _conflicted_merges.get(repo)
+        if info is None:
+            return MergeResult.CONFLICT
+        written, owned = info
+        try:
+            # Resolution owns only the paths the prepared merge changed. A user
+            # can independently stage another file while the resolver works.
+            staged = GitWorktreeOps._index_entries(
+                _git_step(repo, {}, "ls-files", "--stage", "-z"),
+            )
+            with _own_index(repo, written) as env:
+                records = "".join(f"0 {'0' * len(written)}\t{p}\0" for p in owned)
+                records += "".join(staged.get(p, "") for p in owned)
+                _git_step(repo, env, "update-index", "-z", "--index-info", input=records)
+                tree = _git_step(repo, env, "write-tree").strip()
+            original = _git_step(repo, {}, "rev-parse", f"{head_before}^{{tree}}").strip()
+            if tree == original:
+                return MergeResult.CONFLICT
+        except _GitStepError:
+            return MergeResult.MERGE_FAILED
         if GitWorktreeOps._commit_merge(
-            repo, branch, user_prompt=user_prompt, task_result=task_result,
+            repo, branch, tree, user_prompt=user_prompt, task_result=task_result,
+            expected_head=head_before,
         ):
             _conflicted_merges.pop(repo, None)
             return MergeResult.SUCCESS

@@ -306,27 +306,25 @@ def test_stop_during_eviction_still_tears_the_evicted_child_down(
         mgr.shutdown()
 
 
-def _stop_as_the_maintainer_is_submitted(frame: FrameType, event: str, arg: Any) -> None:
-    """Profile hook: inject the task Stop as ``run_coroutine_threadsafe`` is entered."""
-    if event == "call" and frame.f_code is asyncio.run_coroutine_threadsafe.__code__:
+def _stop_at_the_loop_call(
+    caller: Any, at: str, frame: FrameType, event: str, arg: Any,
+) -> None:
+    """Profile hook: inject the task Stop at *caller*'s own ``call_soon_threadsafe``.
+
+    At its *at* event: ``"call"`` lands before the callback is queued on
+    the manager loop, ``"return"`` once it is.
+    """
+    if (
+        event == at and frame.f_code is asyncio.BaseEventLoop.call_soon_threadsafe.__code__
+        and frame.f_back is not None and frame.f_back.f_code is caller.__code__
+    ):
         sys.setprofile(None)
         tool_interrupt.inject_async_exception(threading.get_ident(), KeyboardInterrupt)
 
 
-def _stop_as_the_submission_returns(frame: FrameType, event: str, arg: Any) -> None:
-    """Profile hook: inject the task Stop as ``run_coroutine_threadsafe`` returns the handle."""
-    if event == "return" and frame.f_code is asyncio.run_coroutine_threadsafe.__code__:
-        sys.setprofile(None)
-        tool_interrupt.inject_async_exception(threading.get_ident(), KeyboardInterrupt)
-
-
-@pytest.mark.parametrize(
-    "hook", [_stop_as_the_maintainer_is_submitted, _stop_as_the_submission_returns],
-    ids=["before-queueing", "before-the-handle-is-stored"],
-)
+@pytest.mark.parametrize("at", ["call", "return"], ids=["before-queueing", "once-queued"])
 def test_stop_during_the_connection_start_does_not_poison_the_server(
-    hook: Callable[[FrameType, str, Any], Any], server_script: Path, tmp_path: Path,
-    real_stdin: None,
+    at: str, server_script: Path, tmp_path: Path, real_stdin: None,
 ) -> None:
     """A Stop landing while a connection is started must not leave a dead record in the pool.
 
@@ -346,6 +344,7 @@ def test_stop_during_the_connection_start_does_not_poison_the_server(
     config = _config(server_script, pid_file)
     key = _connection_key(config)
     errors: list[BaseException] = []
+    hook = functools.partial(_stop_at_the_loop_call, MCPManager._connection_for, at)
     try:
         worker = threading.Thread(
             target=_run_under_hook, args=(hook, functools.partial(mgr.connect, config), errors),
@@ -361,6 +360,10 @@ def test_stop_during_the_connection_start_does_not_poison_the_server(
                 "the maintainer queued by the interrupted start parked for ever"
             )
             pid_file.unlink()
+        deadline = time.time() + 20
+        while time.time() < deadline and mgr._orphans:
+            time.sleep(0.02)
+        assert mgr._orphans == [], "the interrupted start's record stayed an orphan"
         conn = mgr.connect(config)
         assert conn.session is not None, conn.error
         assert mgr.call_tool(key, "add", {"a": 1, "b": 2}) == "3"
@@ -369,11 +372,88 @@ def test_stop_during_the_connection_start_does_not_poison_the_server(
         mgr.shutdown()
 
 
+def test_shutdown_reaps_the_child_of_an_interrupted_connection_start(
+    tmp_path: Path, real_stdin: None, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A shutdown right after a Stop interrupted a connection's start must still reap its child.
+
+    The Stop landed once the maintainer was queued and before its handle
+    was stored: the record left the pool with no handle, in no registry.
+    The stop event it was sent does not end a handshake (this server
+    never answers one), so the shutdown found nothing to wait for and
+    closed the loop underneath the child, which outlived the manager.
+    """
+    monkeypatch.setattr(mcp_servers, "_DISCONNECT_WAIT_S", 1.0)
+    silent = tmp_path / "silent.py"
+    silent.write_text(
+        'import os, sys\nopen(sys.argv[1], "w").write(str(os.getpid()))\nsys.stdin.read()\n',
+        encoding="utf-8",
+    )
+    mgr = MCPManager(idle_timeout_s=3600, max_connections=2, health_interval_s=30)
+    pid = 0
+    errors: list[BaseException] = []
+    try:
+        worker = threading.Thread(
+            target=_run_under_hook,
+            args=(
+                functools.partial(_stop_at_the_loop_call, MCPManager._connection_for, "return"),
+                functools.partial(mgr.connect, _config(silent, tmp_path / "pid")), errors,
+            ),
+        )
+        worker.start()
+        worker.join(30)
+        assert not worker.is_alive(), "connect() did not return"
+        assert len(errors) == 1 and isinstance(errors[0], KeyboardInterrupt), errors
+        pid = _wait_for_pid_file(tmp_path / "pid")
+        mgr.shutdown()
+        assert not _alive(pid), "the child of the interrupted start outlived the manager"
+    finally:
+        mgr.shutdown()
+        if _alive(pid):
+            os.kill(pid, 9)
+
+
+def test_a_connection_disconnected_before_its_maintainer_starts_never_starts_it(
+    server_script: Path, tmp_path: Path, real_stdin: None, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A disconnect that gave up on a maintainer still queued leaves nothing to start.
+
+    The manager loop is held, so the disconnect waits out its deadline
+    and cancels the connection's handle.  Once the loop is back, the
+    maintainer is not started (no server is spawned for a connection
+    already reported disconnected) and the record is marked finished.
+    """
+    monkeypatch.setattr(mcp_servers, "_DISCONNECT_WAIT_S", 0.2)
+    mgr = MCPManager(idle_timeout_s=3600, max_connections=2, health_interval_s=30)
+    blocked = threading.Event()
+    try:
+        mgr._loop.call_soon_threadsafe(blocked.wait, 30)
+        with concurrent.futures.ThreadPoolExecutor(1) as pool:
+            pending = pool.submit(mgr.connect, _config(server_script, tmp_path / "pid"))
+            deadline = time.time() + 30
+            while time.time() < deadline and not mgr._connections:
+                time.sleep(0.02)
+            mgr.disconnect_all()
+            conn = pending.result(30)
+        assert conn.error == "disconnected", conn.error
+        blocked.set()
+        assert conn.finished.wait(10), "the cancelled start never ended the record"
+        assert conn.loop_task is None and not (tmp_path / "pid").exists()
+    finally:
+        blocked.set()
+        mgr.shutdown()
+
+
 def _stop_as_the_loop_thread_starts(frame: FrameType, event: str, arg: Any) -> None:
-    """Profile hook: inject the task Stop as ``Thread.start`` returns to ``MCPManager.__init__``."""
+    """Profile hook: inject the task Stop as ``MCPManager.__init__``'s ``Thread.start`` returns.
+
+    The start is made with the Stop held back, which is raised as that hold ends.
+    """
+    held = frame.f_back
     if (
         event == "return" and frame.f_code is threading.Thread.start.__code__
-        and frame.f_back is not None and frame.f_back.f_code is MCPManager.__init__.__code__
+        and held is not None and held.f_code is tool_interrupt.call_without_injection.__code__
+        and held.f_back is not None and held.f_back.f_code is MCPManager.__init__.__code__
     ):
         sys.setprofile(None)
         tool_interrupt.inject_async_exception(threading.get_ident(), KeyboardInterrupt)
@@ -860,6 +940,61 @@ def test_a_server_without_ping_keeps_its_idle_connection(
     time.sleep(1.6)  # three health intervals, idle
     assert (conn.error, conn.session is not None) == ("", True), "the ping's answer tore it down"
     assert manager.call_tool(key, "pid", {}) == str(pid)
+
+
+#: The server above, closing its stdout under a tool call and living on: the
+#: call fails on the closed transport, and the child's teardown needs the
+#: SDK's SIGTERM.
+_CLOSING_SERVER_SCRIPT = _NO_PING_SERVER_SCRIPT.replace(
+    "import json, os, sys", "import json, os, sys, time",
+).replace(
+    'reply["result"] = {"content": [{"type": "text", "text": str(os.getpid())}]}',
+    "os.close(1)\n        time.sleep(300)",
+)
+
+
+@pytest.mark.parametrize(
+    "at", ["call", "return"], ids=["before-the-stop-is-queued", "once-it-is-queued"],
+)
+def test_shutdown_reaps_a_connection_whose_retirement_a_stop_interrupted(
+    at: str, tmp_path: Path, real_stdin: None,
+) -> None:
+    """A shutdown right after a Stop interrupted a retirement must still reap the retired child.
+
+    The retirement took the connection out of the pool, told it to stop
+    and only then listed it as an orphan: a Stop landing at the stop
+    (the retirement's own ``call_soon_threadsafe``) left it in no
+    registry, so the shutdown closed the loop underneath a transport
+    still closing, and its child (alive behind its closed stdout until
+    the SDK's SIGTERM) outlived the manager.
+    """
+    script = tmp_path / "closing.py"
+    script.write_text(_CLOSING_SERVER_SCRIPT, encoding="utf-8")
+    mgr = MCPManager(health_interval_s=600)
+    pid = 0
+    errors: list[BaseException] = []
+    try:
+        config = _config(script, tmp_path / "pid")
+        conn = mgr.connect(config)
+        assert conn.session is not None, conn.error
+        pid = _wait_for_pid_file(tmp_path / "pid")
+        worker = threading.Thread(
+            target=_run_under_hook,
+            args=(
+                functools.partial(_stop_at_the_loop_call, MCPManager._retire_closed, at),
+                functools.partial(mgr.call_tool, _connection_key(config), "pid", {}), errors,
+            ),
+        )
+        worker.start()
+        worker.join(30)
+        assert not worker.is_alive(), "call_tool() did not return"
+        assert len(errors) == 1 and isinstance(errors[0], KeyboardInterrupt), errors
+        mgr.shutdown()
+        assert conn.finished.is_set() and not _alive(pid), "the retired child outlived the manager"
+    finally:
+        mgr.shutdown()
+        if _alive(pid):
+            os.kill(pid, 9)
 
 
 def test_shutdown_right_after_construction_stops_the_loop_thread() -> None:

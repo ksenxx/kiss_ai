@@ -43,6 +43,7 @@ from typing import Any
 from urllib.parse import parse_qsl, urlsplit
 
 from kiss.agents.sorcar.mcp_servers import (
+    _LOCK_TIMEOUT_S,
     CONNECT_TIMEOUT,
     FileTokenStorage,
     MCPServerConfig,
@@ -54,6 +55,7 @@ from kiss.agents.sorcar.mcp_servers import (
 from kiss.core import tool_interrupt
 from kiss.core.brand import PRODUCT_NAME
 from kiss.core.browser_handoff import BROWSER_TAB, open_for_user
+from kiss.core.file_lock import exclusive_file_lock
 from kiss.core.locked import locked_call
 
 #: Well-known remote MCP servers: name -> (transport, URL).
@@ -97,8 +99,24 @@ def _env_name(server: str) -> str:
     return "".join(c if c.isalnum() else "_" for c in server).upper()
 
 
+def _registered(storage: FileTokenStorage, data: dict[str, Any]) -> str | None:
+    """Return the id of the client registered in *data*, the payload of *storage*, if any."""
+    from mcp.shared.auth import OAuthClientInformationFull
+
+    info = storage._load(data, "client_info", OAuthClientInformationFull)
+    return getattr(info, "client_id", None)
+
+
 def seed_preregistered_client(storage: FileTokenStorage, server: str) -> bool:
     """Store a pre-registered client for *server* from the environment.
+
+    The grant stored for another client is forgotten in the write that
+    replaces the registration: it is not this client's to present, and
+    its refresh, sent as this client, is refused.  Forgotten in a write
+    of its own, it was stored again in between by the sign-in it came
+    from, which was still running (one that ends after this write
+    stores nothing, see :class:`_GrantStorage`).  The same client again
+    (a new secret) keeps its grant.
 
     Args:
         storage: The server's token storage.
@@ -120,8 +138,86 @@ def seed_preregistered_client(storage: FileTokenStorage, server: str) -> bool:
         "client_secret": secret or None,
         "token_endpoint_auth_method": "client_secret_basic" if secret else "none",
     })
-    storage.put("client_info", info.model_dump(mode="json", exclude_none=True))
+    with exclusive_file_lock(storage._lock_path, timeout=_LOCK_TIMEOUT_S):
+        data = storage._read()
+        if _registered(storage, data) not in (None, client_id):
+            data["tokens"] = data["expires_at"] = None
+        data["client_info"] = info.model_dump(mode="json", exclude_none=True)
+        storage._write(data)
     return True
+
+
+class _GrantStorage(FileTokenStorage):
+    """The token storage of an OAuth provider.
+
+    A refreshed grant is stored whole (:meth:`set_tokens`).  A
+    registration, and the grant a sign-in ends with, are stored only
+    while the stored registration is still the client the provider acts
+    as (:meth:`put`).
+    """
+
+    #: The client the provider acts as: the registration as last read or stored here.
+    _client_id: str | None = None
+
+    async def get_client_info(self) -> Any:
+        """Return the stored OAuth client registration, if any: the client the provider acts as."""
+        info = self.client_info()
+        self._client_id = getattr(info, "client_id", None)
+        return info
+
+    def put(self, key: str, value: Any, refreshed: bool = False) -> None:
+        """Replace *key* as :meth:`FileTokenStorage.put` does, unless the provider is superseded.
+
+        A registration and the grant of a sign-in are the provider's
+        client's.  The stored registration may have been replaced since
+        the provider read it (:func:`seed_preregistered_client`, the
+        client another sign-in registered), and the grant stored with
+        it forgotten: the grant of a sign-in started before that is not
+        the new client's, and the client such a sign-in registers is
+        not the one to sign in as now.  So the read-modify-write that
+        stores either first checks the stored registration, and stores
+        nothing over another one.  A refresh's answer is told by the
+        tokens it replaces instead, and the server's metadata is no
+        client's.
+
+        Args:
+            key: ``"tokens"``, ``"client_info"`` or ``"oauth_metadata"``.
+            value: Its already-serialized JSON value, or ``None`` to forget it.
+            refreshed: Whether *value* is the tokens a refresh was answered with.
+
+        Raises:
+            RuntimeError: When the stored registration is another client's by now.
+        """
+        if key == "oauth_metadata" or refreshed:
+            super().put(key, value, refreshed)
+            return
+        with exclusive_file_lock(self._lock_path, timeout=_LOCK_TIMEOUT_S):
+            data = self._read()
+            if _registered(self, data) != self._client_id:
+                raise RuntimeError("the stored OAuth client was replaced meanwhile; sign in again")
+            self._set(data, key, value)
+            if key != "tokens":
+                self._client_id = _registered(self, data)
+            self._write(data)
+
+    async def set_tokens(self, tokens: Any) -> None:
+        """Persist *tokens*; a refresh's answer without a refresh token keeps the one in use.
+
+        An authorization server that does not rotate its refresh tokens
+        leaves it out of the refresh response: the one in use stays good
+        (RFC 6749 section 6).  The SDK stores the response whole, and the
+        next expiry would find nothing to refresh with and ask for a new
+        sign-in.  The token is put back here, before the one write of
+        the grant (a second write is one that a provider cancelled at
+        the first never gets to), from the grant that write replaces:
+        the stored tokens as read under the refresh lock.
+
+        Args:
+            tokens: An :class:`~mcp.shared.auth.OAuthToken`, completed in place.
+        """
+        if self._refreshing and not tokens.refresh_token:
+            tokens.refresh_token = (self._seen_tokens or {}).get("refresh_token")
+        await super().set_tokens(tokens)
 
 
 @functools.cache
@@ -136,10 +232,11 @@ def _provider_class() -> Any:
         """An ``OAuthClientProvider`` over a grant that other providers refresh too.
 
         The SDK loads the stored grant once and refreshes its own copy.
-        Each request here first re-reads the store (tokens, client and
-        the refresh deadline) under the store's refresh lock, and the
-        SDK's refresh, if still due, runs under that lock.  A refresh
-        answered without a refresh token keeps the one it used.  The
+        Each request here first re-reads the store (tokens, client,
+        the refresh deadline and the authorization server metadata)
+        under the store's refresh lock, and the SDK's refresh, if still
+        due, runs under that lock.  A refresh answered without a refresh
+        token keeps the one it used (:class:`_GrantStorage`).  The
         authorization server metadata a sign-in discovers is stored
         ahead of the grant it leads to (:meth:`_keep_metadata`).
         """
@@ -173,6 +270,9 @@ def _provider_class() -> Any:
                             context.current_tokens = stored = await store.get_tokens()
                             context.client_info = await store.get_client_info()
                             context.token_expiry_time = store.refresh_deadline()
+                            # As stored now: another provider's sign-in since may
+                            # have recorded the token endpoint the grant goes to.
+                            self._metadata = context.oauth_metadata = store.get_oauth_metadata()
                             if stored and stored.access_token == rejected:
                                 # As good as expired: the SDK refreshes it first.
                                 context.token_expiry_time = time.time() - 1
@@ -180,7 +280,6 @@ def _provider_class() -> Any:
                             refreshed = outgoing is not request
                             while outgoing is not request:  # the refresh round trip
                                 outgoing = await flow.asend((yield outgoing))
-                                await self._keep_refresh_token(stored)
                         response = yield outgoing
                         sent = context.current_tokens
                         if (
@@ -197,20 +296,6 @@ def _provider_class() -> Any:
                         return
                     finally:
                         await flow.aclose()
-
-        async def _keep_refresh_token(self, stored: Any) -> None:
-            """Give a grant refreshed without a refresh token the one of *stored*, its predecessor.
-
-            An authorization server that does not rotate its refresh
-            tokens leaves it out of the refresh response: the one in use
-            stays good (RFC 6749 section 6).  The SDK stores the response
-            whole, and the next expiry would find nothing to refresh
-            with and ask for a new sign-in.
-            """
-            fresh = self.context.current_tokens  # None when the refresh failed
-            if fresh and not fresh.refresh_token and stored and stored.refresh_token:
-                fresh.refresh_token = stored.refresh_token
-                await self._store.set_tokens(fresh)
 
         async def _keep_metadata(self) -> None:
             """Store the authorization server metadata once the flow has discovered it.
@@ -245,7 +330,7 @@ def build_provider(cfg: MCPServerConfig, redirect_handler: Any, callback_handler
     return _provider_class()(
         server_url=cfg.url,
         client_metadata=client_metadata(),
-        storage=FileTokenStorage(cfg.name, cfg.url),
+        storage=_GrantStorage(cfg.name, cfg.url),
         redirect_handler=redirect_handler,
         callback_handler=callback_handler,
         client_metadata_url=os.environ.get("KISS_MCP_CLIENT_METADATA_URL", "").strip() or None,
@@ -419,7 +504,9 @@ class MCPLoginSession:
         session = locked_call(cls._start_lock, cls._replace_active, cfg)
         deadline = time.monotonic() + wait_seconds
         while time.monotonic() < deadline and not session._finished.is_set():
-            if session._url_ready.wait(timeout=0.1):
+            # The Stop is raised between two slices: raised as one takes the
+            # event's lock, it left the session's thread blocked setting it.
+            if tool_interrupt.call_without_injection(session._url_ready.wait, 0.1):
                 break
             tool_interrupt.raise_if_interrupted()
         return session
@@ -443,7 +530,7 @@ class MCPLoginSession:
             raise
         try:
             cls._active = session
-            session._thread.start()
+            tool_interrupt.call_without_injection(session._thread.start)
         except BaseException:
             # A Stop landing here (the tool runs on the task thread), or
             # a thread that cannot start: nothing would ever finish the

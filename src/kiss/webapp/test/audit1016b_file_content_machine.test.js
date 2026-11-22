@@ -12,9 +12,10 @@
 // header drop-down's unsent machine pick.  Every reply a registered
 // machine answers carries `machine` (sidebar_panels.py
 // machine_workspace_reply), so an unstamped reply is a file of this
-// machine; a report (a synthetic event, no reply) is on the machine the
-// task ran on (the daemon's binding, `tabMachine`).  Before the fix the
-// tab adopted the pick and its Save / Reload went to the picked machine.
+// machine; a finished task's report is asked of the machine the task
+// ran on (the daemon's binding, `tabMachine`), whose stamped reply
+// opens it.  Before the fix the tab adopted the pick and its Save /
+// Reload went to the picked machine.
 // main.js against the real chat.html, through the ui_antipattern harness.
 
 const assert = require('assert');
@@ -22,6 +23,11 @@ const H = require('./ui_antipattern_harness');
 
 const harness = require('./simplify2_harness');
 const {MACHINES} = require('./settings_helpers');
+const {
+  writeReport,
+  reportRequests,
+  answerReport,
+} = require('./subagent_tab_helpers');
 
 const {makePage, send, sleep, click, ofType} = H;
 
@@ -65,8 +71,8 @@ async function openEditAndSave(ctx, fileEvent) {
 async function testUnstampedReplyStaysLocal() {
   const ctx = makePage();
   setUp(ctx);
-  // The user picks gpu-box but submits nothing: the pick is where the
-  // NEXT task goes, not where the transcript's files are.
+  // The user picks gpu-box: the pick is where new chats run (one opens
+  // for it), not where the files of the chat left are.
   pickMachine(ctx.win, 'gpu-box');
   const save = await openEditAndSave(ctx, {
     path: '/shared/notes.txt',
@@ -105,32 +111,30 @@ async function testStampedReplyStaysOnItsMachine() {
   console.log('  ok - stamped fileContent -> save goes to that machine');
 }
 
-function openReport(win, filePath, content) {
-  send(win, {type: 'tool_call', name: 'Write', path: filePath, content});
-  send(win, {
-    type: 'tool_result',
-    content: 'Successfully wrote ' + content.length + ' characters to ' + filePath,
-    is_error: false,
-    tool_name: 'Write',
-    path: filePath,
-  });
-  send(win, {type: 'task_done', success: true});
-}
-
 function contentTabCount(win) {
   return win._testApi.openTabs().filter(t => t.isContentTab).length;
 }
 
 function testReportFollowsTheBinding() {
   const ctx = makePage();
-  const {win} = ctx;
+  const {win, posted} = ctx;
   setUp(ctx);
-  // The daemon bound the tab to gpu-box (its task ran there); the user
-  // then picked this machine ('' in the drop-down) for the next task
-  // without submitting.
+  // The daemon bound the tab to gpu-box (its task runs there); the user
+  // then picked this machine ('' in the drop-down), which opened a new
+  // chat for this machine.  The gpu-box task ends behind that chat.
   send(win, {type: 'tabMachine', tabId: 'a1', machine: 'gpu-box'});
   pickMachine(win, '');
-  openReport(win, '/ws/a/reports/out.html', '<p>report</p>');
+  assert.notStrictEqual(win._testApi.getActiveTabId(), 'a1', 'a new chat');
+  writeReport(win, '/ws/a/reports/out.html', '<p>report</p>', {tabId: 'a1'});
+  send(win, {type: 'task_done', success: true, tabId: 'a1'});
+  const [req] = reportRequests(posted);
+  assert.strictEqual(
+    req.machine,
+    'gpu-box',
+    'the report is asked of the machine the task ran on, not of the pick: ' +
+      JSON.stringify(req),
+  );
+  answerReport(win, req, '<p>report</p>', {machine: 'gpu-box'});
   assert.strictEqual(contentTabCount(win), 1, 'the report tab opened');
   // The report is a file of gpu-box: a fileContent reply gpu-box
   // answers for the same path is the same file (one tab per path per

@@ -7,12 +7,16 @@
 
 import base64
 import binascii
+import contextlib
 import json
 import logging
+import random
+import re
 import threading
 import time
 import uuid
-from collections.abc import Callable
+import weakref
+from collections.abc import Callable, Iterator
 from typing import Any, NamedTuple
 
 import httpx
@@ -36,7 +40,7 @@ from kiss.core.models.model import (
     split_data_url,
     text_of_parts,
 )
-from kiss.core.models.model_info import MODEL_INFO, _strip_thinking_alias
+from kiss.core.models.model_info import MODEL_INFO, _strip_thinking_alias, calculate_cost
 from kiss.core.models.stream_abort import (
     CONNECT_TIMEOUT,
     RequestAbortWatchdog,
@@ -45,6 +49,7 @@ from kiss.core.models.stream_abort import (
     stop_error,
     stop_or_stall_error,
 )
+from kiss.core.tool_interrupt import call_without_injection, wait_interruptible
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +61,17 @@ _GEMINI_TOP_LEVEL = {"xhigh": "high", "max": "high"}
 # that trickles its reply would hold the calling thread for good.
 # ``model_config["timeout"]`` overrides it, as on the OpenAI transport.
 _EMBEDDINGS_TIMEOUT = 60.0
+
+# What ``http_options.retry_options`` stand for where they say nothing, as
+# the SDK's ``HttpRetryOptions`` documents them (``retry_args`` in its
+# ``_api_client``): ``GeminiModel._retried_chunks`` makes the retries in
+# the SDK's place.
+_RETRY_ATTEMPTS = 5
+_RETRY_INITIAL_DELAY = 1.0
+_RETRY_MAX_DELAY = 60.0
+_RETRY_EXP_BASE = 2.0
+_RETRY_JITTER = 1.0
+_RETRY_STATUS_CODES = (408, 429, 500, 502, 503, 504)
 
 # Deepest nesting of a JSON tool result that is sent parsed; a deeper one
 # is sent as its text.  The SDK builds a request with one Python call per
@@ -97,6 +113,179 @@ _FILTER_FINISH_REASONS = frozenset(
 # model".
 FOREIGN_CALL_SIGNATURE = b"skip_thought_signature_validator"
 
+# Google prices a request by the service tier that SERVED it
+# (https://ai.google.dev/gemini-api/docs/pricing, tabs Standard / Flex /
+# Priority; ``service_tier`` in ``model_config`` asks for one): Priority
+# at 1.8x the Standard rate of every token and Flex at half of it.  Read
+# 2026-11-19 for every model with the tabs (gemini-2.5-pro: $1.25 /
+# $10.00 / $0.125 Standard, $2.25 / $18.00 / $0.225 Priority, $0.625 /
+# $5.00 Flex).
+_GEMINI_PRIORITY_MULTIPLIER = 1.8
+_GEMINI_FLEX_MULTIPLIER = 0.5
+
+# Cached input, where a tier's tab does not price it at the tier's factor
+# of the Standard price: (model name prefix, {tier: its factor of the
+# Standard cached price}).
+# - Flex leaves it at the Standard price on the older models
+#   (gemini-2.5-pro: $0.125 in both tabs; gemini-3.1-pro-preview and
+#   gemini-3-flash-preview: "Same as Standard").  Every model since
+#   gemini-3.1-flash-lite halves it like the rest (gemini-4-carbon: $0.10
+#   -> $0.05), so that is what a name not listed here gets.
+# - gemini-3.5-flash-lite: $0.03 Standard, $0.02 Flex, $0.05 Priority
+#   (not $0.015 and $0.054 rounded: its Batch tab prints $0.015).
+_TIER_CACHED_INPUT: tuple[tuple[str, dict[str, float]], ...] = (
+    ("gemini-2.5-", {"flex": 1.0}),
+    ("gemini-3-", {"flex": 1.0}),
+    ("gemini-3.1-pro", {"flex": 1.0}),
+    ("gemini-3.5-flash-lite", {"flex": 0.02 / 0.03, "priority": 0.05 / 0.03}),
+)
+
+# Where the served tier is reported.  A unary response names it in the
+# ``x-gemini-service-tier`` header (docs: flex-inference, priority-
+# inference; a Priority request over its limit is served, and billed, as
+# Standard).  A streamed one - the only kind this adapter makes - names
+# it only in the body, as ``usageMetadata.serviceTier``, which the SDK
+# drops (google-genai 2.25.0 through 3.6.1 have no such field), so
+# :class:`_ServiceTierTap` reads it off the wire and the adapter notes
+# it on the billed chunk under a header name of its own.
+_SERVICE_TIER_HEADER = "x-gemini-service-tier"
+_STREAMED_TIER_HEADER = "x-kiss-gemini-stream-service-tier"
+_SERVICE_TIER_EXTENSION = "kiss_gemini_service_tier"
+_SERVICE_TIER_KEY = b'"serviceTier"'
+# The line ends of an event stream (the SSE format, and httpx's ``iter_lines``).
+_SSE_LINE_END = re.compile(rb"\r\n|\n|\r")
+
+
+def _tier_factors(model_name: str, tier: str | None) -> tuple[float, float]:
+    """Return what *tier* multiplies the Standard rates of *model_name* by.
+
+    Args:
+        model_name: A direct Gemini model, or a thinking alias of one.
+        tier: The tier that served the call, in lower case, if known.
+
+    Returns:
+        The factor of every token, and the factor of cached input.
+    """
+    factor = {"priority": _GEMINI_PRIORITY_MULTIPLIER, "flex": _GEMINI_FLEX_MULTIPLIER}.get(
+        tier or "", 1.0
+    )
+    for prefix, cached in _TIER_CACHED_INPUT:
+        if model_name.startswith(prefix):
+            return factor, cached.get(tier or "", factor)
+    return factor, factor
+
+
+def _tier_name(value: Any) -> str | None:
+    """Return *value* as a lower-case tier name, ``None`` when it names none.
+
+    Args:
+        value: A tier as the API (``"priority"``), a caller (``"FLEX"``) or
+            the SDK (``types.ServiceTier.FLEX``, a ``str``) spells it.
+    """
+    return value.lower() if isinstance(value, str) and value else None
+
+
+def _tier_in_sse_data(data: bytes) -> str | None:
+    """Return the served tier one event of a streamed body reports, if any.
+
+    Only ``usageMetadata.serviceTier`` of the event's own chunk counts: the
+    same key inside a function call's arguments is the model's output.
+
+    Args:
+        data: The event's data: its ``data:`` lines, joined.
+    """
+    try:
+        body = json.loads(data)
+    except (ValueError, RecursionError):  # not this tap's to report: the SDK parses it next
+        return None
+    usage = body.get("usageMetadata") if isinstance(body, dict) else None
+    return _tier_name(usage.get("serviceTier")) if isinstance(usage, dict) else None
+
+
+class _ServiceTierTap(httpx.SyncByteStream):
+    """A streamed response body that notes the service tier it reports.
+
+    Every byte is passed on untouched; the tier of the latest complete
+    event is left in the response's ``extensions`` under
+    :data:`_SERVICE_TIER_EXTENSION` before the bytes that complete the
+    event are handed on, so whoever receives a chunk finds its tier there.
+
+    An event is framed as the SDK frames it (``_iter_response_stream``):
+    its ``data:`` lines, however many, up to the next blank line or the
+    end of the body.
+    """
+
+    def __init__(self, stream: httpx.SyncByteStream, response: httpx.Response) -> None:
+        """Wrap *stream*, the body of *response*."""
+        self._stream = stream
+        self._response = response
+        self._partial: list[bytes] = []  # the pieces of the line still arriving
+        self._held_cr = False  # they end in a "\r" that the next block may complete
+        self._event: list[bytes] = []  # the data lines of the event still arriving
+
+    def __iter__(self) -> Iterator[bytes]:
+        """Yield the body's bytes as they arrive."""
+        for data in self._stream:
+            self._note(data)
+            yield data
+        self._note(b"\n\n")  # a last event the peer did not terminate
+
+    def close(self) -> None:
+        """Close the wrapped body."""
+        self._stream.close()
+
+    def _note(self, data: bytes) -> None:
+        """Record the tier of each event *data* completes."""
+        self._partial.append(data)
+        if b"\n" not in data and b"\r" not in data and not self._held_cr:
+            return
+        data = b"".join(self._partial)
+        # A "\r" the block ends with may be half of a "\r\n": the next
+        # block tells, as it tells httpx's line decoder.
+        self._held_cr = data.endswith(b"\r")
+        end = len(data) - self._held_cr
+        *lines, rest = _SSE_LINE_END.split(data[:end])
+        self._partial = [rest + data[end:]]
+        for line in lines:
+            if line.startswith(b"data:"):
+                self._event.append(line[5:])
+            elif not line and self._event:
+                event = b"\n".join(self._event)
+                self._event = []
+                tier = _tier_in_sse_data(event) if _SERVICE_TIER_KEY in event else None
+                if tier is not None:
+                    self._response.extensions[_SERVICE_TIER_EXTENSION] = tier
+
+
+def _note_served_tier(chunk: Any, response: httpx.Response | None) -> None:
+    """Note on *chunk* the tier its stream has reported so far.
+
+    Args:
+        chunk: The streamed chunk a turn is billed against.
+        response: The stream's httpx response (see :class:`_ServiceTierTap`).
+    """
+    tier = response.extensions.get(_SERVICE_TIER_EXTENSION) if response is not None else None
+    if tier is None:
+        return
+    headers = dict(getattr(chunk.sdk_http_response, "headers", None) or {})
+    headers[_STREAMED_TIER_HEADER] = tier
+    chunk.sdk_http_response = types.HttpResponse(headers=headers)
+
+
+def _served_tier(response: Any) -> str | None:
+    """Return the service tier *response* says served it, ``None`` when it does not say.
+
+    Args:
+        response: A ``GenerateContentResponse``, or any stand-in for one.
+    """
+    headers = getattr(getattr(response, "sdk_http_response", None), "headers", None)
+    if not isinstance(headers, dict):
+        return None
+    named = {str(key).lower(): value for key, value in headers.items()}
+    return _tier_name(named.get(_SERVICE_TIER_HEADER)) or _tier_name(
+        named.get(_STREAMED_TIER_HEADER)
+    )
+
 
 class _ResponseTrackingHttpxClient(httpx.Client):
     """The transport ``GeminiModel`` gives ``genai.Client``.
@@ -115,6 +304,9 @@ class _ResponseTrackingHttpxClient(httpx.Client):
       has nothing whose socket it can shut down.  Remembering the
       in-flight response here is what lets a Stop unblock a thread parked
       in ``recv()``.
+
+    It also reads the served tier off a streamed body, which the SDK
+    drops (see :class:`_ServiceTierTap`).
     """
 
     def __init__(self, stall_timeout: float) -> None:
@@ -137,6 +329,14 @@ class _ResponseTrackingHttpxClient(httpx.Client):
         """Send *request*, remembering the response for the abort watchdog."""
         response = super().send(request, **kwargs)
         self.last_response = response
+        if (
+            kwargs.get("stream")
+            and isinstance(response.stream, httpx.SyncByteStream)
+            and response.headers.get("content-encoding", "identity").lower() == "identity"
+        ):
+            # Plain text on the wire (Google does not compress its event
+            # streams): a compressed body is left alone, and its tier unread.
+            response.stream = _ServiceTierTap(response.stream, response)
         return response
 
 
@@ -153,8 +353,42 @@ class _EmbeddingClient(NamedTuple):
         self.pool.close()
 
 
+def _close_idle_embedding_client(slot: dict[str, _EmbeddingClient]) -> None:
+    """Close the embedding client *slot* holds, if any: its model is gone."""
+    idle = slot.pop("idle", None)
+    if idle is not None:
+        idle.close()
+
+
 _END_OF_STREAM = object()
 """Sentinel for a stream that ended before its first chunk."""
+
+
+def _retry_delays(options: types.HttpRetryOptions) -> Iterator[float]:
+    """Yield the seconds to wait before each retry *options* allow.
+
+    The SDK's exponential backoff with jitter, one delay per attempt
+    after the first: none for a single attempt.
+    """
+    attempts = _RETRY_ATTEMPTS if options.attempts is None else options.attempts
+    backoff = options.initial_delay or _RETRY_INITIAL_DELAY
+    for _ in range(attempts - 1):
+        jitter = random.uniform(0, options.jitter or _RETRY_JITTER)
+        yield min(backoff + jitter, options.max_delay or _RETRY_MAX_DELAY)
+        backoff *= options.exp_base or _RETRY_EXP_BASE
+
+
+def _retried_by_policy(error: Exception, options: types.HttpRetryOptions) -> bool:
+    """Return whether the SDK sends a request again after *error* under *options*.
+
+    Args:
+        error: What an attempt failed with before its response opened.
+        options: The request's retry options.
+    """
+    codes = options.http_status_codes or _RETRY_STATUS_CODES
+    return (isinstance(error, errors.APIError) and error.code in codes) or isinstance(
+        error, (httpx.TimeoutException, httpx.ConnectError)
+    )
 
 
 class _AbortableStream:
@@ -178,7 +412,8 @@ class _AbortableStream:
         abort must never shut that socket down.
 
         Args:
-            chunks: The generator ``generate_content_stream`` returned.
+            chunks: The generator of the turn's chunks
+                (:meth:`GeminiModel._retried_chunks`).
             http_client: The transport that recorded the response.
             header_budget: Seconds the wait for the first chunk may take
                 before the request is cut (see :meth:`__iter__`).
@@ -199,7 +434,7 @@ class _AbortableStream:
         bounds the silence between two reads, so a peer trickling header
         bytes would hold the turn for good and past any Stop.  The
         watchdog cuts the client's pool at a Stop or at the header
-        budget (the SDK's own retries run inside this wait).
+        budget (the retries of a refused request run inside this wait).
 
         The snapshot is taken at the first chunk so a watchdog abort that
         fires late — after this stream is dead and a retry has begun on
@@ -214,7 +449,7 @@ class _AbortableStream:
         if first is _END_OF_STREAM:
             return
         # The chunk came from the client's latest response, whatever an
-        # earlier poll adopted (an attempt's error reply the SDK retried).
+        # earlier poll adopted (the error reply of an attempt since retried).
         self._response = self._http_client.last_response
         yield first
         yield from self._chunks
@@ -226,7 +461,7 @@ class _AbortableStream:
         Cached on first read; after :meth:`close` only the cached value
         is ever returned, so a parked abort can no longer observe a later
         request through the shared client.  A response the SDK already
-        finished with (the error reply of an attempt it is retrying) is
+        finished with (the error reply of an attempt being retried) is
         not this stream's: the watchdog keeps polling for the live one.
         """
         if self._response is None and not self._closed:
@@ -455,6 +690,13 @@ class GeminiModel(Model):
         # ``dict.pop`` takes it and ``dict.setdefault`` puts it back, each
         # atomic, so no two calls share a client and at most one is kept.
         self._idle_embedding_client: dict[str, _EmbeddingClient] = {}
+        # A dropped model closes it at once: httpx binds a reply and its
+        # stream to each other, and that cycle holds the pool, whose socket
+        # would stay open until a cyclic collection.  Not at exit, and the
+        # ignore, as in ``DecisionsModel``.
+        weakref.finalize(
+            self, _close_idle_embedding_client, self._idle_embedding_client
+        ).atexit = False  # type: ignore[misc]
 
     def _new_client(self) -> tuple[_ResponseTrackingHttpxClient, genai.Client]:
         """Return a new abortable tracking pool and a ``genai.Client`` that sends through it.
@@ -889,6 +1131,67 @@ class GeminiModel(Model):
                 self._invoke_thinking_callback(is_thought)
             self._invoke_token_callback(part.text)
 
+    def _retried_chunks(
+        self, contents: list[types.Content], config: Any, headers_due: float
+    ) -> Iterator[Any]:
+        """Yield the chunks of one turn's request, sent again as its ``retry_options`` ask.
+
+        Handed the options, the SDK makes the retries itself and sleeps
+        each backoff in ``time.sleep``, which neither a Stop nor the
+        header deadline ends (a minute at most, by its defaults).
+        So the SDK gets the request without them, one attempt a call, and
+        its policy is applied here: an attempt that failed before its
+        response opened, with a status code of the options, a timeout or
+        a failed connect, is made again after the backoff, which is waited
+        on the thread's stop event and no longer than *headers_due*.
+
+        Args:
+            contents: The conversation in Gemini API format.
+            config: The generation config for this turn.
+            headers_due: The ``time.monotonic()`` by which the response
+                must have opened, retries included.
+
+        Raises:
+            KeyboardInterrupt: When the task was stopped during a backoff.
+            TimeoutError: When a backoff reached *headers_due*: a stall.
+        """
+        http_options = config.http_options
+        options = types.HttpRetryOptions(attempts=1)  # the SDK's default: no retry
+        if http_options is not None and http_options.retry_options is not None:
+            options = http_options.retry_options
+            config = config.model_copy(
+                update={"http_options": http_options.model_copy(update={"retry_options": None})}
+            )
+        delays = _retry_delays(options)
+        stop_event = stop_signal.get_thread_stop_event() or threading.Event()
+        while True:
+            # A generator, whatever the SDK's signature says: closed below.
+            chunks: Any = self.client.models.generate_content_stream(
+                model=_strip_thinking_alias(self.model_name), contents=contents, config=config
+            )
+            try:
+                first = next(chunks, _END_OF_STREAM)
+                break
+            except Exception as error:
+                # The latest response of this turn (``_AbortableStream`` forgot older ones).
+                response = self._http_client.last_response
+                opened = response is not None and response.status_code == 200
+                retried = not opened and _retried_by_policy(error, options)
+                delay = next(delays, None) if retried else None
+                if delay is None:
+                    raise
+                logger.info("Gemini request failed (%s); sending it again in %.1fs.", error, delay)
+                remaining = headers_due - time.monotonic()
+                if (
+                    wait_interruptible(stop_event, min(delay, remaining), cooperative=False)
+                    or delay >= remaining
+                ):
+                    raise stop_or_stall_error(self._stream_stall_timeout) from error
+        if first is not _END_OF_STREAM:
+            with contextlib.closing(chunks):
+                yield first
+                yield from chunks
+
     def _stream_turn(
         self, contents: list[types.Content], config: Any
     ) -> tuple[list[Any], Any, str | None]:
@@ -952,13 +1255,11 @@ class GeminiModel(Model):
         finish_reason: str | None = None
         block_reason: str | None = None
         # The wait for the headers is bounded as a whole (connection,
-        # request, the SDK's retries): the byte-level clock cannot see
-        # a peer that trickles them.  A cut after the budget is a stall.
+        # request, retries): the byte-level clock cannot see a peer
+        # that trickles them.  A cut after the budget is a stall.
         headers_due = time.monotonic() + CONNECT_TIMEOUT + 2 * self._stream_stall_timeout
         stream = _AbortableStream(
-            self.client.models.generate_content_stream(
-                model=_strip_thinking_alias(self.model_name), contents=contents, config=config
-            ),
+            self._retried_chunks(contents, config, headers_due),
             self._http_client,
             headers_due - time.monotonic(),
         )
@@ -970,6 +1271,7 @@ class GeminiModel(Model):
                         # Billed already: kept for take_partial_usage_response
                         # if the stream fails before it ends.
                         usage_chunk = self._rejected_response = chunk
+                        _note_served_tier(chunk, stream.response)
                     if chunk.prompt_feedback is not None and chunk.prompt_feedback.block_reason:
                         block_reason = _reason_name(chunk.prompt_feedback.block_reason)
                     if chunk.candidates and chunk.candidates[0].finish_reason:
@@ -1164,6 +1466,42 @@ class GeminiModel(Model):
             return input_tokens, output_tokens, cached_tokens, 0
         return 0, 0, 0, 0
 
+    def cost_multiplier_for_response(self, response: Any) -> float:
+        """Return Google's service-tier factor for the tier that served *response*.
+
+        The catalog holds Standard rates.  Priority bills every token at
+        :data:`_GEMINI_PRIORITY_MULTIPLIER` times that and Flex at
+        :data:`_GEMINI_FLEX_MULTIPLIER`, except cached input on the
+        models of :data:`_TIER_CACHED_INPUT` (Flex leaves it at the
+        Standard price on the older ones): for those the factor returned
+        is the one that prices this response's cached share at its own
+        rate and the rest at the tier's.
+
+        The tier is the one the response reports (see
+        :func:`_served_tier`), so a Priority request served as Standard
+        bills Standard.  A response that reports none (an endpoint that
+        does not send it, a compressed stream) is billed at the tier
+        ``model_config["service_tier"]`` asked for: Flex is served as
+        Flex or not at all, and Priority is then an upper bound.
+
+        Args:
+            response: The chunk a turn is billed against, or the usage
+                snapshot of a turn that raised.
+
+        Returns:
+            The factor to apply to the Standard-rate catalog estimate.
+        """
+        tier = _served_tier(response) or _tier_name(self.model_config.get("service_tier"))
+        factor, cached_factor = _tier_factors(self.model_name, tier)
+        if cached_factor == factor:
+            return factor
+        counts = self.extract_input_output_token_counts_from_response(response)
+        standard = calculate_cost(self, *counts)
+        if standard <= 0:
+            return factor
+        cached = calculate_cost(self, *counts, cache_read_only=True)
+        return factor + (cached_factor - factor) * cached / standard
+
     def get_embedding(
         self,
         text: str,
@@ -1213,7 +1551,7 @@ class GeminiModel(Model):
             daemon=True,
         )
         try:
-            worker.start()
+            call_without_injection(worker.start)
             worker.join()
             result = outcome[0]
             if isinstance(result, BaseException):

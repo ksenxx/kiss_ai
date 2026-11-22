@@ -9,7 +9,6 @@ from __future__ import annotations
 from typing import Any
 
 from kiss.server import agent_state
-from kiss.server.merge_flow import _flatten_changed
 
 
 def worktree_changed_files(server: Any, tab_id: str) -> list[str]:
@@ -24,4 +23,8 @@ def worktree_changed_files(server: Any, tab_id: str) -> list[str]:
     state = agent_state.find_by_tab(tab_id)
     if state is None or state.agent is None:
         return []
-    return _flatten_changed(server._list_pending(state.agent), state.agent._wt)
+    files: list[str] = []
+    for wt, names in server._list_pending(state.agent):
+        prefix = "" if wt is state.agent._wt else f"{wt.repo_root}/"
+        files.extend(prefix + name for name in names or ())
+    return sorted(set(files))

@@ -31,13 +31,17 @@ Asynchronous delivery has one hazard that shapes this module: the
 exception may land right after a ``lock.__enter__`` returned and before
 the ``with`` body's exception range begins, so ``__exit__`` never runs
 and the lock stays held.  Therefore the tool's own thread NEVER takes a
-lock here — its registry operations are single dict stores and pops,
-atomic under the GIL — and the interrupting side only ever holds
-:data:`_INJECT_LOCK`, which the tool thread never touches.  The
-``closing`` flag on the token orders the two sides: a tool that has
+lock here with a ``with`` — its registry operations are single dict
+stores and pops, atomic under the GIL — and the interrupting side
+decides under :data:`_INJECT_LOCK`, which the tool thread never touches.
+The ``closing`` flag on the token orders the two sides: a tool that has
 begun returning is never injected, and an injection that raced the
 return is drained by :func:`end_tool_call` so it cannot surface later
-in the agent loop.
+in the agent loop.  The standard library's waits take their locks the
+unsafe way, so a thread that can be injected runs each slice of one
+through :func:`call_without_injection`, which holds the exception back
+until the slice has returned (the one lock both sides take for that is
+taken through :func:`~kiss.core.locked.locked_call`).
 
 A call made while the thread already runs one (the ``Write`` a tool's
 :class:`~kiss.core.tool_verdict.ToolRedirect` stands for, its follow-up)
@@ -55,15 +59,14 @@ call's interrupt between the nested calls
 from __future__ import annotations
 
 import ctypes
-import functools
 import itertools
 import logging
 import threading
 import time
+from collections.abc import Callable
 from concurrent.futures import Future
 
-from kiss.core.locked import locked
-from kiss.core.processes import inject_outside_spawn
+from kiss.core.locked import locked, locked_call
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +84,8 @@ deadline blocks in C for all of it, where an injected Stop
 (:class:`ToolCallInterrupted` from the tool panel, ``KeyboardInterrupt``
 from the task's stop watchdog) cannot land; short slices return to
 Python between them, and the tool panel's Stop is honoured cooperatively
-there too.
+there too.  A Stop injected into a slice is raised as the slice ends
+(:func:`call_without_injection`).
 """
 
 _DRAIN_SECONDS = 1.0
@@ -110,6 +114,13 @@ class ToolCallInterrupted(BaseException):
 # ``Py_None``, which SETS a pending ``SystemError`` instead of clearing).
 _SET_ASYNC_EXC = ctypes.pythonapi["PyThreadState_SetAsyncExc"]
 
+# Ident of each thread inside :func:`call_without_injection` -> its one-item
+# list: the exception class an injector left for that call, or None.
+_HELD: dict[int, list[type[BaseException] | None]] = {}
+# Orders a thread's mark in ``_HELD`` against an injector's look at it.
+# Taken through ``locked_call``: both sides can be a thread under a Stop.
+_HELD_LOCK = threading.RLock()
+
 
 def inject_async_exception(tid: int, exc_type: type[BaseException]) -> int:
     """Raise *exc_type* asynchronously in thread *tid*.
@@ -119,9 +130,9 @@ def inject_async_exception(tid: int, exc_type: type[BaseException]) -> int:
     the process cannot change how the arguments are marshalled.  When
     the call reports the exception was set in more than one thread state
     (``rc > 1``), the injection is undone as CPython's documentation
-    requires.  A thread that is starting a child process gets the
-    exception once the child is started
-    (:func:`kiss.core.processes.inject_outside_spawn`).
+    requires.  A thread inside :func:`call_without_injection` (a slice
+    of a wait, the start of a thread or of a child process) raises the
+    exception itself as that call ends.
 
     Args:
         tid: The target thread's ``ident``.
@@ -129,15 +140,73 @@ def inject_async_exception(tid: int, exc_type: type[BaseException]) -> int:
 
     Returns:
         The number of thread states modified: ``0`` when *tid* no
-        longer names a live thread, ``1`` on success (values above 1
-        have already been rolled back here).
+        longer names a live thread, ``1`` on success or when the
+        exception was left to the thread (values above 1 have already
+        been rolled back here).
     """
-    rc = inject_outside_spawn(
-        tid, functools.partial(_SET_ASYNC_EXC, ctypes.c_ulong(tid), ctypes.py_object(exc_type))
-    )
+    return locked_call(_HELD_LOCK, _hold_or_set, tid, exc_type)
+
+
+def _hold_or_set(tid: int, exc_type: type[BaseException]) -> int:
+    """Under ``_HELD_LOCK``: leave *exc_type* to the call thread *tid* is in, else set it."""
+    held = _HELD.get(tid)
+    if held is not None:
+        held[0] = exc_type
+        return 1
+    rc: int = _SET_ASYNC_EXC(ctypes.c_ulong(tid), ctypes.py_object(exc_type))
     if rc > 1:  # pragma: no cover — rare: exception set in multiple states
         _SET_ASYNC_EXC(ctypes.c_ulong(tid), None)
     return rc
+
+
+def call_without_injection[**P, T](fn: Callable[P, T], /, *args: P.args, **kwargs: P.kwargs) -> T:
+    """Call ``fn(*args, **kwargs)``; an exception injected meanwhile is raised as it ends.
+
+    For a call that takes a lock the unsafe way on a thread a Stop can
+    be injected into, above all the standard library's waits:
+    ``Event.wait``, ``Future.result`` and ``queue.Queue.get`` enter a
+    ``threading.Condition``, whose ``__enter__`` is a Python function.
+    An exception raised at the check that follows its acquire (a thread
+    blocked on a contended acquire receives a pending one exactly there)
+    leaves the lock held by a thread that unwinds, and whoever publishes
+    under that lock (``set``, ``set_result``, ``put``) blocks for good.
+    The calling thread is therefore marked for the length of the call:
+    :func:`inject_async_exception` leaves the exception class with the
+    mark instead of setting it, and this thread raises it itself once
+    *fn* has returned or raised, outside every lock *fn* took.  The
+    exception waits for *fn* to end, so *fn* is one short step (a slice
+    of a wait, the start of a thread or of a child process), never a
+    whole wait.  A call made through here inside *fn* joins this hold.
+
+    Args:
+        fn: The call to protect.
+        *args: Its positional arguments.
+        **kwargs: Its keyword arguments.
+
+    Returns:
+        ``fn``'s return value.
+
+    Raises:
+        BaseException: The exception class injected during the call, in
+            place of ``fn``'s own outcome.
+    """
+    ident = threading.get_ident()
+    if ident in _HELD:
+        return fn(*args, **kwargs)
+    held: list[type[BaseException] | None] = [None]
+    try:
+        # An exception set before the mark is raised at the check that
+        # follows this acquire: none is pending when ``fn`` starts.
+        locked_call(_HELD_LOCK, _HELD.__setitem__, ident, held)
+        return fn(*args, **kwargs)
+    finally:
+        # The mark goes first, in one C call.  An injector that found it
+        # fills ``held`` before it releases the lock, so the take under
+        # that lock misses nothing.
+        _HELD.pop(ident, None)
+        exc_type = locked_call(_HELD_LOCK, held.pop)
+        if exc_type is not None:
+            raise exc_type
 
 
 _call_ids = itertools.count(1)
@@ -412,34 +481,41 @@ def result_interruptible[T](future: Future[T], timeout: float | None = None) -> 
         if deadline is not None:
             wait = min(max(deadline - time.monotonic(), 0.0), wait)
         try:
-            return future.result(timeout=wait)
+            return call_without_injection(future.result, timeout=wait)
         except TimeoutError:
-            if future.done():
-                return future.result()
+            if call_without_injection(future.done):
+                return call_without_injection(future.result)
             if deadline is not None and time.monotonic() >= deadline:
                 raise
             raise_if_interrupted()
 
 
-def wait_interruptible(event: threading.Event, timeout: float) -> bool:
+def wait_interruptible(event: threading.Event, timeout: float, cooperative: bool = True) -> bool:
     """Wait for *event* in :data:`_WAIT_SLICE_SECONDS` slices.
 
     Args:
         event: The event to wait for.
         timeout: Seconds to wait at most.
+        cooperative: Whether an interrupt of the calling thread's tool
+            call ends the wait.  ``False`` for a wait of the cleanup that
+            interrupt begins, and where only an injected Stop ended the
+            wait so far: the Stop is still raised between two slices.
 
     Returns:
         Whether *event* was set before *timeout* passed.
 
     Raises:
         ToolCallInterrupted: When the calling thread's tool call was
-            interrupted meanwhile.
+            interrupted meanwhile, for a *cooperative* wait.
     """
     deadline = time.monotonic() + timeout
-    while not event.wait(min(max(deadline - time.monotonic(), 0.0), _WAIT_SLICE_SECONDS)):
+    while not call_without_injection(
+        event.wait, min(max(deadline - time.monotonic(), 0.0), _WAIT_SLICE_SECONDS)
+    ):
         if time.monotonic() >= deadline:
             return False
-        raise_if_interrupted()
+        if cooperative:
+            raise_if_interrupted()
     return True
 
 
@@ -613,13 +689,15 @@ def _signal(call: ToolCallToken) -> None:
     call.event.set()
     if call.armed:
         return  # a repeated Stop must not arm a second watchdog
+    watchdog = threading.Thread(
+        target=_inject_after_grace,
+        args=(call,),
+        name=f"tool-interrupt-{call.call_id}",
+        daemon=True,
+    )
     try:
-        threading.Thread(
-            target=_inject_after_grace,
-            args=(call,),
-            name=f"tool-interrupt-{call.call_id}",
-            daemon=True,
-        ).start()
+        # A task thread makes this call too (see ``interrupt_tool_call``).
+        call_without_injection(watchdog.start)
     except RuntimeError:  # pragma: no cover — thread exhaustion
         # No forced fallback here: the caller may hold a lock the tool
         # thread is waiting for, and an injection landing right after

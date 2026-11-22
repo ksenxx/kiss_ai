@@ -12,6 +12,7 @@ sync-memory tests do.
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import shutil
@@ -31,11 +32,18 @@ from kiss.agents.seas.autorouter.autorouter_sea import log_decision
 from kiss.core.file_lock import lock_exclusive, unlock
 from kiss.core.processes import kill_process_tree, popen_process_group
 from kiss.scripts import sync_kiss_notes as notes
-from kiss.tests.conftest import posix_only
+from kiss.tests.conftest import is_root, posix_only
 
 SCRIPT = Path(notes.__file__).resolve()
 
 pytestmark = posix_only("drives the script with a bash ssh stand-in")
+
+renames_over_a_note = pytest.mark.skipif(
+    sys.platform != "linux",
+    reason="off Linux Python cannot tell whether a new file can stand in for a note that is "
+    "there (no os.listxattr): a merge rewrites the note in place instead of renaming over it",
+)
+"""Marks a test of what only the rename gives: ``merge_into_file`` says where it is to be had."""
 
 FAKE_SSH = """#!/bin/bash
 while [ $# -gt 0 ]; do
@@ -300,6 +308,7 @@ def test_a_row_appended_while_the_ledger_is_merged_survives(
     monkeypatch.setenv("KISS_HOME", str(tmp_path))
     path = tmp_path / "MODEL_DECISIONS.md"
     path.write_text(HEADER + ROW_A)
+    inode = path.stat().st_ino
     verdicts: list[str] = []
     with path.open("a") as held:
         lock_exclusive(held)
@@ -319,6 +328,7 @@ def test_a_row_appended_while_the_ledger_is_merged_survives(
     assert text.startswith(HEADER + ROW_A + ROW_B)
     assert text.count("| - | grep logs | small | m-small | tier small 0.9 | pending |") == 1
     assert sorted(p.name for p in tmp_path.iterdir()) == ["MODEL_DECISIONS.md"]
+    assert path.stat().st_ino == inode  # whichever of the two had the lock first
 
 
 def test_two_merges_of_the_same_ledger_at_once_lose_nothing(tmp_path: Path) -> None:
@@ -348,7 +358,7 @@ def _append_result(results: list[object], function: Callable[..., object], *args
 
 
 def _refresh(path: Path, text: str) -> IO[str]:
-    """Replace the note at *path* as ``/rsi7d`` does, by a rename; return the new file, locked."""
+    """Replace the note at *path* by a rename, with no lock held; return the new file, locked."""
     partial = path.with_name(path.name + ".tmp")
     partial.write_text(text)
     held = partial.open("r+")
@@ -360,8 +370,9 @@ def _refresh(path: Path, text: str) -> IO[str]:
 def test_a_note_replaced_while_it_is_merged_is_merged_again(tmp_path: Path) -> None:
     """A merge that finds its note replaced by a rename merges into the file now at the path.
 
-    ``/rsi7d`` renames a fresh AUTOROUTER.md over the old one without the note's lock; a merge
-    holding the old file open wrote the incoming rows into that orphan and said "updated".
+    A writer that takes none of the note's locks (an editor, a daemon from before ``/rsi7d``
+    took the lock file) renames a fresh AUTOROUTER.md over the old one; a merge holding the
+    old file open wrote the incoming rows into that orphan and said "updated".
     Here every file at the path stays locked until the next one has replaced it, so each
     merge attempt meets a replaced note: the merge lands once the refreshes stop, and gives
     up, rather than report success, when they do not.
@@ -397,8 +408,361 @@ def test_a_note_replaced_while_it_is_merged_is_merged_again(tmp_path: Path) -> N
     assert path.read_text() == local
 
 
+def _start_at(
+    started: list[tuple[threading.Thread, bool]],
+    call: str,
+    action: Callable[[], object],
+    _frame: FrameType,
+    event: str,
+    arg: object,
+) -> None:
+    """Profile function of a merge: a thread runs *action* as the merge first calls *call*.
+
+    *call* is the qualified name of a C function (``replace`` is ``os.replace``).  *started*
+    gets the thread and whether it was still at work a second later.
+    """
+    if event == "c_call" and getattr(arg, "__qualname__", "") == call and not started:
+        thread = threading.Thread(target=action)
+        thread.start()
+        thread.join(timeout=1.0)
+        started.append((thread, thread.is_alive()))
+
+
+def _merge_at_each_lock(
+    competitors: list[threading.Thread],
+    path: Path,
+    stamp: str,
+    frame: FrameType,
+    event: str,
+    _arg: object,
+) -> None:
+    """Profile function of a merge: each time it goes for a lock, another merge gets a second.
+
+    Four times at most; merge *n* brings bullet *n* to the evidence at *path*.
+    """
+    if event == "call" and frame.f_code is notes.lock_note.__code__ and len(competitors) < 4:
+        merge = ("AUTOROUTER.md", str(path), f"{stamp}- bullet {len(competitors)}.\n")
+        competitors.append(threading.Thread(target=notes.merge_into_file, args=merge))
+        competitors[-1].start()
+        competitors[-1].join(timeout=1.0)
+
+
+def test_merges_of_the_evidence_take_turns_and_lose_nothing(tmp_path: Path) -> None:
+    """Merges of AUTOROUTER.md take turns, whichever name each was given for the note.
+
+    A merge renames the merged evidence over the file the note's path leads to (a rename
+    over a symlink would leave a regular file in its place and the old text in the file it
+    named).  Merges that only locked the file each had opened found it replaced by the merge
+    they had waited for: one that renamed its text all the same lost that merge's bullet, and
+    one that merged again gave up after three replacements.  Here a merge of the file itself
+    starts each time a merge through a symlink goes for a lock: for the link's lock file, for
+    the file's, for the note.  The last one waits, no merge gives up, and the note holds the
+    bullet of each.
+    """
+    real, link = tmp_path / "dotfiles" / "AUTOROUTER.md", tmp_path / "home" / "AUTOROUTER.md"
+    real.parent.mkdir()
+    link.parent.mkdir()
+    stamp = EVIDENCE.splitlines()[0] + "\n\n"
+    real.write_text(stamp + "- seed.\n")
+    link.symlink_to(real)
+    competitors: list[threading.Thread] = []
+    sys.setprofile(functools.partial(_merge_at_each_lock, competitors, real, stamp))
+    try:
+        verdict = notes.merge_into_file("AUTOROUTER.md", str(link), stamp + "- first.\n")
+    finally:
+        sys.setprofile(None)
+    for competitor in competitors:
+        competitor.join(timeout=30)
+    assert verdict == "updated" and len(competitors) == 3
+    assert sorted(real.read_text().splitlines()[2:]) == [
+        "- bullet 0.",
+        "- bullet 1.",
+        "- bullet 2.",
+        "- first.",
+        "- seed.",
+    ]
+    assert link.is_symlink()
+    for folder in (link.parent, real.parent):
+        assert sorted(os.listdir(folder)) == ["AUTOROUTER.md", "AUTOROUTER.md.lock"]
+
+
+def _save_with_a_backup(path: Path, text: str) -> None:
+    """Move the note at *path* aside and write *text* as a new note, as an editor may save."""
+    path.rename(path.with_name(path.name + "~"))
+    path.write_text(text)
+
+
+def test_evidence_is_renamed_over_the_file_that_was_merged_and_no_other(tmp_path: Path) -> None:
+    """A merge that finds another file at the note's path than the one it read merges again.
+
+    An editor that keeps a backup moves the note aside and writes a new one, with none of the
+    note's locks.  A merge that had read the old note and renamed its text over the path all
+    the same put the old evidence back over what the editor had saved.  Here the editor saves
+    when the merge has staged its text: the merge renames nothing, and merges into the new note.
+    """
+    path = tmp_path / "AUTOROUTER.md"
+    stamp = EVIDENCE.splitlines()[0] + "\n\n"
+    path.write_text(stamp + "- old.\n")
+    save = functools.partial(_save_with_a_backup, path, stamp + "- saved.\n")
+    sys.setprofile(functools.partial(_start_at, [], "fchown", save))
+    try:
+        verdict = notes.merge_into_file("AUTOROUTER.md", str(path), stamp + "- incoming.\n")
+    finally:
+        sys.setprofile(None)
+    assert verdict == "updated"
+    assert sorted(path.read_text().splitlines()[2:]) == ["- incoming.", "- saved."]
+
+
+def _read_into(texts: list[str | None], path: Path) -> None:
+    """Thread body: append to *texts* what ``read_note`` returns for the note at *path*."""
+    texts.append(notes.read_note(str(path)))
+
+
+@pytest.mark.skipif(is_root(), reason="root ignores directory permission bits")
+@pytest.mark.parametrize("lock_file", [False, True])
+def test_evidence_in_a_folder_that_takes_no_new_file_is_merged_in_place(
+    tmp_path: Path, lock_file: bool
+) -> None:
+    """A writable AUTOROUTER.md in a folder its user cannot write to is merged all the same.
+
+    Nothing can be renamed into such a folder, so the merged text is written into the note
+    itself, as the ledger's is -- also when the note is reached through a symlink in a folder
+    that would take a new file, and whether or not the folder holds the note's lock file from
+    the time it took one.  The merge failed there instead: "Permission denied".  Between the
+    write and the truncate the note is the start of the new text and the end of the old one;
+    a reader that takes the note's lock, as ``read_note`` does, waits and reads the new text.
+    """
+    path, link = tmp_path / "dotfiles" / "AUTOROUTER.md", tmp_path / "home" / "AUTOROUTER.md"
+    path.parent.mkdir()
+    link.parent.mkdir()
+    path.write_text(EVIDENCE)
+    link.symlink_to(path)
+    if lock_file:
+        path.with_name("AUTOROUTER.md.lock").touch()
+    beside = sorted(os.listdir(path.parent))
+    stamp = EVIDENCE.splitlines()[0]
+    newer = stamp.replace("2026-09-27", "2026-10-04") + "\n\n" + "- a newer bullet.\n" * 3000
+    newest = stamp.replace("2026-09-27", "2026-10-11") + "\n\n" + "- the newest bullet.\n" * 1000
+    inode = path.stat().st_ino
+    texts: list[str | None] = []
+    started: list[tuple[threading.Thread, bool]] = []
+    read = functools.partial(_read_into, texts, path)
+    path.parent.chmod(0o500)
+    try:
+        assert notes.merge_into_file("AUTOROUTER.md", str(path), newer) == "updated"
+        assert path.read_text() == newer
+        sys.setprofile(functools.partial(_start_at, started, "TextIOWrapper.truncate", read))
+        try:
+            assert notes.merge_into_file("AUTOROUTER.md", str(link), newest) == "updated"
+        finally:
+            sys.setprofile(None)
+    finally:
+        path.parent.chmod(0o700)
+    [(reader, waited)] = started
+    reader.join(timeout=30)
+    assert waited and texts == [newest]
+    assert path.read_text() == newest and path.stat().st_ino == inode and link.is_symlink()
+    assert sorted(os.listdir(path.parent)) == beside
+    assert sorted(os.listdir(link.parent)) == ["AUTOROUTER.md", "AUTOROUTER.md.lock"]
+
+
+@pytest.mark.skipif(is_root(), reason="root ignores directory permission bits")
+@pytest.mark.parametrize(
+    "why",
+    ["attribute", "second name", "lock symlink", "lock hard link", "lock is note", "folder closes"],
+)
+def test_evidence_no_new_file_can_stand_in_for_is_merged_in_place(tmp_path: Path, why: str) -> None:
+    """Where a new file would not be what the note was, the evidence is written into the note.
+
+    A new file lacks the note's extended attributes (an ACL is one: whoever it let read the
+    note could not read the new file) and is not the file the note's second name, a hard link,
+    leads to.  A lock file that is a link is no lock to take (here a link to the lock file of
+    the file the note, a symlink, leads to), nor is one the note is a link to: the merge waited
+    for a lock it held itself until it gave up.  And a folder
+    that stops taking files once the text is staged allows neither the rename nor the removal
+    of the staged file: that second error ended the merge.  Each of these notes is merged as
+    it always was, in place.
+    """
+    path = tmp_path / "AUTOROUTER.md"
+    path.write_text(EVIDENCE)
+    newer = EVIDENCE.replace("2026-09-27", "2026-10-04")
+    inode = path.stat().st_ino
+    hook = None
+    if why == "attribute":
+        try:
+            if sys.platform != "linux":
+                raise OSError("os.setxattr is Linux's")
+            os.setxattr(path, "user.kiss", b"kept")
+        except OSError:
+            pytest.skip("no user extended attributes here")
+    elif why == "second name":
+        os.link(path, tmp_path / "twin.md")
+    elif why in ("lock symlink", "lock hard link"):
+        path.rename(tmp_path / "real.md")
+        path.symlink_to("real.md")
+        (tmp_path / "real.md.lock").touch()
+        link = os.symlink if why == "lock symlink" else os.link
+        link(tmp_path / "real.md.lock", path.with_name("AUTOROUTER.md.lock"))
+    elif why == "lock is note":
+        path.rename(path.with_name("AUTOROUTER.md.lock"))
+        path.symlink_to("AUTOROUTER.md.lock")
+    else:
+        close = functools.partial(tmp_path.chmod, 0o500)
+        hook = functools.partial(_start_at, [], "replace", close)
+    sys.setprofile(hook)
+    try:
+        verdict = notes.merge_into_file("AUTOROUTER.md", str(path), newer)
+    finally:
+        sys.setprofile(None)
+        tmp_path.chmod(0o700)
+    assert verdict == "updated" and path.read_text() == newer and path.stat().st_ino == inode
+
+
+@pytest.mark.parametrize("target", ["gone/../target.md", "target.md/"])
+def test_evidence_behind_a_link_the_kernel_does_not_open_is_not_made_elsewhere(
+    tmp_path: Path, target: str
+) -> None:
+    """A note that is a symlink the kernel refuses to open fails its merge, as it always did.
+
+    ``os.path.realpath`` reads both targets as ``target.md``: a merge that opened what it
+    returns made that file and said "created", and the note's path led nowhere, as before.
+
+    Not reached by any test: the bound on the links a merge follows (``_rename_locks``).  A
+    chain the kernel gives up on fails the merge's ``os.stat`` before any link is followed,
+    so the bound only ends a loop of links made while the merge runs, which no real file
+    system makes on demand.
+    """
+    path = tmp_path / "AUTOROUTER.md"
+    os.symlink(f"{tmp_path}/{target}", path)
+    with pytest.raises(OSError):
+        notes.merge_into_file("AUTOROUTER.md", str(path), EVIDENCE)
+    assert sorted(os.listdir(tmp_path)) == ["AUTOROUTER.md", "AUTOROUTER.md.lock"]
+
+
+def test_evidence_that_cannot_be_written_leaves_the_note_and_nothing_beside_it(
+    tmp_path: Path,
+) -> None:
+    """A text UTF-8 cannot encode fails the merge: the note is whole, no staged file is left."""
+    path = tmp_path / "AUTOROUTER.md"
+    path.write_text(EVIDENCE)
+    newer = EVIDENCE.replace("2026-09-27", "2026-10-04") + "- \udcff.\n"
+    with pytest.raises(UnicodeEncodeError):
+        notes.merge_into_file("AUTOROUTER.md", str(path), newer)
+    assert path.read_text() == EVIDENCE
+    assert sorted(os.listdir(tmp_path)) == ["AUTOROUTER.md", "AUTOROUTER.md.lock"]
+
+
+def _merge_under(profile: Callable[..., object], path: Path, text: str) -> None:
+    """Thread body: merge *text* into the evidence at *path* with *profile* as profile function."""
+    sys.setprofile(profile)
+    try:
+        notes.merge_into_file("AUTOROUTER.md", str(path), text)
+    finally:
+        sys.setprofile(None)
+
+
+def _replace_under_lock(path: Path, text: str) -> None:
+    """Thread body: put *text* at *path* the way ``/rsi7d`` refreshes the evidence."""
+    with notes.rename_lock(str(path)):
+        notes.replace_note(str(path), text)
+
+
+@renames_over_a_note
+def test_a_lock_file_renamed_over_while_a_merge_waits_for_it_is_not_its_lock(
+    tmp_path: Path,
+) -> None:
+    """A merge that waited for a lock file goes on with the file at that name, not an old one.
+
+    A note that is a link to another note's lock file is merged like any note: the new text
+    is renamed over that lock file.  A merge of the other note that had waited for the old
+    file went on with it, a file nothing led to any more: a refresh took the new lock file at
+    once, and the merge renamed its older text over the refreshed note.  Here a merge of the
+    note starts as its lock file is renamed over, and a refresh as that merge renames: both
+    wait, and the note is the refreshed one.
+    """
+    note, alias = tmp_path / "home" / "AUTOROUTER.md", tmp_path / "alias" / "AUTOROUTER.md"
+    note.parent.mkdir()
+    alias.parent.mkdir()
+    stamp = EVIDENCE.splitlines()[0] + "\n\n"
+    note.write_text(stamp + "- seed.\n")
+    lock_file = note.with_name("AUTOROUTER.md.lock")
+    lock_file.write_text(stamp + "- elsewhere.\n")
+    alias.symlink_to(lock_file)
+    newer = EVIDENCE.replace("2026-09-27", "2026-10-04")
+    merges: list[tuple[threading.Thread, bool]] = []
+    refreshes: list[tuple[threading.Thread, bool]] = []
+    refresh = functools.partial(_replace_under_lock, note, newer)
+    as_it_renames = functools.partial(_start_at, refreshes, "replace", refresh)
+    merge = functools.partial(_merge_under, as_it_renames, note, stamp + "- incoming.\n")
+    sys.setprofile(functools.partial(_start_at, merges, "replace", merge))
+    try:
+        notes.merge_into_file("AUTOROUTER.md", str(alias), stamp + "- via the link.\n")
+    finally:
+        sys.setprofile(None)
+    merges[0][0].join(timeout=30)
+    refreshes[0][0].join(timeout=30)
+    assert merges[0][1] and refreshes[0][1] and note.read_text() == newer
+
+
+def _read_at_each_lock(
+    texts: list[str | None], path: Path, frame: FrameType, event: str, _arg: object
+) -> None:
+    """Profile function of a merge: each time it goes for a lock, a reader reads *path*."""
+    if event == "call" and frame.f_code is notes.lock_note.__code__:
+        reader = threading.Thread(target=_read_into, args=(texts, path))
+        reader.start()
+        reader.join(timeout=1.0)
+
+
+@pytest.mark.parametrize("linked", [False, True])
+def test_evidence_that_is_not_there_yet_is_never_read_empty(tmp_path: Path, linked: bool) -> None:
+    """The first evidence appears whole: a reader finds no note, or all of it.
+
+    A merge made the missing note, empty, and then went for its lock: a reader that got the
+    lock first read an empty note.  Here a reader reads each time the merge goes for a lock;
+    the note is made by a rename, private as ever, also where a dangling link leads to it.
+    """
+    path = tmp_path / "AUTOROUTER.md"
+    target = tmp_path / "dotfiles.md" if linked else path
+    if linked:
+        path.symlink_to(target)
+    texts: list[str | None] = []
+    sys.setprofile(functools.partial(_read_at_each_lock, texts, path))
+    try:
+        verdict = notes.merge_into_file("AUTOROUTER.md", str(path), EVIDENCE)
+    finally:
+        sys.setprofile(None)
+    assert verdict == "created" and texts and set(texts) == {None}
+    assert notes.read_note(str(path)) == notes.merge_note("AUTOROUTER.md", "", EVIDENCE)
+    assert path.is_symlink() == linked and stat.S_IMODE(target.stat().st_mode) == 0o600
+
+
+@pytest.mark.skipif(is_root(), reason="root ignores directory permission bits")
+def test_evidence_that_cannot_be_made_fails_as_it_always_did(tmp_path: Path) -> None:
+    """Where the first evidence cannot be staged, the merge fails on the note itself, as before.
+
+    The folder takes no new file and the lock file is there from better days: the error is
+    that of making the note, not of a file staged beside it, and nothing is left behind.
+    """
+    path = tmp_path / "home" / "AUTOROUTER.md"
+    path.parent.mkdir()
+    path.with_name("AUTOROUTER.md.lock").touch()
+    path.parent.chmod(0o500)
+    try:
+        with pytest.raises(PermissionError) as failure:
+            notes.merge_into_file("AUTOROUTER.md", str(path), EVIDENCE)
+    finally:
+        path.parent.chmod(0o700)
+    assert failure.value.filename == str(path)
+    assert os.listdir(path.parent) == ["AUTOROUTER.md.lock"]
+
+
 def test_command_line_merges_two_files_and_explains_itself(tmp_path: Path) -> None:
-    """``merge NAME INTO FROM`` merges on disk; anything else prints the usage."""
+    """``merge NAME INTO FROM`` merges on disk; anything else prints the usage.
+
+    A FROM that is no regular file is refused: the command waited for ever to open a named
+    pipe nobody writes to (it is ended at the timeout here when it does).
+    """
     into, other = tmp_path / "into.md", tmp_path / "from.md"
     into.write_text(EVIDENCE)
     other.write_text(EVIDENCE.replace("2026-09-27", "2026-10-04"))
@@ -417,6 +781,17 @@ def test_command_line_merges_two_files_and_explains_itself(tmp_path: Path) -> No
         check=False,
     )
     assert done.returncode == 1 and "not a synced note" in done.stderr
+    pipe = tmp_path / "pipe.md"
+    os.mkfifo(pipe)
+    done = subprocess.run(
+        [sys.executable, str(SCRIPT), "merge", "AUTOROUTER.md", str(into), str(pipe)],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    assert done.returncode == 1 and "pipe.md is not a regular file" in done.stderr
+    assert into.read_text() == other.read_text()
     for args in ([], ["--help"], ["merge"], ["_merge"]):
         done = subprocess.run(
             [sys.executable, str(SCRIPT), *args], capture_output=True, text=True, check=False
@@ -497,7 +872,11 @@ def test_sync_brings_both_machines_to_the_same_merged_notes(tmp_path: Path) -> N
         assert (box.local / name).read_text() == (box.remote / name).read_text()
     assert (box.local / "MODEL_DECISIONS.md").read_text() == HEADER + ROW_A + ROW_B + ROW_C
     assert (box.local / "AUTOROUTER.md").read_text() == EVIDENCE
-    assert sorted(p.name for p in box.remote.iterdir()) == ["AUTOROUTER.md", "MODEL_DECISIONS.md"]
+    assert sorted(p.name for p in box.remote.iterdir()) == [
+        "AUTOROUTER.md",
+        "AUTOROUTER.md.lock",  # of whoever replaces the evidence: left for the next one
+        "MODEL_DECISIONS.md",
+    ]
     again = box.run()
     assert again.returncode == 0 and again.stdout.splitlines() == [
         "AUTOROUTER.md: here unchanged, me@fakehost unchanged",
@@ -676,10 +1055,11 @@ def _stop_at_ssh(frame: FrameType, event: str, _arg: object) -> None:
 def test_a_note_being_rewritten_is_never_read_half_written(tmp_path: Path) -> None:
     """A snapshot taken while a merge rewrites the note waits for the merge to finish.
 
-    The test writes as ``merge_into_file`` rewrites a note: lock, write the shorter, newer text over
-    the start, flush -- and truncate only later.  Until then the file holds the new stamp and the
-    old tail, which a sync would push back as bullets of the new evidence.  Both readers wait for
-    the lock and print the new text alone: ``read_note``, and what ``fetch_remote`` hands to ssh.
+    The test writes as ``merge_into_file`` rewrites a note in place (the ledger, and the evidence
+    where it cannot be renamed over): lock, write the shorter, newer text over the start, flush --
+    and truncate only later.  Until then the file holds the new stamp and the old tail, which a
+    sync would push back as bullets of the new evidence.  Both readers wait for the lock and print
+    the new text alone: ``read_note``, and what ``fetch_remote`` hands to ssh.
     """
     path = tmp_path / ".kiss" / "AUTOROUTER.md"
     path.parent.mkdir()
@@ -713,6 +1093,49 @@ def test_a_note_being_rewritten_is_never_read_half_written(tmp_path: Path) -> No
                     reader.wait()
     assert snapshots == [b"lock" + newer.encode()] * 2
     assert [reader.returncode for reader in readers] == [0, 0]
+
+
+def _read_unlocked(
+    path: Path, seen: list[str], _frame: FrameType, event: str, _arg: object
+) -> None:
+    """Profile function: at each call into C, read the note as a reader without its lock does."""
+    if event.startswith("c_"):
+        seen.append(path.read_text(encoding="utf-8"))
+
+
+@renames_over_a_note
+def test_evidence_read_without_its_lock_during_a_merge_is_one_whole_version(tmp_path: Path) -> None:
+    """Whoever reads AUTOROUTER.md without the note's lock never gets a mix of two texts.
+
+    ``observed_evidence`` spliced ``read_text()`` of the note into every routing prompt.  A merge
+    that rewrote the note in place showed it the start of the newer evidence followed by the tail
+    of the longer, older one, from the merge's write until its truncate.  Here the note is read
+    that way at every call a real merge makes into C: each read is the old text or the new one.
+    The file that replaces the note has its permission bits and its group (here one of the
+    user's other groups, where it has any), as the note rewritten in place kept them.
+
+    Where the note is still rewritten in place, the mix is there to be read: these reads get it
+    under Python 3.13 and miss it under 3.14, whose buffer holds the text back until the truncate.
+    """
+    path = tmp_path / "AUTOROUTER.md"
+    stamp = EVIDENCE.splitlines()[0]
+    old = stamp + "\n\n" + "- an old bullet.\n" * 3000
+    new = stamp.replace("2026-09-27", "2026-10-04") + "\n\n" + "- a new bullet.\n" * 1000
+    path.write_text(old)
+    path.chmod(0o640)
+    group = next((gid for gid in os.getgroups() if gid != os.getegid()), os.getegid())
+    os.chown(path, -1, group)
+    seen: list[str] = []
+    sys.setprofile(functools.partial(_read_unlocked, path, seen))
+    try:
+        verdict = notes.merge_into_file("AUTOROUTER.md", str(path), new)
+    finally:
+        sys.setprofile(None)
+    assert verdict == "updated"
+    assert set(seen) == {old, new}
+    assert path.read_text() == new and stat.S_IMODE(path.stat().st_mode) == 0o640
+    assert path.stat().st_gid == group
+    assert sorted(os.listdir(tmp_path)) == ["AUTOROUTER.md", "AUTOROUTER.md.lock"]
 
 
 def test_a_host_that_never_answers_the_ssh_handshake_fails_the_fetch() -> None:

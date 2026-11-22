@@ -236,7 +236,9 @@ class TestChromeBridgeToggle:
                     "starts it."
                 )
                 # The "?" is next to the label: after its text, on its line.
-                help_button = page.locator("#cfg-chrome-bridge-help-btn")
+                help_button = page.get_by_role(
+                    "button", name="How to set up Drive my Chrome", exact=True,
+                )
                 assert help_button.inner_text() == "?"
                 label_box, button_box = label.bounding_box(), help_button.bounding_box()
                 assert label_box is not None and button_box is not None

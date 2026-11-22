@@ -196,8 +196,12 @@ class Base:
         Returns:
             dict[str, Any]: A dictionary containing all agent state for persistence.
         """
+        # A run's model knows its own window whatever became of its
+        # registration since (``Model.info``); an agent without a model
+        # is looked up by name.
+        model = getattr(self, "model", None)
         try:
-            max_tokens = get_max_context_length(self.model_name)
+            max_tokens = get_max_context_length(self.model_name if model is None else model)
         except Exception:
             logger.debug("Exception caught", exc_info=True)
             max_tokens = None

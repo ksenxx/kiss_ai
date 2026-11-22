@@ -22,6 +22,7 @@ kernel) and, anywhere but on Windows, the Windows poll of a pipe.
 from __future__ import annotations
 
 import contextlib
+import ctypes
 import json
 import logging
 import os
@@ -30,23 +31,38 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from pathlib import Path
+from types import FrameType
+from typing import IO, Any
 
 import pytest
 
+from kiss.core import processes
+from kiss.core.locked import locked_call
 from kiss.core.processes import (
+    IS_WINDOWS,
     PIPE_GIVE_UP_SECONDS,
+    SIGKILL,
     CappedOutput,
     _capped_timeout,
     _read_some,
+    kill_process_group,
+    kill_process_tree,
     pid_alive,
+    pin_process,
     popen_process_group,
+    process_identity,
     run_capped,
     run_process_group,
+    start_process_group,
 )
+from kiss.core.tool_interrupt import inject_async_exception
 from kiss.tests.conftest import posix_only
+from kiss.tests.lock_injection import inject
+from kiss.tests.server.pause import Pause
 
 
 def _py(code: str) -> list[str]:
@@ -283,6 +299,23 @@ def _wait_for_pid_file(pid_file: Path) -> int:
     return int(pid_file.read_text())
 
 
+@pytest.mark.parametrize("pid", [2**31, 2**32, 2**64])
+def test_a_number_too_large_for_a_pid_names_no_process(pid: int) -> None:
+    """A number beyond the OS's pid type (a corrupt pidfile's) names no process and no group.
+
+    The system calls refuse such a number with an error that is no
+    ``OSError`` (``OverflowError`` from ``os.kill`` and ``os.killpg``,
+    ``ctypes.ArgumentError`` from ``OpenProcess`` past a DWORD): it went
+    through every caller's handler, and the daemon's sweep of an
+    orphaned tunnel raised instead of finding the pidfile stale.
+    """
+    assert pid_alive(pid) is False
+    assert process_identity(pid) is None
+    assert pin_process(pid) is None
+    with pytest.raises(ProcessLookupError):
+        kill_process_group(pid, 0)
+
+
 @pytest.fixture
 def sigint_raises_keyboard_interrupt() -> Iterator[None]:
     """Python's SIGINT handler installed for the test, whatever the launcher left.
@@ -338,6 +371,138 @@ def test_an_interrupted_wait_kills_and_reaps_the_child(
     finally:
         with contextlib.suppress(OSError):
             os.killpg(pid, signal.SIGKILL)
+
+
+class _InterruptsAsTheChildIsCreated:
+    """Profile hook: a real ``SIGINT`` inside ``Popen``, its child created and not yet published.
+
+    POSIX: as ``_fork_exec`` returns the pid that ``Popen`` has yet to
+    store.  Windows: as ``_close_pipe_fds`` returns to
+    ``_execute_child``, whose locals alone hold the handles of the child
+    that ``CreateProcess`` made; ``handles`` keeps them (process, thread)
+    for the test to end a child the spawn lost.
+    """
+
+    def __init__(self) -> None:
+        self.handles: tuple[int, int] | None = None
+
+    def __call__(self, frame: FrameType, event: str, arg: object) -> None:
+        if IS_WINDOWS:
+            if event != "return" or frame.f_code.co_name != "_close_pipe_fds":
+                return
+            created = frame.f_back.f_locals if frame.f_back is not None else {}
+            if "hp" not in created:
+                return
+            self.handles = (created["hp"], created["ht"])
+        elif event != "c_return" or getattr(arg, "__name__", None) != "fork_exec":
+            return
+        sys.setprofile(None)
+        signal.raise_signal(signal.SIGINT)
+
+
+def test_an_interrupt_while_the_child_is_created_is_raised_with_the_child_in_hand(
+    sigint_raises_keyboard_interrupt: None,
+) -> None:
+    """A ``KeyboardInterrupt`` arriving while ``Popen`` creates the child does not lose the child.
+
+    Python raises the interrupt of a ``SIGINT`` on the main thread at
+    its next check, and the deferral of the Stop injector does not hold
+    it back: raised inside ``Popen.__init__`` between the call that
+    creates the child and the statement that stores its pid, it left a
+    child nobody could kill or reap, and on Windows, where the child is
+    created suspended, one that never ran and never ended.  The spawn
+    now has the signal recorded until the child is published (in its
+    job and resumed, on Windows) and calls the handler then: the
+    interrupt is raised where the child (which exits at once, so a
+    survivor is a lost one) is killed and reaped.
+    """
+    proc: subprocess.Popen[bytes] = object.__new__(subprocess.Popen)
+    hook = _InterruptsAsTheChildIsCreated()
+    sys.setprofile(hook)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            start_process_group(proc, _py("pass"))
+    finally:
+        sys.setprofile(None)
+        lost = getattr(proc, "pid", None) is None
+        if lost and hook.handles is not None:  # Windows: suspended for good unless ended here
+            kernel32 = ctypes.WinDLL("kernel32")  # type: ignore[attr-defined]
+            kernel32.TerminateProcess(ctypes.c_void_p(hook.handles[0]), 1)
+            for handle in hook.handles:
+                kernel32.CloseHandle(ctypes.c_void_p(handle))
+    assert not lost, "the interrupt was raised before the spawn held its child"
+    assert proc.returncode is not None, "the child was not reaped"
+    assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
+
+
+def _raise_system_exit(signum: int, frame: FrameType | None) -> None:
+    """A signal handler that raises, as Python's own ``SIGINT`` handler does."""
+    raise SystemExit(signum)
+
+
+class _InterruptedStdin:
+    """A stdin for the child: ``Popen`` gets its descriptor with a real ``SIGINT`` raised first."""
+
+    def __init__(self, file: IO[bytes]) -> None:
+        self.file = file
+
+    def fileno(self) -> int:
+        signal.raise_signal(signal.SIGINT)
+        return self.file.fileno()
+
+
+class _TerminatedAsSigintIsReinstalled:
+    """:class:`Pause` hook that never holds: a real ``SIGTERM`` as ``signal.signal`` starts.
+
+    Not at its first call, which keeps the ``SIGINT`` handler from
+    running, but at the *failures* next ones, which are to put it back.
+    (Such a hook stays in place when it raises, which a profile function
+    does not.)
+    """
+
+    def __init__(self, failures: int) -> None:
+        self.failures = failures
+        self.calls = 0
+
+    def __call__(self, _locals: dict[str, Any]) -> bool:
+        self.calls += 1
+        if 1 < self.calls <= 1 + self.failures:
+            signal.raise_signal(signal.SIGTERM)
+        return False
+
+
+@pytest.mark.parametrize("failures", [1, 2])
+def test_sigint_is_handled_again_whatever_interrupts_the_reinstallation_of_its_handler(
+    failures: int, sigint_raises_keyboard_interrupt: None
+) -> None:
+    """What other signals' handlers raise as the spawn ends leaves ``SIGINT`` handled.
+
+    The spawn keeps the ``SIGINT`` handler from running until its child
+    is published, then puts it back.  ``signal.signal`` first runs the
+    handlers of pending signals, and what one of them raises ends the
+    call before it has installed anything: the spawn calls it once
+    more, and a ``SIGINT`` is handled again even where that fails as
+    well (the stand-in, still installed, hands it on), or every later
+    one would only be noted.  The ``SIGINT`` noted during the spawn is
+    handled too, and the child killed and reaped as on any other
+    exception.
+    """
+    proc: subprocess.Popen[bytes] = object.__new__(subprocess.Popen)
+    sigterm = signal.signal(signal.SIGTERM, _raise_system_exit)
+    try:
+        with (
+            open(os.devnull, "rb") as null,
+            Pause(signal.signal.__code__, _TerminatedAsSigintIsReinstalled(failures)),
+            pytest.raises(KeyboardInterrupt) as interrupt,
+        ):
+            start_process_group(proc, _py("pass"), stdin=_InterruptedStdin(null))
+    finally:
+        signal.signal(signal.SIGTERM, sigterm)
+    assert isinstance(interrupt.value.__context__, SystemExit), "SIGTERM's handler did not run"
+    assert (signal.getsignal(signal.SIGINT) is signal.default_int_handler) == (failures == 1)
+    with pytest.raises(KeyboardInterrupt):
+        signal.raise_signal(signal.SIGINT)
+    assert proc.returncode is not None, "the child was not reaped"
 
 
 _ESCAPED_HOLDER = """
@@ -500,3 +665,225 @@ def test_an_escaped_descendant_that_keeps_writing_cannot_extend_the_read(
     assert out.timed_out is True
     assert out.stdout.startswith(b"x" * 100 + b"\n")
     assert len(out.stdout) < 10_000_000
+
+
+windows_only = pytest.mark.skipif(not IS_WINDOWS, reason="Job Objects are Windows'")
+
+# Starts a grandchild (``_PID_SLEEPER``) as its first act, then sleeps.
+_SPAWNS_AT_ONCE = """
+import subprocess, sys, time
+subprocess.Popen([sys.executable, "-I", "-S", "-c", sys.argv[1], sys.argv[2]])
+time.sleep(60)
+"""
+
+
+class _RunsBeforeItsJob:
+    """Profile hook: as the spawn goes on to put its child in a Job Object, let the child run.
+
+    The child's first act is a grandchild that publishes *pid_file*;
+    ``ran`` tells whether it did in the two seconds waited here.
+    """
+
+    def __init__(self, pid_file: Path) -> None:
+        self.pid_file = pid_file
+        self.ran: bool | None = None
+
+    def __call__(self, frame: FrameType, event: str, arg: object) -> None:
+        if event == "call" and frame.f_code is processes._windows_enrol_in_job.__code__:
+            deadline = time.monotonic() + 2
+            while not self.pid_file.exists() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.ran = self.pid_file.exists()
+
+
+@windows_only
+def test_a_child_starts_no_descendant_before_it_is_in_its_job(tmp_path: Path) -> None:
+    """A child runs only once it is in its Job Object, so a kill takes every descendant.
+
+    Windows puts a new process in the jobs of its parent, and in none
+    its parent joins later.  The child used to run from its creation
+    and was put in its job afterwards: a launcher quick to start its
+    worker (it has two seconds here, the spawn held at that point) left
+    it outside the job, where the kill of the group did not reach it.
+    The child is now created suspended and resumed once it is in the job.
+    """
+    pid_file = tmp_path / "grandchild.pid"
+    hook = _RunsBeforeItsJob(pid_file)
+    sys.setprofile(hook)
+    try:
+        proc = popen_process_group(
+            [sys.executable, "-I", "-S", "-c", _SPAWNS_AT_ONCE, _PID_SLEEPER, str(pid_file)]
+        )
+    finally:
+        sys.setprofile(None)
+    try:
+        assert hook.ran is False, "the child ran before it was in its Job Object"
+        grandchild = _wait_for_pid_file(pid_file)
+        kill_process_tree(proc)
+        proc.wait(timeout=10)
+        deadline = time.monotonic() + 10
+        while pid_alive(grandchild) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert not pid_alive(grandchild), "a descendant outlived the kill of its group"
+    finally:
+        with contextlib.suppress(OSError, ValueError):
+            os.kill(int(pid_file.read_text()), SIGKILL)
+        with contextlib.suppress(OSError):
+            proc.kill()
+        proc.wait(timeout=10)
+
+
+class _Spawner(threading.Thread):
+    """Start a minute's sleeper with :func:`popen_process_group`, keeping what the call raised."""
+
+    def __init__(self) -> None:
+        super().__init__(daemon=True)
+        self.raised: BaseException | None = None
+
+    def run(self) -> None:
+        try:
+            popen_process_group(_py("import time; time.sleep(60)"))
+        except BaseException as exc:  # the injected Stop is the expected outcome
+            self.raised = exc
+
+
+def _registering_its_job(worker: threading.Thread) -> FrameType:
+    """Wait until *worker* waits for the job registry's lock; its frame enrolling the child."""
+    deadline = time.monotonic() + 30
+    while True:
+        frame = sys._current_frames().get(worker.ident or 0)
+        if frame is not None and frame.f_code is locked_call.__code__:
+            caller = frame.f_back
+            if caller is not None and caller.f_code is processes._windows_enrol_in_job.__code__:
+                return caller
+        assert time.monotonic() < deadline, "the spawn never reached the job registry"
+        time.sleep(0.005)
+
+
+def _is_open_job(handle: int) -> bool:
+    """Whether *handle* is an open handle on a Job Object."""
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+    accounting = ctypes.create_string_buffer(48)  # JOBOBJECT_BASIC_ACCOUNTING_INFORMATION
+    return bool(
+        kernel32.QueryInformationJobObject(
+            ctypes.c_void_p(handle), 1, accounting, len(accounting), None
+        )
+    )
+
+
+@windows_only
+@pytest.mark.parametrize("deferred", [True, False], ids=["the task's Stop", "another exception"])
+def test_a_stop_while_the_job_is_registered_leaves_its_handle_owned_or_closed(
+    deferred: bool,
+) -> None:
+    """A Stop landing while the child's Job Object is registered does not leak the job's handle.
+
+    The registration waits for the registry's lock (held here, as by
+    another task's spawn or kill) with the child already in the job.
+    The spawn stopped deferring the Stop once ``Popen`` had returned,
+    so it was raised in that wait: the child was killed, and the handle,
+    which the registry did not hold yet, stayed open for good.  The Stop
+    is now deferred until the job is registered and the child killed
+    with it; any other exception raised in the wait (set here the way
+    the interpreter sets one, past the deferral) closes the handle it
+    leaves unregistered.
+    """
+    worker = _Spawner()
+    processes._WINDOWS_JOBS_LOCK.acquire()
+    try:
+        worker.start()
+        enrolment = _registering_its_job(worker)
+        job, proc = enrolment.f_locals["job"], enrolment.f_locals["proc"]
+        if deferred:
+            assert inject_async_exception(worker.ident or 0, KeyboardInterrupt) == 1
+        else:
+            assert inject(worker) == 1
+    finally:
+        processes._WINDOWS_JOBS_LOCK.release()
+    try:
+        worker.join(30)
+        assert isinstance(worker.raised, KeyboardInterrupt)
+        assert proc.returncode is not None, "the child was left running after the Stop"
+        assert processes._WINDOWS_JOBS.get(proc.pid) == job or not _is_open_job(job), (
+            "the job's handle is open and nothing owns it"
+        )
+    finally:
+        if proc.returncode is None:
+            kill_process_tree(proc)
+            proc.wait(timeout=10)
+
+
+class _RaisesOnceTheJobExists:
+    """Trace function: has *raise_here* raise in the spawning thread once its job exists.
+
+    That is the first line of ``_windows_enrol_in_job`` reached with the
+    new job's handle in a local (``jobs``, or ``job``): the child is not
+    in the job yet, and no registry holds the handle (kept in ``job``).
+    With *registered*, it is the return of the function that registers
+    the job instead.
+    """
+
+    def __init__(self, raise_here: Callable[[], object], registered: bool) -> None:
+        self.raise_here = raise_here
+        where = processes._windows_record_job if registered else processes._windows_enrol_in_job
+        self.code = where.__code__
+        self.event = "return" if registered else "line"
+        self.job: int | None = None
+
+    def __call__(self, frame: FrameType, event: str, arg: object) -> Any:
+        if frame.f_code is not self.code:
+            return None
+        if event == self.event and self.job is None:
+            made = [*frame.f_locals.get("jobs", ()), frame.f_locals.get("job")]
+            if made[0]:
+                self.job = made[0]
+                self.raise_here()
+        return self
+
+
+@windows_only
+@pytest.mark.parametrize(
+    ("deferred", "registered"),
+    [(True, False), (False, False), (False, True)],
+    ids=["an interrupt", "another exception", "another exception, the job registered"],
+)
+def test_an_exception_once_the_job_exists_leaves_its_handle_owned_or_closed(
+    deferred: bool, registered: bool, sigint_raises_keyboard_interrupt: None
+) -> None:
+    """An exception raised once the child's Job Object exists does not leak the job's handle.
+
+    The handler that closes an unregistered handle covered the
+    registration only: an exception raised between the call that
+    creates the job and that registration (the interrupt of a
+    ``SIGINT``, which the Stop injector's deferral does not hold back)
+    killed the child and left the handle open with no owner.  The
+    interrupt is now raised once the job is registered, and the handle
+    is owned from the call that creates it, so any other exception
+    raised from there on (set here the way the interpreter sets one)
+    closes it, unless the registry holds it by then: a registered job
+    stays open for the kill of the child's group.
+    """
+    proc: subprocess.Popen[bytes] = object.__new__(subprocess.Popen)
+    raise_here = (
+        partial(signal.raise_signal, signal.SIGINT)
+        if deferred
+        else partial(inject, threading.main_thread())
+    )
+    hook = _RaisesOnceTheJobExists(raise_here, registered)
+    tracing = sys.gettrace()
+    sys.settrace(hook)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            start_process_group(proc, _py("pass"))
+    finally:
+        sys.settrace(tracing)
+    try:
+        assert hook.job is not None, "the spawn made no Job Object"
+        assert proc.returncode is not None, "the child was left running after the exception"
+        assert (processes._WINDOWS_JOBS.get(proc.pid) == hook.job) == _is_open_job(hook.job), (
+            "the job's handle is open with no owner, or closed with one"
+        )
+    finally:
+        if proc.returncode is None:
+            kill_process_tree(proc)
+            proc.wait(timeout=10)

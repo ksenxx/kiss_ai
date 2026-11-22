@@ -32,10 +32,12 @@ const {
   captureTimers,
   fireCapturedTimers,
   stubClipboard,
+  pickMachine,
 } = require('./simplify2_harness');
 
 const {test, report} = require('./ui_antipattern_harness').makeRunner();
-const {rootRows, answerWorkDirCheck} = require('./workdir_helpers');
+const {rootRows, answerWorkDirCheck, pick} = require('./workdir_helpers');
+const {MACHINES} = require('./settings_helpers');
 const {
   all,
   showSection,
@@ -341,6 +343,13 @@ async function main() {
     const adopted = after.filter(m => m.type === 'setWorkDir');
     assert.strictEqual(adopted.length, 1, 'exactly one setWorkDir');
     assert.strictEqual(adopted[0].workDir, OTHER, 'setWorkDir OTHER');
+    // The tree on screen is kept, out of reach, until the folder it is
+    // to show answers: it is never emptied to say "Loading...".
+    const tree = byId(win, 'explorer-tree');
+    assert.strictEqual(rootRows(win)[0].dataset.explorerPath, WD);
+    assert.ok(tree.hasAttribute('inert'), 'the kept tree is out of reach');
+    answer(win, posted, OTHER, []);
+    assert.ok(!tree.hasAttribute('inert'), 'the new tree is in reach');
     // The tree: OTHER first (working directory), the old work dir kept.
     const roots = rootRows(win);
     assert.deepStrictEqual(
@@ -366,6 +375,37 @@ async function main() {
     assert.ok(
       roots[0].classList.contains('expanded'),
       'row not collapsed by the mark click',
+    );
+    win.close();
+  });
+
+  await test('Set as Working Directory: the answer is the Explorer\u2019s still after a folder was picked on another machine', async () => {
+    const {win, posted} = makePage();
+    openExplorer(win, posted, []);
+    addOtherFolder(win, posted, []);
+    click(win, rootRows(win)[1].querySelector('.explorer-root-set'));
+    // Before this daemon answers, the chat goes to a registered machine
+    // and a folder is picked there: a check of that machine's own.
+    send(win, {type: 'machines', machines: MACHINES, checkedAt: 1});
+    pickMachine(win, 'gpu-box');
+    send(win, {
+      type: 'machineWorkDirs',
+      machine: 'gpu-box',
+      workDir: '/srv/proj',
+      recentWorkDirs: [{path: '/srv/other', ts: 1}],
+      error: '',
+    });
+    pick(win, '/srv/other');
+    // This daemon's answer is taken, and as the Explorer's: the folder
+    // that was the working directory stays an added folder.
+    answerWorkDirCheck(win, posted, OTHER);
+    assert.deepStrictEqual(
+      ofType(posted, 'setWorkDir').map(m => [m.machine || '', m.workDir]),
+      [['', OTHER]],
+    );
+    assert.deepStrictEqual(
+      JSON.parse(win.localStorage.getItem('kiss-explorer-roots')).sort(),
+      [OTHER, WD].sort(),
     );
     win.close();
   });
@@ -631,6 +671,50 @@ async function main() {
     win.close();
   });
 
+  await test('Refresh while the next folder is first listed: the folder is listed once more after its tree is built', async () => {
+    const {win, posted} = makePage();
+    openExplorer(win, posted, [{name: 'old.txt'}]);
+    const NEXT = '/ws/next';
+    const asked = () => ofType(posted, 'listDir').map(m => m.path);
+    const files = () =>
+      all(win, '.explorer-row.is-file').map(r => r.dataset.explorerPath);
+    // The chat's folder changes: the tree is kept while NEXT answers.
+    send(win, {type: 'configData', config: {work_dir: NEXT}});
+    let before = asked().length;
+    assert.strictEqual(asked()[before - 1], NEXT);
+    // Refresh (twice, and a task's news) while that listing is in
+    // flight: nothing is asked twice, but the listing may have read the
+    // disk before whatever the refresh was pressed for.
+    click(win, byId(win, 'explorer-refresh'));
+    click(win, byId(win, 'explorer-refresh'));
+    send(win, {type: 'tasks_updated'});
+    assert.strictEqual(asked().length, before, 'the listing is not doubled');
+    answer(win, posted, NEXT, [{name: 'before.txt'}]);
+    assert.deepStrictEqual(files(), [NEXT + '/before.txt']);
+    assert.deepStrictEqual(asked().slice(before), [NEXT], 'listed once more');
+    before = asked().length;
+    answer(win, posted, NEXT, [{name: 'before.txt'}, {name: 'written.txt'}]);
+    assert.deepStrictEqual(files(), [
+      NEXT + '/before.txt',
+      NEXT + '/written.txt',
+    ]);
+    assert.strictEqual(asked().length, before, 'and only once');
+    // A change of folder alone lists the folder once.
+    send(win, {type: 'configData', config: {work_dir: WD}});
+    before = asked().length;
+    answer(win, posted, WD, [{name: 'old.txt'}]);
+    assert.deepStrictEqual(files(), [WD + '/old.txt']);
+    assert.strictEqual(asked().length, before, 'no refresh, no second listing');
+    // Back on the folder the kept tree shows before the next one has
+    // answered: the refresh pressed meanwhile is that tree's.
+    send(win, {type: 'configData', config: {work_dir: NEXT}});
+    click(win, byId(win, 'explorer-refresh'));
+    before = asked().length;
+    send(win, {type: 'configData', config: {work_dir: WD}});
+    assert.deepStrictEqual(asked().slice(before), [WD]);
+    win.close();
+  });
+
   // ---- Review regressions (Explorer) ----
 
   await test('Duplicate stored folders show once and are removed together', async () => {
@@ -759,12 +843,14 @@ async function main() {
     rightClick(win, rootRows(win)[1]);
     click(win, menuItem(win, 'Set as Working Directory'));
     answerWorkDirCheck(win, posted, OTHER);
+    answer(win, posted, OTHER, []);
     assert.strictEqual(rootRows(win)[0].dataset.explorerPath, OTHER);
     active = win.document.activeElement;
     assert.ok(
       active && active.classList.contains('explorer-row'),
       'focus on the rebuilt tree',
     );
+    assert.ok(active.isConnected, 'on a row of the tree on screen');
     assert.strictEqual(active.tabIndex, 0);
     win.close();
   });
@@ -779,17 +865,17 @@ async function main() {
     const WWD = 'C:\\Repo';
     send(win, {type: 'configData', config: {work_dir: WWD}});
     showSection(win, 'meta-explorer');
-    assert.deepStrictEqual(
-      rootRows(win).map(r => r.dataset.explorerPath),
-      [WWD, 'C:\\Other'],
-      'case / separator variants of the work dir collapse into it',
-    );
     answer(
       win,
       posted,
       WWD,
       [{name: 'folder', path: WWD + '\\folder', isDir: true}],
       WWD,
+    );
+    assert.deepStrictEqual(
+      rootRows(win).map(r => r.dataset.explorerPath),
+      [WWD, 'C:\\Other'],
+      'case / separator variants of the work dir collapse into it',
     );
     // Open a file inside the folder, then delete the folder: its tab closes.
     send(win, {
@@ -911,13 +997,20 @@ async function main() {
       'the retries are still pending when the daemon answers the check',
     );
     answerWorkDirCheck(win, posted, OTHER);
-    assert.strictEqual(rootRows(win)[0].dataset.explorerPath, OTHER);
-    // Run the pending timers now, as the clock would.
+    // Run the pending timers now, as the clock would: the folder's
+    // listing, which the kept tree waits for, takes longer than they do.
     fireCapturedTimers(win, timers, armedBefore);
+    assert.notStrictEqual(
+      win.document.activeElement,
+      byId(win, 'task-input'),
+      'the composer did not take the keyboard while the tree waited',
+    );
+    answer(win, posted, OTHER, []);
+    assert.strictEqual(rootRows(win)[0].dataset.explorerPath, OTHER);
     const active = win.document.activeElement;
     assert.ok(
-      active && active.classList.contains('explorer-row'),
-      'focus still on a tree row after the retries, got ' +
+      active && active.isConnected && active.classList.contains('explorer-row'),
+      'focus on a row of the rebuilt tree after the retries, got ' +
         (active ? active.id || active.className : 'none'),
     );
     win.close();
@@ -963,6 +1056,7 @@ async function main() {
     input.focus();
     assert.strictEqual(win.document.activeElement, input);
     answerWorkDirCheck(win, posted, OTHER);
+    answer(win, posted, OTHER, []);
     assert.strictEqual(rootRows(win)[0].dataset.explorerPath, OTHER);
     assert.strictEqual(
       win.document.activeElement,
@@ -1001,6 +1095,7 @@ async function main() {
     });
     assert.strictEqual(rootRows(win)[0].dataset.explorerPath, WD);
     answerWorkDirCheck(win, posted, '/data/third');
+    answer(win, posted, '/data/third', []);
     assert.strictEqual(rootRows(win)[0].dataset.explorerPath, '/data/third');
     const active = win.document.activeElement;
     assert.ok(

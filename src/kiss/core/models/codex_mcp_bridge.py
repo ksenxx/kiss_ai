@@ -336,6 +336,14 @@ class ToolBridge:
         # so that they survive a step's retry (see :meth:`_close`).
         self._forced_stop: BaseException | None = None
         self._stop_deadline: float | None = None
+        # The steps of :meth:`_close` still to run: on the instance too, so
+        # that a close cut short as it began is finished by the next one.
+        self._close_steps = [
+            self._refuse_new_calls,
+            self._stop_listener,
+            self._server.server_close,
+            self._wait_for_calls,
+        ]
 
     @property
     def port(self) -> int:
@@ -416,7 +424,7 @@ class ToolBridge:
 
     def __enter__(self) -> "ToolBridge":
         try:
-            self._thread.start()
+            tool_interrupt.call_without_injection(self._thread.start)
         except BaseException as e:
             # A task-thread Stop (``KeyboardInterrupt`` injected with
             # ``PyThreadState_SetAsyncExc``) lands at the next check
@@ -458,19 +466,19 @@ class ToolBridge:
         idempotent: the wait keeps its deadline on the instance) and the
         exception, which makes the wait a bounded one, is re-raised once
         every step is done.
+
+        One landing as ``__exit__`` or this method is entered skips the
+        close whole, before its first step.  The bridge's owner then
+        closes it again (``CodexModel.native_tools_exposed``): the steps
+        still to run are on the instance, so that close finishes what is
+        left, and does nothing after one that completed.
         """
-        steps = [
-            self._refuse_new_calls,
-            self._stop_listener,
-            self._server.server_close,
-            self._wait_for_calls,
-        ]
-        while steps:
+        while self._close_steps:
             try:
                 if self._forced_stop is None and isinstance(leaving, _STOPS):
                     self._forced_stop = leaving
-                steps[0]()
-                del steps[0]
+                self._close_steps[0]()
+                del self._close_steps[0]
             except _STOPS as e:
                 self._forced_stop = e
         if self._forced_stop is not None and self._forced_stop is not leaving:

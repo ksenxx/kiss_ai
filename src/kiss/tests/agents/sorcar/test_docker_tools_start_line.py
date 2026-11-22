@@ -17,16 +17,21 @@ The contract mirrors ``UsefulTools.Read``:
   *after* the window;
 * a ``start_line`` past EOF returns an explicit error sentinel and does
   not leak earlier content;
-* ``start_line<=0`` is rejected.
+* ``start_line<=0`` is rejected;
+* the window and its line count come from one reading of the file.
 """
 
 from __future__ import annotations
 
+import functools
 import os
+import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -35,18 +40,47 @@ import pytest
 from kiss.agents.sorcar.docker_tools import DockerTools
 
 
-def _host_bash(command: str, _description: str) -> str:
-    """Run the synthesised shell snippet on the host (no Docker required)."""
+def _host_bash(command: str, _description: str, env: dict[str, str] | None = None) -> str:
+    """Run the synthesised shell snippet on the host (no Docker required), in *env* if given."""
     proc = subprocess.run(
         ["bash", "-c", command],
         capture_output=True,
         text=True,
         check=False,
+        env=env,
     )
     out = proc.stdout
     if proc.returncode != 0:
         out += f"\n[exit code: {proc.returncode}]\n{proc.stderr}"
     return out
+
+
+def _awk_that_waits(bin_dir: Path, counted: Path, released: Path) -> None:
+    """Put an ``awk`` in *bin_dir* that runs the real one, then waits for *released*.
+
+    It makes *counted* once the real ``awk`` has exited (the line
+    count is taken) and gives up waiting after 30 s.
+    """
+    real = shutil.which("awk")
+    assert real is not None
+    script = bin_dir / "awk"
+    script.write_text(
+        "#!/bin/sh\n"
+        f'{shlex.quote(real)} "$@"\n'
+        "status=$?\n"
+        f": > {shlex.quote(str(counted))}\n"
+        "n=0\n"
+        f'while [ ! -e {shlex.quote(str(released))} ] && [ "$n" -lt 3000 ]; do\n'
+        "  sleep 0.01; n=$((n + 1))\n"
+        "done\n"
+        'exit "$status"\n'
+    )
+    script.chmod(0o755)
+
+
+def _read_into(results: list[str], tools: DockerTools, path: str, max_lines: int) -> None:
+    """Thread body: ``Read`` the first *max_lines* lines of *path* and keep the result."""
+    results.append(tools.Read(path, max_lines=max_lines))
 
 
 @pytest.fixture
@@ -136,3 +170,42 @@ def test_start_line_negative_rejected(temp_dir: Path) -> None:
 
     assert "start_line" in out.lower()
     assert "line-1" not in out
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="the Write script needs GNU mv -T")
+def test_a_file_replaced_while_it_is_read_is_answered_as_one_version(temp_dir: Path) -> None:
+    """The window and its line count come from one reading of the file (S5/F2).
+
+    The count was one ``awk`` over the path and the window a ``tail``
+    that opened the path again: a file another tool's Write replaced
+    in between was answered with the new file's lines under the old
+    file's count, which neither version gives.  The real ``awk`` is
+    run by a wrapper first on ``PATH`` that waits once it has counted;
+    a second tool instance replaces the file meanwhile.
+    """
+    p = temp_dir / "f.txt"
+    p.write_text("old-1\nold-2\nold-3\n")
+    bin_dir = temp_dir / "bin"
+    bin_dir.mkdir()
+    counted, released = temp_dir / "counted", temp_dir / "released"
+    _awk_that_waits(bin_dir, counted, released)
+    env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}
+    reader = DockerTools(functools.partial(_host_bash, env=env))
+    results: list[str] = []
+    read = threading.Thread(target=_read_into, args=(results, reader, str(p), 2))
+    read.start()
+    try:
+        deadline = time.monotonic() + 30
+        while not counted.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert counted.exists(), "the Read never counted the file's lines"
+        written = DockerTools(_host_bash).Write(str(p), "".join(f"new-{i}\n" for i in range(1, 7)))
+        assert written.startswith("Successfully wrote"), written
+    finally:
+        released.touch()
+        read.join(30)
+    assert not read.is_alive()
+    assert results[0] in (
+        "old-1\nold-2\n[truncated: 1 more lines]\n",
+        "new-1\nnew-2\n[truncated: 4 more lines]\n",
+    ), results[0]

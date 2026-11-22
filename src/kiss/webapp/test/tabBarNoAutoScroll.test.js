@@ -223,9 +223,9 @@ function testNewChatHasNoStripToScroll() {
 }
 
 function testCloseSuccessorScrollsIntoView() {
-  // Closing the active entry activates a successor: that is a switch,
-  // so the successor must be brought into view (the group keeps three
-  // entries, so the strip stays shown).
+  // The active entry closing (its sub-agent finished) activates a
+  // successor: that is a switch, so the successor must be brought into
+  // view (the group keeps three entries, so the strip stays shown).
   const {win, tabScrolls} = makeThreeTabs();
   openSubagent(win, 's1', 0);
   openSubagent(win, 's2', 1);
@@ -234,9 +234,7 @@ function testCloseSuccessorScrollsIntoView() {
   assert.strictEqual(activeTabId(win), 's2', 'setup: s2 is active');
   tabScrolls.length = 0;
 
-  const closeBtn = tabEl(win, 's2').querySelector('.chat-tab-close');
-  assert.ok(closeBtn, 'setup: the active entry must have a close control');
-  clickEl(win, closeBtn);
+  send(win, {type: 'subagentDone', tab_id: 's2'});
 
   const successor = activeTabId(win);
   assert.ok(
@@ -256,17 +254,16 @@ function testCloseSuccessorScrollsIntoView() {
 }
 
 function testClosingBackgroundTabDoesNotScroll() {
-  // Closing a background entry of the group re-renders the strip but
-  // the active tab is unchanged: no switch, no scroll.
+  // A background entry of the group closing (its sub-agent finished)
+  // re-renders the strip but the active tab is unchanged: no switch, no
+  // scroll.
   const {win, tabScrolls} = makeThreeTabs();
   openSubagent(win, 's1', 0);
   openSubagent(win, 's2', 1);
   assert.strictEqual(activeTabId(win), 't1', 'setup: t1 stays active');
   tabScrolls.length = 0;
 
-  const closeBtn = tabEl(win, 's2').querySelector('.chat-tab-close');
-  assert.ok(closeBtn, 'setup: s2 must have a close control');
-  clickEl(win, closeBtn);
+  send(win, {type: 'subagentDone', tab_id: 's2'});
 
   assert.strictEqual(activeTabId(win), 't1', 't1 must stay active');
   assert.strictEqual(tabEl(win, 's2'), null, 's2 must be gone from the strip');

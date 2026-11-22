@@ -18,7 +18,6 @@ import yaml
 from kiss.core.memoryfield.pages import (
     MemoryDir,
     PageChangedError,
-    is_debris,
     is_valid_page_name,
     now_iso,
     render_page,
@@ -56,14 +55,6 @@ def test_slugify_rules() -> None:
     assert len(long) <= 20 and is_valid_page_name(long)
     # A single very long word is cut hard because there is no hyphen to break on.
     assert slugify("a" * 100, max_length=10) == "a" * 10
-
-
-def test_is_debris() -> None:
-    assert is_debris(".DS_Store")
-    assert is_debris("notes.md~")
-    assert is_debris("notes.sync-conflict-20260101-abc.md")
-    assert is_debris("Thumbs.db") and is_debris("desktop.ini")
-    assert not is_debris("notes.md")
 
 
 # --- frontmatter ---------------------------------------------------------
@@ -414,6 +405,8 @@ def test_memory_dir_page_names_skips_non_pages(tmp_path: Path) -> None:
     (tmp_path / "Upper.md").write_text("x")
     (tmp_path / "real.md~").write_text("x")
     (tmp_path / "real.sync-conflict-1.md").write_text("x")
+    for debris in (".DS_Store", "desktop.ini", "Thumbs.db"):
+        (tmp_path / debris).write_text("x")
     (tmp_path / "sub").mkdir()
     (tmp_path / "sub" / "nested.md").write_text("x")
     (tmp_path / "text-embedding-3-small.sqlite3").write_bytes(b"")

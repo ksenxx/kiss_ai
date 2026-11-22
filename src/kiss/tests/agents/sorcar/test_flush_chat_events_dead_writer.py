@@ -82,7 +82,7 @@ class TestFlushChatEventsDeadWriter:
         th._event_deque.append((
             task_id, json.dumps(event), time.time(), th._current_db_path(),
         ))
-        assert th._pending_count(None) == 1
+        assert th._pending_count() == 1
 
         done = threading.Event()
 

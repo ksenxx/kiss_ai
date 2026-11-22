@@ -219,6 +219,7 @@ class TestUnknownWorktreeAction(_DbTestBase):
         assert results[0] == {
             "type": "worktree_result",
             "tabId": "tab-dispatch",
+            "action": "frobnicate",
             "success": False,
             "message": "Unknown action: frobnicate",
         }
@@ -400,17 +401,10 @@ class TestPersistedSubagentIsDone(_DbTestBase):
             parent_task_id=parent_id, parent_tab_id="tab-parent",
         )
 
-        opens = [e for e in events if e.get("type") == "openSubagentTab"]
-        assert len(opens) == 1
-        assert opens[0]["tab_id"] == f"tab-parent__sub_{sub_id}"
-        assert opens[0]["parent_tab_id"] == "tab-parent"
-        assert opens[0]["description"] == "sub task"
-        assert opens[0]["isDone"] is True
-        assert not [e for e in events if e.get("type") == "task_events"]
-        offers = [e for e in events if e.get("type") == "replay_deferred"]
-        assert len(offers) == 1
-        assert offers[0]["taskId"] == sub_id
-        assert offers[0]["tabId"] == f"tab-parent__sub_{sub_id}"
+        told = ("openSubagentTab", "replay_deferred", "task_events", "subagentDone")
+        assert [
+            (e["type"], e.get("tab_id"), e.get("task_id")) for e in events if e.get("type") in told
+        ] == [("subagentDone", f"tab-parent__sub_{sub_id}", sub_id)]
 
     def test_no_subagent_rows_no_broadcast(self) -> None:
         parent_id, _ = th._add_task("childless parent")

@@ -39,13 +39,20 @@ from __future__ import annotations
 
 import json
 import time
+from pathlib import Path
 
 import pytest
 from playwright.sync_api import sync_playwright
 
-from kiss.tests.conftest import goto_retrying_network_change
+from kiss.tests.conftest import goto_retrying_network_change, posix_only
 from kiss.tests.server.test_content_tab_file_links import (
     harness,  # noqa: F401  (module fixture used by param name)
+)
+from kiss.tests.server.test_open_external_command import (
+    recorder,  # noqa: F401  (fixture the opener fixture depends on)
+)
+from kiss.tests.server.test_open_in_browser import (
+    opener,  # noqa: F401  (fixture used by param name)
 )
 
 # Every open tab (chats, sub-agents, content tabs), as the page
@@ -160,7 +167,13 @@ class TestContentTabFileLinks:
             assert page.locator("#new-chat-btn").is_visible()
             assert page.locator("#more-btn").is_visible()
             assert page.locator("#task-input").is_visible()
-            assert page.locator("#tricks-btn").is_visible()
+            assert page.locator("#dictate-btn").is_visible()
+            # "Inject promptlet" waits in the closed "..." menu; the
+            # item itself is not hidden, as it is on a file screen
+            # (body.content-tab-open).
+            assert page.evaluate(
+                "() => getComputedStyle(document.getElementById('tricks-btn')).display",
+            ) != "none"
             assert page.locator("#model-picker").is_visible()
             assert page.locator("#send-btn").is_visible()
             assert page.input_value("#task-input") == "my precious draft"
@@ -237,7 +250,8 @@ class TestContentTabFileLinks:
     def test_big_html_page_renders_read_only(self, browser, harness) -> None:
         """An HTML page bigger than the editor cap (a shared chat page
         of a long task) still opens: it renders in the sandboxed iframe
-        with no Save bar and no source toggle, since the daemon served
+        with no Save button and no source toggle (its bar holds the
+        path and "Open in Browser" alone), since the daemon served
         it without a version stamp instead of "File too large".  The
         page spans several fileContent frames (``more`` on every one
         but the last), which the webapp joins: the last paragraph,
@@ -267,8 +281,11 @@ class TestContentTabFileLinks:
             assert frame.locator("#last").inner_text() == "KISS-LAST-PIECE"
             paragraphs = 2 * web_server._FILE_CONTENT_CHUNK_CHARS // len(filler)
             assert frame.locator("p").count() > paragraphs
-            assert page.locator("#content-tab-area .content-save-bar").count() == 0
+            assert page.locator("#content-tab-area .content-save-btn").count() == 0
             assert page.locator("#content-tab-area .content-mode-btn").count() == 0
+            assert page.locator(
+                "#content-tab-area .content-save-bar .content-browser-btn",
+            ).count() == 1
             assert page.locator(".notification-toast, .notice").filter(
                 has_text="too large",
             ).count() == 0
@@ -386,6 +403,64 @@ class TestContentTabFileLinks:
             assert "File not found" in toast.inner_text()
             assert page.locator(".chat-tab.content-tab").count() == 0
             assert page.locator("#output").is_visible()
+        finally:
+            context.close()
+
+    def test_file_no_tab_shows_is_offered_as_a_download(
+        self, browser, harness, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A daemon that starts no program hands the file's bytes to
+        the browser: the link opens a tab that offers them to save."""
+        monkeypatch.setenv("KISS_HEADLESS", "1")
+        data = b"PK\x03\x04\x00 a document no tab shows"
+        (harness.work_dir / "minutes.docx").write_bytes(data)
+        context, page, sent = _open_page(browser, harness)
+        try:
+            _inject_file_link(page, "minutes.docx", "lnk-docx")
+            page.click("#lnk-docx")
+            link = page.locator("#content-tab-area a.content-binary-note")
+            link.wait_for(state="visible", timeout=30000)
+            assert link.inner_text() == "Download minutes.docx"
+            with page.expect_download() as download:
+                link.click()
+            assert download.value.suggested_filename == "minutes.docx"
+            assert Path(download.value.path()).read_bytes() == data
+            assert page.locator(".kiss-notification-error").count() == 0
+            opens = [f for f in sent if f.get("type") == "openFile"]
+            assert [f.get("download") for f in opens] == [None, True]
+            assert not [f for f in sent if f.get("type") == "openWithDefaultApp"]
+        finally:
+            context.close()
+
+    @posix_only("POSIX opener script")
+    def test_daemon_opens_a_file_no_tab_shows_with_its_default_application(
+        self, browser, harness, opener: Path,
+    ) -> None:
+        """On the daemon's own machine the link has the daemon open the
+        file: nothing is shown, unless no application opens its type."""
+        document = harness.work_dir / "minutes.docx"
+        document.write_bytes(b"PK\x03\x04\x00")
+        (harness.work_dir / "viewer.noapp").write_bytes(b"\0")
+        context, page, sent = _open_page(browser, harness)
+        try:
+            _inject_file_link(page, "minutes.docx", "lnk-docx")
+            _inject_file_link(page, "viewer.noapp", "lnk-noapp")
+            page.click("#lnk-docx")
+            deadline = time.time() + 30
+            while not opener.exists():
+                assert time.time() < deadline, "the opener was never started"
+                time.sleep(0.05)
+            assert opener.read_text(encoding="utf-8").splitlines() == [str(document)]
+            # The daemon's answer follows the opener's exit: no toast comes.
+            page.wait_for_timeout(1500)
+            assert page.locator(".kiss-notification-error").count() == 0
+            page.click("#lnk-noapp")
+            toast = page.locator(".kiss-notification-error")
+            toast.wait_for(timeout=30000)
+            assert "Cannot display binary file: viewer.noapp" in toast.inner_text()
+            assert page.locator(".chat-tab.content-tab").count() == 0
+            commands = ("openFile", "openWithDefaultApp")
+            assert [f["type"] for f in sent if f.get("type") in commands] == [*commands] * 2
         finally:
             context.close()
 

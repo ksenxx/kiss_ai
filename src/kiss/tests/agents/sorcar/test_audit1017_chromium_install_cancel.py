@@ -31,7 +31,12 @@ from typing import Any
 import pytest
 
 from kiss.agents.sorcar.web_use_tool import _install_chromium
-from kiss.core.processes import kill_process_group, pid_alive, waitid_exited
+from kiss.core.processes import (
+    kill_process_group,
+    pid_alive,
+    start_process_group,
+    waitid_exited,
+)
 from kiss.core.tool_interrupt import ToolCallInterrupted, inject_async_exception
 from kiss.tests.agents.sorcar.test_webuse_unresponsive_page_timeout import (
     _stop_in,
@@ -124,6 +129,47 @@ def test_stop_kills_installer_grandchild(tmp_path: Path) -> None:
     assert _gone(grandchild), f"grandchild {grandchild} survived the Stop"
 
 
+class _StopAsTheInstallerIsSpawned(_StopWhileTimerStarts):
+    """Inject the Stop as the real spawn call returns, once the launcher has its grandchild.
+
+    ``installer`` is then the launcher's pid: the leader of its grandchild's group.
+    """
+
+    def __init__(self, pid_file: Path) -> None:
+        super().__init__(start_process_group.__code__)
+        self._pid_file = pid_file
+        self.installer = 0
+
+    def _inject(self, code: Any, offset: int, retval: Any) -> None:
+        if threading.get_ident() == self._thread:
+            self.installer = os.getpgid(_grandchild_pid(self._pid_file))
+            super()._inject(code, offset, retval)
+
+
+def test_stop_as_the_installer_is_spawned_kills_its_tree(tmp_path: Path) -> None:
+    """A Stop raised as the spawn call returns ends the installer's tree all the same (S18/F2).
+
+    The exception is raised before the call's result is bound to a
+    name: the installer, started outside the ``try`` that kills it, was
+    owned by nothing and ran on past its timeout, with the cache lock.
+    """
+    command, pid_file = _stand_in(tmp_path, "wait")
+    stop = _StopAsTheInstallerIsSpawned(pid_file)
+    try:
+        with stop, pytest.raises(ToolCallInterrupted):
+            _install_chromium(command, timeout=60.0)
+        grandchild = _grandchild_pid(pid_file)
+        assert _gone(grandchild), f"grandchild {grandchild} survived the Stop"
+        with pytest.raises(ChildProcessError):  # reaped: no child of this process any more
+            waitid_exited(stop.installer)
+    finally:
+        if stop.installer:  # one left running is still this process's unreaped child
+            with contextlib.suppress(ChildProcessError):
+                waitid_exited(stop.installer)
+                kill_process_group(stop.installer, signal.SIGKILL)
+                os.waitpid(stop.installer, 0)
+
+
 def test_installer_exit_status(tmp_path: Path) -> None:
     """A clean exit returns; a failing installer raises ``RuntimeError``."""
     command, pid_file = _stand_in(tmp_path, "0")
@@ -169,3 +215,12 @@ def test_stop_once_the_installer_is_reaped_signals_no_group(stop_at: str) -> Non
     with Pauses(*hooks), stop, pytest.raises(ToolCallInterrupted):
         _install_chromium([sys.executable, "-c", "pass"], timeout=30.0)
     assert not signalled, f"the group of the reaped installer {signalled} was signalled"
+
+
+def test_an_installer_that_cannot_be_started_signals_no_group(tmp_path: Path) -> None:
+    """A spawn that failed has reaped its child: its error is raised and no group is signalled."""
+    signalled: list[int] = []
+    noting = Pause(kill_process_group.__code__, functools.partial(_note_reaped_leader, signalled))
+    with noting, pytest.raises(FileNotFoundError):
+        _install_chromium([str(tmp_path / "no-such-installer")], timeout=30.0)
+    assert not signalled, f"the group of the reaped child {signalled} was signalled"

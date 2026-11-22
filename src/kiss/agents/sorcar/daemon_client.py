@@ -259,6 +259,14 @@ class TaskResult:
         reconnects: How many times the client lost its daemon
             connection mid-run and reconnected (the ``reconnect_seconds``
             argument of :func:`run`); 0 for an uninterrupted wait.
+        tasks: The run's tasks one by one, when its spend reports
+            named their rows (the ``<task>`` blocks of a prompt run one
+            after the other, each with its own row): a
+            :class:`TaskResult` each, of that task's ``task_id``,
+            ``settings`` and spend alone (``text`` and ``success`` are
+            the run's only).  This result's spend is their sum.  Empty
+            when no report named a row: the run's one task,
+            ``task_id``, spent it all.
     """
 
     text: str
@@ -270,6 +278,7 @@ class TaskResult:
     task_id: str = ""
     settings: dict[str, Any] = field(default_factory=dict)
     reconnects: int = 0
+    tasks: tuple[TaskResult, ...] = ()
 
 
 def _net_totals(event: dict[str, Any], charged: dict[str, Any]) -> dict[str, Any]:
@@ -290,8 +299,9 @@ def _net_totals(event: dict[str, Any], charged: dict[str, Any]) -> dict[str, Any
     Args:
         event: A ``result`` or ``usage_info`` event carrying ``cost``.
         charged: Running ``{"cost", "tokens", "steps"}`` sums of the
-            deltas already charged elsewhere, and under ``"keys"`` the
-            ``(taskId, charge_key)`` pairs added; updated in place.
+            deltas of *event*'s task already charged elsewhere, and
+            under ``"keys"`` the ``(taskId, charge_key)`` pairs added;
+            updated in place.
 
     Returns:
         A totals dict with ``cost`` / ``total_tokens`` / ``step_count``.
@@ -323,6 +333,7 @@ def _to_task_result(
     totals: dict[str, Any] | None = None,
     settings: dict[str, Any] | None = None,
     reconnects: int = 0,
+    tasks: tuple[TaskResult, ...] = (),
 ) -> TaskResult:
     """Convert the final daemon ``result`` event into a :class:`TaskResult`.
 
@@ -344,6 +355,7 @@ def _to_task_result(
             ``task_settings`` event, or ``None`` when none was seen.
         reconnects: How many times the run's connection was lost and
             re-established (see :meth:`_Inbox.reconnect`).
+        tasks: The run's tasks one by one (:attr:`TaskResult.tasks`).
 
     Returns:
         The parsed :class:`TaskResult`.  The daemon enriches ``result``
@@ -363,6 +375,7 @@ def _to_task_result(
         task_id=task_id,
         settings=dict(settings or {}),
         reconnects=reconnects,
+        tasks=tasks,
     )
 
 
@@ -380,10 +393,22 @@ class _Observed:
             its history row exists (``client_run_token``).  The daemon
             echoes it on the run's status events and on the ``result``
             of a run that never started; it is no row id.
-        result: The last ``result`` event for the task's tab, or ``None``.
+        result: The last ``result`` event for the task's tab, or
+            ``None``; a replayed transcript starts it over
+            (:meth:`_Inbox.absorb_replay`).
         settings: The ``settings`` payload of the run's
             ``task_settings`` event, or ``None``.
-        totals: The latest spend totals (:func:`_net_totals`), or ``None``.
+        announced: Whether the daemon announced a task of the run by its
+            row (a ``task_settings`` naming it): it then names the task
+            of every spend report.
+        totals: The latest spend totals (:func:`_net_totals`) of each
+            task of the run, by its row id: the ``<task>`` blocks of a
+            prompt run one after the other, each with its own counters
+            and row.  Under ``""``, those of a report that names no
+            row, and every report of a run no task of which was
+            :attr:`announced` (one task, whatever its reports name).
+        task_settings: The ``settings`` payload of each task the daemon
+            announced, by its row id.
         reconnects: How many times the run's connection was lost and
             re-established (:meth:`_Inbox.reconnect`).
         ended: Whether :func:`run` accepted a terminal status as the
@@ -395,41 +420,82 @@ class _Observed:
     run_token: str = ""
     result: dict[str, Any] | None = None
     settings: dict[str, Any] | None = None
-    totals: dict[str, Any] | None = None
+    announced: bool = False
+    totals: dict[str, dict[str, Any]] = field(default_factory=dict)
+    task_settings: dict[str, dict[str, Any]] = field(default_factory=dict)
     reconnects: int = 0
     ended: bool = False
 
     def task_result(self) -> TaskResult:
-        """Return the :class:`TaskResult` of what was observed (:func:`_to_task_result`)."""
+        """Return the :class:`TaskResult` of what was observed (:func:`_to_task_result`).
+
+        Its spend is the sum of the run's tasks'.  The reports that
+        name no row count only while no row has reported: after one,
+        such a report is a failure before the next task had its row,
+        and carries the counters that task started from, or the last
+        task's again.
+
+        Its ``tasks`` are the tasks that reported under their rows, each
+        with its own spend and settings (the run's latest for a task
+        never announced), and the run's current task with no spend
+        when it is none of them: the run was cut in it before its
+        first report.
+        """
+        named = {task: spend for task, spend in self.totals.items() if task}
+        if named:
+            named.setdefault(self.task_id, {"cost": 0.0, "total_tokens": 0, "step_count": 0})
+        spends = [*named.values()] or [*self.totals.values()]
+        totals = {
+            name: sum(spend[name] for spend in spends)
+            for name in ("cost", "total_tokens", "step_count")
+        }
+        tasks = tuple(
+            _to_task_result(
+                None, self.chat_id, task, spend, self.task_settings.get(task, self.settings),
+            )
+            for task, spend in named.items()
+        )
         return _to_task_result(
-            self.result, self.chat_id, self.task_id, self.totals, self.settings, self.reconnects,
+            self.result, self.chat_id, self.task_id, totals if spends else None, self.settings,
+            self.reconnects, tasks,
         )
 
-    def absorb(self, event: dict[str, Any], charged: dict[str, Any]) -> None:
+    def absorb(self, event: dict[str, Any], charged: dict[str, dict[str, Any]]) -> None:
         """Fold one event of the run's tab into what was observed.
 
         Shared by the live stream and a replayed transcript
-        (:meth:`_Inbox.reconnect`), which repeats events the live
-        stream already delivered: a replay starts *charged* over, so
-        folding every replayed event again yields the same totals.
+        (:meth:`_Inbox.absorb_replay`), which repeats events the live
+        stream already delivered: a replay starts its task's *charged*
+        over, so folding every replayed event again yields the same totals.
 
         Args:
             event: A display event of the run's tab (``clear``,
                 ``usage_info``, ``result``, ``task_settings``, ...).
             charged: The :func:`_net_totals` sums of spend already
-                charged elsewhere; updated in place.
+                charged elsewhere, of each task of the run (keyed as
+                :attr:`totals`); updated in place.
         """
         etype = event.get("type")
+        task = str(event.get("taskId") or "")
+        if task == self.run_token:
+            task = ""
         if etype == "clear":
             self.chat_id = str(event.get("chat_id", "") or "") or self.chat_id
-        elif etype != "status" and event.get("taskId") and event["taskId"] != self.run_token:
-            self.task_id = str(event["taskId"])
+        elif etype != "status" and task and task not in self.totals:
+            # Not a task that reported its spend already: a late charge
+            # of an earlier one would name it as the run's current task.
+            self.task_id = task
         if etype in ("result", "usage_info") and "cost" in event:
-            self.totals = _net_totals(event, charged)
+            spender = task if self.announced else ""
+            sums = charged.setdefault(spender, {"cost": 0.0, "tokens": 0, "steps": 0})
+            self.totals[spender] = _net_totals(event, sums)
         if etype == "result":
             self.result = event
         elif etype == "task_settings" and isinstance(event.get("settings"), dict):
             self.settings = event["settings"]
+            self.announced = self.announced or bool(task)
+            if task:
+                self.task_settings[task] = event["settings"]
 
 
 def resolve_sea_path(sea_path: str | None) -> str:
@@ -550,7 +616,7 @@ def _wait_interruptible(seconds: float, cancel: threading.Event | None = None) -
         left = end - time.monotonic()
         if left <= 0 or waiter.is_set():
             return
-        waiter.wait(min(left, _TOOL_CALL_WAKE_SECONDS))
+        tool_interrupt.call_without_injection(waiter.wait, min(left, _TOOL_CALL_WAKE_SECONDS))
 
 
 def _read_frames(ws: ClientConnection) -> queue.SimpleQueue[str | bytes | BaseException]:
@@ -562,9 +628,10 @@ def _read_frames(ws: ClientConnection) -> queue.SimpleQueue[str | bytes | BaseEx
     connection's reader cannot be mistaken for the current one's.
     """
     frames: queue.SimpleQueue[str | bytes | BaseException] = queue.SimpleQueue()
-    threading.Thread(
+    reader = threading.Thread(
         target=_pump_frames, args=(ws, frames), name="sorcar-local-recv", daemon=True,
-    ).start()
+    )
+    tool_interrupt.call_without_injection(reader.start)
     return frames
 
 
@@ -911,28 +978,49 @@ class _Inbox:
         return remaining
 
     def absorb_replay(
-        self, frame: dict[str, Any], seen: _Observed, charged: dict[str, Any],
+        self, frame: dict[str, Any], seen: _Observed, charged: dict[str, dict[str, Any]],
     ) -> None:
         """Fold the replayed transcript *frame* (a ``task_events`` of the due replay) into *seen*.
 
-        The transcript holds every event of the task so far, including
-        those the live stream already delivered: *charged* starts over
-        so the ``ancestor_charged`` deltas of repeated events are
-        subtracted once (see :func:`_net_totals`).  A transcript of
-        another replay (one a user's history click broadcast to the
-        tab) is ignored.
+        The transcript holds every event so far of one task of the run,
+        including those the live stream already delivered: that task's
+        sums of *charged* start over so the ``ancestor_charged`` deltas
+        of repeated events are subtracted once (see
+        :func:`_net_totals`), and the run's other tasks keep theirs.
+        The run's result starts over too: the one seen so far is an
+        older task's, or this task's again, and must not pass for the
+        result of a task whose transcript has none (the daemon lost the
+        run in a later ``<task>`` block than the one that returned it).
+        Nor does what a block returned that the run is not known to
+        have ended with: the daemon marks its frame ``run_continues``
+        (it died between two blocks, say, or before it recorded the
+        block's end, and that block is the last it has of the run).
+        A transcript of another replay (one a user's history click
+        broadcast to the tab) is ignored.
 
         Args:
             frame: The ``task_events`` frame of the run's tab.
             seen: What the run reported so far; updated in place.
-            charged: The :func:`_net_totals` sums; reset and refilled.
+            charged: The :func:`_net_totals` sums of each task (see
+                :meth:`_Observed.absorb`); the replayed task's are
+                replaced.
         """
         if not self.replay_id or frame.get("replayId") != self.replay_id:
             return
-        charged.update(cost=0.0, tokens=0, steps=0, keys=set())
+        seen.result = None
+        replayed: dict[str, dict[str, Any]] = {}
         for event in frame.get("events") or []:
             if isinstance(event, dict):
-                seen.absorb(event, charged)
+                seen.absorb(event, replayed)
+        if frame.get("run_continues"):
+            seen.result = None
+        charged.update(replayed)
+        # The daemon replays the tasks of the run oldest first, so the
+        # last transcript's is the run's task now: also one whose live
+        # events came ahead of an older task's transcript.
+        task = str(frame.get("task_id") or "")
+        if task and task in seen.totals:
+            seen.task_id = task
 
     def replay_done(self, seen: _Observed, stopping: bool) -> dict[str, Any] | None:
         """End the due replay; return the terminal status :func:`run` must act on, or ``None``.
@@ -1126,6 +1214,7 @@ def run_command(
     sea_command: str = "",
     attachments: list[dict[str, str]] | None = None,
     budget_cap: float | None = None,
+    model_owns_endpoint: bool | None = None,
 ) -> dict[str, Any]:
     """Encode a run's arguments as the ``run`` command :func:`run` sends the daemon.
 
@@ -1150,6 +1239,13 @@ def run_command(
             ``budgetCap``, set only when not ``None``); the daemon
             lowers the effective ``maxBudget`` to it after the SEA's
             settings apply.
+        model_owns_endpoint: Whether the endpoint *model_config* names
+            is *model*'s own (its ``MY_MODELS.json`` entry's) rather
+            than the run's, as the caller the configuration is
+            inherited from recorded it (wire field
+            ``modelOwnsEndpoint``, set only when not ``None``).  The
+            daemon takes it for the configuration as sent; without it,
+            its own read of the registry answers.
         machine: The registered remote machine the run executes on
             (wire field ``machine``, set only when non-empty).
         sea_command: The registered command whose SEA the executing
@@ -1206,6 +1302,8 @@ def run_command(
         cmd["attachments"] = list(attachments)
     if budget_cap is not None:
         cmd["budgetCap"] = budget_cap
+    if model_owns_endpoint is not None:
+        cmd["modelOwnsEndpoint"] = model_owns_endpoint
     return cmd
 
 
@@ -1248,6 +1346,7 @@ def run(
     sea_command: str = "",
     attachments: list[dict[str, str]] | None = None,
     budget_cap: float | None = None,
+    model_owns_endpoint: bool | None = None,
     reconnect_seconds: float = 300.0,
 ) -> TaskResult:
     """Run *prompt* as a task on the local Sorcar daemon and block until done.
@@ -1648,6 +1747,9 @@ def run(
             *data* — the webapp's ``submit`` wire shape.
         budget_cap: The bound a ``run_agent`` dispatch puts on the
             task's budget (:func:`run_command`); ``None`` for none.
+        model_owns_endpoint: A ``run_agent`` dispatch's word on whose
+            endpoint the *model_config* it inherited names
+            (:func:`run_command`); ``None`` for none.
         reconnect_seconds: How long, in seconds, to keep reconnecting
             when the daemon connection closes while the task runs
             (after its ``status running=true``, with no stop pending).
@@ -1762,7 +1864,7 @@ def run(
     ws: ClientConnection | None = None
     aborted: BaseException | None = None
     seen = _Observed(chat_id=chat_id, run_token=run_token)
-    charged = {"cost": 0.0, "tokens": 0, "steps": 0}  # see _net_totals
+    charged: dict[str, dict[str, Any]] = {}  # see _Observed.absorb
     endpoint_path = Path(endpoint_file) if endpoint_file else None
     try:
         # Held here too: an abort while the inbox is built still closes it.
@@ -1809,6 +1911,7 @@ def run(
             sea_command=sea_command,
             attachments=attachments,
             budget_cap=budget_cap,
+            model_owns_endpoint=model_owns_endpoint,
         )
         try:
             local_endpoint.send(inbox.ws, json.dumps(cmd))

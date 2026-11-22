@@ -393,9 +393,11 @@ class TestShareChatTasksOverLocal(_LocalServerTestCase):
         first = self._seed("chat-a", "first task", "ls -la")
         second = self._seed("chat-a", "second task", "pwd")
         self._seed("chat-OTHER", "foreign task", "whoami")
-        event = self._tasks(chatId="chat-a", tabId="tab-7")
+        event = self._tasks(chatId="chat-a", tabId="tab-7", token="click-7")
         self.assertEqual(event["tabId"], "tab-7")
         self.assertEqual(event["chatId"], "chat-a")
+        # The page tells the answers of two clicks on one chat apart by it.
+        self.assertEqual(event["token"], "click-7")
         self.assertFalse(event["truncated"])
         self.assertEqual(
             [t["task_id"] for t in event["tasks"]], [first, second]
@@ -649,10 +651,11 @@ class TestShareChatTasksOverLocal(_LocalServerTestCase):
         self.assertEqual(event["tasks"], [])
 
     def test_non_string_chat_id_yields_no_tasks(self) -> None:
-        event = self._tasks(chatId=7, tabId=42)
+        event = self._tasks(chatId=7, tabId=42, token=["t"])
         self.assertEqual(event["tasks"], [])
         self.assertEqual(event["chatId"], "")
         self.assertEqual(event["tabId"], "")
+        self.assertEqual(event["token"], "")
 
     def test_missing_chat_id_is_rejected_by_the_catalog(self) -> None:
         event = self._roundtrip(
@@ -667,9 +670,12 @@ class TestShareChatTasksOverLocal(_LocalServerTestCase):
         # The echoed identifiers ride in every reply; a client must not
         # be able to push the reply past the frame cap by inflating
         # them.
-        event = self._tasks(chatId="x" * 10_000, tabId="y" * 10_000)
+        event = self._tasks(
+            chatId="x" * 10_000, tabId="y" * 10_000, token="z" * 10_000,
+        )
         self.assertEqual(len(event["chatId"]), 256)
         self.assertEqual(len(event["tabId"]), 256)
+        self.assertEqual(len(event["token"]), 256)
         self.assertEqual(event["tasks"], [])
 
     def test_database_failure_reports_an_error(self) -> None:
@@ -678,10 +684,11 @@ class TestShareChatTasksOverLocal(_LocalServerTestCase):
         close_db()
         th._DB_PATH = Path(self.tmp.name) / "db-in-the-way"
         th._DB_PATH.mkdir()
-        event = self._tasks(chatId="chat-x", tabId="tab-x")
+        event = self._tasks(chatId="chat-x", tabId="tab-x", token="click-x")
         self.assertIn("Failed to load the chat history", event["error"])
         self.assertEqual(event["tasks"], [])
         self.assertEqual(event["tabId"], "tab-x")
+        self.assertEqual(event["token"], "click-x")
 
     def test_database_failure_during_the_subagent_walk_reports_an_error(self) -> None:
         # The chat's rows are read, then the database goes away (the
@@ -917,12 +924,13 @@ class TestShareChatTasksOfAMachine(IsolatedAsyncioTestCase):
         """The reply is the machine's tasks, stamped ``machine``; this daemon's copy stays out."""
         older = self.remote.task_ids["chat-shared/older remote task"]
         newer = self.remote.task_ids["chat-shared/newer remote task"]
-        reply = await self._share_tasks(tabId="tab-1", machine="box")
+        reply = await self._share_tasks(tabId="tab-1", machine="box", token="click-1")
         self.assertEqual(reply.get("machine"), "box", reply)
         self.assertNotIn("error", reply)
         self.assertEqual(
             (reply["tabId"], reply["chatId"], reply["truncated"]), ("tab-1", "chat-shared", False),
         )
+        self.assertEqual(reply.get("token"), "click-1", "the machine echoes the click's token")
         self.assertEqual([t["task_id"] for t in reply["tasks"]], [older, newer])
         self.assertEqual(
             [t["task"] for t in reply["tasks"]], ["older remote task", "newer remote task"],
@@ -940,9 +948,9 @@ class TestShareChatTasksOfAMachine(IsolatedAsyncioTestCase):
         self.assertEqual([t["task"] for t in own["tasks"]], ["this daemon's task"])
 
     async def test_an_unknown_machine_is_an_empty_reply_carrying_the_error(self) -> None:
-        reply = await self._share_tasks(tabId="tab-2", machine="nowhere")
+        reply = await self._share_tasks(tabId="tab-2", machine="nowhere", token="click-2")
         self.assertEqual(reply, {
-            "type": "share_tasks", "tabId": "tab-2", "chatId": "chat-shared",
+            "type": "share_tasks", "tabId": "tab-2", "chatId": "chat-shared", "token": "click-2",
             "tasks": [], "truncated": False, "error": "no machine named 'nowhere'",
             "machine": "nowhere",
         })

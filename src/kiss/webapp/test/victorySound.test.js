@@ -10,6 +10,8 @@
 // machine -- and stays quiet for a sub-agent child's end, for an error
 // or a stop, for a replayed transcript, for a tab it does not have, and
 // when the Settings checkbox muted it (localStorage `kissVictorySound`).
+// A project's own "Play a sound when a task finishes" overrides that
+// checkbox for the finishes of the project's chats.
 //
 // The real chat.html + panelCopy.js + api.js + main.js run in jsdom;
 // `Audio` is the recording stub of speech_helpers (jsdom's own play()
@@ -615,6 +617,160 @@ const pendingPlay = test('the rejection of a retired player\'s pending play() ch
   assert.deepStrictEqual(played.map(p => p.playCalls), [2, 2, 2, 1], 'the retry sounds');
 });
 
-Promise.all([last, mutedLate, interrupted, pendingPlay]).then(() => {
+// ---- A project's own "Play a sound when a task finishes" ----------------
+
+/** A project of the daemon's list whose own settings are `settings`. */
+function project(id, settings) {
+  return {
+    id,
+    name: id,
+    description: '',
+    settings,
+    isPinned: false,
+    createdAt: 1,
+    updatedAt: 1,
+  };
+}
+
+/** The daemon's word that chat "c1" is in project `id` ('' for none). */
+function putChatInProject(win, id) {
+  send(win, {
+    type: 'projects',
+    projects: [
+      project('loud', {victory_sound: true}),
+      project('quiet', {victory_sound: false}),
+      project('plain', {}),
+    ],
+    chatProjects: id ? {c1: id} : {},
+  });
+}
+
+/** Task `n` of chat "c1" starts in the tab and finishes: the daemon's end names the chat. */
+function finishTask(win, tabId, n) {
+  send(win, {type: 'status', running: true, tabId, taskId: 'task-' + n});
+  send(win, {type: 'task_done', success: true, tabId, chatId: 'c1'});
+}
+
+const ofProject = test('a project\u2019s own setting overrides this browser\u2019s for the finishes of its chats', async () => {
+  await pendingPlay;
+  let allowed = true;
+  let breakNext = false;
+  const page = makePage({
+    stored: 'off',
+    playResult: () => {
+      if (breakNext) {
+        breakNext = false;
+        return Promise.reject(domError('NotSupportedError'));
+      }
+      return allowed ? Promise.resolve() : Promise.reject(domError('NotAllowedError'));
+    },
+  });
+  const {win, played, tabId} = page;
+  // This browser is muted; the chat's project asks for the sound.
+  putChatInProject(win, 'loud');
+  finishTask(win, tabId, 2);
+  await settle();
+  assert.deepStrictEqual(played.map(p => p.playCalls), [1], 'the project asks for it');
+  // A project that leaves the setting alone, and no project: this
+  // browser's choice.
+  putChatInProject(win, 'plain');
+  finishTask(win, tabId, 3);
+  putChatInProject(win, '');
+  finishTask(win, tabId, 4);
+  assert.strictEqual(played.length, 1, 'muted here, and no project has a say');
+  // Unmuted here: a project that turns the sound off keeps its chats
+  // silent.
+  win.localStorage.setItem(KEY, 'on');
+  putChatInProject(win, 'quiet');
+  finishTask(win, tabId, 5);
+  assert.strictEqual(played.length, 1, 'the project turned it off');
+  // Also for a task whose tab this page does not have: closed since,
+  // or launched on another device.
+  send(win, {type: 'task_done', success: true, tabId: 'not-a-tab-here', chatId: 'c1'});
+  assert.strictEqual(played.length, 1, 'the project of the chat the end names');
+  putChatInProject(win, 'plain');
+  finishTask(win, tabId, 6);
+  await settle();
+  assert.deepStrictEqual(played.map(p => p.playCalls), [1, 1], 'this browser\u2019s choice');
+
+  // Muted here again.  A project's jingle the autoplay policy refused
+  // sounds at the next gesture all the same...
+  win.localStorage.setItem(KEY, 'off');
+  putChatInProject(win, 'loud');
+  allowed = false;
+  finishTask(win, tabId, 7);
+  await settle();
+  allowed = true;
+  gesture(win, 'pointerdown');
+  await settle();
+  assert.deepStrictEqual(
+    played.map(p => p.playCalls),
+    [1, 1, 2],
+    'the mute here is not the project\u2019s',
+  );
+  played[2].fire('ended');
+  // ...and so does the second fetch of one whose clip failed to load.
+  breakNext = true;
+  finishTask(win, tabId, 8);
+  await settle();
+  assert.deepStrictEqual(
+    played.map(p => p.playCalls),
+    [1, 1, 2, 1, 1],
+    'fetched again, and sounded',
+  );
+});
+
+// Audit 2026-11-21 (W10 F1): the deferred queue holds the finishes of
+// every chat in order, so one that this browser's mute silences can
+// wait ahead of one a project asked for.  The mute takes that player's
+// own turn only: the project's finishes behind it sound, each once.
+const mixedQueue = test('a muted deferred finish does not silence a project\u2019s behind it', async () => {
+  await ofProject;
+  let allowed = false;
+  const page = makePage({
+    playResult: () =>
+      allowed ? Promise.resolve() : Promise.reject(domError('NotAllowedError')),
+  });
+  const {win, played, tabId} = page;
+  putChatInProject(win, 'loud');
+  // Refused by the autoplay policy, in this order: the finish of a
+  // chat in no project, one of the project's chat, and both once more.
+  for (const chatId of ['c2', 'c1', 'c2', 'c1']) {
+    send(win, {type: 'status', running: true, tabId, taskId: 'task-of-' + chatId});
+    send(win, {type: 'task_done', success: true, tabId, chatId});
+  }
+  await settle();
+  assert.deepStrictEqual(played.map(p => p.playCalls), [1, 1, 1, 1], 'all four refused');
+  // Muted on another page of this browser profile.
+  win.localStorage.setItem(KEY, 'off');
+  win.dispatchEvent(new win.StorageEvent('storage', {key: KEY, newValue: 'off'}));
+  allowed = true;
+  gesture(win, 'pointerdown');
+  await settle();
+  assert.deepStrictEqual(
+    played.map(p => p.playCalls),
+    [1, 2, 1, 1],
+    'BUG - the muted finish ahead of it took the project\u2019s jingle with it',
+  );
+  played[1].fire('ended');
+  await settle();
+  assert.deepStrictEqual(
+    played.map(p => p.playCalls),
+    [1, 2, 1, 2],
+    'BUG - the muted finish between them took the project\u2019s second jingle',
+  );
+  played[3].fire('ended');
+  // The muted ones are gone for good: neither an unmute nor a failed
+  // load heard late sounds them.
+  win.localStorage.setItem(KEY, 'on');
+  played[0].fire('error');
+  played[2].fire('error');
+  gesture(win, 'pointerdown');
+  await settle();
+  assert.strictEqual(played.length, 4, 'a dropped finish is not fetched again');
+  assert.deepStrictEqual(played.map(p => p.playCalls), [1, 2, 1, 2], 'each forced finish once');
+});
+
+Promise.all([last, mutedLate, interrupted, pendingPlay, ofProject, mixedQueue]).then(() => {
   report('victorySound');
 });

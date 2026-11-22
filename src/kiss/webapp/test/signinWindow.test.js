@@ -547,6 +547,26 @@ function runTests() {
     }
   }
 
+  // 2026-11-21 L4: the token names the click among every window's
+  // clicks.  The daemon takes the paste of a page that reconnected
+  // since its click by the token alone, so two windows whose first
+  // clicks shared one could paste into each other's sign-in.  (That
+  // paste itself, from two real windows through the daemon into its
+  // hook: tests/webapp/test_signin_window_e2e.py.)
+  {
+    const pages = [signinPage(), signinPage()];
+    try {
+      const [a, b] = pages.map(({win, posted}) => {
+        send(win, SIGNIN);
+        buttons(win)[0].click();
+        return sent(posted, 'signinLogin')[0].attempt;
+      });
+      assert.ok(a && b && a !== b, `BUG - the windows' tokens: ${a}, ${b}`);
+    } finally {
+      pages.forEach(page => page.win.close());
+    }
+  }
+
   console.log('signinWindow.test.js passed');
 }
 

@@ -4,9 +4,6 @@
 // add your name here
 
 // End-to-end (JSDOM) tests for the tab-mirroring review fixes:
-//  [2] a sub-agent tab closed on one client is removed on every other
-//      client via the daemon's `closeSubagentTab` broadcast, applied
-//      locally WITHOUT echoing a `closeTab` back (no feedback loop);
 //  [5] a cap-rejected `openTab` is answered with `openTabRejected`,
 //      which drops the local pending tab, and pending ids that no
 //      snapshot ever confirms expire instead of staying immune.
@@ -16,7 +13,6 @@
 const assert = require('assert');
 const harness = require('./simplify2_harness');
 const {trackWindow, runTests} = require('./workdir_helpers');
-const {clickClose} = require('./subagent_tab_helpers');
 const {
   installFakeWebSocket,
   bootShim,
@@ -69,86 +65,7 @@ function openTabFrames(sockets) {
   return sockets.flatMap(frames).filter(f => f.type === 'openTab');
 }
 
-/** The tab ids on the strip (#tab-list), in order. */
-function tabBarIds(win) {
-  return Array.from(win.document.querySelectorAll('.chat-tab'))
-    .filter(el => !!el.dataset.tabId)
-    .map(el => el.dataset.tabId);
-}
-
 const {ofType: msgsOf, snapshotEntry} = harness;
-
-// Give a page a mirrored parent tab plus one sub-agent tab: live by
-// default, finished history with `done`.  The user may hand-close
-// either: a running sub-agent's tab stays open only until the user
-// closes it.
-function seedSubagent(win, done) {
-  send(win, {type: 'tabs_state', tabs: [snapshotEntry('parent', 'Parent')]});
-  send(win, {
-    type: 'openSubagentTab',
-    tab_id: 'parent__sub_1',
-    parent_tab_id: 'parent',
-    description: 'Sub one',
-    task_id: '42',
-    isDone: !!done,
-  });
-  assert.ok(
-    tabBarIds(win).includes('parent__sub_1'),
-    'harness: the sub-agent tab never opened',
-  );
-}
-
-// --- [2] sub-agent close mirroring ----------------------------------------
-
-function testCloseSubagentTabBroadcastRemovesTabWithoutEcho() {
-  // Client B shows the same sub-agent tab client A just closed; the
-  // daemon's `closeSubagentTab` broadcast must remove it on B without
-  // B echoing a `closeTab` back to the daemon (feedback loop).
-  const {win, posted} = makePage();
-  seedSubagent(win);
-  const closesBefore = msgsOf(posted, 'closeTab').length;
-
-  send(win, {type: 'closeSubagentTab', tab_id: 'parent__sub_1'});
-
-  assert.ok(
-    !tabBarIds(win).includes('parent__sub_1'),
-    'the broadcast close never removed the sub-agent tab — the tab ' +
-      'sets diverge between clients',
-  );
-  assert.strictEqual(
-    msgsOf(posted, 'closeTab').length,
-    closesBefore,
-    'applying a broadcast close must NOT echo closeTab back to the ' +
-      'daemon',
-  );
-  // The parent tab is untouched.
-  assert.ok(tabBarIds(win).includes('parent'));
-}
-
-function testCloseSubagentTabForUnknownIdIsIgnored() {
-  const {win, posted} = makePage();
-  seedSubagent(win);
-  const before = tabBarIds(win);
-  const postedBefore = posted.length;
-  send(win, {type: 'closeSubagentTab', tab_id: 'no-such-tab__sub_7'});
-  assert.deepStrictEqual(tabBarIds(win), before);
-  assert.strictEqual(posted.length, postedBefore);
-}
-
-function testManualSubagentCloseStillAnnouncedToDaemon() {
-  // The origin side of the mirror: a hand-closed sub-agent tab must
-  // still send `closeTab` so the daemon can broadcast the close.
-  const {win, posted} = makePage();
-  seedSubagent(win, true);
-  const closeBtn = win.document.querySelector(
-    '.chat-tab[data-tab-id="parent__sub_1"] .chat-tab-close',
-  );
-  closeBtn.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-  const closes = msgsOf(posted, 'closeTab');
-  assert.strictEqual(closes.length, 1);
-  assert.strictEqual(closes[0].tabId, 'parent__sub_1');
-  assert.ok(!tabBarIds(win).includes('parent__sub_1'));
-}
 
 // --- [5] rejected openTab + pending expiry ---------------------------------
 
@@ -329,15 +246,12 @@ function testUnacknowledgedOpenIsNotReannouncedAfterReconnect() {
   const open = msgsOf(a.posted, 'openTab')[0];
   const fresh = snapshotEntry(open.tabId, open.title);
   // The daemon processed the open: its acknowledging snapshot reaches
-  // B, but A's connection drops first.  The user then closes the
-  // shared tab on B.
+  // B, but A's connection drops first.  The shared tab is then closed
+  // on another surface: B's next snapshot omits it.
   send(b.win, {type: 'tabs_state', tabs: [root, fresh], acks: [open.ack]});
   assert.deepStrictEqual(openTabIds(b.win), ['t1', open.tabId]);
   send(a.win, {type: 'daemonStatus', connected: false});
-  b.win._testApi.switchToTab(open.tabId);
-  clickClose(b.win, open.tabId);
-  const close = msgsOf(b.posted, 'closeTab').pop();
-  send(b.win, {type: 'tabs_state', tabs: [root], acks: [close.ack]});
+  send(b.win, {type: 'tabs_state', tabs: [root], acks: []});
   assert.deepStrictEqual(openTabIds(b.win), ['t1']);
   // A reconnects: `ready` goes out, the open does not.
   a.posted.length = 0;
@@ -670,9 +584,6 @@ function testReadyGoesOutOncePerConnectionAfterALostPong() {
 }
 
 const tests = [
-  testCloseSubagentTabBroadcastRemovesTabWithoutEcho,
-  testCloseSubagentTabForUnknownIdIsIgnored,
-  testManualSubagentCloseStillAnnouncedToDaemon,
   testOpenTabRejectedDropsLocalPendingTab,
   testOpenTabRejectedForLastTabKeepsLocalPlaceholder,
   testUnconfirmedPendingOpenExpiresAfterSnapshots,

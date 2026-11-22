@@ -16,12 +16,21 @@ an interruption rolls the column back and the next open redoes both.
 The interruption is SQLite's own: a progress handler on the opening
 connection aborts the backfill's ``UPDATE`` (``OperationalError:
 interrupted``), exactly where the lost-work window was.
+
+Also here: the ``settled`` column of ``remote_charges`` was added outside
+that transaction, so two processes opening an older database both found
+it missing and the second ``ALTER TABLE`` failed its open (``duplicate
+column name: settled``).  The second process is a real one, started from
+the opening connection's trace callback right after its check.
 """
 
 from __future__ import annotations
 
+import os
 import re
 import sqlite3
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -45,6 +54,42 @@ class AbortBackfill:
     def progress(self) -> int:
         """SQLite's progress callback: a non-zero return aborts the running statement."""
         return 1 if self.aborting else 0
+
+
+# Another process opens the database at argv[1] the way the daemon does.
+_OPEN_SCRIPT = """
+import sys
+from pathlib import Path
+
+from kiss.agents.sorcar import persistence
+
+persistence._DB_PATH = Path(sys.argv[1])
+persistence._get_db()
+"""
+
+
+class PeerOpensAfterTheCheck:
+    """Have another process open the database once *conn* has found ``settled`` missing."""
+
+    def __init__(self, conn: sqlite3.Connection, path: Path) -> None:
+        self.conn = conn
+        self.path = path
+        self.checked = False
+        self.peer: subprocess.CompletedProcess[str] | None = None
+        conn.set_trace_callback(self.statement_started)
+
+    def statement_started(self, sql: str) -> None:
+        """Run the peer before the first statement after the ``remote_charges`` check."""
+        if self.checked:
+            self.conn.set_trace_callback(None)
+            self.peer = subprocess.run(
+                [sys.executable, "-c", _OPEN_SCRIPT, str(self.path)],
+                env={**os.environ, "PYTHONPATH": os.pathsep.join(sys.path)},
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+        self.checked = sql == "PRAGMA table_info(remote_charges)"
 
 
 def pre_is_cron_db(path: Path) -> None:
@@ -115,6 +160,22 @@ def test_a_caller_owning_a_transaction_keeps_it(tmp_path: Path) -> None:
     conn.close()
     assert {"is_cron"} <= columns(path, "task_history")
     assert {"user_summary", "last_finished"} <= columns(path, "chat_summaries")
+
+
+def test_two_processes_that_both_find_a_charge_column_missing_add_it_once(tmp_path: Path) -> None:
+    """An open that found ``settled`` missing and lost the race to add it adds nothing."""
+    path = tmp_path / "history.db"
+    conn = sqlite3.connect(path, isolation_level=None)  # autocommit, as the daemon opens it
+    persistence._init_tables(conn)
+    conn.execute("ALTER TABLE remote_charges DROP COLUMN settled")
+    race = PeerOpensAfterTheCheck(conn, path)
+    persistence._init_tables(conn)
+    declared = [
+        row[1:5] for row in conn.execute("PRAGMA table_info(remote_charges)") if row[1] == "settled"
+    ]
+    conn.close()
+    assert race.peer is not None and race.peer.returncode == 0, race.peer
+    assert declared == [("settled", "INTEGER", 1, "0")]
 
 
 if __name__ == "__main__":

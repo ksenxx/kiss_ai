@@ -55,7 +55,7 @@ import pytest
 import kiss.agents.sorcar.persistence as th
 from kiss.core.locked import locked_call
 from kiss.server.task_runner import inject_keyboard_interrupt
-from kiss.tests.persistence_helpers import close_db
+from kiss.tests.persistence_helpers import close_db, queued_events
 
 
 @pytest.fixture
@@ -211,7 +211,7 @@ def test_a_writer_that_dies_holding_a_batch_leaves_it_to_its_replacement(
     threading.Thread(target=flush, name="r2-flush-2", daemon=True).start()
     assert flushed.wait(10), "the flush hung after the replacement writer took over"
     assert _event_count(task_id) == 2
-    assert th._pending_count(None) == 0
+    assert th._pending_count() == 0
 
 
 def test_flushes_waiting_behind_a_long_queue_do_not_rescan_it(isolated_db: Path) -> None:
@@ -364,7 +364,7 @@ def test_a_writer_that_dies_acknowledging_a_batch_cannot_release_a_later_flush(
         assert rechecked.wait(10), "the flusher did not re-check its target"
         # B is persisted by nobody yet: the flusher must still be waiting.
         assert counts == [] and not errors, (counts, errors)
-        assert _event_count(task_b) == 0 and th._pending_count(task_b) == 1
+        assert _event_count(task_b) == 0 and queued_events(task_b) == 1
         assert rechecks and not any(rechecks), rechecks
     finally:
         release_first.set()
@@ -377,4 +377,4 @@ def test_a_writer_that_dies_acknowledging_a_batch_cannot_release_a_later_flush(
     assert not errors, errors
     assert _event_count(task_a) >= th._BATCH_MAX  # re-persisted by the replacement writer
     th._flush_chat_events()
-    assert th._pending_count(None) == 0
+    assert th._pending_count() == 0

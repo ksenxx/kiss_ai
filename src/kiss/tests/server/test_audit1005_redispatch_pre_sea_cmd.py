@@ -28,10 +28,14 @@ whose module body appends a line to a marker file every time the SEA
 is executed, and a model name that is not available, so both runs
 take the runner's "No model available" exit without an LLM.  No mocks
 or patches.
+
+The same harness closes the tab between the run's release of it and the
+re-dispatch: the follow-up then starts no task in the closed tab.
 """
 
 from __future__ import annotations
 
+import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -46,6 +50,7 @@ from kiss.server.server import AgentServer
 from kiss.tests.agents.sorcar.conftest import reset_sea_registry
 from kiss.tests.server.conftest import clear_tab_states
 from kiss.tests.server.parallel_agent_harness import IsolatedKissHome
+from kiss.tests.server.pause import Pause
 
 _UNKNOWN_MODEL = "audit1005-redispatch-no-such-model"
 _WAIT_S = 60.0
@@ -78,6 +83,7 @@ class _LatePromptPrinter(JsonPrinter):
         self.events: list[dict[str, Any]] = []
         self.server: AgentServer | None = None
         self.late_prompt = ""
+        self.worker: threading.Thread | None = None
         self._submitted = False
 
     def broadcast(self, event: dict[str, Any]) -> None:
@@ -91,6 +97,7 @@ class _LatePromptPrinter(JsonPrinter):
             and self.server is not None
         ):
             self._submitted = True
+            self.worker = threading.current_thread()
             self.server._cmd_run({"tabId": _TAB, "prompt": self.late_prompt})
 
 
@@ -177,3 +184,45 @@ def test_followup_after_slash_run_is_a_plain_run(
     # the user's plain prompt (no ``seaPath``), so it did not run the
     # SEA a second time.
     assert marker.read_text(encoding="utf-8").count("executed") == 1
+
+
+def test_followup_of_a_tab_closed_since_its_run_ended_starts_no_task(tmp_path: Path) -> None:
+    """A follow-up a run left starts no task in a tab closed before its re-dispatch.
+
+    The finished run frees its tab, then re-submits what it left.  A
+    tab closed in between is gone, as one closed before the run's end
+    is: nothing clears it, no task runs there and no state is made for
+    it again.
+    """
+    printer = _LatePromptPrinter()
+    server = AgentServer(printer=printer)
+    printer.server = server
+    printer.late_prompt = "left for the tab's next run"
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    with Pause(
+        AgentServer._redispatch_leftover_prompts.__code__, lambda _locals: True,
+    ) as redispatch:
+        server._cmd_run({
+            "type": "run",
+            "tabId": _TAB,
+            "prompt": "the first task",
+            "workDir": str(work_dir),
+            "model": _UNKNOWN_MODEL,
+            "classifyTasks": False,
+        })
+        assert redispatch.paused.wait(_WAIT_S), "the run never got to what it left"
+        server._cmd_close_tab({"type": "closeTab", "tabId": _TAB})
+        assert agent_state.find_by_tab(_TAB) is None, "the idle tab's state outlived its close"
+        closed_at = len(printer.events)
+        redispatch.release()
+        worker = printer.worker
+        assert worker is not None
+        worker.join(_WAIT_S)
+        assert not worker.is_alive(), "the first run's thread never ended"
+    _wait_idle()
+    since_close = printer.events[closed_at:]
+    started = [e for e in since_close if e.get("type") in ("clear", "result") or e.get("running")]
+    assert started == [], started
+    assert agent_state.find_by_tab(_TAB) is None
+    assert not server.tab_registry.has_tab(_TAB), "the closed tab is listed again"

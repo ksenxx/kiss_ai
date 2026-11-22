@@ -83,6 +83,7 @@ from asyncio import sslproto
 from collections.abc import Awaitable, Callable, Coroutine, Iterable, Iterator
 from concurrent.futures import Future as ConcurrentFuture
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field, replace
 from functools import partial
 from http import HTTPStatus
 from pathlib import Path
@@ -96,6 +97,11 @@ from websockets.datastructures import Headers
 from websockets.http11 import Request, Response
 
 from kiss.agents.sorcar import chrome_bridge, cron_agent, local_endpoint, machines
+from kiss.agents.sorcar.git_worktree import (
+    GitWorktreeOps,
+    inside_kiss_worktree,
+    strip_worktree_suffix,
+)
 from kiss.agents.sorcar.persistence import (
     _load_all_chat_events_by_chat_id,
     _load_chat_events_by_task_id,
@@ -104,15 +110,20 @@ from kiss.agents.sorcar.persistence import (
     _shutdown_persist_in_flight_results,
 )
 from kiss.agents.sorcar.sea_settings import file_stamp
-from kiss.agents.sorcar.useful_tools import remap_vanished_worktree
+from kiss.agents.sorcar.useful_tools import _worktree_index, remap_vanished_worktree
 from kiss.core import tls_certs, user_config
 from kiss.core.brand import BRAND, HOME_DIR, PRODUCT_NAME
-from kiss.core.browser_handoff import in_docker, set_browser_tab_opener
+from kiss.core.browser_handoff import (
+    in_docker,
+    open_in_default_browser,
+    open_with_default_app,
+    set_browser_tab_opener,
+)
 from kiss.core.config import get_jobs_root as get_jobs_root
 from kiss.core.config import kiss_home, read_remote_urls, remote_url_file
 from kiss.core.file_lock import exclusive_file_lock
 from kiss.core.locked import locked_call
-from kiss.core.processes import find_bash, suppress_error_dialogs
+from kiss.core.processes import find_bash, pin_process, suppress_error_dialogs, unpin_process
 from kiss.core.processes import pid_alive as _is_pid_alive
 from kiss.core.processes import process_identity as _process_identity
 from kiss.core.remote_password import password_accepted
@@ -127,7 +138,7 @@ from kiss.core.utils import (
     is_root_dir,
     read_bytes_waiting_for_writer,
 )
-from kiss.server import agent_state, deferred_restart, standalone_app
+from kiss.server import agent_state, deferred_restart, html_views, standalone_app
 from kiss.server import sorcar as sorcar_api
 from kiss.server.commands import (
     broadcast_to_conn,
@@ -825,11 +836,6 @@ def _rate_limit_backoff_seconds() -> int:
     return _TUNNEL_RATE_LIMIT_BACKOFF + jitter
 
 
-def _default_executor() -> ThreadPoolExecutor:
-    """Return the executor a server installs as its loop's default."""
-    return ThreadPoolExecutor(max_workers=_EXECUTOR_WORKERS, thread_name_prefix="kiss-web")
-
-
 def _bound_loopback(*ws_servers: Any) -> tuple[str, int]:
     """Return the ``(host, port)`` a same-machine client should dial.
 
@@ -1450,6 +1456,21 @@ def _inline_binary_mime(path: Path) -> str:
     mime = mimetypes.guess_type(path.name, strict=False)[0] or ""
     return mime if mime in _INLINE_BINARY_MIMES else ""
 
+
+def _download_mime(path: Path) -> str:
+    """The MIME type the bytes of *path* are offered for download as.
+
+    The type its name says, so the device that saves the file knows
+    what opens it; ``application/octet-stream`` for a name that says
+    none, and for a document a browser runs (HTML, SVG and every other
+    XML type): opened from its download link in a tab of its own, such
+    a document would run in the webapp's origin.
+    """
+    mime = mimetypes.guess_type(path.name, strict=False)[0] or ""
+    if not mime or mime in ("text/html", "text/xml", "application/xml") or mime.endswith("+xml"):
+        return "application/octet-stream"
+    return mime
+
 # Caps on an openFile directory-listing reply, so one click on a huge
 # directory (node_modules, .git/objects, ...) cannot produce a
 # multi-megabyte WSS message: at most this many entries, and at most
@@ -1756,29 +1777,27 @@ def _load_cloudflared_pidfile() -> dict[str, Any] | None:
     return data
 
 
-def _unlink_cloudflared_pidfile(pid: int | None = None) -> None:
+def _unlink_cloudflared_pidfile(pid: int) -> None:
     """Best-effort removal of the cloudflared pidfile.
 
     Used once the recorded cloudflared process is known to be dead so
-    a later kiss-web does not try to adopt a stale pid.  With *pid*,
-    only a record still naming that process goes: a successor daemon
+    a later kiss-web does not try to adopt a stale pid.  Only a record
+    still naming that process goes: a successor daemon
     sharing the home may have published its own tunnel while the
     retired one was waited for, and that record is kept (A21-3).
     Failures are ignored — the worst case is a stale pidfile that the
     next adoption attempt rejects via its pid-liveness check.
 
     Args:
-        pid: The retired process whose record is to be removed, or
-            ``None`` to remove whatever record there is.
+        pid: The retired process whose record is to be removed.
     """
     try:
         with exclusive_file_lock(
             _cloudflared_pidfile_lock(), timeout=_CLOUDFLARED_PIDFILE_LOCK_TIMEOUT_S,
         ):
-            if pid is not None:
-                data = _load_cloudflared_pidfile()
-                if data is not None and data["pid"] != pid:
-                    return
+            data = _load_cloudflared_pidfile()
+            if data is not None and data["pid"] != pid:
+                return
             _cloudflared_pidfile().unlink(missing_ok=True)
     except OSError:
         pass
@@ -1858,29 +1877,68 @@ def _terminate_cloudflared_pid(pid: int, grace_s: float = 2.0) -> None:
     :func:`_terminate_declined_cloudflared`) and for stray tunnels
     found by :func:`_find_cloudflared_forwarding_to`, where unlinking
     the pidfile would wrongly discard the daemon's OWN tunnel record.
+
+    A check and its signal are two steps, and a tunnel that ends in
+    between frees its pid for a stranger (such a tunnel is no child
+    of this process: nothing keeps its pid once it exits).  Where the
+    kernel has pidfds (Linux) both signals therefore go through one
+    opened before the first check: it names the process that was
+    checked and no later holder of its pid.  On Windows a handle
+    opened the same way (:func:`kiss.core.processes.pin_process`)
+    keeps the pid from being reused.  Elsewhere (macOS, a kernel or
+    sandbox without ``pidfd_open``) the bare pid is signalled right
+    after its check, which shortens that window and does not close it.
     """
-    if not _looks_like_cloudflared(pid):
-        logger.info(
-            "pid %d is not a cloudflared process (pid recycled); "
-            "not signalling it",
-            pid,
-        )
-        return
-    try:
-        os.kill(pid, signal.SIGTERM)
-    except OSError:
-        return
-    for _ in range(int(grace_s / 0.1)):
-        if not _is_pid_alive(pid):
-            break
-        time.sleep(0.1)
-    if _is_pid_alive(pid) and _looks_like_cloudflared(pid):
+    pidfd = -1
+    pidfd_open = getattr(os, "pidfd_open", None)
+    if pidfd_open is not None:
         try:
-            # Windows has no SIGKILL; ``os.kill`` there terminates the
-            # process outright for any signal number.
-            os.kill(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
+            pidfd = pidfd_open(pid)
+        except ProcessLookupError:
+            return
         except OSError:
-            pass
+            logger.debug("pidfd_open(%d) failed; signalling the pid instead", pid, exc_info=True)
+    pinned = pin_process(pid)
+    try:
+        if not _looks_like_cloudflared(pid):
+            logger.info(
+                "pid %d is not a cloudflared process (pid recycled); "
+                "not signalling it",
+                pid,
+            )
+            return
+        try:
+            _signal_cloudflared(pidfd, pid, signal.SIGTERM)
+        except OSError:
+            return
+        for _ in range(int(grace_s / 0.1)):
+            if not _is_pid_alive(pid):
+                break
+            time.sleep(0.1)
+        if _is_pid_alive(pid) and _looks_like_cloudflared(pid):
+            try:
+                # Windows has no SIGKILL; ``os.kill`` there terminates the
+                # process outright for any signal number.
+                _signal_cloudflared(pidfd, pid, getattr(signal, "SIGKILL", signal.SIGTERM))
+            except OSError:
+                pass
+    finally:
+        if pidfd >= 0:
+            os.close(pidfd)
+        if pinned is not None:  # pragma: no cover — Windows-only
+            unpin_process(pinned)
+
+
+def _signal_cloudflared(pidfd: int, pid: int, sig: int) -> None:
+    """Send *sig* through *pidfd*, or to the bare *pid* where there is none.
+
+    Raises:
+        OSError: The process is gone, or may not be signalled.
+    """
+    if pidfd >= 0 and sys.platform == "linux":
+        signal.pidfd_send_signal(pidfd, sig)
+    else:
+        os.kill(pid, sig)
 
 
 _LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
@@ -3007,13 +3065,61 @@ def _snapshot_active_tabs() -> list[str]:
 def _persist_shutdown_results(task_ids: set[str]) -> None:
     """Mark the history rows of the swept tasks as interrupted (best effort).
 
-    Body of the thread :meth:`RemoteAccessServer._stop_active_agent_tasks`
-    starts beside its joins.
+    Body of the thread :func:`_start_shutdown_persistence` starts.
     """
     try:
         _shutdown_persist_in_flight_results(task_ids)
     except Exception:  # noqa: BLE001 — best-effort, must not block shutdown
         logger.debug("Pre-emptive shutdown persistence failed", exc_info=True)
+
+
+def _start_shutdown_persistence(task_ids: set[str]) -> threading.Thread | None:
+    """Start the thread that marks the swept tasks' history rows as interrupted.
+
+    The rewrite waits for the history write lock (no bound) and, behind
+    another writer, for SQLite's busy timeout.  On a thread of its own,
+    which :meth:`RemoteAccessServer._stop_active_agent_tasks` joins
+    within its deadline, it cannot keep the shutdown behind a stuck
+    history writer; the sweep therefore never makes the rewrite itself.
+
+    Args:
+        task_ids: Row ids of the swept tasks.
+
+    Returns:
+        The started thread, or ``None`` when no thread can start.
+    """
+    persist = threading.Thread(
+        target=_persist_shutdown_results,
+        args=(task_ids,),
+        name="shutdown-persist",
+        daemon=True,
+    )
+    try:
+        persist.start()
+    except RuntimeError:
+        logger.exception("Shutdown: could not start the persistence thread")
+        return None
+    return persist
+
+
+def _shutdown_worker_unstarted(
+    swept: tuple[str, Any, threading.Event | None, threading.Thread],
+) -> bool:
+    """Sort key of the graceful-shutdown sweep: the workers already running go first.
+
+    Evaluated under ``agent_state.STATE_LOCK``, which ``_cmd_run``
+    holds across ``thread.start()``: there ``ident`` is ``None``
+    exactly for a worker that has not started, and one the sweep
+    flagged never starts afterwards.
+
+    Args:
+        swept: A task of the sweep: its id, state, stop event and
+            worker thread.
+
+    Returns:
+        ``True`` for a worker ``_cmd_run`` registered and has not started.
+    """
+    return swept[3].ident is None
 
 
 def _shutdown_state_owns_thread(state: Any, thread: threading.Thread) -> bool:
@@ -3312,11 +3418,12 @@ def _webclip_profile(url: str) -> bytes:
 
 URGENT_REPLY_TYPES = frozenset({
     "history", "machines", "cronJobs", "appsStatus", "spendReport", "recommendations",
+    "skills", "skillSearch", "skillInstall",
 })
 """Replies that go ahead of the frames queued for their connection.
 
 The sidebar panels' lists (the CHATS rows a page opens on, the
-Machines, Schedule, Apps, Spend and Recommendations panels): a few
+Machines, Schedule, Apps, Skills, Spend and Recommendations panels): a few
 kilobytes each, asked for by the user and waited for on screen, with
 no ordering relation to a task's stream.  Sent in queue order they
 waited behind whatever was queued first -- the transcripts a ``ready``
@@ -3324,6 +3431,15 @@ replays, megabytes that take a slow link half a minute -- so
 :meth:`WebPrinter.broadcast` sends them ahead of the queue
 (:meth:`FifoSendLock.acquire` with ``ahead``), and a big frame under
 way lets them through between its parts (:meth:`WebPrinter._locked_send`).
+"""
+
+OWN_PAGES_EVENT_TYPES = frozenset({"projects"})
+"""Global events that go to this daemon's pages and never to a daemon-link peer.
+
+``projects`` lists every project with its settings, API keys included.
+Projects are this daemon's own, so like ``configData``, the other event
+that carries keys, the list reaches another daemon only as the reply to
+its own request (``getProjects``), never as a broadcast.
 """
 
 
@@ -3404,6 +3520,66 @@ class FifoSendLock:
         self._locked = False
 
 
+# How many tabs' logs ``WebPrinter._tab_runs`` keeps: as many tabs as
+# the tab registry holds.
+_TAB_RUNS_MAX = 512
+
+
+@dataclass(frozen=True)
+class _TabRun:
+    """What one tab was told of task worktrees since its last run started.
+
+    The entries of ``WebPrinter._tab_runs``, which
+    :meth:`WebPrinter.worktree_merged` answers a report request from.
+    An entry is replaced as a whole, never changed in place, so a
+    reader needs no lock.
+
+    Attributes:
+        began: When the last ``clear`` (a run starts) reached the tab, in
+            milliseconds since the epoch (the clock of an event's ``ts``).
+        merged: Every worktree directory (an event's ``worktreeDir``)
+            the tab was told of since, and whether a successful merge
+            of it was announced.
+        presented: The directories of the tab's last ``worktree_done``,
+            which the user's Merge merges; none once the user's Discard
+            or Do nothing acted on them.
+    """
+
+    began: int
+    merged: dict[str, bool] = field(default_factory=dict)
+    presented: tuple[str, ...] = ()
+
+
+def _run_worktree_dir(work_dir: object) -> str:
+    """Return the task worktree a run that starts in *work_dir* works in.
+
+    The directory is named as a ``worktreeDir`` names it (the resolved
+    ``<repo>/.kiss-worktrees/kiss_wt-*``, the innermost one of nested
+    worktrees), so the events that tell of that worktree later meet
+    the entry this name makes in a tab's log.  It is the directory a
+    ``Write`` of a checkout path is redirected into
+    (``useful_tools._active_worktree_remap`` goes by the same resolved
+    folder).
+
+    Args:
+        work_dir: The ``workDir`` of a ``clear`` event: the folder the
+            run starts in, when the event names one.
+
+    Returns:
+        The worktree directory, or ``""`` when *work_dir* is not a
+        folder inside a task worktree (or names none).
+    """
+    if not isinstance(work_dir, str) or not work_dir:
+        return ""
+    try:
+        parts = Path(work_dir).resolve().parts
+    except (OSError, ValueError):
+        # ValueError: a path with an embedded NUL byte.
+        return ""
+    marker = _worktree_index(parts)
+    return "" if marker is None else str(Path(*parts[: marker + 2]))
+
+
 class WebPrinter(JsonPrinter):
     """Printer that broadcasts JSON events to connected WebSocket clients.
 
@@ -3460,6 +3636,9 @@ class WebPrinter(JsonPrinter):
         # tabId -> pending worktree dir of that tab's finished (or
         # running) worktree task; see _track_worktree_event().
         self._tab_worktree_dirs: dict[str, str] = {}
+        # tabId -> the worktrees the tab was told of since its last run
+        # started, the least recently started first; see worktree_merged().
+        self._tab_runs: dict[str, _TabRun] = {}
 
     def _track_worktree_event(
         self, event: dict[str, Any], tab_id: Any, task_id: Any = None,
@@ -3476,6 +3655,12 @@ class WebPrinter(JsonPrinter):
         launched in a repo subdirectory resolve correctly); a
         successful ``worktree_result`` (merge or discard finished)
         drops it, so the main checkout wins again.
+
+        The same events are logged for the tab from the ``clear`` that
+        starts its run on (:meth:`_begin_tab_run`,
+        :meth:`_log_tab_worktrees`, :meth:`_log_worktree_result`), so a
+        report is shown only once the worktrees it may have been
+        written in are merged (:meth:`worktree_merged`).
 
         Args:
             event: The event being broadcast.
@@ -3505,18 +3690,24 @@ class WebPrinter(JsonPrinter):
                     self._lock, self._store_tab_worktree_dir,
                     tab_id, wt_dir, task_id, keep_existing,
                 )
-        elif (
-            etype == "worktree_result"
-            and event.get("success")
-            and not event.get("kept")
-        ):
-            # A "Do nothing" result (kept: true) leaves the worktree on
-            # disk, so the remote client's openFile/checkPaths fallback
-            # must survive for transcript file links to keep resolving
-            # into it.  A result naming another repository's worktree
-            # (one per repository from commit_and_merge) leaves the
-            # recorded one, still pending, alone.
-            locked_call(self._lock, self._forget_tab_worktree_dir, tab_id, event.get("worktreeDir"))
+            locked_call(self._lock, self._log_tab_worktrees, tab_id, event, task_id)
+        elif etype == "worktree_result":
+            if event.get("success") and not event.get("kept"):
+                # A "Do nothing" result (kept: true) leaves the worktree
+                # on disk, so the remote client's openFile/checkPaths
+                # fallback must survive for transcript file links to
+                # keep resolving into it.  A result naming another
+                # repository's worktree (one per repository from
+                # commit_and_merge) leaves the recorded one, still
+                # pending, alone.
+                locked_call(
+                    self._lock, self._forget_tab_worktree_dir, tab_id, event.get("worktreeDir"),
+                )
+            locked_call(self._lock, self._log_worktree_result, tab_id, event, task_id)
+        elif etype == "clear":
+            locked_call(
+                self._lock, self._begin_tab_run, tab_id, _run_worktree_dir(event.get("workDir")),
+            )
 
     def _forget_tab_worktree_dir(self, tab_id: str, result_dir: Any) -> None:
         """Under ``_lock``: drop *tab_id*'s worktree entry once *result_dir* merged it."""
@@ -3553,14 +3744,158 @@ class WebPrinter(JsonPrinter):
                 worktree directory yet (a second repository's worktree
                 must not displace the work dir's).
         """
-        if task_id is not None:
-            key = self._coerce_task_id(task_id)
-            viewers = self._subscribers.get(key) if key else None
-            if not viewers or tab_id not in viewers:
-                return
+        if self._is_stale_copy(tab_id, task_id):
+            return
         if keep_existing and self._tab_worktree_dirs.get(tab_id):
             return
         self._tab_worktree_dirs[tab_id] = wt_dir
+
+    def _is_stale_copy(self, tab_id: str, task_id: Any) -> bool:
+        """Under ``_lock``: whether a fan-out copy of task *task_id* no longer concerns *tab_id*.
+
+        True when *tab_id* is not subscribed to the task any more (see
+        :meth:`_store_tab_worktree_dir`); never for an event addressed
+        to the tab directly (*task_id* ``None``).
+        """
+        if task_id is None:
+            return False
+        key = self._coerce_task_id(task_id)
+        viewers = self._subscribers.get(key) if key else None
+        return not viewers or tab_id not in viewers
+
+    def _begin_tab_run(self, tab_id: str, wt_dir: str) -> None:
+        """Under ``_lock``: start *tab_id*'s log anew: a ``clear`` announced a run to it.
+
+        What the tab was told before goes: the page drops the earlier
+        run's reports on the same event.  So does the log of the tab
+        whose run started longest ago once :data:`_TAB_RUNS_MAX` tabs
+        have one.
+
+        Args:
+            tab_id: The tab the ``clear`` is addressed to.
+            wt_dir: The worktree directory the run starts in
+                (:func:`_run_worktree_dir`), ``""`` for a run that
+                starts in a checkout.  No ``worktree_created`` tells the
+                tab of it, and the run's ``Write`` calls land in it, so
+                it is logged here, not merged.
+        """
+        self._tab_runs.pop(tab_id, None)
+        if len(self._tab_runs) >= _TAB_RUNS_MAX:
+            del self._tab_runs[next(iter(self._tab_runs))]
+        self._tab_runs[tab_id] = _TabRun(
+            int(time.time() * 1000), {wt_dir: False} if wt_dir else {},
+        )
+
+    def _log_tab_worktrees(self, tab_id: str, event: dict[str, Any], task_id: Any) -> None:
+        """Under ``_lock``: add the worktrees *event* names to *tab_id*'s log.
+
+        A ``worktree_done`` lists every pending worktree of the tab's
+        task: the ones the user's Merge will merge.  A tab without a log
+        (it was sent no ``clear`` yet) gets none here, and a stale
+        fan-out copy (:meth:`_is_stale_copy`) logs nothing.
+
+        Args:
+            tab_id: The tab the event copy is addressed to.
+            event: A ``worktree_created`` or ``worktree_done`` event.
+            task_id: See :meth:`_track_worktree_event`.
+        """
+        run = self._tab_runs.get(tab_id)
+        if run is None or self._is_stale_copy(tab_id, task_id):
+            return
+        listed = event.get("worktrees")
+        named = listed if isinstance(listed, list) else [event]
+        named_dirs = [wt.get("worktreeDir") for wt in named if isinstance(wt, dict)]
+        dirs = tuple(wt_dir for wt_dir in named_dirs if isinstance(wt_dir, str) and wt_dir)
+        self._tab_runs[tab_id] = _TabRun(
+            run.began,
+            {**dict.fromkeys(dirs, False), **run.merged},
+            dirs if event.get("type") == "worktree_done" else run.presented,
+        )
+
+    def _log_worktree_result(self, tab_id: str, event: dict[str, Any], task_id: Any) -> None:
+        """Under ``_lock``: log what a ``worktree_result`` sent to *tab_id* says was merged.
+
+        A successful merge that names its worktree (the task's own
+        ``commit_and_merge`` sends one result per worktree) merged that
+        one.  The user's actions name none and act on every pending
+        worktree of the tab's task, the ones its last ``worktree_done``
+        listed.  A successful Merge merged them all; a failed one may
+        have merged some and is retried.  A Discard or a Do nothing may
+        have removed or detached some of them even when it failed, and
+        nothing says which: the list is emptied, and a Merge that
+        follows marks nothing.  A merge is marked in every tab's log.
+        A stale fan-out copy (:meth:`_is_stale_copy`) says nothing.
+
+        Args:
+            tab_id: The tab the result copy is addressed to.
+            event: The ``worktree_result`` event.
+            task_id: See :meth:`_track_worktree_event`.
+        """
+        if self._is_stale_copy(tab_id, task_id):
+            return
+        own = self._tab_runs.get(tab_id)
+        if event.get("action") != "merge":
+            if own is not None:
+                self._tab_runs[tab_id] = replace(own, presented=())
+            return
+        if not event.get("success"):
+            return
+        result_dir = event.get("worktreeDir")
+        dirs: tuple[str, ...] = () if own is None else own.presented
+        if isinstance(result_dir, str) and result_dir:
+            dirs = (result_dir,)
+        for tab, run in self._tab_runs.items():
+            known = [wt_dir for wt_dir in dirs if wt_dir in run.merged]
+            if known:
+                self._tab_runs[tab] = replace(
+                    run, merged={**run.merged, **dict.fromkeys(known, True)},
+                )
+
+    def worktree_merged(self, tab_id: str, path: Path, since: float) -> bool | None:
+        """Tell whether what a task wrote at *path* at *since*, as *tab_id* saw it, is merged.
+
+        The answer comes from the tab's log alone.  That is enough: a
+        tab sees a task's ``Write`` only while it watches the task, and
+        a tab that watches a task is told the worktree the task works
+        in (the task's ``worktree_created``, or
+        ``AgentServer._emit_running_worktree`` when the tab comes
+        later), which is where a ``Write`` of a checkout path lands.
+
+        A path inside a worktree directory is answered by that
+        worktree alone.  Any other path may have been written in any
+        worktree of its repository the tab was told of (of the
+        innermost repository, when they are nested).
+
+        Args:
+            tab_id: The tab that saw the ``Write``.
+            path: The file's resolved path.
+            since: When the task wrote it, in milliseconds since the epoch.
+
+        Returns:
+            ``False`` when the log does not reach back to *since* (the
+            tab was sent no ``clear`` since this daemon started, or one
+            after *since*), and when a worktree the file may have been
+            written in is not known to be merged; ``True`` when every
+            one is merged; ``None`` when the tab was told of no worktree
+            of the path's repository: the task wrote into the checkout
+            itself.
+        """
+        run = self._tab_runs.get(tab_id)
+        if run is None or not since >= run.began:
+            return False
+        in_worktree = inside_kiss_worktree(path)
+        # (depth of the directory, merged) of every worktree around *path*
+        # (*path* is in a worktree) or of every worktree of a repository
+        # around it (it is not).
+        around: list[tuple[int, bool]] = []
+        for wt_dir, merged in run.merged.items():
+            scope = Path(wt_dir if in_worktree else strip_worktree_suffix(wt_dir)).resolve()
+            if path.is_relative_to(scope):
+                around.append((len(scope.parts), merged))
+        if not around:
+            return False if in_worktree else None
+        innermost = max(around)[0]
+        return all(merged for depth, merged in around if depth == innermost)
 
     def worktree_dir_for_tab(self, tab_id: str) -> str:
         """Return the pending worktree dir recorded for *tab_id*.
@@ -3698,7 +4033,8 @@ class WebPrinter(JsonPrinter):
                 return
             data = json.dumps(event)
             self._send_to_ws_clients(data)
-            self._send_to_link_clients(data)
+            if event.get("type") not in OWN_PAGES_EVENT_TYPES:
+                self._send_to_link_clients(data)
             return
 
         # A ``talk`` event is never replayed (not a display event), and
@@ -4558,15 +4894,10 @@ _DARK_THEME_CSS = (
     "      --theme-button-background: #efefef;\n"
     "      --theme-button-foreground: #0b0b0b;\n"
     "      --theme-button-hoverBackground: #d7d7d7;\n"
-    "      --theme-button-secondaryBackground: #ffffff26;\n"
-    "      --theme-button-secondaryForeground: #f0efec;\n"
-    "      --theme-button-secondaryHoverBackground: #ffffff36;\n"
     "      --theme-textLink-foreground: #4d9fff;\n"
     "      --theme-textLink-activeForeground: #6aabf1;\n"
     "      --theme-textCodeBlock-background: #151515;\n"
     "      --theme-textPreformat-foreground: #fa8080;\n"
-    "      --theme-menu-background: #1f1f1f;\n"
-    "      --theme-menu-selectionBackground: #ffffff26;\n"
     "      --theme-toolbar-hoverBackground: #ffffff1a;\n"
     "      --theme-scrollbarSlider-background: #ffffff33;\n"
     "      --theme-terminal-foreground: #c3c2b7;\n"
@@ -4634,15 +4965,10 @@ _LIGHT_THEME_CSS = (
     "      --theme-button-background: #191919;\n"
     "      --theme-button-foreground: #ffffff;\n"
     "      --theme-button-hoverBackground: #3c3c3c;\n"
-    "      --theme-button-secondaryBackground: #0b0b0b0d;\n"
-    "      --theme-button-secondaryForeground: #0b0b0b;\n"
-    "      --theme-button-secondaryHoverBackground: #0b0b0b14;\n"
     "      --theme-textLink-foreground: #1f6fe5;\n"
     "      --theme-textLink-activeForeground: #1757ac;\n"
     "      --theme-textCodeBlock-background: #f4f4f2;\n"
     "      --theme-textPreformat-foreground: #a42528;\n"
-    "      --theme-menu-background: #ffffff;\n"
-    "      --theme-menu-selectionBackground: #0b0b0b14;\n"
     "      --theme-toolbar-hoverBackground: #0b0b0b0f;\n"
     "      --theme-scrollbarSlider-background: #0b0b0b33;\n"
     "      --theme-terminal-foreground: #3d3d3a;\n"
@@ -4709,15 +5035,10 @@ _DARK_HIGH_CONTRAST_CSS = (
     "      --theme-button-background: #ffffff;\n"
     "      --theme-button-foreground: #000000;\n"
     "      --theme-button-hoverBackground: #d7d7d7;\n"
-    "      --theme-button-secondaryBackground: #000000;\n"
-    "      --theme-button-secondaryForeground: #ffffff;\n"
-    "      --theme-button-secondaryHoverBackground: #ffffff26;\n"
     "      --theme-textLink-foreground: #7ab8ff;\n"
     "      --theme-textLink-activeForeground: #a8d1ff;\n"
     "      --theme-textCodeBlock-background: #0b0b0b;\n"
     "      --theme-textPreformat-foreground: #ffffff;\n"
-    "      --theme-menu-background: #0b0b0b;\n"
-    "      --theme-menu-selectionBackground: #ffffff40;\n"
     "      --theme-toolbar-hoverBackground: #ffffff33;\n"
     "      --theme-scrollbarSlider-background: #ffffff80;\n"
     "      --theme-terminal-foreground: #ffffff;\n"
@@ -4783,15 +5104,10 @@ _LIGHT_HIGH_CONTRAST_CSS = (
     "      --theme-button-background: #000000;\n"
     "      --theme-button-foreground: #ffffff;\n"
     "      --theme-button-hoverBackground: #3c3c3c;\n"
-    "      --theme-button-secondaryBackground: #ffffff;\n"
-    "      --theme-button-secondaryForeground: #000000;\n"
-    "      --theme-button-secondaryHoverBackground: #0000001a;\n"
     "      --theme-textLink-foreground: #144c96;\n"
     "      --theme-textLink-activeForeground: #0b3a7a;\n"
     "      --theme-textCodeBlock-background: #ffffff;\n"
     "      --theme-textPreformat-foreground: #000000;\n"
-    "      --theme-menu-background: #ffffff;\n"
-    "      --theme-menu-selectionBackground: #00000026;\n"
     "      --theme-toolbar-hoverBackground: #00000026;\n"
     "      --theme-scrollbarSlider-background: #00000080;\n"
     "      --theme-terminal-foreground: #000000;\n"
@@ -5040,7 +5356,9 @@ def _build_html() -> str:
     to the daemon through), the inline brand / tricks / tips / voice
     JSON, the ``loading...`` model name and the auth-modal block.
     ``media/assetLoadGuard.js`` is inlined as the first script of
-    ``<head>`` so it is installed before any asset can fail to load.
+    ``<head>`` so it is installed before any asset can fail to load,
+    and ``media/displayCorners.js`` after it so the first paint of an
+    iPhone's Home Screen web app already follows the screen's corners.
 
     The page is served before any login, to whoever reaches the port,
     so of the Inject promptlets it holds only those shipped with the
@@ -5116,10 +5434,9 @@ def _page_subs(version: str, commit: str) -> dict[str, str]:
     )
     subs = {
         "VIEWPORT": "width=device-width,initial-scale=1,maximum-scale=1",
-        "HEAD_SCRIPT": (
-            "<script>\n"
-            + (MEDIA_DIR / "assetLoadGuard.js").read_text(encoding="utf-8")
-            + "</script>"
+        "HEAD_SCRIPT": "\n".join(
+            "<script>\n" + (MEDIA_DIR / name).read_text(encoding="utf-8") + "</script>"
+            for name in ("assetLoadGuard.js", "displayCorners.js")
         ),
         "STYLE_HREF": _media_url("main.css"),
         "BRAND_STYLE_HREF": _media_url("brand.css"),
@@ -5161,6 +5478,7 @@ def _page_subs(version: str, commit: str) -> dict[str, str]:
         "BROWSER_TAB_SRC": _media_url("browserTab.js"),
         "TERMINAL_TAB_SRC": _media_url("terminalTab.js"),
         "PDF_VIEW_SRC": _media_url("pdfView.js"),
+        "PROJECTS_SRC": _media_url("projects.js"),
         "MOBILE_SWIPE_SRC": _media_url("mobileSwipe.js"),
         "APP_WINDOW_SRC": _media_url("appWindow.js"),
         "MAIN_SRC": _media_url("main.js"),
@@ -5852,6 +6170,8 @@ class RemoteAccessServer:
         # Tabs whose merge outlived a shutdown grace period already
         # (:meth:`_await_active_merges`).
         self._merges_given_up: set[str] = set()
+        # The HTML documents pages staged for "Open in Browser".
+        self._html_views = html_views.HtmlViews()
         self._watchdog_task: asyncio.Task[None] | None = None
         self._ping_tasks: dict[Any, asyncio.Task[None]] = {}
         self._tunnel_check_task: asyncio.Task[None] | None = None
@@ -6110,6 +6430,8 @@ class RemoteAccessServer:
             # plain open of the name for a few milliseconds.
             body = await asyncio.to_thread(read_bytes_waiting_for_writer, model_file)
             return _http_response(200, "application/gzip", body)
+        if path.startswith("/view/"):
+            return await self._html_view_response(path)
         if path.startswith("/media/"):
             filepath = MEDIA_DIR / path[7:]
             media_body = await asyncio.to_thread(_read_media_file, filepath)
@@ -6122,6 +6444,43 @@ class RemoteAccessServer:
             "The link may be old or mistyped. Go to the start page to "
             f"open {PRODUCT_NAME}.",
             f"No route matches {path[:200]!r}.",
+        )
+
+    async def _html_view_response(self, path: str) -> Response:
+        """Answer ``GET /view/<token>/<name>`` with the document staged under the token.
+
+        The "Open in Browser" button of an HTML content tab uploads the
+        document (:meth:`_handle_stage_html_view`) and opens this
+        address in a new browser tab at the same moment, so the request
+        waits for an upload still on its way
+        (:meth:`~kiss.server.html_views.HtmlViews.get`).  The document
+        goes out under :data:`~kiss.server.html_views.RESPONSE_HEADERS`
+        and in no other way: sandboxed into an opaque origin, its
+        scripts cannot reach the chat page this host serves.  No file
+        is ever read for this route, and the name after the token only
+        labels the browser tab.
+
+        Args:
+            path: The request's URL-decoded path, starting ``/view/``.
+
+        Returns:
+            The document, or a 404 page when none is staged under the
+            token (never staged, dropped for newer ones, or lost with
+            a daemon restart).
+        """
+        document = await self._html_views.get(path.split("/")[2])
+        if document is None:
+            return _error_page(
+                404,
+                "This page is no longer available",
+                f"Open it again from {PRODUCT_NAME}, with the Open in Browser "
+                "button of the file's tab. A large page may still be on its "
+                "way: reloading this tab in a moment can show it.",
+                "No HTML document is staged under this /view/ token: staged "
+                "documents are kept in memory only, the oldest dropped first.",
+            )
+        return _http_response(
+            200, "text/html; charset=utf-8", document, html_views.RESPONSE_HEADERS,
         )
 
     async def _peer_client_ca(self, connection: Any) -> str:
@@ -7509,8 +7868,14 @@ class RemoteAccessServer:
         says both of the page's recognizers (grammar and grammar-free)
         heard the wake word; only then may a non-English transcript
         that lost the word in translation still be accepted.  Messages
-        without ``wakePrefixed`` (older clients, plain dictation) keep
-        the lenient behavior.
+        without ``wakePrefixed`` (older clients) keep the lenient
+        behavior.
+
+        ``dictation: true`` marks speech typed with the composer's mic,
+        which follows no wake word: its transcript comes back whole (a
+        first word that sounds like the wake word is the user's) and
+        its speaker is not identified, since the page types the words
+        for the user and names no speaker.
 
         Args:
             cmd: The parsed ``voiceTranscribe`` command.
@@ -7530,6 +7895,7 @@ class RemoteAccessServer:
             assert self._loop is not None
             expect_wake_prefix = bool(cmd.get("wakePrefixed"))
             wake_agreed = cmd.get("wakeAgreed") is True
+            dictation = cmd.get("dictation") is True
             wake_samples = cmd.get("wakeSamples")
             if (
                 not isinstance(wake_samples, int)
@@ -7555,6 +7921,7 @@ class RemoteAccessServer:
                     DEFAULT_AUDIO_MODEL,
                     expect_wake_prefix,
                     wake_agreed,
+                    dictation,
                 )
                 text = result["text"]
                 language = result["language"]
@@ -7572,7 +7939,7 @@ class RemoteAccessServer:
                 await self._loop.run_in_executor(
                     None, update_voice_recording_info, recording, info,
                 )
-            if text:
+            if text and not dictation:
                 # Speaker identification uses the capture alone: the
                 # client's wakeSamples marks where the prepended
                 # pre-wake ring (which may carry another voice) ends.
@@ -7686,6 +8053,61 @@ class RemoteAccessServer:
             return None
         return None
 
+    def _resolve_report_file(
+        self, raw_path: str, work_dir: str, tab_id: str, since: object,
+    ) -> Path | None:
+        """Find the report a task of *tab_id* wrote at *raw_path*, once it is in the checkout.
+
+        A page shows a finished task's report once the worktree it was
+        written in is merged, and never before, so it asks for the file
+        with ``report`` (see :meth:`_handle_open_file`).  Whether it is
+        merged is what the daemon was told while it logged the tab's run
+        (:meth:`WebPrinter.worktree_merged`), never a guess from a
+        file's date, from the directories that exist or from what an
+        agent holds now:
+
+        * the log does not hold the run, or a worktree the report may
+          have been written in is not known to be merged: nothing;
+        * every such worktree is merged: the repository's file (a path
+          into the removed worktree stands for it), unless its path is
+          git-ignored, for a merge carries no ignored file and the file
+          there is another one;
+        * the run made no worktree of the path's repository: the file
+          the task wrote into the checkout.
+
+        A file still inside a worktree directory is unmerged work and a
+        missing file is no report: nothing either.
+
+        Args:
+            raw_path: The path as the task's ``Write`` named it.
+            work_dir: The folder a relative path resolves in.
+            tab_id: The tab whose task wrote the report.
+            since: When the task wrote it, in milliseconds since the
+                epoch (the ``ts`` the daemon stamped on its ``Write``
+                call), which tells the run.  Anything but a number:
+                nothing.
+
+        Returns:
+            The report's file, or ``None`` when there is none to show.
+        """
+        if isinstance(since, bool) or not isinstance(since, (int, float)):
+            return None
+        try:
+            path = (Path(work_dir) / os.path.expanduser(raw_path)).resolve()
+            merged = self._printer.worktree_merged(tab_id, path, since)
+            if merged is False:
+                return None
+            path = remap_vanished_worktree(path)
+            if inside_kiss_worktree(path) or not path.is_file():
+                return None
+            if merged and GitWorktreeOps.is_ignored(path.parent, path):
+                return None
+            return path
+        except (OSError, ValueError) as exc:
+            # ValueError: a path with an embedded NUL byte.
+            logger.warning("cannot resolve report %r under %r: %s", raw_path, work_dir, exc)
+            return None
+
     async def _handle_open_file(
         self, cmd: dict[str, Any], endpoint: Any,
     ) -> None:
@@ -7709,11 +8131,25 @@ class RemoteAccessServer:
              "size": <bytes>, "base64": <bytes>}   # PDF / image viewer
             {"type": "fileContent", "path": ..., "name": ...,
              "tabId": ..., "error": <message>}  # on failure
+            {"type": "fileContent", "path": <resolved abs path>,
+             "name": <basename>, "tabId": ..., "error": <message>,
+             "unsupported": true}   # a file no tab can show
 
         A PDF or image (``_INLINE_BINARY_MIMES``, up to
         ``_OPEN_BINARY_MAX_BYTES``) is served base64-encoded so the
         client can show it in a viewer tab instead of refusing it as a
         binary file.
+
+        Any other binary file (NUL byte in the first 8 KiB) is one no
+        tab can show, whatever its size: its ``error`` reply is flagged
+        ``unsupported`` and names the resolved file, so the client can
+        have it opened by the machine's default application
+        (:meth:`_handle_open_with_default_app`) or ask for its bytes.
+        A command flagged ``download`` asks for those: the bytes of any
+        regular file up to ``_OPEN_BINARY_MAX_BYTES``, in the binary
+        reply's shape with ``download`` echoed and the ``mime`` of
+        :func:`_download_mime`.  The client offers them as a file to
+        save, whatever the type.
 
         A command carrying a ``token`` gets it echoed on every reply
         (success, binary or error): ``media/main.js`` sends a tokened
@@ -7746,7 +8182,10 @@ class RemoteAccessServer:
 
         Args:
             cmd: The parsed ``openFile`` command (``path``, optional
-                ``workDir``, ``tabId``, ``line``, ``token``).
+                ``workDir``, ``tabId``, ``line``, ``token``,
+                ``background``, ``download``, and ``report`` with
+                ``since`` for a finished task's report — see
+                :meth:`_resolve_report_file`).
             endpoint: The requesting connection.
         """
         raw_path = self._cmd_str(cmd, "path")
@@ -7755,6 +8194,7 @@ class RemoteAccessServer:
         work_dir = self._cmd_work_dir(cmd)
         tab_id = self._cmd_str(cmd, "tabId")
         token = self._cmd_str(cmd, "token")
+        download = cmd.get("download") is True
         line = cmd.get("line")
         if isinstance(line, bool) or not isinstance(line, int) or line < 1:
             line = 0
@@ -7775,7 +8215,12 @@ class RemoteAccessServer:
                 # the tab without switching to it.
                 reply["background"] = True
             try:
-                path = self._resolve_tab_file(raw_path, work_dir, tab_id)
+                if cmd.get("report") is True:
+                    path = self._resolve_report_file(
+                        raw_path, work_dir, tab_id, cmd.get("since"),
+                    )
+                else:
+                    path = self._resolve_tab_file(raw_path, work_dir, tab_id)
                 if path is None:
                     reply["error"] = f"File not found: {raw_path}"
                     return reply
@@ -7790,30 +8235,43 @@ class RemoteAccessServer:
                     reply["isDirectory"] = True
                     reply["content"] = _directory_listing_text(path)
                     return reply
-                inline_mime = _inline_binary_mime(path)
+                # The type the file's bytes are served as: a download's,
+                # a PDF's or an image's for the viewer tab; text has none.
+                mime = _download_mime(path) if download else _inline_binary_mime(path)
                 # The cap is enforced on the bytes actually read, not
                 # on a ``stat`` size: a file still being appended to (a
                 # log a transcript links to) can outgrow its stat before
                 # the read, and the whole of it would land in one frame.
-                preview = path.suffix.lower() in _PREVIEW_SUFFIXES
-                cap = _OPEN_BINARY_MAX_BYTES if inline_mime else _OPEN_FILE_MAX_BYTES
+                preview = not download and path.suffix.lower() in _PREVIEW_SUFFIXES
+                cap = _OPEN_BINARY_MAX_BYTES if mime else _OPEN_FILE_MAX_BYTES
                 with _open_regular_file(path) as f:
                     data = f.read() if preview else f.read(cap + 1)
+                binary = not mime and b"\0" in data[:8192]
+                if binary:
+                    # No tab can show it, small or large: the reply
+                    # names the resolved file, which the client has
+                    # opened outside the page.
+                    reply["unsupported"] = True
+                    reply["path"] = str(path)
+                    reply["name"] = path.name
                 oversize = len(data) > cap
                 if oversize and not preview:
                     reply["error"] = f"File too large to display: {raw_path}"
                     return reply
-                if inline_mime:
+                if mime:
                     # A PDF or an image: the client shows the bytes in
-                    # a viewer tab (blob: URL) instead of an editor.
+                    # a viewer tab (blob: URL) instead of an editor.  A
+                    # download: it offers them as a file to save.
                     reply["path"] = str(path)
                     reply["name"] = path.name
                     reply["binary"] = True
-                    reply["mime"] = inline_mime
+                    reply["mime"] = mime
                     reply["size"] = len(data)
                     reply["base64"] = base64.b64encode(data).decode("ascii")
+                    if download:
+                        reply["download"] = True
                     return reply
-                if b"\0" in data[:8192]:
+                if binary:
                     reply["error"] = f"Cannot display binary file: {raw_path}"
                     return reply
                 reply["path"] = str(path)
@@ -7975,6 +8433,157 @@ class RemoteAccessServer:
         reply = await asyncio.to_thread(_write_file)
         await self._reply_direct(endpoint, reply, "saveFile")
 
+    async def _handle_open_in_browser(
+        self, cmd: dict[str, Any], endpoint: Any,
+    ) -> None:
+        """Open the HTML file an ``openInBrowser`` names in this machine's default browser.
+
+        Handles the ``openInBrowser`` command ``media/main.js`` sends
+        for the "Open in Browser" button of an HTML content tab whose
+        page runs on this machine.  The reply goes directly to the
+        requesting *endpoint* — never broadcast — with the shape::
+
+            {"type": "openInBrowserResult", "opened": <bool>,
+             "path": <echo of the command's path>,
+             "token": <echo of the command's token, when it has one>}
+
+        ``opened`` is false for a path that names no HTML file and on
+        a daemon that can start no browser (:meth:`_open_html_file`):
+        the page then shows the document through ``stageHtmlView``
+        instead.  The ``token`` tells the page which click the reply
+        answers: the path alone also names a tab that was closed and
+        opened again meanwhile.
+
+        Args:
+            cmd: The parsed ``openInBrowser`` command (``path``,
+                optional ``workDir``, ``tabId``, ``token``).
+            endpoint: The requesting WSS connection.
+        """
+        await self._reply_opened(cmd, endpoint, "openInBrowser", self._open_html_file)
+
+    async def _handle_open_with_default_app(
+        self, cmd: dict[str, Any], endpoint: Any,
+    ) -> None:
+        """Open the file an ``openWithDefaultApp`` names with this machine's default application.
+
+        Handles the ``openWithDefaultApp`` command ``media/main.js``
+        sends, from a page that runs on this machine, for a clicked
+        file no tab can show (an ``openFile`` reply flagged
+        ``unsupported``).  The reply goes directly to the requesting
+        *endpoint* — never broadcast — with the shape::
+
+            {"type": "openWithDefaultAppResult", "opened": <bool>,
+             "path": <echo of the command's path>,
+             "token": <echo of the command's token, when it has one>}
+
+        ``opened`` is false for a path that names no file, for a
+        program, and on a daemon that can start no application
+        (:meth:`_open_file_with_default_app`): the page then says that
+        the file cannot be displayed.
+
+        Args:
+            cmd: The parsed ``openWithDefaultApp`` command (``path``,
+                optional ``workDir``, ``tabId``, ``token``).
+            endpoint: The requesting WSS connection.
+        """
+        await self._reply_opened(
+            cmd, endpoint, "openWithDefaultApp", self._open_file_with_default_app,
+        )
+
+    async def _reply_opened(
+        self,
+        cmd: dict[str, Any],
+        endpoint: Any,
+        what: str,
+        opener: Callable[[str, str, str], bool],
+    ) -> None:
+        """Run *opener* on the file *cmd* names and tell *endpoint* whether it opened.
+
+        Args:
+            cmd: The parsed command (``path``, optional ``workDir``,
+                ``tabId``, ``token``).
+            endpoint: The requesting WSS connection.
+            what: The command's name; the reply's type is
+                ``<what>Result``.
+            opener: Called off the event loop with the path, the folder
+                a relative path resolves in and the tab id; returns
+                whether it opened the file.
+        """
+        raw_path = self._cmd_str(cmd, "path")
+        opened = await asyncio.to_thread(
+            opener, raw_path, self._cmd_work_dir(cmd), self._cmd_str(cmd, "tabId"),
+        )
+        reply: dict[str, Any] = {"type": f"{what}Result", "opened": opened, "path": raw_path}
+        token = self._cmd_str(cmd, "token")
+        if token:
+            reply["token"] = token
+        await self._reply_direct(endpoint, reply, what)
+
+    def _open_html_file(self, raw_path: str, work_dir: str, tab_id: str) -> bool:
+        """Open the HTML file at *raw_path* in the default browser of this machine.
+
+        The path is resolved exactly like :meth:`_handle_open_file`
+        resolves it and must name an existing regular ``.html`` /
+        ``.htm`` file (``_PREVIEW_SUFFIXES``); the browser is handed
+        its ``file://`` address.  Blocks while the opener starts, so it
+        runs off the event loop.
+
+        Args:
+            raw_path: The path as the page holds it.
+            work_dir: The folder a relative path resolves in.
+            tab_id: The tab whose pending worktree is tried too.
+
+        Returns:
+            Whether a browser was started on the file: ``False`` for a
+            path that names no such file and on a headless daemon.
+        """
+        path = self._resolve_tab_file(raw_path, work_dir, tab_id, True)
+        if path is None or path.suffix.lower() not in _PREVIEW_SUFFIXES:
+            return False
+        return open_in_default_browser(path.as_uri(), once=False)
+
+    def _open_file_with_default_app(self, raw_path: str, work_dir: str, tab_id: str) -> bool:
+        """Open the file at *raw_path* with the application this machine opens its type with.
+
+        The path is resolved exactly like :meth:`_handle_open_file`
+        resolves it and must name an existing regular file; a program
+        is never started
+        (:func:`~kiss.core.browser_handoff.open_with_default_app`).
+        Blocks while the opener starts, so it runs off the event loop.
+
+        Args:
+            raw_path: The path as the page holds it.
+            work_dir: The folder a relative path resolves in.
+            tab_id: The tab whose pending worktree is tried too.
+
+        Returns:
+            Whether an application was started on the file: ``False``
+            for a path that names no file, for a program, and on a
+            headless daemon.
+        """
+        path = self._resolve_tab_file(raw_path, work_dir, tab_id, True)
+        return path is not None and open_with_default_app(path)
+
+    async def _handle_stage_html_view(self, cmd: dict[str, Any]) -> None:
+        """Keep the HTML document a ``stageHtmlView`` carries for its browser tab.
+
+        Handles the ``stageHtmlView`` command ``media/main.js`` sends
+        for the "Open in Browser" button of an HTML content tab: the
+        page opens ``/view/<token>/<name>`` in a new tab at the same
+        moment, which :meth:`_html_view_response` answers with the
+        document.  A ``token`` that does not match
+        :data:`~kiss.server.html_views.TOKEN_RE` or an ``html`` that is
+        not text is ignored, and there is no reply: the browser tab
+        shows the outcome.
+
+        Args:
+            cmd: The parsed ``stageHtmlView`` command (``token``,
+                ``html``; its ``name`` only labels the tab's address).
+        """
+        document = cmd.get("html")
+        if isinstance(document, str):
+            await self._html_views.stage(self._cmd_str(cmd, "token"), document)
+
     async def _handle_share_chat(
         self, cmd: dict[str, Any], endpoint: Any,
     ) -> None:
@@ -8068,6 +8677,7 @@ class RemoteAccessServer:
         with the shape::
 
             {"type": "share_tasks", "tabId": <echo>, "chatId": <echo>,
+             "token": <echo>,
              "tasks": [{"task": <str>, "task_id": <str>,
                         "events": [<event>, ...],
                         "metrics": {"tokens", "cost", "steps",
@@ -8077,6 +8687,10 @@ class RemoteAccessServer:
                                        "events": [...],
                                        "metrics": ...}, ...]}, ...],
              "truncated": <bool>}
+
+        ``token`` is the page's own name for the click that sent the
+        command: by it the page tells this reply from the late one of an
+        earlier click on the same tab and chat.
 
         ``metrics`` (:func:`~kiss.server.json_printer.task_metrics_from_session`)
         feeds the Tokens / Cost / Steps / Time rows of the saved page's
@@ -8105,7 +8719,8 @@ class RemoteAccessServer:
 
         Args:
             cmd: The parsed ``shareChatTasks`` command (``chatId``,
-                optional ``tabId``, optional ``taskId``).
+                optional ``tabId``, optional ``taskId``, optional
+                ``token``).
             endpoint: The requesting connection (local or remote).
         """
         tab_id = self._cmd_str(cmd, "tabId")[:_SHARE_TASKS_MAX_ID_CHARS]
@@ -8118,6 +8733,7 @@ class RemoteAccessServer:
             "type": "share_tasks",
             "tabId": tab_id,
             "chatId": chat_id,
+            "token": self._cmd_str(cmd, "token")[:_SHARE_TASKS_MAX_ID_CHARS],
             "tasks": [],
             "truncated": False,
         }
@@ -8368,7 +8984,9 @@ class RemoteAccessServer:
         a folder.  ``path`` is resolved like ``openFile`` resolves it
         (``~`` expansion, then relative to the command's ``workDir``,
         falling back to the daemon work dir); an empty ``path`` names
-        the work dir itself.  The reply goes directly to the requesting
+        the work dir itself.  ``sort`` names the order of the entries
+        (:data:`kiss.server.explorer.DIR_SORT_ORDERS`; by name when
+        absent or unknown).  The reply goes directly to the requesting
         *endpoint* — never broadcast — with the shape::
 
             {"type": "dirListing", "path": <abs dir>, "root": <work dir>,
@@ -8380,7 +8998,7 @@ class RemoteAccessServer:
 
         Args:
             cmd: The parsed ``listDir`` command (optional ``path``,
-                ``workDir``, ``tabId``, ``token``).
+                ``workDir``, ``tabId``, ``token``, ``sort``).
             endpoint: The requesting WSS connection.
         """
         from kiss.server.explorer import list_directory
@@ -8389,6 +9007,7 @@ class RemoteAccessServer:
         work_dir = self._cmd_work_dir(cmd)
         tab_id = self._cmd_str(cmd, "tabId")
         token = self._cmd_str(cmd, "token")
+        sort = self._cmd_str(cmd, "sort")
 
         def _list() -> dict[str, Any]:
             reply: dict[str, Any] = {
@@ -8408,7 +9027,7 @@ class RemoteAccessServer:
                     )
                     return reply
                 reply["path"] = str(path)
-                reply.update(list_directory(path))
+                reply.update(list_directory(path, sort))
             except Exception as exc:
                 # OSError (unreadable), ValueError (NUL in a name), or
                 # anything else: the view must get a reply either way.
@@ -8750,6 +9369,10 @@ class RemoteAccessServer:
                         return {
                             "error": f"Not inside the workspace: {raw_dest}",
                         }
+                # The checks above and the action are two steps: the
+                # action is given the workspace too, so a folder an
+                # external writer swaps for a link in between is
+                # refused there instead of followed out of it.
                 result = fs_action(
                     action,
                     path,
@@ -8757,6 +9380,7 @@ class RemoteAccessServer:
                     name=self._cmd_str(cmd, "name"),
                     query=self._cmd_str(cmd, "query"),
                     overwrite=cmd.get("overwrite") is True,
+                    root=work_dir,
                 )
                 result.setdefault("path", path)
                 return result
@@ -8826,6 +9450,8 @@ class RemoteAccessServer:
              "content": <html>, "error": <str>, "running": <bool>,
              "cost": <usd>, "updatedAt": <epoch ms>,
              "dueAt": <epoch ms>,                # next unforced run
+             "etaAt": <epoch ms>,                # estimated finish
+             "etaLowAt": <epoch ms>, "etaHighAt": <epoch ms>,
              "unchanged": true,                  # sig == cmd knownSig
              "tabId": <echo of cmd tabId>, "taskId": <task id>,
              "token": <echo of cmd token>}
@@ -8833,10 +9459,13 @@ class RemoteAccessServer:
         ``token`` is an opaque client request tag the page matches
         replies by.  ``sig`` fingerprints the update state; a poll whose
         ``knownSig`` matches it is answered with ``unchanged: true`` and
-        no ``content``.  A tab attached to no running task, or to a task
-        whose history row is not allocated yet, replies ``exists: false``
-        with empty content — the client renders that as an empty
-        subpanel rather than an error.
+        no ``content``.  ``etaAt`` is when the update agent expects the
+        task to finish and ``etaLowAt``..``etaHighAt`` the range it may
+        fall in; all three are 0 when there is no estimate.  A tab
+        attached to no running task, or to a task whose history row is
+        not allocated yet, replies ``exists: false`` with empty content
+        and no estimate — the client renders that as an empty subpanel
+        rather than an error.
 
         Args:
             cmd: The parsed ``getTaskUpdate`` command (``tabId``,
@@ -8857,6 +9486,9 @@ class RemoteAccessServer:
             "exists": False,
             "sig": "",
             "content": "",
+            "etaAt": 0,
+            "etaLowAt": 0,
+            "etaHighAt": 0,
         }
         state = self._tab_task_state(tab_id) if tab_id else None
         agent = state.agent if state is not None else None
@@ -9762,30 +10394,34 @@ class RemoteAccessServer:
             )
             return
         prompt = cmd.get("prompt", "")
-        if isinstance(prompt, str):
-            # ``surrogatepass``: json.loads may yield lone surrogates
-            # (``"\ud800"``), which strict UTF-8 refuses to encode.
-            prompt_size = len(prompt.encode("utf-8", errors="surrogatepass"))
-            if prompt_size > _MAX_PROMPT_BYTES:
-                # Refuse rather than silently cut the prompt: the tab's
-                # composer keeps the draft (only a ``status
-                # running:false`` lowers its optimistic running state,
-                # which ``_refuse_run`` sends first) and the user is
-                # told the limit instead of the agent running on a
-                # prompt with its end missing.
-                logger.warning(
-                    "prompt size %d bytes exceeds cap %d bytes; refusing",
-                    prompt_size, _MAX_PROMPT_BYTES,
-                )
-                self._agent_server._refuse_run(
-                    tab_id,
-                    f"This prompt is too long to send: it is "
-                    f"{prompt_size / 1_000_000:.1f} MB and the limit is "
-                    f"{_MAX_PROMPT_BYTES / 1_000_000:.0f} MB. Shorten it, or "
-                    f"put the long part in a file and attach that.",
-                    cmd=cmd,
-                )
-                return
+        if not isinstance(prompt, str):
+            self._agent_server._refuse_run(
+                tab_id, "The prompt must be text; task not started.", cmd=cmd,
+            )
+            return
+        # ``surrogatepass``: json.loads may yield lone surrogates
+        # (``"\ud800"``), which strict UTF-8 refuses to encode.
+        prompt_size = len(prompt.encode("utf-8", errors="surrogatepass"))
+        if prompt_size > _MAX_PROMPT_BYTES:
+            # Refuse rather than silently cut the prompt: the tab's
+            # composer keeps the draft (only a ``status
+            # running:false`` lowers its optimistic running state,
+            # which ``_refuse_run`` sends first) and the user is
+            # told the limit instead of the agent running on a
+            # prompt with its end missing.
+            logger.warning(
+                "prompt size %d bytes exceeds cap %d bytes; refusing",
+                prompt_size, _MAX_PROMPT_BYTES,
+            )
+            self._agent_server._refuse_run(
+                tab_id,
+                f"This prompt is too long to send: it is "
+                f"{prompt_size / 1_000_000:.1f} MB and the limit is "
+                f"{_MAX_PROMPT_BYTES / 1_000_000:.0f} MB. Shorten it, or "
+                f"put the long part in a file and attach that.",
+                cmd=cmd,
+            )
+            return
         attachments = cmd.get("attachments")
         notice = ""
         if isinstance(attachments, list) and len(attachments) > _MAX_ATTACHMENTS:
@@ -9841,6 +10477,11 @@ class RemoteAccessServer:
             # the daemon (the page only scrolled to it): the new task
             # continues it (``TaskRunner._take_continued_task``).
             "continueTaskId": cmd.get("continueTaskId"),
+            # The project the page lists the chat in (``""``: none): the
+            # run puts its chat there before it resolves its settings
+            # (``TaskRunner._enter_project``).  Absent: the chat stays
+            # where it is.
+            "projectId": cmd.get("projectId"),
             "_notice": notice,
         }
         await self._run_cmd(run_cmd)
@@ -11063,7 +11704,9 @@ class RemoteAccessServer:
         """Bind this server and its printer to the running event loop."""
         self._loop = asyncio.get_running_loop()
         self._printer._loop = self._loop
-        self._loop.set_default_executor(_default_executor())
+        self._loop.set_default_executor(
+            ThreadPoolExecutor(max_workers=_EXECUTOR_WORKERS, thread_name_prefix="kiss-web"),
+        )
 
     async def _setup_server(self) -> None:
         """Shared setup for both blocking and async server start.
@@ -11940,7 +12583,11 @@ class RemoteAccessServer:
         ``PyThreadState_SetAsyncExc``) but, crucially, **joins** each
         worker synchronously so its cleanup ``finally`` runs to
         completion (persisting ``"Task stopped by user"`` and
-        broadcasting a final result) before the process exits.
+        broadcasting a final result) before the process exits.  Every
+        running worker gets the same cooperative second and then its
+        interrupt before any is joined, and before the sweep waits for
+        one that ``_cmd_run`` has not started yet: neither that one nor
+        a worker that swallows its interrupt takes time from the others.
 
         The total time spent is bounded by *timeout* seconds across all
         workers so a thread wedged in uninterruptible C code cannot hang
@@ -11985,6 +12632,12 @@ class RemoteAccessServer:
                 ):
                     state.interrupted_by_shutdown = True
                     active.append((task_id, state, state.stop_event, thread))
+            # The workers already running come first.  One ``_cmd_run``
+            # registered and has not started is waited for below, until
+            # the deadline when the registry write that holds its start
+            # is slow: a running worker behind it got its interrupt only
+            # then, and its cleanup was cut off by the exit.
+            active.sort(key=_shutdown_worker_unstarted)
 
         if not active:
             return
@@ -12000,14 +12653,13 @@ class RemoteAccessServer:
         # inline it kept the whole shutdown behind a stuck writer, the
         # deadline not even started.  Its rewrite touches only rows
         # still at the creation sentinel, so a worker that finishes its
-        # cleanup first is never clobbered.
-        persist = threading.Thread(
-            target=_persist_shutdown_results,
-            args=({task_id for task_id, _, _, _ in active},),
-            name="shutdown-persist",
-            daemon=True,
-        )
-        persist.start()
+        # cleanup first is never clobbered.  Where that thread cannot
+        # start (thread exhaustion is exactly when an operator sends
+        # SIGTERM) the sweep goes on without it: the tasks are flagged
+        # as swept by now, so a later sweep skips them all, and raising
+        # here left the workers neither interrupted nor joined.
+        task_ids = {task_id for task_id, _, _, _ in active}
+        persist = _start_shutdown_persistence(task_ids)
 
         logger.warning(
             "Shutdown: stopping %d in-flight agent task(s) before exit: %s",
@@ -12015,6 +12667,14 @@ class RemoteAccessServer:
             ", ".join(tab_id for tab_id, _, _, _ in active),
         )
 
+        # Every worker gets the same cooperative second and then its
+        # interrupt, before any is joined against the deadline.
+        # Joined one after another, a worker that swallowed its
+        # interrupt held the sweep until the deadline, and the ones
+        # behind it were interrupted only then: their cleanup was cut
+        # off by the exit.
+        cooperative = min(deadline, time.monotonic() + 1.0)
+        started: list[tuple[str, threading.Thread]] = []
         for tab_id, state, _stop_event, thread in active:
             # A worker registered by ``_cmd_run`` but not yet started
             # cannot be joined (``Thread.join`` raises before start).
@@ -12028,8 +12688,8 @@ class RemoteAccessServer:
                 deadline=deadline,
             ):
                 continue
-            remaining = max(0.0, deadline - time.monotonic())
-            thread.join(timeout=min(1.0, remaining))
+            started.append((tab_id, thread))
+            thread.join(timeout=max(0.0, cooperative - time.monotonic()))
             if thread.is_alive():
                 # Ownership is re-checked under STATE_LOCK immediately
                 # before injecting, exactly like the Stop watchdog.
@@ -12046,14 +12706,23 @@ class RemoteAccessServer:
                 # joining after a refusal: the cleanup must finish
                 # before the process exits.
                 inject_if_owned(thread, partial(_state_owns_thread, state, thread))
-                thread.join(timeout=max(0.0, deadline - time.monotonic()))
+        for tab_id, thread in started:
+            thread.join(timeout=max(0.0, deadline - time.monotonic()))
             if thread.is_alive():
                 logger.warning(
                     "Shutdown: agent task %s did not stop within timeout; "
                     "it may be persisted as a process-killed task",
                     tab_id,
                 )
-        persist.join(max(0.0, deadline - time.monotonic()))
+        if persist is None:
+            # The workers that ended have given their threads back: the
+            # rewrite gets one more start.  Without a thread there is
+            # no rewrite (made here, nothing bounds its wait for the
+            # history write lock), and a task whose worker did not
+            # stop is persisted as process-killed by the next start.
+            persist = _start_shutdown_persistence(task_ids)
+        if persist is not None:
+            persist.join(max(0.0, deadline - time.monotonic()))
 
     def _install_signal_handlers(self) -> None:
         """Register handlers for catchable termination signals.

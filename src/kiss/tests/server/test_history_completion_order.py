@@ -7,8 +7,9 @@
 
 A task's completion time is its ``end_ts``; a row without one (still
 running, or a legacy row) sorts by its launch ``timestamp``.  Running
-tasks still come first.  The same key orders the union of several
-machines' histories (``machines.merged_history``).
+tasks still come first, then the rows the user pinned (the task, or its
+chat).  The same key orders the union of several machines' histories
+(``machines.merged_history``).
 """
 
 from __future__ import annotations
@@ -63,6 +64,30 @@ class TestLoadHistoryCompletionOrder:
         rows = th._load_history(running_task_ids={running})
         assert _ids(rows) == [running, done]
 
+    def test_pinned_rows_follow_the_running_ones(self) -> None:
+        newest = self._task("newest", 9_000.0, 0)
+        pinned = self._task("pinned task", 1_000.0, 2_000_000)
+        in_pinned_chat = self._task("in pinned chat", 500.0, 3_000_000)
+        running = self._task("running and pinned", 100.0, 0)
+        th._set_task_pinned(pinned, True)
+        th._set_task_pinned(running, True)
+        chat_id = str(th._load_history(query="in pinned chat")[0]["chat_id"])
+        th._set_chat_pinned(chat_id, True)
+        # A running row stays with the running ones; the pinned ones come
+        # next, latest completion first, then the rest.
+        rows = th._load_history(running_task_ids={running})
+        assert _ids(rows) == [running, in_pinned_chat, pinned, newest]
+        # An old pinned row is on the first page.
+        first_page = th._load_history(limit=2, running_task_ids={running})
+        assert _ids(first_page) == [running, in_pinned_chat]
+        second_page = th._load_history(limit=2, offset=2, running_task_ids={running})
+        assert _ids(second_page) == [pinned, newest]
+        # Nothing runs: the task that ran is a pinned row like the others.
+        assert _ids(th._load_history()) == [in_pinned_chat, pinned, running, newest]
+        th._set_task_pinned(pinned, False)
+        th._set_chat_pinned(chat_id, False)
+        assert _ids(th._load_history()) == [running, newest, in_pinned_chat, pinned]
+
     def test_date_range_spans_completion_times(self) -> None:
         # The From/To autofill must cover the last completion (9000 s),
         # not just the last launch, or the To filter hides that task.
@@ -88,3 +113,18 @@ def test_merged_history_orders_by_completion() -> None:
     ])
     merged = mach.merged_history(page, [], "", "", 0, 50)
     assert [r["task_id"] for r in merged.rows] == ["running", "long", "legacy", "short"]
+
+
+def test_merged_history_lists_pinned_rows_after_the_running_ones() -> None:
+    page = mach.HistoryPage([
+        _row("recent", 9_000.0, 0),
+        {**_row("old pinned", 1_000.0, 0), "is_pinned": True},
+        {**_row("in pinned chat", 2_000.0, 0), "chat_is_pinned": True},
+        # Its pin does not lift a running row over a later running one.
+        {**_row("running pinned", 50.0, 0, running=True), "is_pinned": True},
+        _row("running", 100.0, 0, running=True),
+    ])
+    merged = mach.merged_history(page, [], "", "", 0, 50)
+    assert [r["task_id"] for r in merged.rows] == [
+        "running", "running pinned", "in pinned chat", "old pinned", "recent",
+    ]

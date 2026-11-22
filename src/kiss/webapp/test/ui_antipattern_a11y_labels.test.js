@@ -31,6 +31,7 @@ function label(id) {
 test('icon-only buttons have an accessible name', () => {
   const expected = {
     'input-clear-btn': 'Clear input',
+    'input-save-btn': 'Save input',
     'sidebar-close': 'Close sidebar',
     'model-search-clear': 'Clear search',
     'history-search-clear': 'Clear search',
@@ -83,7 +84,12 @@ test('every data-tooltip-only button carries a matching aria-label', () => {
 
 test('search inputs are named by aria-label, not only by placeholder', () => {
   assert.strictEqual(label('model-search'), 'Search models');
-  assert.strictEqual(label('history-search'), 'Search chats');
+  assert.strictEqual(label('history-search'), 'Search prompts');
+  // The name says what the box shows while it is empty.
+  assert.strictEqual(
+    doc.getElementById('history-search').placeholder,
+    'Search prompts...',
+  );
 });
 
 test('restart-server confirm names the outcome and keeps Cancel first', () => {
@@ -101,7 +107,7 @@ test('restart-server confirm names the outcome and keeps Cancel first', () => {
 const css = fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8');
 
 test('clear buttons are at least 24x24 px hit targets', () => {
-  for (const sel of ['#input-clear-btn', '.search-clear-btn']) {
+  for (const sel of ['#input-clear-btn', '#input-save-btn', '.search-clear-btn']) {
     const style = win.getComputedStyle(doc.querySelector(sel));
     assert.ok(parseFloat(style.width) >= 24, `${sel} width >= 24, got ${style.width}`);
     assert.ok(parseFloat(style.height) >= 24, `${sel} height >= 24, got ${style.height}`);

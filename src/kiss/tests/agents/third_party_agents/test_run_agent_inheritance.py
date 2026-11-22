@@ -44,6 +44,7 @@ from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.cron_agent import UNATTENDED_CHILD_PREAMBLE, unattended_child_suffix
 from kiss.agents.sorcar.sea_apply import CHANNEL_PREAMBLE, apply_sea
 from kiss.core.kiss_error import BudgetExceededError
+from kiss.core.models import model_info
 from kiss.tests.agents.sorcar.docker_test_containers import is_docker_available
 from kiss.tests.agents.third_party_agents.recording_daemon import (
     RecordingDaemon,
@@ -285,6 +286,9 @@ class TestDispatchResultInheritance:
         (call,) = daemon.run_commands
         assert call["model"] == PARENT_MODEL
         assert call["modelConfig"] == PARENT_CONFIG
+        # With the configuration goes the caller's record of whose endpoint it
+        # names: here the run's (a gateway), not the model's own registry one.
+        assert call["modelOwnsEndpoint"] is False
         # (4.0 - 1.0 used) / 2: half of the remaining budget.
         assert call["maxBudget"] == pytest.approx(1.5)
         assert call["chatId"] == "chat-parent"
@@ -381,6 +385,8 @@ class Sea(BaseSea):
         (call,) = daemon.run_commands
         assert call["model"] == PARENT_MODEL
         assert call["modelConfig"] == {"base_url": "http://x/v1"}
+        # The caller's record speaks about its own configuration, not the call's.
+        assert "modelOwnsEndpoint" not in call
         assert call["maxBudget"] == 0.5
         assert call["chatId"] == "chat-explicit"
         assert call["systemPrompt"] == "explicit base"
@@ -401,6 +407,7 @@ class Sea(BaseSea):
         _dispatch(parent, model_name="claude-sonnet-4-5")
         assert _sent(daemon)["model"] == "claude-sonnet-4-5"
         assert _sent(daemon)["modelConfig"] is None
+        assert "modelOwnsEndpoint" not in _sent(daemon)
 
     @pytest.mark.parametrize("label, body", PICKS_MODEL.items(), ids=list(PICKS_MODEL))
     def test_a_script_that_picks_its_model_gets_no_parent_model_config(
@@ -523,27 +530,6 @@ class Sea(BaseSea):
         parent.model_config = {}
         _dispatch(parent)
         assert _sent(daemon)["modelConfig"] is None
-
-    def test_model_config_follows_the_launch_model_after_set_model(
-        self,
-        env: IsolatedKissHome,
-        daemon: RecordingDaemon,
-    ) -> None:
-        """The run's config belongs to the launch model, not to a model switched to later.
-
-        After ``set_model`` the parent's ``model_name`` is the new model
-        while ``model_config`` still names the launch model's endpoint:
-        an empty ``model_name`` inherits the new model WITHOUT that
-        endpoint, and asking for the launch model by name gets it back.
-        """
-        parent = _parent_after_a_run(env.repo)
-        parent.model_name = "claude-sonnet-4-5"  # what set_model leaves behind
-        _dispatch(parent)
-        assert _sent(daemon)["model"] == "claude-sonnet-4-5"
-        assert _sent(daemon)["modelConfig"] is None
-        _dispatch(parent, model_name=PARENT_MODEL)
-        assert _sent(daemon)["model"] == PARENT_MODEL
-        assert _sent(daemon)["modelConfig"] == PARENT_CONFIG
 
     def test_a_parent_without_a_run_inherits_only_its_defaults(
         self,
@@ -715,6 +701,24 @@ class _DelegatingModel:
         )
 
 
+class _SwitchingModel:
+    """Scripted model: ``set_model``, then ``run_agent`` on each of *models*, then ``finish``."""
+
+    def __init__(self, switch_to: str, models: list[str]) -> None:
+        self.calls = [("set_model", {"model_name": switch_to})] + [
+            ("run_agent", {
+                "task": "say hi", "agent": agent_dispatch.DEFAULT_AGENT_PATH, "timeout": "30",
+                "model": model,
+            })
+            for model in models
+        ]
+
+    def __call__(self, request: dict[str, Any]) -> dict[str, Any]:
+        if not self.calls:
+            return finish_response("delegated")
+        return tool_call_response(*self.calls.pop(0))
+
+
 class TestFullRunInheritance:
     """A real ``ChatSorcarAgent.run`` → ``run_agent`` → recorded ``run`` command."""
 
@@ -824,6 +828,36 @@ class TestFullRunInheritance:
             assert ".kiss-worktrees" in worktree_dir.parts
         finally:
             parent.discard()
+
+    def test_model_config_follows_the_model_the_caller_switched_to(
+        self,
+        env: IsolatedKissHome,
+        daemon: RecordingDaemon,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The caller's config belongs to the model it runs now, not to its launch model.
+
+        ``set_model`` replaces the caller's ``model_config`` with the new
+        model's routing, here a ``MY_MODELS.json`` model's own endpoint
+        and key: a sub-task that names no model inherits the new model
+        WITH them and with the caller's record that the endpoint is that
+        model's own, and one that names the launch model gets none of them.
+        """
+        env.write_config(classify_tasks=False)
+        monkeypatch.setattr(model_info, "USER_MY_MODELS_PATH", env.kiss_home / "MY_MODELS.json")
+        server = StandInModelServer(_SwitchingModel("switched-model", ["", STANDIN_MODEL]))
+        try:
+            assert not model_info.save_custom_model("switched-model", server.url, "switched-key")
+            _run_parent(env, server)
+        finally:
+            server.stop()
+        inheriting, on_launch_model = daemon.run_commands
+        assert inheriting["model"] == "switched-model"
+        assert inheriting["modelConfig"] == {"base_url": server.url, "api_key": "switched-key"}
+        assert inheriting["modelOwnsEndpoint"] is True
+        assert on_launch_model["model"] == STANDIN_MODEL
+        assert on_launch_model["modelConfig"] is None
+        assert "modelOwnsEndpoint" not in on_launch_model
 
 
 @pytest.mark.slow

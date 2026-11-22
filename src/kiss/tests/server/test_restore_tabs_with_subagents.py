@@ -15,9 +15,9 @@ that spawned sub-agents the restored parent tab must:
    events of the most recently persisted sub-agent row, which shares
    the parent's chat_id and was inserted later),
 2. NOT be converted into a sub-agent tab, and
-3. reopen every persisted sub-agent row in its own sub-agent tab
-   (``openSubagentTab`` + ``task_events``) anchored to the parent tab
-   so the restored layout mirrors the live execution layout.
+3. end the tab of every persisted sub-agent (``subagentDone``): none
+   of them runs after a restart, and a sub-agent has a tab only while
+   it runs.
 """
 
 from __future__ import annotations
@@ -108,55 +108,22 @@ class TestRestoreParentTabWithSubagents:
             for e in events
         ), f"parent tab was converted into a sub-agent tab: {events}"
 
-    def test_subagent_tabs_reopen_right_of_parent_with_own_events(
-        self,
-    ) -> None:
-        """Each persisted sub-agent row reopens in its own sub-agent
-        tab anchored to the parent tab, replaying its own events."""
-        server, events, _, sub_ids, parent_tab_id = (
-            self._resume_restored_parent_tab()
-        )
-        opens = [e for e in events if e.get("type") == "openSubagentTab"]
-        offers = [e for e in events if e.get("type") == "replay_deferred"]
-        assert [o["tabId"] for o in offers] == [op["tab_id"] for op in opens]
-        # Each tab fetches its own transcript when opened.
-        for offer in offers:
-            server._replay_session(
-                chat_id=offer["chatId"], tab_id=offer["tabId"], task_id=offer["taskId"],
-            )
-        assert len(opens) == len(sub_ids), f"events={events}"
-        for idx, (op, sub_id) in enumerate(zip(opens, sub_ids)):
-            assert op["parent_tab_id"] == parent_tab_id
-            assert op["isSubagentTab"] is True
-            assert op["isDone"] is True
-            assert op["description"] == f"sub task {idx}"
-            sub_tab_id = op["tab_id"]
-            assert sub_tab_id != parent_tab_id
-            sub_replays = [
-                e for e in events
-                if e.get("type") == "task_events"
-                and e.get("tabId") == sub_tab_id
-            ]
-            assert len(sub_replays) == 1
-            assert sub_replays[0]["task_id"] == sub_id
-            assert any(
-                ev.get("type") == "text_delta"
-                and ev.get("text") == f"sub-event-{idx}"
-                for ev in sub_replays[0]["events"]
-            )
-
-    def test_parent_events_replay_before_subagent_tabs_open(self) -> None:
-        """The parent tab's own events must be replayed first; the
-        sub-agent tabs open after (to the right of) the parent."""
-        _, events, _, _, parent_tab_id = self._resume_restored_parent_tab()
-        parent_idx = next(
-            i for i, e in enumerate(events)
-            if e.get("type") == "task_events"
-            and e.get("tabId") == parent_tab_id
-        )
-        open_idxs = [
-            i for i, e in enumerate(events)
-            if e.get("type") == "openSubagentTab"
+    def test_persisted_subagents_are_ended_after_the_parents_replay(self) -> None:
+        """No persisted sub-agent row gets a tab, a transcript or an
+        offer of one: each one's ``subagentDone`` (its tab and task)
+        follows the parent's own events and closes the tab a page kept
+        from before the restart."""
+        _, events, _, sub_ids, parent_tab_id = self._resume_restored_parent_tab()
+        told = [
+            e for e in events
+            if e.get("type") in ("openSubagentTab", "replay_deferred", "subagentDone")
         ]
-        assert open_idxs, f"no sub-agent tabs opened: {events}"
-        assert all(parent_idx < i for i in open_idxs)
+        assert [e["type"] for e in told] == ["subagentDone"] * len(sub_ids), f"events={events}"
+        assert [(e["tab_id"], e["task_id"]) for e in told] == [
+            (f"{parent_tab_id}__sub_{sub_id}", sub_id) for sub_id in sub_ids
+        ]
+        replayed = [e["tabId"] for e in events if e.get("type") == "task_events"]
+        assert replayed == [parent_tab_id]
+        assert events.index(told[0]) > next(
+            i for i, e in enumerate(events) if e.get("type") == "task_events"
+        )

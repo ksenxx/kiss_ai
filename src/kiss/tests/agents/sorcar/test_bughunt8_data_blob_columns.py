@@ -8,9 +8,8 @@
 ``version`` / ``parent_task_id`` column values into the synthesized
 ``extra`` JSON payload verbatim.  SQLite's dynamic typing lets a
 hand-edited / 3rd-party-source DB store a BLOB in those TEXT columns;
-``json.dumps(bytes)`` raises ``TypeError`` — caught neither by the
-local ``(KeyError, IndexError)`` handler nor by ``_dumps_extra``'s
-``ValueError`` handler — which propagated out of ``_load_history`` /
+``json.dumps(bytes)`` raises ``TypeError`` — not caught by the
+local ``(KeyError, IndexError)`` handler — which propagated out of ``_load_history`` /
 ``_load_history`` / ``_load_chat_events_by_task_id`` and blanked
 the whole history sidebar over one corrupt row (the exact threat
 model of the earlier bughunt2 TEXT-in-REAL coercion fixes).

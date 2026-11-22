@@ -44,9 +44,11 @@ from kiss.agents.sorcar.shell_guards import refuse_or_lift
 from kiss.agents.sorcar.useful_tools import (
     _MAX_BINARY_READ_BYTES,
     _QUEUED_PIECES,
+    SLEEP_PROBE,
     SUBAGENT_DIR_ENV,
     _Capture,
     _output_budget,
+    _runs_environment_text,
     _searched,
     _stop_requested,
     _truncate_output,
@@ -202,7 +204,22 @@ def _new_utf8_decoder() -> Any:
     return codecs.getincrementaldecoder("utf-8")("replace")
 
 
-def _exec_frames(stream: Any, api: Any) -> Iterator[tuple[bytes | None, bytes | None]]:
+def _exec_socket(stream: Any) -> socket.socket | None:
+    """Return the plain socket the exec *stream* is read from, ``None`` on another transport.
+
+    Args:
+        stream: The demuxed ``CancellableStream`` from ``exec_start``.
+    """
+    reader = stream._response.raw._fp.fp
+    if not isinstance(getattr(reader, "raw", None), socket.SocketIO):
+        return None  # pragma: no cover — a Windows named pipe, ssh
+    sock: socket.socket = reader.raw._sock
+    return sock
+
+
+def _exec_frames(
+    stream: Any, api: Any, closing: threading.RLock,
+) -> Iterator[tuple[bytes | None, bytes | None]]:
     """Yield the ``(stdout, stderr)`` frames of the exec *stream*, the buffered ones first.
 
     The SDK reads the frames from the raw socket underneath the HTTP
@@ -223,6 +240,10 @@ def _exec_frames(stream: Any, api: Any) -> Iterator[tuple[bytes | None, bytes | 
     Args:
         stream: The demuxed ``CancellableStream`` from ``exec_start``.
         api: The SDK's low-level client the stream came from.
+        closing: The lock the HTTP response is closed under
+            (:attr:`_ExecRun.lock`): a cancel shuts the stream's socket
+            down under it, and so never a descriptor closed here and
+            given to another connection since.
 
     Yields:
         ``(data, None)`` for a stdout frame, ``(None, data)`` for a
@@ -231,10 +252,10 @@ def _exec_frames(stream: Any, api: Any) -> Iterator[tuple[bytes | None, bytes | 
     """
     response = stream._response
     try:
-        reader = response.raw._fp.fp
-        if not isinstance(getattr(reader, "raw", None), socket.SocketIO):
+        if _exec_socket(stream) is None:
             yield from stream
             return
+        reader = response.raw._fp.fp
         api._disable_socket_timeout(reader.raw)
         while len(header := reader.read(8)) == 8:
             data = reader.read(int.from_bytes(header[4:], "big"))
@@ -242,7 +263,8 @@ def _exec_frames(stream: Any, api: Any) -> Iterator[tuple[bytes | None, bytes | 
     except OSError:
         logger.debug("docker exec stream dropped", exc_info=True)
     finally:
-        response.close()
+        with closing:
+            response.close()
 
 
 def _drain_exec_stream(
@@ -676,6 +698,46 @@ def resolved_path(path: str, exit_code: int | None, output: str) -> str:
     return posixpath.normpath("/" + output.removesuffix("\n").lstrip("/"))
 
 
+#: Prints the ``CDPATH`` the shell of a command inherits where it runs, for the
+#: destructive and here-document guards: bash looks the ``cd`` before a delete or
+#: a here-document up in that one, not in this host's.
+CDPATH_COMMAND = 'printf %s "$CDPATH"'
+
+
+def probed_cdpath(exit_code: int | None, output: str) -> str:
+    """Return the answer of a :data:`CDPATH_COMMAND` run: the ``CDPATH`` there (``""`` for none).
+
+    Raises:
+        KISSError: When the environment gave none (the run timed out,
+            was stopped or failed), as for :func:`resolved_path`.
+    """
+    if exit_code != 0:
+        why = "it timed out" if exit_code is None else output.strip() or f"status {exit_code}"
+        raise KISSError(f"the environment did not say what its CDPATH is ({why})")
+    return output
+
+
+def sleep_probe_command(word: str) -> str:
+    """Return the shell command printing what the shell that runs it runs for *word*.
+
+    :data:`~kiss.agents.sorcar.useful_tools.SLEEP_PROBE` as one shell
+    text, for a container and a bridged environment.  The word is set
+    in POSIX mode: before it, a function ``set`` the environment
+    exports would answer for the shell.
+    """
+    return f"POSIXLY_CORRECT=1; set -- {shlex.quote(word)}; {SLEEP_PROBE}"
+
+
+def probed_sleep(exit_code: int | None, output: str) -> str:
+    """Return the answer of a :func:`sleep_probe_command` run, ``""`` when it gave none.
+
+    stdout leads the output and its line is the answer; what the shell
+    wrote to stderr (a warning of a locale the environment does not
+    have) is not, as on the host.
+    """
+    return output[:output.find("\n") + 1] if exit_code == 0 else ""
+
+
 def _refuse_or_lift(
     command: str,
     workdir: str | None,
@@ -683,6 +745,7 @@ def _refuse_or_lift(
     exists: Callable[[str], bool],
     isdir: Callable[[str], bool],
     realpath: Callable[[str], str],
+    cdpath: Callable[[], str],
     read_bytes: Callable[[str], bytes] | None = None,
     description: str = "",
     max_output_chars: int = MAX_OUTPUT_CHARS,
@@ -694,14 +757,16 @@ def _refuse_or_lift(
     """Apply the guards of the container ``Bash`` tools to *command*.
 
     The destructive and install-timeout guards of the host ``Bash``
-    (:func:`refuse_or_lift`; *isdir* and *realpath* tell it where the
-    ``cd`` of a delete lands in the container, whose work directory is
-    no path of this host), and its refusals of shell rewrites that
+    (:func:`refuse_or_lift`; *isdir*, *realpath* and *cdpath* tell it
+    where the ``cd`` of a delete lands in the container, whose work
+    directory is no path of this host and whose shell inherits its own
+    ``CDPATH``, not this host's), and its refusals of shell rewrites that
     belong in ``Edit``: :func:`rewrite_guard`, and :func:`heredoc_guard`,
     which calls *exists* to learn whether a here-document's target exists
     in the container (or the exec bridge's environment, whose *workdir*
-    is ``None`` when unknown) and *isdir* to learn where a ``cd`` before
-    it leads.  With *read_bytes*, *remember* and *islink* too (the
+    is ``None`` when unknown) and *isdir* and *cdpath* to learn where a
+    ``cd`` before it leads (*cdpath* once a call at most: each answer is
+    an exec there).  With *read_bytes*, *remember* and *islink* too (the
     ``Bash`` tools pass them; ``run_commands_parallel`` cannot redirect
     a command and passes none of the three) a literal here-document copy
     or mechanical edit is redirected to the ``Write``/``Edit`` it stands
@@ -709,7 +774,9 @@ def _refuse_or_lift(
     of a compound command then runs as a ``Bash`` call with the
     original call's *description*, *timeout_seconds* and
     *max_output_chars*, *isdir* tells whether its leading ``cd``
-    names a directory there, *islink* whether a ``sed -i`` on its
+    names a directory there and *cdpath* whether bash may look it up
+    elsewhere (then no call stands for the rewrite), *islink* whether
+    a ``sed -i`` on its
     target would cut a link or replace a read-only file (then no
     Edit is exact), and *remember* keeps the :class:`PendingAppend`
     of a redirected ``>>`` copy, or the :class:`PendingEdit` of a
@@ -728,29 +795,46 @@ def _refuse_or_lift(
     Returns:
         ``(refusal, timeout_seconds)``: the guard's message (``None``
         when the command may run; :data:`STOPPED_MESSAGE` when a Stop
-        left *realpath* unanswered) and the possibly lifted deadline.
+        left *realpath* or *cdpath* unanswered) and the possibly lifted
+        deadline.
 
     Raises:
         ToolRedirect: The ``Write``/``Edit`` to make instead of *command*.
     """
     if remember is not None:
         remember(None)
+    if isinstance(command, ToolScript):
+        # A tool's own script is not the model's text: the guards read the command it carries,
+        # which runs as written or not at all (never as the Write or Edit it stands for).
+        if not command.command:
+            return None, timeout_seconds
+        command, read_bytes = command.command, None
+    cdpath = functools.cache(cdpath)  # an exec in the container: the guards share one answer
     try:
-        guard, timeout_seconds = refuse_or_lift(command, workdir, timeout_seconds, isdir, realpath)
+        guard, timeout_seconds = refuse_or_lift(
+            command, workdir, timeout_seconds, isdir, realpath, cdpath)
     except OracleStoppedError:  # the task was stopped: nothing runs
         return STOPPED_MESSAGE, timeout_seconds
     except KISSError as unanswered:  # nobody knows what the delete would take
         return f"Error: the command did not run: {unanswered.args[0]}.", timeout_seconds
-    if guard is None and read_bytes is not None and remember is not None and islink is not None:
-        guard = _rewrite_instead(
-            command, workdir, exists, isdir, islink, read_bytes, description, timeout_seconds,
-            max_output_chars, remember, shadowed, runs,
+    try:
+        if guard is None and read_bytes is not None and remember is not None and islink is not None:
+            guard = _rewrite_instead(
+                command, workdir, exists, isdir, islink, read_bytes, description, timeout_seconds,
+                max_output_chars, remember, shadowed, runs, cdpath,
+            )
+        # Each answer of *isdir* and *cdpath* is an exec in the container: they are asked about
+        # the ``cd`` of a command that writes a file through a here-document only, which the
+        # guard tells without one (``bool``: every path exists; ``str``: no ``CDPATH``), and
+        # the text does not (``bash -c 'cat > f <''<EOF ...'`` holds no ``<<``).
+        heredoc = heredoc_guard(command, workdir, bool, None, str) is not None
+        refusal = guard or rewrite_guard(command) or heredoc_guard(
+            command, workdir, exists, isdir if heredoc else None, cdpath if heredoc else str,
         )
-    # Each answer of *isdir* is an exec in the container: it is asked about
-    # the ``cd`` of a command that holds a here-document only.
-    refusal = guard or rewrite_guard(command) or heredoc_guard(
-        command, workdir, exists, isdir if "<<" in command else None,
-    )
+    except OracleStoppedError:  # the task was stopped: nothing runs
+        return STOPPED_MESSAGE, timeout_seconds
+    except KISSError as unanswered:  # nobody knows where the copy would land
+        return f"Error: the command did not run: {unanswered.args[0]}.", timeout_seconds
     return refusal, timeout_seconds
 
 
@@ -767,6 +851,7 @@ def _rewrite_instead(
     remember: Callable[[PendingRewrite], None],
     shadowed: Callable[[str, str, set[str]], bool] | None = None,
     runs: Callable[[str], bool] | None = None,
+    cdpath: Callable[[], str] = str,
 ) -> str | None:
     """Redirect a shell rewrite of a container file to the ``Write``/``Edit`` it stands for.
 
@@ -814,6 +899,10 @@ def _rewrite_instead(
         runs: Whether bash finds a program in the container (``None``:
             every program is taken to be there).  A rewrite whose
             program it does not find is no Edit: in bash it fails.
+        cdpath: The ``CDPATH`` a command's shell inherits in the
+            container (the default: none).  With one, bash may look the
+            ``cd dir`` before a rewrite up there: no call stands for
+            the rewrite then.
 
     Returns:
         ``None`` when *command* is no such rewrite (the other guards
@@ -822,12 +911,20 @@ def _rewrite_instead(
 
     Raises:
         ToolRedirect: The call to make instead.
+        KISSError: When *cdpath*, asked, gave no answer (its
+            :class:`OracleStoppedError` after a Stop).
     """
     # The container's (or the bridge environment's) home is not this
     # process's: a ``~`` target stays unresolved and heredoc_guard
-    # refuses the copy, asking for the literal path.
-    copy = heredoc_copy(command, workdir, home=None)
+    # refuses the copy, asking for the literal path.  Nor is its
+    # ``CDPATH``, and each answer of *cdpath*, *runs* and *shadowed* is
+    # an exec there.  So a rewrite is first read without them (``str``:
+    # no ``CDPATH``); only the rewrite of a known file is read again,
+    # with *cdpath* when a ``cd`` leads to it.
+    copy = heredoc_copy(command, workdir, home=None, cdpath=str)
     if copy is not None and copy.path is not None and not copy.path.startswith("/dev/"):
+        if copy.cwd and heredoc_copy(command, workdir, home=None, cdpath=cdpath) is None:
+            return None
         refusal = cd_refusal(copy.cwd, isdir)
         if refusal is not None:
             return refusal
@@ -850,7 +947,9 @@ def _rewrite_instead(
             copy.cwd, copy.remainder, description, timeout_seconds, max_output_chars,
         )
         raise rewrite_redirect("Write", args, call, copy.append, followup)
-    edit = mechanical_edit(command, workdir, shadowed, runs)
+    edit = mechanical_edit(command, workdir, cdpath=str)
+    if edit is not None and edit.path is not None:
+        edit = mechanical_edit(command, workdir, shadowed, runs, cdpath if edit.cwd else str)
     if edit is not None and edit.path is not None:
         refusal = cd_refusal(edit.cwd, isdir)
         if refusal is not None:
@@ -957,6 +1056,33 @@ def _with_exit_code(output: str, exit_code: int) -> str:
     return f"{output}\n{suffix}" if output else suffix
 
 
+class ToolScript(str):
+    """A script a container tool runs for itself, not the command of a call.
+
+    The job scripts of
+    :class:`~kiss.agents.sorcar.container_jobs.ContainerJobs` (a job's
+    start, the look for the running jobs, the report of a wait) reach
+    :meth:`DockerManager.Bash` through the function that runs the
+    agent's commands.  What they print is the tool's to read:
+    ``Bash`` streams none of it, so the panel of the call shows the
+    output of its command alone and, with nothing streamed, its result
+    whole (a call that streamed is recorded by its status lines only).
+
+    The guards of ``Bash`` judge the model's text, not a tool's: of such a
+    script they read :attr:`command` alone, the command of the model that
+    the script runs (a background job's; ``""`` when it runs none).
+    """
+
+    __slots__ = ("command",)
+    command: str
+
+    def __new__(cls, script: str, command: str = "") -> "ToolScript":
+        """Return *script*, carrying the model's *command* it runs (``""`` for none)."""
+        self = super().__new__(cls, script)
+        self.command = command
+        return self
+
+
 class _ExecRun:
     """One docker exec, shared by the task thread, its worker thread and its reaper.
 
@@ -1011,6 +1137,11 @@ class _ExecRun:
         self.cancelled = False
         self.start_committed = False
         self.start_refused = False
+        # The socket the worker reads the exec's output from, once the
+        # daemon answered the start (``None`` before that, and on a
+        # transport that is no plain socket).  Shut down by a cancel
+        # (:meth:`_shut_stream`).
+        self.stream_sock: socket.socket | None = None
         # Taken by the one reaper thread that sweeps; a repeat of
         # ``cancel()`` may start a second thread, which finds it taken.
         self.reaper_claim = threading.Lock()
@@ -1036,7 +1167,15 @@ class _ExecRun:
                 with self.lock:
                     self.start_refused = True
                 raise
-            _drain_exec_stream(_exec_frames(stream, self.manager.client.api), self.put)
+            with self.lock:
+                # Under the lock a cancel is marked under: the stream of
+                # a start answered after the cancel is shut here instead.
+                self.stream_sock = _exec_socket(stream)
+                if self.cancelled:
+                    self._shut_stream()
+            _drain_exec_stream(
+                _exec_frames(stream, self.manager.client.api, self.lock), self.put,
+            )
             self._wait_for_exit_code()
         except BaseException as exc:
             self.error = exc
@@ -1048,8 +1187,8 @@ class _ExecRun:
 
         A command that prints faster than its output is taken therefore
         waits on its stream instead of filling memory.  Once the exec is
-        cancelled nobody takes from the queue any more: the worker reads
-        the rest of the stream, which the kill ends, and drops it.
+        cancelled nobody takes from the queue any more: the worker drops
+        what it still read of the stream, which the cancel has shut.
         """
         while not self.cancelled:
             try:
@@ -1076,7 +1215,26 @@ class _ExecRun:
     def _mark_cancelled(self) -> bool:
         """Cancel the exec (caller holds :attr:`lock`); return whether it needs a reaper."""
         self.cancelled = True
+        self._shut_stream()
         return self.start_committed and not self.start_refused
+
+    def _shut_stream(self) -> None:
+        """End the worker's read of the exec's stream (caller holds :attr:`lock`).
+
+        The kill ends the stream at the daemon, but a transport that
+        stalls (a half-open connection, a relay that withholds the end)
+        never tells the worker, which then read on for good, keeping its
+        thread and its socket.  A socket shut down here reads as ended
+        whatever the transport does.  The worker closes the response
+        under the same lock (:func:`_exec_frames`), so the descriptor
+        shut is still the stream's.  The tree is the reaper's to kill
+        all the same: the daemon does not end an exec whose client left.
+        """
+        if self.stream_sock is not None:
+            try:
+                self.stream_sock.shutdown(socket.SHUT_RDWR)
+            except OSError:  # ended by itself: closed by the worker, or dropped by the daemon
+                logger.debug("docker exec stream had already ended", exc_info=True)
 
     def cancel(self) -> None:
         """Kill the exec from the task thread (timeout or injected Stop).
@@ -1098,13 +1256,16 @@ class _ExecRun:
         if not locked_call(self.lock, self._mark_cancelled):
             return
         swept = threading.Event()
-        threading.Thread(
+        reaper = threading.Thread(
             target=self.reap, args=(swept,),
             name=f"docker-exec-reaper-{self.token[:8]}", daemon=True,
-        ).start()
+        )
+        # A Stop raised inside the start or a slice could leave the lock of
+        # an event held: the reaper never run, or blocked ahead of its watch.
+        tool_interrupt.call_without_injection(reaper.start)
         deadline = time.monotonic() + _KILL_WAIT_S
         while not swept.is_set() and time.monotonic() < deadline:
-            swept.wait(0.2)
+            tool_interrupt.call_without_injection(swept.wait, 0.2)
 
     def reap(self, swept: threading.Event) -> None:
         """Reaper thread body: sweep the token-tagged tree now and again once the exec has started.
@@ -1135,6 +1296,13 @@ class _ExecRun:
         interval backs off so an indefinitely delayed start costs one
         inspect every few seconds.
 
+        A sweep that did not run to its end (the daemon refuses every
+        exec into a paused container) is not that last sweep: the watch
+        goes on, at the same interval, until one did
+        (:meth:`DockerManager._kill_exec`).  Retiring after a refused
+        one left the children of an exited shell to run on once the
+        container was unpaused.
+
         Args:
             swept: Set once the first sweep has run (at once when another
                 reaper of this run holds the claim and sweeps).
@@ -1162,8 +1330,8 @@ class _ExecRun:
                     return
                 info = {}
             if info.get("Pid"):
-                self.manager._kill_exec(self.token, self.container)
-                if not info.get("Running"):
+                killed = self.manager._kill_exec(self.token, self.container)
+                if killed and not info.get("Running"):
                     return  # the exec itself is finished; its tree is swept
             time.sleep(interval)
             interval = min(interval * 2, _REAP_POLL_MAX_INTERVAL_S)
@@ -1424,8 +1592,8 @@ class DockerManager:
         probe = functools.partial(self._path_test, *asked)
         guard, deadline = _refuse_or_lift(
             command, self.workdir, timeout_seconds, probe, functools.partial(probe, test="-d"),
-            functools.partial(self._realpath, *asked), self.read_bytes,
-            description, max_output_chars,
+            functools.partial(self._realpath, *asked), functools.partial(self._cdpath, *asked),
+            self.read_bytes, description, max_output_chars,
             functools.partial(setattr, self, "pending_append"),
             functools.partial(probe, test="link"),
             functools.partial(self._shadows, *asked),
@@ -1435,8 +1603,10 @@ class DockerManager:
             return _with_exit_code(guard, -1)
         if guard is not None:
             return guard
+        # Only the command of a call is streamed into its panel (:class:`ToolScript`).
+        on_text = None if isinstance(command, ToolScript) else self.stream_callback
         run = functools.partial(self._exec, container, command, cancel=self.stop_event,
-                                on_text=self.stream_callback)
+                                on_text=on_text)
         verdict = ""
         if until:
             refusal = until_refusal(until, poll_seconds)
@@ -1539,6 +1709,7 @@ class DockerManager:
             guard, timeout_seconds = _refuse_or_lift(
                 command, self.workdir, timeout_seconds, exists,
                 functools.partial(exists, test="-d"), functools.partial(self._realpath, *asked),
+                functools.partial(self._cdpath, *asked),
             )
             if guard is not None:
                 return -1, guard, 0.0
@@ -1608,6 +1779,25 @@ class DockerManager:
             raise OracleStoppedError(f"the task was stopped before it said where {path} leads")
         return resolved_path(path, exit_code, output)
 
+    def _cdpath(
+        self, container: Container, timeout_seconds: float, cancel: threading.Event | None,
+    ) -> str:
+        """Return the ``CDPATH`` a command's shell inherits in the container (``""`` for none).
+
+        The destructive and here-document guards' oracle
+        (:data:`CDPATH_COMMAND`): bash looks the ``cd`` before a delete
+        or a here-document up in it.  An exec like
+        :meth:`_path_test`'s, in the environment a command gets.
+
+        Raises:
+            OracleStoppedError: When a Stop left it unanswered.
+            KISSError: When the container gave no answer otherwise.
+        """
+        exit_code, output, _ = self._exec(container, CDPATH_COMMAND, timeout_seconds, cancel)
+        if exit_code != 0 and _stop_requested(cancel):
+            raise OracleStoppedError("the task was stopped before it said what its CDPATH is")
+        return probed_cdpath(exit_code, output)
+
     def _shadows(
         self,
         container: Container,
@@ -1630,6 +1820,37 @@ class DockerManager:
             container, shadow_command(program, path, modules), timeout_seconds, cancel,
         )
         return exit_code != 1
+
+    def sleep_probe(self, word: str) -> str:
+        """Return what a command's shell prints for ``SLEEP_PROBE`` and *word* in the container.
+
+        The ``probe`` of
+        :func:`~kiss.agents.sorcar.useful_tools.wait_instead_of_sleep`:
+        an exec of :func:`sleep_probe_command` like a command's, with
+        its shell and its environment (the container's, then the
+        exec's own).
+
+        Args:
+            word: The command word asked about (``sleep``, ``/bin/sleep``).
+
+        Returns:
+            The shell's answer, the line it wrote to stdout, or ``""``
+            when that shell runs text of the environment first
+            (:func:`~kiss.agents.sorcar.useful_tools._runs_environment_text`)
+            or no answer came (a failure, a timeout, a Stop), so that
+            the sleep runs as written.
+
+        Raises:
+            KISSError: If no container is open.
+        """
+        container = self._open_container()
+        started_with = dict(
+            entry.partition("=")[::2] for entry in container.attrs["Config"].get("Env") or ()
+        )
+        if _runs_environment_text({**started_with, **self.exec_env}):
+            return ""
+        exit_code, output, _ = self._exec(container, sleep_probe_command(word), 10, self.stop_event)
+        return probed_sleep(exit_code, output)
 
     def read_bytes(
         self,
@@ -1752,15 +1973,20 @@ class DockerManager:
         try:
             # Started inside the protected region: a Stop landing as
             # ``start()`` returns must still cancel the worker it started.
-            threading.Thread(
+            worker = threading.Thread(
                 target=run.run_worker, name=f"docker-exec-worker-{run.token[:8]}", daemon=True,
-            ).start()
+            )
+            tool_interrupt.call_without_injection(worker.start)
             while sweep or not _stop_requested(cancel):
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     break
                 try:
-                    item = run.out_queue.get(timeout=min(remaining, 0.2))
+                    # A Stop raised inside the slice could leave the queue's
+                    # lock held, and the worker blocked on it for good.
+                    item = tool_interrupt.call_without_injection(
+                        run.out_queue.get, timeout=min(remaining, 0.2),
+                    )
                 except queue.Empty:
                     continue
                 if item is None:
@@ -1784,7 +2010,7 @@ class DockerManager:
                 # counted is there.
                 run.cancel()
                 for _ in range(run.out_queue.qsize()):
-                    item = run.out_queue.get_nowait()
+                    item = tool_interrupt.call_without_injection(run.out_queue.get_nowait)
                     if item is None:
                         break
                     _take_output(item, stdout, stderr, None if stopped else shown)
@@ -1793,7 +2019,7 @@ class DockerManager:
                 # beginning of a secret is shown.
                 for redactor in shown:
                     redactor.flush()
-        except BaseException:
+        except BaseException as error:
             # An injected Stop (task stop watchdog, tool-panel interrupt)
             # landed anywhere from the worker's start to the verdict's
             # own cancellation, or the worker failed mid-stream: the exec
@@ -1806,8 +2032,15 @@ class DockerManager:
             # again whether a reaper is needed.
             try:
                 run.cancel()
-            except BaseException:
+            except BaseException as cut:
                 run.cancel()
+                # A Stop that cut the cancellation short is not dropped
+                # for the exception being cleaned up after: the task's
+                # Stop outranks any, a tool call's an ordinary error.
+                if isinstance(cut, KeyboardInterrupt) or (
+                    isinstance(error, Exception) and not isinstance(cut, Exception)
+                ):
+                    raise
             raise
         (out, out_dropped), (err, err_dropped) = _kept(stdout), _kept(stderr)
         output = "\n".join(part for part in (out, err) if part)
@@ -1930,7 +2163,7 @@ class DockerManager:
         if stop is not None:
             raise stop
 
-    def _kill_exec(self, token: str, container: Container) -> None:
+    def _kill_exec(self, token: str, container: Container) -> bool:
         """Kill the container-side processes of a timed-out exec.
 
         Without this the hung command keeps running (and holding the
@@ -1945,11 +2178,27 @@ class DockerManager:
             container: The container the exec was created in (the
                 reaper passes its run's own, which outlives a ``close()``
                 of an attached manager).
+
+        Returns:
+            Whether nothing of the tree is left: the sweep ran to its
+            end, or the container runs no process any more (it was
+            stopped or removed).  ``False`` when the sweep did not run
+            to its end in a container that still runs (the daemon
+            refuses an exec into a paused container, the connection was
+            lost, the sweep's shell failed): the caller sweeps again.
         """
         try:
-            container.exec_run(["/bin/sh", "-c", kill_tagged_tree_script(token)])
-        except Exception:  # the container is already gone, and the tagged tree with it
+            if container.exec_run(["/bin/sh", "-c", kill_tagged_tree_script(token)]).exit_code == 0:
+                return True
+        except Exception:
             logger.debug("could not kill timed-out exec", exc_info=True)
+        try:
+            return not self.client.api.inspect_container(str(container.id))["State"]["Running"]
+        except docker.errors.NotFound:  # type: ignore[attr-defined]
+            return True  # the container is gone, and the tagged tree with it
+        except Exception:
+            logger.debug("could not tell whether the container still runs", exc_info=True)
+            return False
 
     def close(self) -> None:
         """Remove the Docker container.

@@ -12,7 +12,8 @@ block waits up to ``STOP_WAIT_SECONDS`` for the interrupted tool calls,
 so no tool keeps working after the run returned; the injected exception
 used to end that wait after about one second, with the tool still
 running.  These tests run the daemon's own watchdog (and the raw
-injection a Ctrl+C amounts to) against a real bridge.
+injection a Ctrl+C amounts to) against a real bridge, opened by the model
+that owns it in production (``CodexModel.native_tools_exposed``).
 """
 
 import json
@@ -26,6 +27,7 @@ import pytest
 
 from kiss.core import stop_signal
 from kiss.core.models.codex_mcp_bridge import BRIDGE_TOKEN_ENV, STOP_WAIT_SECONDS, ToolBridge
+from kiss.core.models.codex_model import CodexModel
 from kiss.core.tool_interrupt import (
     ToolCallInterrupted,
     end_tool_call,
@@ -113,8 +115,10 @@ class _TaskThread(threading.Thread):
         stop_signal.set_thread_stop_event(stop)
         client: socket.socket | None = None
         try:
-            with ToolBridge(SCHEMA, self.tool) as bridge:
-                self.bridge = bridge
+            model = CodexModel("codex/default")
+            with model.native_tools_exposed(SCHEMA, self.tool):
+                bridge = self.bridge = model._tool_bridge
+                assert bridge is not None
                 client = socket.create_connection(("127.0.0.1", bridge.port), timeout=15)
                 token = bridge.codex_env()[BRIDGE_TOKEN_ENV]
                 request = {"op": "call", "name": "slow", "arguments": {}, "token": token}
@@ -236,6 +240,8 @@ def test_a_keyboard_interrupt_at_the_entry_of_the_wait_still_bounds_the_wait() -
         (ToolCallInterrupted, ToolBridge._stop_listener),
         (ToolCallInterrupted, socketserver.ThreadingMixIn.server_close),
         (ToolCallInterrupted, ToolBridge._wait_for_calls),
+        (KeyboardInterrupt, ToolBridge.__exit__),
+        (KeyboardInterrupt, ToolBridge._close),
     ],
 )
 def test_a_stop_ending_the_block_or_landing_in_its_exit_bounds_the_wait(
@@ -244,7 +250,9 @@ def test_a_stop_ending_the_block_or_landing_in_its_exit_bounds_the_wait(
     """A per-panel Stop (``ToolCallInterrupted``) or a Ctrl+C without a stop event, ending
     the block's body (*step* is None) or landing in a step of its exit, interrupts the running
     tool and leaves once it ended with the listener closed: not once the tool would have ended
-    by itself (the body's Stop was dropped), and not at once with the rest of the exit skipped."""
+    by itself (the body's Stop was dropped), and not at once with the rest of the exit skipped.
+    One landing as the exit is entered (``__exit__``, ``_close``) skips it whole, before its
+    first step: the model runs the exit again, or the listener went on serving calls."""
     tool = _PatientTool()
     task = _TaskThread(tool, request_stop=False)
     if step is None:

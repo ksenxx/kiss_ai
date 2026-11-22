@@ -17,8 +17,10 @@ The test serves a real page whose script spins forever right after
 (with an error string) well before the worker-thread join deadline.
 """
 
+import asyncio
 import contextlib
 import functools
+import gc
 import http.server
 import importlib
 import logging
@@ -28,6 +30,7 @@ import subprocess
 import sys
 import threading
 import time
+from asyncio import selector_events
 from collections.abc import Callable
 from pathlib import Path
 from types import CodeType
@@ -38,6 +41,7 @@ import pytest
 from kiss.agents.sorcar import web_stealth
 from kiss.agents.sorcar.web_use_tool import (
     _CDP_CALL_TIMEOUT_SECS,
+    _DRIVER_START_SECS,
     _DRIVER_STOP_SECS,
     WebUseTool,
     _cdp_call,
@@ -1124,6 +1128,178 @@ def test_stop_while_a_watchdog_starts_leaves_it_disarmed(tmp_path):
         tool.close()
         srv.shutdown()
         srv.server_close()
+
+
+class _StopAsTheDriverIsSpawned(_StopWhileTimerStarts):
+    """Inject the Stop as the real ``asyncio.create_subprocess_exec`` returns the first driver.
+
+    The driver runs by then and the transport that asked for it has not
+    kept it yet.  ``spawned`` receives its pid.
+    """
+
+    def __init__(self, spawned: list[int]) -> None:
+        super().__init__(asyncio.create_subprocess_exec.__code__)
+        self._spawned = spawned
+
+    def _inject(self, code: Any, offset: int, retval: Any) -> None:
+        if threading.get_ident() == self._thread and not self._spawned:
+            self._spawned.append(retval.pid)
+            super()._inject(code, offset, retval)
+
+
+@posix_only("the driver is this process's child, reaped before the call returns")
+def test_stop_as_the_driver_is_spawned_ends_that_driver(tmp_path):
+    """A Stop landing before the transport keeps its new driver takes the driver with it (S18/F3).
+
+    The transport names the driver's process once the call that spawned
+    it has returned to it.  Stopped in between, the start left a running
+    driver that nothing named: no ``close()`` ended it.  The next call
+    starts a driver of its own.
+    """
+    srv, base = _serve()
+    tool = WebUseTool(user_data_dir=str(tmp_path / "prof"), headless=True)
+    spawned: list[int] = []
+    try:
+        with _StopAsTheDriverIsSpawned(spawned), pytest.raises(ToolCallInterrupted):
+            tool.go_to_url(f"{base}/ok")
+        assert spawned and not pid_alive(spawned[0]), "the driver outlived the Stop"
+        assert tool.go_to_url(f"{base}/ok").startswith("Page: fine page\n")
+    finally:
+        tool.close()
+        srv.shutdown()
+        srv.server_close()
+        for pid in spawned:  # a driver that did outlive it is still this process's child
+            signal_unreaped_child(pid, signal.SIGKILL)
+
+
+async def _navigate_inside_a_loop() -> str:
+    """Use the tool where Playwright refuses to start: on a thread whose event loop runs."""
+    tool = WebUseTool(ephemeral=True, headless=True)
+    try:
+        return tool.go_to_url("data:text/html,hello")
+    finally:
+        tool.close()
+
+
+def test_a_start_refused_before_it_has_a_driver_is_reported_as_it_is():
+    """A start that fails with no connection yet, hence no driver to end, keeps its own error."""
+    assert "Playwright Sync API inside the asyncio loop" in asyncio.run(_navigate_inside_a_loop())
+
+
+class _StopAtTheFirstReturn(_StopWhileTimerStarts):
+    """Inject the Stop as the hooked code first returns: the start is then ended undisturbed."""
+
+    _injected = False
+
+    def _inject(self, code: Any, offset: int, retval: Any) -> None:
+        if not self._injected and threading.get_ident() == self._thread:
+            self._injected = True
+            super()._inject(code, offset, retval)
+
+
+class _SigintAtTheFirstReturn(_StopAtTheFirstReturn):
+    """Send this process a ``SIGINT`` there instead: ``KeyboardInterrupt`` is raised on the spot."""
+
+    def _inject(self, code: Any, offset: int, retval: Any) -> None:
+        if not self._injected and threading.get_ident() == self._thread:
+            self._injected = True
+            signal.raise_signal(signal.SIGINT)
+
+
+def _stop_registering_a_pidfd(thread: int, entry: dict[str, Any]) -> bool:
+    """A :class:`Pause` hook on the loop's ``_add_reader``: the Stop, as a child's pidfd goes in."""
+    if threading.get_ident() == thread and getattr(entry["callback"], "__name__", "") == "_do_wait":
+        inject_async_exception(thread, ToolCallInterrupted)
+    return False
+
+
+def _stop_a_start(tool: WebUseTool, hook: Callable[[], Any], stop: type[BaseException]) -> None:
+    """Start *tool*'s driver under a new *hook*, which interrupts that start once, with *stop*."""
+    began = time.monotonic()
+    with hook(), pytest.raises(stop):
+        tool._start_playwright()
+    assert time.monotonic() - began < _DRIVER_START_SECS, "the Stop waited for the start's watchdog"
+
+
+@posix_only("the open descriptors of the process are listed in /dev/fd")
+@pytest.mark.parametrize(
+    ("stop", "stopped_as"),
+    [
+        (KeyboardInterrupt, "the driver is looked up"),
+        pytest.param(
+            ToolCallInterrupted,
+            "its pidfd is being registered",
+            marks=pytest.mark.skipif(
+                not hasattr(os, "pidfd_open"), reason="asyncio watches a child by pidfd on Linux"
+            ),
+        ),
+        (KeyboardInterrupt, "the driver is spawned"),
+        (KeyboardInterrupt, "its pipes are being connected"),
+        (ToolCallInterrupted, "the handshake is being sent"),
+        (KeyboardInterrupt, "the driver answers"),
+        (KeyboardInterrupt, "the start returns"),
+    ],
+)
+def test_a_stopped_start_gives_back_what_it_opened(stop, stopped_as, caplog):
+    """Wherever a start is interrupted, no descriptor stays open and the thread can start again.
+
+    The start's event loop was left as the Stop found it.  The loop's
+    child watcher holds a descriptor on the driver that only the loop's
+    own reap closes (a pidfd): reaped in the loop's place, each stopped
+    start left one open for the life of the process (review of S18/F3).
+    A start stopped as it returned left its loop running under the
+    thread, where every later start was refused.  The driver's first
+    answer finds the handshake's request waiting, a task of the loop
+    that has to end with it: asyncio reports one left pending, and a
+    driver reaped behind its back, in its log.  The loop's first turn
+    ends with the driver spawned and asyncio about to connect its
+    pipes: cancelled there, asyncio never reports the driver's exit to
+    one who waits for it.
+
+    The daemon's Stop is held back until the start has returned,
+    wherever it is injected (C1).  Raised on the spot, it left open the
+    pidfd asyncio had opened on the driver and not yet registered with
+    its loop; and one raised in the task that sends the handshake
+    stayed with that task: the start waited out its watchdog and failed
+    with another error.  Nothing holds back the ``KeyboardInterrupt``
+    of a ``SIGINT``, so the other starts are interrupted by one: each
+    is still ended as it was found.
+    """
+    package = web_stealth.playwright_package()
+    transport = importlib.import_module(f"{package}._impl._transport")
+    manager = importlib.import_module(f"{package}.sync_api._context_manager")
+    hook: Callable[[], Any]
+    if stopped_as == "its pidfd is being registered":
+        add_reader = vars(selector_events.BaseSelectorEventLoop)["_add_reader"]
+        registering = functools.partial(_stop_registering_a_pidfd, threading.get_ident())
+        hook = functools.partial(Pause, add_reader.__code__, registering)
+    else:
+        returning = {
+            "the driver is looked up": transport.compute_driver_executable,
+            "the driver is spawned": asyncio.create_subprocess_exec,
+            "its pipes are being connected": vars(asyncio.BaseEventLoop)["_run_once"],
+            "the handshake is being sent": transport.Transport.serialize_message,
+            "the driver answers": transport.Transport.deserialize_message,
+            "the start returns": manager.PlaywrightContextManager.__enter__,
+        }[stopped_as]
+        injector = _StopAtTheFirstReturn if stop is ToolCallInterrupted else _SigintAtTheFirstReturn
+        hook = functools.partial(injector, returning.__code__)
+    tool = WebUseTool(ephemeral=True, headless=True)
+    # Python's own handler, whatever the launcher left: a background job inherits SIGINT ignored.
+    handler = signal.signal(signal.SIGINT, signal.default_int_handler)
+    try:
+        _stop_a_start(tool, hook, stop)  # what the process opens once is open after this one
+        opened = len(os.listdir("/dev/fd"))
+        for _ in range(3):
+            _stop_a_start(tool, hook, stop)
+        assert len(os.listdir("/dev/fd")) == opened, "the stopped starts left descriptors open"
+        gc.collect()  # a pending task is reported when it is collected
+        assert [record.getMessage() for record in caplog.records if record.name == "asyncio"] == []
+        tool._start_playwright()
+        assert pid_alive(_driver_pid(tool))
+    finally:
+        signal.signal(signal.SIGINT, handler)
+        tool.close()
 
 
 @posix_only("the driver is frozen with SIGSTOP")

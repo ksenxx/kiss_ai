@@ -4,18 +4,19 @@
 # add your name here
 """``virtual_display`` and an Xvfb wrapper that exits before reporting a display.
 
-``_read_display_number`` ``poll()``s the wrapper and returns ``None`` as
-soon as it has exited; the wrapper is then reaped and its process group
-gone (it kills its Xvfb before exiting), so ``virtual_display`` must not
-signal that group: :func:`terminate_process_group` documents that a
-caller which already saw the child exit skips it, since the pgid may
-belong to an unrelated process by now.  The misdirected signal is made
-observable without pid reuse: the fake Xvfb leaves a ``sleep`` behind in
-the wrapper's process group before exiting, so a group signal sent after
-the wrapper's exit would kill that sleep, while the guard leaves it
-alive.  The test also pins the branch around it: an Xvfb that dies at
-once yields no display, promptly, with the wrapper reaped and the module
-state clean.
+``_read_display_number`` watches the wrapper without reaping it and
+returns ``None`` as soon as it has exited.  An exited wrapper does not
+mean an empty process group: killed from outside it could not take its
+Xvfb along, and what Xvfb forked lives on in the group either way.  The
+leader being a zombie still, the group id cannot be anyone else's, so
+``virtual_display`` ends the group and only then reaps the wrapper
+(audit S17/F2).  Until then the wrapper was reaped at the first look and
+its group left alone, a reaped leader's group id being possibly a
+stranger's, and this test required the ``sleep`` the fake Xvfb leaves
+behind in the wrapper's process group to survive; it must now be gone
+when ``virtual_display`` returns.  The test also pins the branch around
+it: an Xvfb that dies at once yields no display, promptly, with the
+wrapper reaped and the module state clean.
 The companion branch (a wrapper still alive at the timeout or at a Stop
 is terminated) is ``test_web_stealth.py::
 test_stop_during_xvfb_startup_leaves_no_wrapper_behind``.
@@ -34,12 +35,19 @@ from pathlib import Path
 import pytest
 
 from kiss.agents.sorcar import web_stealth
-from kiss.core.processes import pid_alive
 
 pytestmark = pytest.mark.skipif(
     not sys.platform.startswith("linux"),
     reason="virtual_display only runs Xvfb on Linux",
 )
+
+
+def _runs_the_stray_sleep(pid: int) -> bool:
+    """Whether *pid* runs the fake Xvfb's ``sleep 30``: not gone, a zombie, or a stranger."""
+    try:
+        return Path(f"/proc/{pid}/cmdline").read_bytes() == b"sleep\x0030\x00"
+    except OSError:
+        return False
 
 
 def test_an_xvfb_that_exits_at_once_yields_no_display_and_no_wrapper(
@@ -53,7 +61,7 @@ def test_an_xvfb_that_exits_at_once_yields_no_display_and_no_wrapper(
     # The stray sleep stays in the wrapper's process group (a
     # non-interactive sh has no job control) and inherits the displayfd
     # write end, so ``_read_display_number`` can only return through its
-    # ``poll()``, i.e. once the wrapper is reaped.
+    # look at the wrapper, i.e. once the wrapper has exited.
     pid_file = tmp_path / "stray.pid"
     fake.write_text(f"#!/bin/sh\nsleep 30 &\necho $! > '{pid_file}'\nexit 1\n")
     fake.chmod(0o755)
@@ -75,10 +83,13 @@ def test_an_xvfb_that_exits_at_once_yields_no_display_and_no_wrapper(
             text=True,
         ).stdout.split()
         assert children == [], f"wrapper shells left behind: {children}"
-        # The reaped wrapper's group was not signalled: the sleep it left
-        # behind (a stand-in for whoever owns that pgid by now) survived.
+        # The exited wrapper's group was ended while its leader, not yet
+        # reaped, still reserved the group id: the sleep it left behind is gone.
         stray = int(pid_file.read_text())
-        assert pid_alive(stray), "virtual_display signalled the exited wrapper's process group"
+        assert not _runs_the_stray_sleep(stray), "the exited wrapper's group was left running"
     finally:
+        # On failure: no stray left behind.
         with contextlib.suppress(OSError, ValueError):
-            os.kill(int(pid_file.read_text()), signal.SIGKILL)
+            stray = int(pid_file.read_text())
+            if _runs_the_stray_sleep(stray):
+                os.kill(stray, signal.SIGKILL)

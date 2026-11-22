@@ -11,7 +11,6 @@ import functools
 import hashlib
 import json
 import logging
-import os
 import threading
 import time
 from collections import OrderedDict
@@ -908,34 +907,33 @@ def _bedrock_credentials() -> tuple[str, str, str, str]:
     )
 
 
-def _key_pair_bedrock_client(
-    credentials: Sequence[str], timeout: httpx2.Timeout
-) -> AnthropicBedrock:
-    """Build the Bedrock client that signs with *credentials*; run under the key store's lock.
+class _SigV4Bedrock(AnthropicBedrock):
+    """The SDK's Bedrock client, signing with the AWS credentials it is given and no token.
 
-    The constructor (and ``with_options``, which builds a copy through
-    it) re-reads AWS_BEARER_TOKEN_BEDROCK from the environment when no
-    api_key is passed and treats an EMPTY exported value as a token:
-    it refuses the key pair next to it and sends ``Authorization:
-    Bearer`` with nothing behind it.  An empty key is unset by KISS's
-    own rules (``DEFAULT_CONFIG`` reads it as ""), so it is unset for
-    the SDK too.  The check, the deletion and the constructor's read run
-    under the key store's lock, which the settings panel holds while it
-    exports a token it just saved: outside it, the empty value could be
-    replaced by that token between the check and the deletion, and the
-    new token deleted with it, or picked up by the constructor.
+    ``AnthropicBedrock`` (and ``with_options``, which builds a copy
+    through the constructor) reads AWS_BEARER_TOKEN_BEDROCK from the
+    environment when no api_key is passed.  It refuses the key pair next
+    to what it finds (``ValueError``), an EMPTY exported value included,
+    and without a pair sends that value as the token.  A model signs
+    with the credentials it read, whatever is exported: a token the
+    settings panel saves later is for the models created after it.  So
+    the SDK's constructor is given an api_key, which keeps it from
+    reading the environment, and the credentials are set once it returns.
     """
-    if os.environ.get("AWS_BEARER_TOKEN_BEDROCK") == "":
-        del os.environ["AWS_BEARER_TOKEN_BEDROCK"]
-    access_key, secret_key, session_token, region = credentials
-    return AnthropicBedrock(
-        aws_access_key=access_key or None,
-        aws_secret_key=secret_key or None,
-        aws_session_token=session_token or None,
-        aws_region=region,
-        timeout=timeout,
-        max_retries=_MAX_RETRIES,
-    )
+
+    def __init__(
+        self,
+        *,
+        aws_access_key: str | None = None,
+        aws_secret_key: str | None = None,
+        aws_session_token: str | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(**{**kwargs, "api_key": ""})
+        self.api_key = None
+        self.aws_access_key = aws_access_key
+        self.aws_secret_key = aws_secret_key
+        self.aws_session_token = aws_session_token
 
 
 def _bedrock_client(
@@ -945,9 +943,9 @@ def _bedrock_client(
 
     A bearer token (``AWS_BEARER_TOKEN_BEDROCK``) is the client's
     ``api_key``; the SDK refuses it together with an access key pair, so
-    the pair is passed only when no token is set.  With neither, the
-    client falls back to boto3's credential chain (``~/.aws``, an
-    instance role).
+    the pair is passed only when no token is set (:class:`_SigV4Bedrock`).
+    With neither, the client falls back to boto3's credential chain
+    (``~/.aws``, an instance role).
 
     Args:
         bearer_token: The Bedrock API key (bearer token), or ``""``.
@@ -966,7 +964,15 @@ def _bedrock_client(
             timeout=timeout,
             max_retries=_MAX_RETRIES,
         )
-    return locked_call(user_config._config_lock, _key_pair_bedrock_client, credentials, timeout)
+    access_key, secret_key, session_token, region = credentials
+    return _SigV4Bedrock(
+        aws_access_key=access_key or None,
+        aws_secret_key=secret_key or None,
+        aws_session_token=session_token or None,
+        aws_region=region,
+        timeout=timeout,
+        max_retries=_MAX_RETRIES,
+    )
 
 
 class AnthropicModel(Model):
@@ -1026,6 +1032,10 @@ class AnthropicModel(Model):
         else:
             self._api_model_name = _strip_thinking_alias(model_name)
             self._catalog_model_name = model_name
+        # Whether the model binds a thinking block to the messages before
+        # it: what its name says, until the provider rejects a block as
+        # bound (``drop_stale_reasoning``).
+        self._binds_thinking = _checks_thinking_prefix(_claude_profile(self._catalog_model_name))
 
     def _thinking_and_max_tokens(self) -> tuple[dict[str, Any] | None, int]:
         """Return the ``thinking`` parameter and the ``max_tokens`` of the requests.
@@ -1112,11 +1122,13 @@ class AnthropicModel(Model):
 
         Such a model signs a thinking block over the block alone, and the
         API requires the blocks of the reply that the pending tool results
-        answer.
+        answer.  The model's name says which it is, until the provider
+        rejects a block as bound to the messages before it
+        (:meth:`drop_stale_reasoning`).
         """
-        return not _checks_thinking_prefix(_claude_profile(self._catalog_model_name))
+        return not self._binds_thinking
 
-    def drop_stale_reasoning(self) -> int:
+    def drop_stale_reasoning(self, rejected: bool = False) -> int:
         """Remove the old thinking blocks with the tool outputs an edit stubbed; return how many.
 
         The agent calls this after it stubbed old tool outputs and arguments
@@ -1132,7 +1144,15 @@ class AnthropicModel(Model):
         earlier model keeps the blocks of its newest reply, which the API
         requires at the start of the assistant message that the pending
         tool results answer.
+
+        Args:
+            rejected: The provider rejected a block as bound to a different
+                conversation.  Only a model that binds its thinking does
+                that, so this one is such a model from here on, whatever
+                its name says (a name of the user's own catalog, which
+                the version grammar does not read), and every block goes.
         """
+        self._binds_thinking |= rejected
         replies = [
             message for message in self.conversation
             if message.get("role") == "assistant" and isinstance(message.get("content"), list)
@@ -1529,6 +1549,7 @@ class AnthropicModel(Model):
             self._stream_stall_timeout * (_MAX_RETRIES + 1) + _RETRY_BACKOFF_SECONDS
         )
         stream = None
+        final: Any = None
         try:
             with contextlib.ExitStack() as stack:
                 with RequestAbortWatchdog(
@@ -1547,7 +1568,6 @@ class AnthropicModel(Model):
                 events = stack.enter_context(
                     self._watched_events(stream, "anthropic-stream-abort-watchdog")
                 )
-                final: Any = None
                 raw_tool_inputs: dict[int, str] = {}
                 for event in events:
                     # The SDK accumulates message_start / message_delta
@@ -1609,8 +1629,11 @@ class AnthropicModel(Model):
                         "text and any tool-call arguments may be incomplete."
                     )
                 _check_streamed_tool_inputs(raw_tool_inputs, final, self.model_name)
-                self._rejected_response = None
-                return final
+            # Cleared only now that the stream and its watchdog are closed:
+            # a Stop raised by that cleanup must still find the finished,
+            # charged message in ``_rejected_response`` to bill it.
+            self._rejected_response = None
+            return final
         except (httpx2.TimeoutException, APITimeoutError, TimeoutError) as exc:
             # The byte-level clock (httpx2 / the SDK, which is the only
             # clock BEFORE the headers arrive) or the event-level one
@@ -1816,9 +1839,12 @@ class AnthropicModel(Model):
         # when the task is stopped (the keep-alive thread carries the
         # task's stop event).  Nothing else sends through the client while
         # a ping is in flight: the agent thread is inside the tool call.
-        create = self.client.with_options(max_retries=0).messages.create
+        # The copy is handed the pool the watchdog aborts: the SDK's
+        # Bedrock client gives a copy one of its own otherwise.
+        pool = self.client._client
+        create = self.client.with_options(max_retries=0, http_client=pool).messages.create
         with RequestAbortWatchdog(
-            self.client._client, KEEP_ALIVE_TIMEOUT_SECONDS, "anthropic-keepalive-abort-watchdog"
+            pool, KEEP_ALIVE_TIMEOUT_SECONDS, "anthropic-keepalive-abort-watchdog"
         ):
             try:
                 return create(**kwargs)

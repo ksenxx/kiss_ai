@@ -114,6 +114,48 @@ class TestOutline:
         )
         assert tools.Read("big.py", force=True).startswith("big.py: 212 lines,")
 
+    def test_a_long_line_is_matched_by_its_pieces_joined_and_listed_clipped(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A definition is found past the first piece of its line; a long entry is clipped.
+
+        Review of S16/F4: the file is read in pieces of 65,536
+        characters and the outline was made from the first piece of
+        each line.  A definition whose indentation or parameters end
+        past it was not listed, and a ``function`` the piece ended with
+        was a definition whatever followed it (as one the part kept of
+        a longer line ends with would be).  An entry longer than the
+        output budget is clipped to it, and says so; so does one that
+        shows less than the budget of a line not kept to its end.  The
+        part kept of a line is its first budget + 65,536 characters,
+        wherever its pieces end (review of FX01c: it ran on to the end
+        of the piece that passed them, one character past the bound
+        when the piece began with a carried ``\\r``).
+        """
+        monkeypatch.setattr(DEFAULT_CONFIG, "read_outline_lines", 5)
+        budget = DEFAULT_CONFIG.tool_output_default_chars
+        kept = budget + 65_536
+        clipped = f" [line clipped to {budget} chars]"
+        tools = UsefulTools(work_dir=str(tmp_path))
+        long = 'def a(): "' + "q" * 65_536 + '"'
+        indented = " " * 65_536 + "def b(): pass"
+        arrow = "const c = (" + "q," * 32_770 + "z) => 1;"
+        word = "const d =" + " " * (kept - 17) + "functionx"  # ``function`` ends the part kept
+        spaced = "def f():" + " " * 140_000 + "pass"
+        # its name begins past the part kept, in a piece that begins with a carried ``\r``
+        late = " " * 65_535 + "\r" + " " * (kept - 65_540) + "def g(): pass"
+        lines = [long, indented, arrow, word, spaced, late, *["def e(): pass"] * 4, "x = 1"]
+        text = "\n".join(lines) + "\n"
+        (tmp_path / "long.py").write_text(text)
+        assert tools.Read("long.py") == (
+            f"long.py: 11 lines, {len(text):,} chars. Too long to send whole; outline of its 8 "
+            f"definitions/headings (line: text):\n1: {long[:budget]}{clipped}\n2: def b(): pass\n"
+            f"3: {arrow[:budget]}{clipped}\n5: def f():{clipped}\n"
+            "7: def e(): pass\n8: def e(): pass\n9: def e(): pass\n10: def e(): pass\n\n"
+            "Read a range with Read(file_path, start_line=N, max_lines=M), or "
+            'locate text with Bash("grep -n PATTERN FILE").'
+        )
+
     def test_outline_caps_entries(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(DEFAULT_CONFIG, "read_outline_lines", 100)
         tools = UsefulTools(work_dir=str(tmp_path))

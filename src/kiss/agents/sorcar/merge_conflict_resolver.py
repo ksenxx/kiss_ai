@@ -39,6 +39,9 @@ logger = logging.getLogger(__name__)
 MergeAgentRunner = Callable[[Any, str, Path], None]
 """``(parent_agent, prompt, repo)``: run the merge agent on *repo*."""
 
+CONFLICT_TASK_OPENING = "Repository: "
+"""How :func:`conflict_task` starts: among a task's side-channel history rows, a resolver run."""
+
 
 def conflict_task(
     repo: Path,
@@ -64,7 +67,7 @@ def conflict_task(
     """
     files = "\n".join(f"- {path}" for path in conflicted_files)
     lines = [
-        f"Repository: {repo}",
+        f"{CONFLICT_TASK_OPENING}{repo}",
         f"Checked-out branch (ours, HEAD): {original_branch}",
         f"Incoming task branch (theirs): {branch}",
         "",
@@ -103,7 +106,7 @@ def run_merge_sea(parent_agent: Any, prompt: str, repo: Path) -> None:
     Raises:
         RuntimeError: When the ``merge`` SEA cannot be resolved.
     """
-    from kiss.agents.sorcar.agent_dispatch import dispatch_epoch, resolve_agent
+    from kiss.agents.sorcar.agent_dispatch import dispatch_epoch, model_snapshot, resolve_agent
     from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
     from kiss.agents.sorcar.sea_commands import evaluate_sea, load_sea
     from kiss.agents.sorcar.sorcar_agent import (
@@ -111,6 +114,7 @@ def run_merge_sea(parent_agent: Any, prompt: str, repo: Path) -> None:
         _live_agent_usage,
         _notify_subagent_done,
         _persisted_task_id,
+        launch_model_config,
         subagent_parent_tab_id_of,
     )
 
@@ -125,14 +129,18 @@ def run_merge_sea(parent_agent: Any, prompt: str, repo: Path) -> None:
     sub_tab_id = f"task-{parent_task_id or parent_tab_id}__merge"
     merge = evaluate_sea([load_sea(Path(resolved[0]))], prompt)
     merge_settings = merge.settings
-    model_name = str(merge_settings.get("model") or parent_agent.model_name)
+    # One snapshot of the parent's model, configuration and record of whose
+    # endpoint that is (its ``set_model`` may be running): the record was
+    # made by the read that configured the parent, this launch is later.
+    parent_model, parent_config, stated = model_snapshot(parent_agent)
+    model_name = str(merge_settings.get("model") or parent_model)
     agent = ChatSorcarAgent("Merge conflict resolver")
+    model_config, agent._launch_owns_endpoint = launch_model_config(
+        model_name, parent_config if model_name == parent_model else None, stated,
+    )
     agent._tab_id = sub_tab_id
     # A side channel like the task-update child: its work is the
-    # resolved merge in the parent's repo, so its finished tab is not
-    # worth reopening.  The daemon replays a finished side channel as
-    # ``subagentDone`` instead of ``openSubagentTab`` (see
-    # ``server._is_side_channel_row``).
+    # resolved merge in the parent's repo.
     agent._subagent_info = {
         "parent_task_id": parent_task_id,
         "parent_tab_id": parent_tab_id,
@@ -150,10 +158,7 @@ def run_merge_sea(parent_agent: Any, prompt: str, repo: Path) -> None:
             work_dir=str(repo),
             printer=printer,
             max_budget=merge_settings["max_budget"],
-            model_config=(
-                getattr(parent_agent, "model_config", None)
-                if model_name == parent_agent.model_name else None
-            ),
+            model_config=model_config,
             system_prompt_hook=merge.system_prompt_hook,
             tools_hook=merge.tools_hook,
             llm_call_hook=merge.llm_call_hook,

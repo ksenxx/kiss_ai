@@ -44,10 +44,6 @@ from kiss.core.utils import (
 # ending with a letter or digit (memoryfield spec, "Pages").
 PAGE_NAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$")
 
-# Files that sync tools, editors and operating systems leave behind; the
-# spec requires these to be ignored even when they end in ``.md``.
-DEBRIS_NAMES = frozenset({".DS_Store", "desktop.ini", "Thumbs.db"})
-
 # Pages SHOULD NOT exceed this many bytes; indexers only embed this prefix.
 MAX_PAGE_BYTES = 8192
 
@@ -161,15 +157,6 @@ def read_page_text(path: Path) -> str:
 def now_iso() -> str:
     """Return the current UTC time as a quoted-safe ISO 8601 string (``...Z``)."""
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def is_debris(filename: str) -> bool:
-    """Return True for files that must never be treated as pages.
-
-    Args:
-        filename: A bare filename inside the memory directory.
-    """
-    return filename in DEBRIS_NAMES or filename.endswith("~") or ".sync-conflict-" in filename
 
 
 def is_valid_page_name(name: str) -> bool:
@@ -306,8 +293,12 @@ class MemoryDir:
         """Map the name of every page in the directory to its ``lstat`` result.
 
         One ``os.scandir`` pass: sub-directories, symlinks, non-``.md``
-        files, debris files and invalid names are skipped, and no page is
-        opened.  A page deleted during the scan is left out.
+        files and invalid names are skipped, and no page is opened.  The
+        files that sync tools, editors and operating systems leave behind,
+        which the spec requires to be ignored, are among them: ``.DS_Store``,
+        ``desktop.ini``, ``Thumbs.db`` and ``notes.md~`` do not end in
+        ``.md``, and the dot in ``notes.sync-conflict-1.md`` is in no page
+        name.  A page deleted during the scan is left out.
         """
         stats: dict[str, os.stat_result] = {}
         try:
@@ -319,7 +310,6 @@ class MemoryDir:
                 stem = entry.name[:-3]
                 if (
                     not entry.name.endswith(".md")
-                    or is_debris(entry.name)
                     or not is_valid_page_name(stem)
                     or not entry.is_file(follow_symlinks=False)
                 ):

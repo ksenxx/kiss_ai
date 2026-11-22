@@ -196,18 +196,17 @@ function testClosedTabIsNotReissued() {
   const tabB = win._testApi.getActiveTabId();
   clickTab(win, tabA);
 
+  // The daemon's task-text echo makes B a used chat ("+" on a chat that
+  // is still new only focuses the composer).
+  send(win, {type: 'setTaskText', text: 'doomed task', tabId: tabB});
   sendToolResult(win, tabA, 'kept ./src/kept.py');
   sendToolResult(win, tabB, 'doomed ./src/doomed.py');
 
   outage(win);
-  // Only the chat on screen has an entry (and a close button) on the
-  // group strip: bring B forward and close it there.
+  // An idle chat is closed by leaving it: bring B forward and press
+  // "+", which moves to the new chat A and closes B.
   clickTab(win, tabB);
-  const closeBtn = win.document.querySelector(
-    `#tab-list .chat-tab[data-tab-id=${JSON.stringify(tabB)}] .chat-tab-close`,
-  );
-  assert.ok(closeBtn, 'tab B must have a close button');
-  closeBtn.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  win.document.getElementById('new-chat-btn').click();
   assert.ok(
     !win._testApi.openTabs().some(t => t.id === tabB),
     'tab B is closed',

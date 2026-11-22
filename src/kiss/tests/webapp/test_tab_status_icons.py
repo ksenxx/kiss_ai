@@ -21,18 +21,15 @@ regression in the class wiring (``main.js``) or in the shared
   filled ``--green``;
 * failed root tab    -> ``.chat-tab-fail.status-cross``: SVG-masked box
   filled ``--red``;
-* running sub-agent  -> ``.subagent-indicator.status-spinner`` (purple,
-  the sub-agent tab's colour);
-* finished sub-agent -> ``.subagent-indicator.done.status-tick`` (purple);
-  a live ``subagentDone`` closes the tab, so the done state is reached
-  through ``openSubagentTab {isDone: true}`` as the daemon sends it on
-  replay.
+* sub-agent tab      -> ``.subagent-indicator.status-spinner`` (purple,
+  the sub-agent tab's colour): a sub-agent has a tab only while it
+  runs, and its ``subagentDone`` closes the tab.
 
 There is no row of chat tabs any more: the group strip ``#tab-list``
 lists the chat on screen plus its sub-agent tabs and is displayed only
 when it has more than one entry.  A lone chat's entry is rendered but
-hidden, so the root-tab tests first attach a finished sub-agent (as the
-daemon replays one) to make the chat's header visible on the strip.
+hidden, so the root-tab tests first attach a sub-agent (as the daemon
+announces one) to make the chat's header visible on the strip.
 
 The harness page is shared with ``test_history_failed_red_cross.py``.
 """
@@ -107,12 +104,11 @@ def _root_tab_id(page) -> str:
 
 
 def _show_strip(page, root_id: str) -> None:
-    """Attach a finished sub-agent to *root_id* so the group strip (the
-    chat's header) is displayed; the chat stays the active tab."""
-    _post(page, {"type": "openSubagentTab", "tab_id": root_id + "__sub_done",
-                 "parent_tab_id": root_id, "description": "finished child",
-                 "task_id": "task-finished-child", "isSubagentTab": True,
-                 "isDone": True})
+    """Attach a sub-agent to *root_id* so the group strip (the chat's
+    header) is displayed; the chat stays the active tab."""
+    _post(page, {"type": "openSubagentTab", "tab_id": root_id + "__sub_child",
+                 "parent_tab_id": root_id, "description": "child",
+                 "task_id": "task-child", "isSubagentTab": True})
     assert _root_tab_id(page) == root_id
     assert page.evaluate(
         "() => getComputedStyle(document.getElementById('tab-bar')).display"
@@ -215,32 +211,25 @@ def test_root_tab_failed_task_shows_red_cross(_browser) -> None:
         context.close()
 
 
-def test_subagent_tab_spinner_and_purple_tick(_browser) -> None:
-    """A sub-agent tab spins in purple while the sub-agent runs; a
-    sub-agent the daemon announces as already finished (``isDone`` on
-    ``openSubagentTab``, as on replay) shows the purple tick with the
-    ``done`` marker."""
+def test_subagent_tab_spins_in_purple(_browser) -> None:
+    """A sub-agent tab spins in purple from its announcement on, and its
+    ``subagentDone`` takes the tab off the strip."""
     context, page = _open_history_page(_browser)
     try:
         parent_id = _root_tab_id(page)
         _post(page, {"type": "status", "running": True, "tabId": parent_id,
                      "startTs": 1700000000000, "taskId": "parent-task"})
-        running_id, done_id = "sub-tab-running", "sub-tab-done"
-        for sub_id, is_done in ((running_id, False), (done_id, True)):
-            _post(page, {"type": "openSubagentTab", "tab_id": sub_id,
-                         "parent_tab_id": parent_id,
-                         "description": "child job " + sub_id,
-                         "task_id": "task-" + sub_id, "isSubagentTab": True,
-                         "isDone": is_done})
-        _post(page, {"type": "status", "running": True, "tabId": running_id,
-                     "startTs": 1700000000000, "taskId": "task-" + running_id})
+        sub_id = "sub-tab-running"
+        _post(page, {"type": "openSubagentTab", "tab_id": sub_id,
+                     "parent_tab_id": parent_id,
+                     "description": "child job " + sub_id,
+                     "task_id": "task-" + sub_id, "isSubagentTab": True})
+        _assert_spinner(_icon(page, sub_id), _PURPLE, "subagent-indicator")
+        _post(page, {"type": "status", "running": True, "tabId": sub_id,
+                     "startTs": 1700000000000, "taskId": "task-" + sub_id})
+        _assert_spinner(_icon(page, sub_id), _PURPLE, "subagent-indicator")
 
-        running = _icon(page, running_id)
-        _assert_spinner(running, _PURPLE, "subagent-indicator")
-        assert "done" not in running["icon"].split(), running
-
-        done = _icon(page, done_id)
-        _assert_mask_icon(done, "status-tick", _PURPLE, "subagent-indicator")
-        assert "done" in done["icon"].split(), done
+        _post(page, {"type": "subagentDone", "tab_id": sub_id, "task_id": "task-" + sub_id})
+        assert _icon(page, sub_id) == {"error": "no tab " + sub_id}
     finally:
         context.close()

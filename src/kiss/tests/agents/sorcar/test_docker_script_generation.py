@@ -37,6 +37,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from collections.abc import Callable
 from pathlib import Path
@@ -179,6 +180,55 @@ def planting_bash(target: Path, victim: Path, command: str, description: str) ->
         link = shlex.quote(f"{target.parent}/.{target.name}.") + "$$.tmp"
         command = f"ln -s {shlex.quote(str(victim))} {link}\nexec {command}"
     return host_bash_without_python(command, description)
+
+
+#: The ``sitecustomize`` of the python a held Edit runs: a trace hook on the
+#: real editor program (nothing of it is replaced) that, once the program
+#: holds the text ``KISS_HOLD_TEXT`` (the file it edits, read), makes the
+#: file ``KISS_HELD`` and waits for the file ``KISS_RELEASED``, 30 s at most.
+_HOLD_PYTHON_EDITOR = '''\
+import os
+import sys
+import time
+
+_TEXT = os.environ["KISS_HOLD_TEXT"]
+
+
+def _hold(frame, event, arg):
+    if frame.f_code.co_filename != "<string>":
+        return None
+    texts = [v for v in list(frame.f_locals.values()) if isinstance(v, (str, bytes))]
+    if _TEXT in texts or _TEXT.encode() in texts:
+        sys.settrace(None)
+        open(os.environ["KISS_HELD"], "w").close()
+        deadline = time.monotonic() + 30
+        while not os.path.exists(os.environ["KISS_RELEASED"]) and time.monotonic() < deadline:
+            time.sleep(0.01)
+        return None
+    return _hold
+
+
+sys.settrace(_hold)
+'''
+
+#: The same hold for the Perl editor, as the debugger hook of ``PERL5OPT=-d``
+#: (called before each statement): it waits once the handle last read from is
+#: on the file ``KISS_HOLD_FILE`` names as ``device:inode``.
+_HOLD_PERL_EDITOR = (
+    "sub DB::DB { return if $DB::held; local $!; my $h = ${^LAST_FH};"
+    " return unless $h && defined fileno($h); my @s = stat($h);"
+    ' return unless @s && "$s[0]:$s[1]" eq $ENV{KISS_HOLD_FILE}; $DB::held = 1;'
+    ' open(my $g, ">", $ENV{KISS_HELD}); close($g); my $n = 0;'
+    " select(undef, undef, undef, 0.01) while !-e $ENV{KISS_RELEASED} && $n++ < 3000; }"
+)
+
+
+def exporting_bash(
+    bash: Callable[[str, str], str], variables: dict[str, str], command: str, description: str,
+) -> str:
+    """Run *command* through *bash* with *variables* exported to what it starts."""
+    exports = " ".join(f"{name}={shlex.quote(value)}" for name, value in variables.items())
+    return bash(f"export {exports}\n{command}", description)
 
 
 def _read_bytes(path: str) -> bytes:
@@ -781,6 +831,58 @@ class TestDockerToolsWithoutDocker(unittest.TestCase):
         self.assertEqual(
             sorted(p.name for p in self.dir.iterdir()), ["adir", "first", "link", "second"],
         )
+
+    @gnu_coreutils_only
+    def test_both_editors_publish_to_the_file_they_read(self) -> None:
+        """A link repointed while an Edit runs sends its text to no other file (S5/F1).
+
+        Both editors read the text through the link and resolved the
+        link again to publish it: repointed in between, the file it
+        named by then was overwritten with the edited text of the
+        first, and the Edit reported success.  As the Write, which
+        resolves its target once, they read and publish the file the
+        link named when they began.  Each editor is held once it has
+        read the file (a trace hook of its interpreter on the real
+        program); the link is repointed meanwhile.
+        """
+        hooks = self.dir / "hooks"
+        hooks.mkdir()
+        (hooks / "sitecustomize.py").write_text(_HOLD_PYTHON_EDITOR, encoding="utf-8")
+        read, other, link = self.dir / "read", self.dir / "other", self.dir / "link"
+        held, released = self.dir / "held", self.dir / "released"
+        for bash in (host_bash, host_bash_without_python):
+            read.write_text("old from read\n", encoding="utf-8")
+            other.write_text("the other's own\n", encoding="utf-8")
+            link.symlink_to(read)
+            identity = read.stat()
+            variables = {
+                "PYTHONPATH": str(hooks), "KISS_HOLD_TEXT": "old from read\n",
+                "PERL5OPT": "-d", "PERL5DB": _HOLD_PERL_EDITOR,
+                "KISS_HOLD_FILE": f"{identity.st_dev}:{identity.st_ino}",
+                "KISS_HELD": str(held), "KISS_RELEASED": str(released),
+            }
+            tools = DockerTools(functools.partial(exporting_bash, bash, variables))
+            results: list[str] = []
+            edit = threading.Thread(
+                target=_collect, args=(results, tools.Edit, str(link), "old", "new"),
+            )
+            edit.start()
+            try:
+                deadline = time.monotonic() + 30
+                while not held.exists() and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                self.assertTrue(held.exists(), "the editor never read the file")
+                link.unlink()
+                link.symlink_to(other)
+            finally:
+                released.touch()
+                edit.join(60)
+            self.assertFalse(edit.is_alive())
+            self.assertIn("Successfully replaced 1 occurrence", results[0])
+            self.assertEqual(other.read_text(encoding="utf-8"), "the other's own\n")
+            self.assertEqual(read.read_text(encoding="utf-8"), "new from read\n")
+            for path in (link, held, released):
+                path.unlink()
 
     @gnu_coreutils_only
     def test_write_keeps_a_hard_linked_file_on_its_inode(self) -> None:

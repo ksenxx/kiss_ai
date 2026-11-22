@@ -25,8 +25,22 @@ import time
 import unittest
 from typing import Any
 
+from kiss.agents.sorcar import persistence as th
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
+from kiss.core.tool_interrupt import (
+    ToolCallInterrupted,
+    end_tool_call,
+    new_tool_call,
+    register_tool_call,
+    unregister_tool_call,
+    wait_interruptible,
+)
 from kiss.server import agent_state
+from kiss.tests.server.two_client_harness import TwoClientHarness
+
+HIDDEN_CHAT, SHOWN_CHAT = "chat-rebound-hidden", "chat-rebound-shown"
+SOURCE_TAB, OTHER_TAB = "tab-rebound-source", "tab-rebound-other"
+HIDDEN_RUN = "run-token-rebound-hidden"
 
 
 def _make_server() -> Any:
@@ -364,6 +378,129 @@ class TestMultiClientStopResolvesSubscriber(unittest.TestCase):
         )
 
         server._stop_task(viewer_tab_id)
+
+
+def _play_run(state: agent_state.AgentState, record: list[str]) -> None:
+    """Play a run's task thread: one ``Bash`` call after another until the run is stopped.
+
+    A call the panel's Stop interrupts ends there and the next one
+    starts, as in the agent's loop.  The run's end leaves the state as
+    ``_run_task`` does: no thread and no stop signal.
+    """
+    stop = state.stop_event
+    assert stop is not None
+    try:
+        while not stop.is_set():
+            call = new_tool_call("Bash")
+            register_tool_call(call)
+            try:
+                wait_interruptible(stop, 60.0)
+                end_tool_call(call)
+            except ToolCallInterrupted:
+                record.append("interrupted")
+            finally:
+                unregister_tool_call(call)
+    except KeyboardInterrupt:  # the Stop watchdog's, had the thread outlived its grace
+        pass
+    finally:
+        record.append("stopped")
+        with agent_state.STATE_LOCK:
+            state.stop_event = state.task_thread = None
+            state.is_task_active = False
+
+
+class TestStopFromATabBoundToAnotherChat(TwoClientHarness):
+    """The Stop of a tab that a replay bound to another chat than its run's.
+
+    Two tasks run, each launched from its own tab; the worker threads
+    are played by the test and everything between them and the page
+    (the replay, the routing, the acknowledgements) is the real daemon
+    on a loopback connection.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.states: dict[str, agent_state.AgentState] = {}
+        self.records: dict[str, list[str]] = {HIDDEN_CHAT: [], SHOWN_CHAT: []}
+        self.workers: list[tuple[threading.Event, threading.Thread]] = []
+        for chat, tab in ((HIDDEN_CHAT, SOURCE_TAB), (SHOWN_CHAT, OTHER_TAB)):
+            task_id, _ = th._add_task(f"the task of {chat}", chat_id=chat)
+            stop = threading.Event()
+            state = agent_state.AgentState(
+                task_id, chat_id=chat, tab_id=tab, server_owned=True, is_task_active=True,
+                stop_event=stop,
+            )
+            worker = threading.Thread(
+                target=_play_run, args=(state, self.records[chat]), daemon=True,
+            )
+            state.task_thread = worker
+            self.states[chat] = state
+            self.workers.append((stop, worker))
+            agent_state.register(state)
+            self.server._printer.subscribe_tab(task_id, tab)
+            worker.start()
+        self.states[HIDDEN_CHAT].client_run_token = HIDDEN_RUN
+
+    def tearDown(self) -> None:
+        for stop, worker in self.workers:
+            stop.set()
+            worker.join(timeout=5)
+        super().tearDown()
+
+    def _acks(self, count: int) -> list[bool]:
+        """Whether each of the first *count* Stops of ``SOURCE_TAB`` was accepted, once sent."""
+        page = self.clients[0]
+        self.wait_for(
+            lambda: len(page.of_type("stop_ack", tabId=SOURCE_TAB)) >= count,
+            what=f"{count} stop acknowledgements",
+        )
+        return [bool(ack["accepted"]) for ack in page.of_type("stop_ack", tabId=SOURCE_TAB)]
+
+    def test_stop_reaches_the_task_the_tab_shows(self) -> None:
+        """A Stop pressed in a tab is for the task the tab shows, as what is typed there is.
+
+        ``SOURCE_TAB`` launched the task of ``HIDDEN_CHAT`` and was then
+        resumed onto ``SHOWN_CHAT``, whose task runs too.  Its Stop and
+        the Stop of a tool-call panel went to the run the tab launched
+        and no longer shows: the task on screen ran on, and one its
+        user could not see was cancelled.
+        """
+        agent = self.server._agent_server
+        hidden, shown = self.states[HIDDEN_CHAT], self.states[SHOWN_CHAT]
+        hidden_record, shown_record = self.records[HIDDEN_CHAT], self.records[SHOWN_CHAT]
+        page = self.open_client("page")
+        page.send({"type": "resumeSession", "chatId": SHOWN_CHAT, "tabId": SOURCE_TAB})
+        self.wait_for(
+            lambda: agent._find_viewer_task_states(SOURCE_TAB) == [shown],
+            what="the tab subscribed to the task of the chat it shows",
+        )
+        self.assertIs(agent_state.find_by_tab(SOURCE_TAB), hidden, "the run keeps the tab's state")
+
+        # A panel's Stop names its tool, and both tasks run one of that name.
+        page.send({"type": "interruptTool", "tabId": SOURCE_TAB, "toolName": "Bash"})
+        self.wait_event(page, "tool_interrupt_ack", tabId=SOURCE_TAB, accepted=True)
+        self.wait_for(lambda: hidden_record + shown_record, what="a tool call interrupted")
+        self.assertEqual((hidden_record, shown_record), ([], ["interrupted"]))
+
+        page.send({"type": "stop", "tabId": SOURCE_TAB})
+        self.assertEqual(self._acks(1), [True])
+        self.wait_for(
+            lambda: "stopped" in hidden_record + shown_record, what="a task stopped",
+        )
+        self.assertEqual((hidden_record, shown_record), ([], ["interrupted", "stopped"]))
+        self.workers[1][1].join(timeout=30)
+
+        # The chat the tab shows runs nothing now: there is no task to
+        # stop from it, and the one it does not show is not stopped instead.
+        page.send({"type": "stop", "tabId": SOURCE_TAB})
+        self.assertEqual(self._acks(2), [True, False])
+        self.assertEqual(hidden_record, [])
+        self.assertTrue(self.workers[0][1].is_alive(), "the hidden task was stopped")
+
+        # A Stop naming the hidden run by its token is for that run, whatever the tab shows.
+        page.send({"type": "stop", "tabId": SOURCE_TAB, "taskId": HIDDEN_RUN})
+        self.assertEqual(self._acks(3), [True, False, True])
+        self.wait_for(lambda: hidden_record == ["stopped"], what="the named run stopped")
 
 
 if __name__ == "__main__":

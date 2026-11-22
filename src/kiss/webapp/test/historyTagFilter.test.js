@@ -11,8 +11,17 @@
 'use strict';
 
 const assert = require('assert');
-const {loadMainCss, makePage, send, ofType} = require('./simplify2_harness');
-const {visibleTitles, makeRow, selectFilter} = require('./history_helpers');
+const {makePage, send, ofType} = require('./simplify2_harness');
+const {
+  visibleTitles,
+  makeRow,
+  selectFilter,
+  filterSubmenu,
+  filterOptions,
+  tickedFilterOptions,
+  pressFilterOption,
+  filterRowValue,
+} = require('./history_helpers');
 
 const ALL_TAGS = [
   'work',
@@ -68,35 +77,27 @@ function testDropdownMarkup() {
   const sel = doc.getElementById('hf-tag');
   assert.ok(sel, '#hf-tag must exist');
   assert.strictEqual(sel.tagName, 'SELECT', '#hf-tag is a <select>');
-  assert.ok(
-    doc.getElementById('history-filters-body').contains(sel),
-    'the tag dropdown lives inside the collapsible Filters body',
-  );
-  const pill = sel.parentElement;
-  assert.ok(
-    pill.classList.contains('history-filter-tag'),
-    'the select sits in the .history-filter-tag pill',
-  );
   assert.strictEqual(
-    pill.parentElement,
-    doc.querySelector('.history-filter-bar'),
-    '.history-filter-tag is a direct child of the filter bar',
+    sel.parentElement,
+    filterSubmenu(win, 'tag'),
+    'the select holds the choice of the Tag submenu',
   );
+  assert.ok(sel.hidden, 'the submenu shows option rows, not the select');
+  assert.deepStrictEqual(
+    filterOptions(win, 'tag'),
+    ['All'].concat(ALL_TAGS),
+    'the submenu offers All, then every listable tag',
+  );
+  assert.deepStrictEqual(tickedFilterOptions(win, 'tag'), ['All']);
+  assert.strictEqual(filterRowValue(win, 'tag'), 'All');
   const options = Array.from(sel.options).map(o => o.value);
   assert.deepStrictEqual(
     options,
     [''].concat(ALL_TAGS),
-    'options are "All tags" then every listable tag in classification order ' +
+    'options are "All" then every listable tag in classification order ' +
       '("subagent" is left out: sub-agent runs are never listed)',
   );
   assert.strictEqual(sel.value, '', 'no tag is selected by default');
-  assert.strictEqual(
-    sel.options[0].textContent,
-    'All tags',
-    'the empty option reads "All tags"',
-  );
-  const lbl = doc.querySelector('label[for="hf-tag"]');
-  assert.ok(lbl, 'the select has a <label for="hf-tag">');
   win.close();
   console.log('  ok - #hf-tag dropdown lists every tag');
 }
@@ -105,17 +106,25 @@ function testTagFiltersLoadedRowsAndRefetches() {
   const {win, posted} = makePage();
   send(win, {type: 'history', sessions: SESSIONS, offset: 0});
   assert.strictEqual(visibleTitles(win).length, 3, 'all rows shown at start');
-  const pill = win.document.getElementById('hf-tag').parentElement;
-  assert.ok(!pill.classList.contains('active'), 'pill inactive with no tag');
+  const button = win.document.getElementById('history-filter-btn');
+  assert.ok(!button.classList.contains('is-filtered'), 'no filter is on');
 
   const before = ofType(posted, 'getHistory').length;
-  selectTag(win, 'work');
+  pressFilterOption(win, 'tag', 'work');
   assert.deepStrictEqual(
     visibleTitles(win),
     ['fix the parser bug', 'write the paper'],
     'rows without the tag hide before the daemon answers',
   );
-  assert.ok(pill.classList.contains('active'), 'pill marks the active tag');
+  assert.deepStrictEqual(tickedFilterOptions(win, 'tag'), ['work']);
+  assert.strictEqual(filterRowValue(win, 'tag'), 'work', 'the row names the tag');
+  assert.ok(button.classList.contains('is-filtered'), 'the button says so');
+  assert.strictEqual(
+    button.getAttribute('aria-label'),
+    'Filter and group (1 filter on)',
+  );
+  // The option that is the choice already asks the daemon nothing.
+  pressFilterOption(win, 'tag', 'work');
   const posts = ofType(posted, 'getHistory');
   assert.strictEqual(posts.length, before + 1, 'one refetch per change');
   const req = posts[posts.length - 1];
@@ -138,8 +147,10 @@ function testTagFiltersLoadedRowsAndRefetches() {
   );
 
   selectTag(win, '');
-  assert.strictEqual(visibleTitles(win).length, 3, '"All tags" restores rows');
-  assert.ok(!pill.classList.contains('active'), 'pill inactive again');
+  assert.strictEqual(visibleTitles(win).length, 3, '"All" restores rows');
+  assert.strictEqual(filterRowValue(win, 'tag'), 'All');
+  assert.ok(!button.classList.contains('is-filtered'), 'no filter is on again');
+  assert.strictEqual(button.getAttribute('aria-label'), 'Filter and group');
   assert.strictEqual(
     ofType(posted, 'getHistory')[ofType(posted, 'getHistory').length - 1].tag,
     '',
@@ -211,46 +222,11 @@ function testTagExpandsChatGroups() {
   console.log('  ok - a tag filter unfolds chat groups');
 }
 
-function testTagCss() {
-  const {win} = makePage();
-  loadMainCss(win);
-  const sel = win.document.getElementById('hf-tag');
-  const pill = sel.parentElement;
-  const pillStyle = win.getComputedStyle(pill);
-  assert.strictEqual(
-    pillStyle.display,
-    'inline-flex',
-    'the pill is a flex row',
-  );
-  assert.strictEqual(pillStyle.whiteSpace, 'nowrap', 'the pill never wraps');
-  assert.ok(
-    pillStyle.borderRadius && pillStyle.borderRadius !== '0px',
-    'the pill is rounded',
-  );
-  const idleBackground = pillStyle.background;
-  pill.classList.add('active');
-  assert.notStrictEqual(
-    win.getComputedStyle(pill).background,
-    idleBackground,
-    'an active tag pill is painted differently',
-  );
-  const selStyle = win.getComputedStyle(sel);
-  assert.strictEqual(selStyle.cursor, 'pointer', 'the dropdown is clickable');
-  assert.strictEqual(
-    selStyle.borderStyle,
-    'none',
-    'the dropdown draws no border of its own (the pill is the frame)',
-  );
-  win.close();
-  console.log('  ok - tag dropdown is styled');
-}
-
 function main() {
   testDropdownMarkup();
   testTagFiltersLoadedRowsAndRefetches();
   testTagRidesOnSearchAndScrollRequests();
   testTagExpandsChatGroups();
-  testTagCss();
   console.log('historyTagFilter.test.js: all assertions passed.');
 }
 

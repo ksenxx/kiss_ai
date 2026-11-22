@@ -197,7 +197,7 @@ conversation:
 
 > Check my GitHub auth; if it's missing, sign me in and store the credential.
 
-You do not have to type such a prompt yourself. The right sidebar's **Apps** panel
+You do not have to type such a prompt yourself. The right sidebar's **Connectors** panel
 lists every channel agent with a connected /
 not-connected / unknown badge — the daemon probes them in a short-lived subprocess
 (`python -m kiss.agents.third_party_agents.auth_status`; the result is cached for 30
@@ -205,7 +205,7 @@ seconds). Inside that subprocess every channel is probed concurrently with a 20-
 deadline: a channel still running when it expires gets an unknown badge ("status check
 timed out"), as does one whose agent cannot be built. The subprocess itself has 45
 seconds; if it fails or overruns, the daemon gets no list at all and serves the last
-good result; with none yet, the panel says "Could not check the apps. Press refresh to
+good result; with none yet, the panel says "Could not check the connectors. Press refresh to
 try again." A service enrolled in the Muse
 vault counts as connected, except the six Google services, for which the probe reads
 the local Composio connection record instead — it does not ask Composio whether the
@@ -331,7 +331,7 @@ and `bluebubbles`. Other channels keep their legacy direct-credential path; the
 Google agents go through Composio instead. (The daemon's host table,
 `SERVICE_HOSTS` in `muse_auth/_common.py`, still lists the six Google service names
 — 24 entries in all — so a Google token imported into the vault before the Composio
-switch stays managed there, but no Google agent reads it any more, and the Apps panel
+switch stays managed there, but no Google agent reads it any more, and the Connectors panel
 ignores such stale enrollments.)
 
 The boundary is managed with `python -m kiss.agents.third_party_agents.muse_auth`
@@ -370,7 +370,7 @@ its vault-backed client on the first request it serves (under a per-agent lock, 
 concurrent first requests share one client), not when it is built for its tool list,
 and the enrollment probes (`vault_has_credentials`, which an agent calls to decide
 whether to expose its backend tools, and `enrolled_services`, behind `auth_status`
-and the Apps panel) read the vault directory on disk, so `sea lint`,
+and the Connectors panel) read the vault directory on disk, so `sea lint`,
 a tool-list build or a status probe never launches a daemon; agents that find none
 serialize the start behind `~/.kiss/muse_auth/spawn.lock`, so concurrent agents
 never race to launch two, and a running daemon exits on its own as soon as its
@@ -539,9 +539,10 @@ into may have been closed and the task reopened in another), and it is kept with
 task even when the answer lands after the task has finished. Files attached to the `/ask` message travel with the question to the
 answering run (the side channel passes them as the `attachments` of its
 `daemon_client.run` call), and the answering session's spend is charged to the task you
-asked about. The task-info panel's refresh button (`src/kiss/server/task_update.py`)
-is the same agent answering a fixed question; the panel's live progress text between
-refreshes is read from the task's persisted events and costs no model call.
+asked about. The task-info panel's Task Progress update (`src/kiss/server/task_update.py`)
+is the same agent answering a fixed question, on a schedule while the panel is on screen
+and at once on its refresh button; each run is charged to the task. The question also
+asks for an estimate of the time left, which the panel shows and counts down.
 No configuration or credentials are involved.
 
 > /ask Which files has this task modified so far, and why did the last test run fail?
@@ -628,7 +629,7 @@ explicit target:
 > Post "deploy of v2.3 finished, all green" to the Slack channel #eng.
 
 **2. Authenticate in chat, not in config files** (or click the app in the sidebar's
-Apps panel, which submits an equivalent prompt for you):
+Connectors panel, which submits an equivalent prompt for you):
 
 > Check my GitHub auth; if it's missing, sign me in and store the credential.
 
@@ -787,8 +788,9 @@ is killed, the descendants that left the process group and the parent chain (a
 `setsid` child of a shell that has exited) are found by that mark in `/proc` and
 killed too (`cron_agent._kill_marked`, Linux only). Its environment also carries
 `KISS_CRON_JOB=1`: a task the command starts through `sorcar.run()` (a scheduled
-script) is recorded as a cron run, which the CHATS list hides unless its Cron chip
-is on, while the same script run by hand gets an ordinary row. The tasks of a
+script) is recorded as a cron run, which the CHATS list hides unless the Cron tasks
+row of its Filter and group menu is set to Shown, while the same script run by hand
+gets an ordinary row. The tasks of a
 gateway tick are the exception: they answer a person's message and stay listed.
 Ctrl-C in a `kiss-cron --tick`
 or `--daemon` stops the runs in progress rather than abandoning them

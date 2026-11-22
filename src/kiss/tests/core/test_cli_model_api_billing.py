@@ -34,7 +34,7 @@ from typing import Any
 
 import pytest
 
-from kiss.core import processes
+from kiss.core import processes, stop_signal, tool_interrupt
 from kiss.core.config import DEFAULT_CONFIG
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.kiss_error import KISSError
@@ -43,6 +43,7 @@ from kiss.core.models.claude_code_model import ClaudeCodeModel
 from kiss.core.models.codex_model import CodexModel
 from kiss.core.models.model_info import calculate_cost
 from kiss.tests.conftest import install_cli_script, posix_only
+from kiss.tests.server.pause import Pause
 
 pytestmark = posix_only("the fake CLIs are POSIX scripts")
 
@@ -791,7 +792,7 @@ if mode == "close-stdin":
     time.sleep(60)
 for line in sys.stdin:
     rpc_id = json.loads(line).get("id")
-    if mode == "hang" or rpc_id is None:
+    if mode == "hang" or rpc_id is None or (mode, rpc_id) == ("hang-on-list", 2):
         continue
     if mode == "garbage":
         print("not json", flush=True)
@@ -871,6 +872,45 @@ def test_codex_default_model_is_none_when_the_app_server_does_not_answer(
     assert not ok_pid_path.exists()
 
 
+@pytest.mark.parametrize(("mode", "rpc_id"), [("hang", 1), ("hang-on-list", 2)])
+def test_codex_default_model_ends_on_a_stop_while_the_app_server_is_silent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str, rpc_id: int
+) -> None:
+    """A Stop while the resolver waits for the answer to ``initialize`` or to
+    ``model/list`` ends it with the stop error at once, not with ``None`` at its
+    deadline (15 s later); the server is killed, and no failure is cached."""
+    monkeypatch.setattr(codex_model, "_default_model_cache", {})
+    pid_path = _install_app_server(tmp_path, monkeypatch, mode)
+    env = {**os.environ}
+    stop = threading.Event()
+    outcome: list[Any] = []
+
+    def resolve() -> None:
+        stop_signal.set_thread_stop_event(stop)
+        try:
+            outcome.append(codex_model.codex_default_model(env))
+        except KeyboardInterrupt as error:
+            outcome.append(error)
+        finally:
+            stop_signal.set_thread_stop_event(None)
+
+    def awaiting_that_answer(frame_locals: dict[str, Any]) -> bool:
+        return bool(frame_locals["rpc_id"] == rpc_id)
+
+    task = threading.Thread(target=resolve, daemon=True)
+    with Pause(codex_model._await_rpc_result.__code__, awaiting_that_answer) as held:
+        task.start()
+        assert held.paused.wait(10), "the resolver never waited for that answer"
+    time.sleep(0.3)  # released: inside the wait by now
+    stop.set()
+    task.join(10)
+    assert not task.is_alive(), "the resolver waited for its deadline"
+    assert isinstance(outcome[0], KeyboardInterrupt), outcome
+    _assert_reaped(pid_path)
+    _install_app_server(tmp_path, monkeypatch, "ok")
+    assert codex_model.codex_default_model(env) == "gpt-6.1-sol", "the stop was cached as a failure"
+
+
 def test_codex_default_model_deadline_holds_against_a_notification_backlog() -> None:
     """Queued notifications are not read past the deadline, and a reply
     that is only reached after it is not accepted."""
@@ -939,13 +979,17 @@ def test_codex_default_model_ends_the_app_server_when_its_reader_cannot_start(
     spawned: list[subprocess.Popen[str]] = []
 
     def fail_the_reader_start(frame: FrameType, event: str, arg: Any) -> None:
+        caller = frame.f_back
+        # The reader is started with the task's Stop held back.
+        if caller and caller.f_code is tool_interrupt.call_without_injection.__code__:
+            caller = caller.f_back
         if event == "return" and frame.f_code is processes.popen_process_group.__code__:
             spawned.append(arg)
         elif (
             event == "call"
             and frame.f_code is callee.__code__
-            and frame.f_back is not None
-            and frame.f_back.f_code is codex_model._query_default_model.__code__
+            and caller is not None
+            and caller.f_code is codex_model._query_default_model.__code__
         ):
             sys.setprofile(None)
             raise error

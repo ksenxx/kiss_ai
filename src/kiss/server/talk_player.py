@@ -32,6 +32,8 @@ whose real player runs as a grandchild, each playback child is
 started in its own process group (POSIX) and a timeout kills the
 whole group — killing only the direct child would leave the
 grandchild holding the audio device and overlapping the next clip.
+The child's own exit ends the clip the same way: a player its wrapper
+did not wait for is killed with the group.
 
 A shutdown ends the clip being played the same way and drops the
 queued ones: :func:`shutdown` for the daemon's, and an ``atexit`` hook
@@ -58,7 +60,8 @@ import time
 from typing import Any
 
 from kiss.core.locked import locked_call
-from kiss.core.processes import popen_process_group, terminate_process_group
+from kiss.core.processes import exited_unreaped, popen_process_group, terminate_process_group
+from kiss.core.tool_interrupt import call_without_injection
 
 logger = logging.getLogger(__name__)
 
@@ -142,7 +145,8 @@ def _run_playback(argv: list[str], stop: threading.Event) -> None:
     suppressed so a chatty player never pollutes the daemon's terminal
     or logs.  A hung child is killed after :func:`_playback_timeout`
     seconds, and a playing one as soon as *stop* is set (the player's
-    shutdown) — together with its whole process group on POSIX.
+    shutdown) — together with its whole process group on POSIX.  What
+    a child that exited left running in that group is killed as well.
     """
     try:
         proc: subprocess.Popen[bytes] = popen_process_group(
@@ -154,25 +158,28 @@ def _run_playback(argv: list[str], stop: threading.Event) -> None:
     except OSError:
         return
     deadline = time.monotonic() + _playback_timeout()
-    # Waited for in slices on *stop*: the shutdown only sets it, so this
-    # thread stays the one that signals the group and reaps its leader
-    # (``terminate_process_group`` needs the leader unreaped to the end).
-    while proc.poll() is None:
+    # Watched without being reaped, in slices on *stop*: the shutdown only
+    # sets it, so this thread stays the one that signals the group and
+    # reaps its leader (``terminate_process_group`` needs the leader
+    # unreaped to the end).
+    while not exited_unreaped(proc):
         remaining = deadline - time.monotonic()
         if remaining <= 0 or stop.wait(min(remaining, _EXIT_POLL)):
-            # The child was started in its own process group, so the kill
-            # reaches grandchildren too: a ``KISS_SORCAR_PLAY_CMD`` wrapper
-            # script's real player must die with the wrapper, or it would
-            # keep the audio device and play over the next clip.  SIGTERM
-            # first (players flush and release the device), SIGKILL five
-            # seconds later; the wait after that is bounded, so a SIGKILLed
-            # player stuck in the kernel (an audio device or network file
-            # system that does not return) cannot wedge the sole talk
-            # worker for good.  A child that outlives the wait stays ours;
-            # ``subprocess`` reaps it later from its unreaped-children list
-            # once it finally dies.
-            terminate_process_group(proc)
-            return
+            break
+    # The child was started in its own process group, so the kill
+    # reaches grandchildren too: a ``KISS_SORCAR_PLAY_CMD`` wrapper
+    # script's real player must die with the wrapper, or it would
+    # keep the audio device and play over the next clip.  That holds
+    # for a wrapper that exited on its own as well (a player it did
+    # not wait for), so the group is ended after every clip.  SIGTERM
+    # first (players flush and release the device), SIGKILL five
+    # seconds later; the wait after that is bounded, so a SIGKILLed
+    # player stuck in the kernel (an audio device or network file
+    # system that does not return) cannot wedge the sole talk
+    # worker for good.  A child that outlives the wait stays ours;
+    # ``subprocess`` reaps it later from its unreaped-children list
+    # once it finally dies.
+    terminate_process_group(proc)
 
 
 class TalkPlayer:
@@ -242,7 +249,8 @@ class TalkPlayer:
             self._worker = threading.Thread(
                 target=self._drain, name="sorcar-talk-player", daemon=True
             )
-            self._worker.start()
+            # A task's thread plays its own talk (``WebPrinter._fanout_talk``).
+            call_without_injection(self._worker.start)
         if talk_id:
             self._spoken_ids[talk_id] = None
             if len(self._spoken_ids) > _MAX_TALK_IDS:

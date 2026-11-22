@@ -599,14 +599,22 @@ class FileTokenStorage:
             if refreshed and data.get("tokens") != self._seen_tokens:
                 logger.info("%s changed during a refresh: its answer is dropped", self.path)
                 return
-            data[key] = value
-            if key == "tokens":
-                self._seen_tokens = value
-                expires_in = (value or {}).get("expires_in")
-                data["expires_at"] = (
-                    time.time() + expires_in if isinstance(expires_in, (int, float)) else None
-                )
+            self._set(data, key, value)
             self._write(data)
+
+    def _set(self, data: dict[str, Any], key: str, value: Any) -> None:
+        """Set *key* to *value* in *data*, the stored JSON a ``put`` read under its lock.
+
+        Tokens are remembered as the ones this storage last wrote, and
+        their expiry is recorded next to them.
+        """
+        data[key] = value
+        if key == "tokens":
+            self._seen_tokens = value
+            expires_in = (value or {}).get("expires_in")
+            data["expires_at"] = (
+                time.time() + expires_in if isinstance(expires_in, (int, float)) else None
+            )
 
     async def set_tokens(self, tokens: Any) -> None:
         """Persist *tokens* (an :class:`~mcp.shared.auth.OAuthToken`).
@@ -741,6 +749,9 @@ class _Connection:
     session: Any = None
     tools: list[Any] = field(default_factory=list)
     error: str = ""
+    #: The maintainer's handle for the other threads, a
+    #: ``concurrent.futures.Future`` made before the maintainer is queued
+    #: (:func:`_start_maintainer`); ``None`` for a connection never started.
     task: Any = None
     finished: threading.Event = field(default_factory=threading.Event)
     last_used: float = field(default_factory=time.monotonic)
@@ -1008,7 +1019,6 @@ async def _maintain_connection(
     from mcp import ClientSession
 
     handshake_timeout = CONNECT_TIMEOUT + _CONNECT_STRAGGLER_GRACE_S
-    conn.loop_task = asyncio.current_task()
     try:
         async with AsyncExitStack() as stack:
             try:
@@ -1042,6 +1052,46 @@ async def _maintain_connection(
         _fail_calls(conn)
         conn.ready.set()
         conn.finished.set()
+
+
+def _start_maintainer(conn: _Connection, auth: Any, health_interval: float) -> None:
+    """Loop-thread side of :meth:`MCPManager._connection_for`: run *conn*'s maintainer.
+
+    The caller made ``conn.task``, the maintainer's handle, before it
+    queued this callback, so the record holds the handle wherever a Stop
+    interrupts the submission (``run_coroutine_threadsafe`` returned its
+    handle only after queueing the maintainer, to a caller that then
+    never stored it).  The handle ends as the maintainer does, and
+    cancelling it cancels the maintainer; one cancelled before this
+    runs starts nothing.
+
+    Args:
+        conn: The connection record, its handle pending.
+        auth: Optional ``httpx.Auth`` for remote transports.
+        health_interval: Seconds between idle health pings.
+    """
+    if conn.task.cancelled():
+        conn.ready.set()
+        conn.finished.set()
+        return
+    task = asyncio.get_running_loop().create_task(_maintain_connection(conn, auth, health_interval))
+    conn.loop_task = task
+    conn.task.add_done_callback(functools.partial(_cancel_task, task))
+    task.add_done_callback(functools.partial(_hand_over, conn.task))
+
+
+def _abandon_start(conn: _Connection) -> None:
+    """Loop-thread side of a :meth:`MCPManager._connection_for` that a Stop interrupted.
+
+    The maintainer the interrupted submission did queue is told to stop.
+    One it never queued has nothing to unwind: its handle is ended here,
+    for the shutdown that would wait on it.
+    """
+    conn.stop.set()
+    if conn.loop_task is None:
+        conn.ready.set()
+        conn.finished.set()
+        conn.task.cancel()
 
 
 def _fail_calls(conn: _Connection) -> None:
@@ -1136,9 +1186,21 @@ def _cancel_unless_unwinding(conn: _Connection) -> None:
 
 
 def _cancel_task(task: asyncio.Task[Any], future: concurrent.futures.Future[Any]) -> None:
-    """Done callback of a call's *future*: once it is cancelled, cancel *task* on its loop."""
+    """Done callback of *task*'s handle *future*: a cancelled handle cancels *task* on its loop."""
     if future.cancelled():
         task.get_loop().call_soon_threadsafe(task.cancel)
+
+
+def _hand_over(future: concurrent.futures.Future[Any], task: asyncio.Task[Any]) -> None:
+    """Done callback of *task*: end *future*, its handle for the other threads, as it ended."""
+    if task.cancelled():
+        future.cancel()
+    elif future.set_running_or_notify_cancel():
+        error = task.exception()
+        if error is None:
+            future.set_result(task.result())
+        else:
+            future.set_exception(error)
 
 
 def _settle(
@@ -1148,16 +1210,8 @@ def _settle(
 
     Unless *conn* ended first and failed the call (:func:`_fail_calls`).
     """
-    if conn.calls.pop(task, None) is None:
-        return
-    if task.cancelled():
-        future.cancel()
-    elif future.set_running_or_notify_cancel():
-        error = task.exception()
-        if error is None:
-            future.set_result(task.result())
-        else:
-            future.set_exception(error)
+    if conn.calls.pop(task, None) is not None:
+        _hand_over(future, task)
 
 
 class MCPManager:
@@ -1214,7 +1268,7 @@ class MCPManager:
         self._health_interval_s = health_interval_s
         atexit.register(self.shutdown)
         try:
-            self._thread.start()
+            tool_interrupt.call_without_injection(self._thread.start)
         except BaseException:
             # A Stop landing as the thread starts (the task thread builds
             # the singleton): the construction fails, so nothing would
@@ -1330,22 +1384,25 @@ class MCPManager:
             # The SDK's provider refuses a $KISS_MCP_CLIENT_METADATA_URL that is
             # not HTTPS as it is built: this server's failure, not the batch's.
             return _failed_connection(config, describe_exception(exc))
+        # The handle first, the maintainer queued last (:func:`_start_maintainer`).
+        conn.task = concurrent.futures.Future()
         self._connections[key] = conn
         try:
-            conn.task = asyncio.run_coroutine_threadsafe(
-                _maintain_connection(conn, auth, self._health_interval_s),
-                self._loop,
+            self._loop.call_soon_threadsafe(
+                _start_maintainer, conn, auth, self._health_interval_s,
             )
         except BaseException:
-            # A Stop landed before the handle was stored: unpublish the
-            # record (every later connect would reuse it as a connection
-            # that never becomes ready, its wait returning at once for
-            # want of a task) and stop the maintainer in case it was
-            # already queued.
+            # A Stop landed while the maintainer was being queued: unpublish
+            # the record (every later connect would reuse it as a connection
+            # that never becomes ready) and stop the maintainer in case it
+            # was queued.  An orphan until that maintainer is done: a
+            # shutdown meanwhile must wait for its transport to unwind, or
+            # the child of a handshake still running outlives the manager.
+            self._forget_when_done(conn, conn.task)
             del self._connections[key]
             conn.error = "connection start interrupted"
-            conn.ready.set()
-            self._loop.call_soon_threadsafe(conn.stop.set)
+            self._orphans.append(conn)
+            self._loop.call_soon_threadsafe(_abandon_start, conn)
             raise
         return conn
 
@@ -1615,12 +1672,16 @@ class MCPManager:
         key = _connection_key(conn.config)
         if self._connections.get(key) is not conn:
             return  # another call leased on the same dead session got here first
+        # Owned until its transport has unwound, as an evicted one is, and
+        # wherever a Stop lands on this task thread: the forgetting is
+        # arranged first (harmless while still in the pool), no call sits
+        # between leaving the pool and joining the orphans, and the stop
+        # goes last, to a connection a shutdown would already wait for.
+        self._forget_when_done(conn, conn.task)
         del self._connections[key]
         conn.error = conn.error or "connection closed"
-        self._loop.call_soon_threadsafe(conn.stop.set)
-        # Owned until its transport has unwound, as an evicted one is.
         self._orphans.append(conn)
-        self._forget_when_done(conn, conn.task)
+        self._loop.call_soon_threadsafe(conn.stop.set)
 
     def _reconnect(self, server: str) -> _Connection | None:
         """Rebuild the connection for *server* from its remembered config.
@@ -1907,6 +1968,7 @@ def _schema_parts(
 
 def _declared_schema(
     prop: Any, root: dict[str, Any], resolving: frozenset[str], size: Iterator[int],
+    arguments: bool = False,
 ) -> dict[str, Any]:
     """Reduce one MCP ``inputSchema`` node to the keywords every provider accepts.
 
@@ -1930,12 +1992,18 @@ def _declared_schema(
     it has properties, an array when it has items, and a string
     otherwise, as every provider wants a typed node.
 
+    The tool's *arguments* (its root) are declared as one object, whose
+    properties are the wrapper's parameters: a union there is not
+    declared but joined into the properties (:func:`_join_unions`).
+
     Args:
         prop: The schema node (the root, a property, ``items`` or a
             union member).
         root: The tool's whole ``inputSchema``, where ``$ref`` targets live.
         resolving: The references on the path to this node.
         size: Counts the tool's declaration (see :func:`_schema_parts`).
+        arguments: Whether the node is the tool's arguments: the root,
+            or an alternative of a union of the arguments.
 
     Returns:
         The reduced JSON schema of the node.
@@ -1946,6 +2014,7 @@ def _declared_schema(
     first: dict[str, tuple[Any, frozenset[str]]] = {}
     props: dict[str, tuple[Any, frozenset[str]]] | None = None
     required: list[Any] | None = None
+    unions: list[tuple[list[Any], frozenset[str]]] = []
     for part, path in _schema_parts(prop, root, resolving, size):
         for key, value in part.items():
             first.setdefault(key, (value, path))
@@ -1955,6 +2024,8 @@ def _declared_schema(
                     props.setdefault(str(name), (child, path))
             elif key == "required" and isinstance(value, list):
                 required = [*(required or ()), *value]
+            elif key in ("anyOf", "oneOf") and isinstance(value, list):
+                unions.append((value, path))
     absent: tuple[Any, frozenset[str]] = (None, resolving)
     out: dict[str, Any] = {}
     kind = first.get("type", absent)[0]
@@ -1986,11 +2057,57 @@ def _declared_schema(
         if isinstance(alternatives, list)
         for member in alternatives
     ]
-    if union:
+    if arguments:
+        _join_unions(out, required or [], [
+            [_declared_schema(member, root, via, size, arguments=True) for member in alternatives]
+            for alternatives, via in unions
+        ])
+    elif union:
         out["anyOf"] = [_declared_schema(member, root, via, size) for member, via in union]
     if not out.keys() & {"type", "anyOf"}:
         out["type"] = "object" if "properties" in out else "array" if "items" in out else "string"
     return out
+
+
+def _join_unions(
+    out: dict[str, Any], required: list[Any], unions: list[list[dict[str, Any]]],
+) -> None:
+    """Declare in *out*, a tool's reduced arguments, the arguments its unions declare.
+
+    A tool takes one object, and the wrapper one parameter for each of
+    its properties, so the arguments that a ``oneOf`` / ``anyOf`` of the
+    root declares in its alternatives (a document by its text or by its
+    URL) are declared with the root's own: left in the union, the tool
+    was offered without them, a call no alternative accepts.  The first
+    declaration of a name stands, the root's before a union's;
+    alternatives of one union that declare a name differently give a
+    union of their declarations.  An argument is required when the node
+    requires it or every alternative of one of its unions does, and
+    ``required`` is not narrowed to the names the node declares: an
+    alternative may require what the root declares.
+
+    Args:
+        out: The reduced node, updated in place.
+        required: The names the node's own parts require.
+        unions: The node's unions, each as its reduced alternatives
+            (their own unions joined).
+    """
+    properties = out.setdefault("properties", {})
+    names = [name for name in required if isinstance(name, str)]
+    for alternatives in unions:
+        declarations: dict[str, list[dict[str, Any]]] = {}
+        for alternative in alternatives:
+            for name, declared in alternative["properties"].items():
+                if name not in properties and declared not in declarations.setdefault(name, []):
+                    declarations[name].append(declared)
+        for name, members in declarations.items():
+            properties[name] = members[0] if len(members) == 1 else {"anyOf": members}
+        if alternatives:
+            names += [
+                name for name in alternatives[0]["required"]
+                if all(name in alternative["required"] for alternative in alternatives)
+            ]
+    out["required"] = list(dict.fromkeys(names))
 
 
 def _admits_null(schema: dict[str, Any]) -> bool:
@@ -2064,17 +2181,17 @@ def make_mcp_tool_wrapper(
     tool_name = str(tool.name)
     full_name = f"{_sanitize(server)}_{_sanitize(tool_name)}"
     root = tool.inputSchema if isinstance(tool.inputSchema, dict) else {}
-    # The root is reduced like any node: it may name its arguments by
-    # reference or composition too.
-    schema = _declared_schema(root, root, frozenset(), itertools.count())
-    required = schema.get("required", ())
+    # The root is reduced like any node (it may name its arguments by
+    # reference or composition too), its unions joined into its properties.
+    schema = _declared_schema(root, root, frozenset(), itertools.count(), arguments=True)
+    required = schema["required"]
 
     params: list[inspect.Parameter] = []
     param_map: dict[str, tuple[str, bool]] = {}
     declared_props: dict[str, Any] = {}
     declared_required: list[str] = []
     used_names: set[str] = set()
-    for prop_name, declared in schema.get("properties", {}).items():
+    for prop_name, declared in schema["properties"].items():
         is_required = prop_name in required
         py_name = _python_param_name(prop_name, used_names)
         declared_props[py_name] = declared

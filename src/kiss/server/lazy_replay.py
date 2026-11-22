@@ -68,13 +68,11 @@ DROPPED = -4
 #: The version of the layout: a first piece kept by another one is laid
 #: out again (:func:`first_piece`).  Raised with every change to what
 #: :func:`plan_transcript` or :meth:`Plan.finished` make of a transcript.
-LAYOUT = 1
+LAYOUT = 2
 
 _STREAM_TYPES = frozenset(persistence.STREAM_EVENT_TYPES)
 #: The banners: one plain panel each.
 _BANNER_TYPES = frozenset({"warning", "notice", "error"})
-#: The tools whose call starts sub-agents (``tc-run-parallel`` panels in main.js).
-FANOUT_TOOLS = frozenset({"run_parallel", "run_agent"})
 # "Steps: 7/100": a usage_info without the numeric fields reports its
 # step count in its text (``reportedStepCount`` in main.js).
 _STEPS_TEXT_RE = re.compile(r"Steps:\s*([0-9]+)/[0-9]+")
@@ -522,10 +520,7 @@ class Plan(NamedTuple):
         call before it, a follow-up bar) only ended that reach
         (``stop``), and a tool result opened the Thinking panel that
         the next words of *part* land in (``tool_result``).  One
-        ``lazy_gap`` stands in for each, where it happened; the first
-        of a run also says how many of the run's tool calls were
-        fan-outs (``fanouts``), because the page numbers a fan-out's
-        panel by its place among the transcript's.
+        ``lazy_gap`` stands in for each, where it happened.
 
         A tool result sent may open a Thinking panel that is another
         piece's to show (a result with no call before it is a block
@@ -549,11 +544,7 @@ class Plan(NamedTuple):
                 born = self.births.get(position)
                 stray = stray or (born is not None and born not in wanted)
                 continue
-            if light.type == "tool_call":
-                _leave_out(run, "tool_call", light.ts)
-                if light.name in FANOUT_TOOLS:
-                    run[0]["fanouts"] = run[0].get("fanouts", 0) + 1
-            elif position in self.sealed:
+            if light.type == "tool_call" or position in self.sealed:
                 _leave_out(run, "tool_call", light.ts)
             if self.parts[position] == RESULT:
                 _leave_out(run, "result" if light.type == "result" else "stop")

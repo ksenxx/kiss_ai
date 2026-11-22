@@ -101,8 +101,9 @@ def test_kill_exec_after_concurrent_close_is_a_noop(cleanup: None) -> None:
     mgr.close()
     assert mgr.container is None
     # Unfixed code: AssertionError.  Fixed code: silent no-op — the
-    # tagged process tree died with the container.
-    mgr._kill_exec("deadbeef" * 4, container)
+    # tagged process tree died with the container, and the reaper is
+    # told that nothing is left to sweep.
+    assert mgr._kill_exec("deadbeef" * 4, container) is True
 
 
 def test_bash_racing_close_never_tears(cleanup: None) -> None:

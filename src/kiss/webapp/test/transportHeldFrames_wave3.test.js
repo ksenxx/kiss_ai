@@ -55,8 +55,10 @@ const {test, report} = makeRunner({windows});
 // a worktree, commit, cron or machine action, a sign-in step, a paid
 // transcription or task update, a file or model usage count), or would
 // refuse the second delivery of the very change the first one made (a
-// promptlet edit or delete, a custom model added).  The Explorer and Git
-// actions are once-only too; they are among GIVEN_UP_FRAMES below.
+// promptlet edit or delete, a custom model added, a skill checked and
+// installed).  The Explorer and Git actions and a project's save (a
+// project created a second time) are once-only too; they are among
+// GIVEN_UP_FRAMES below.
 const ONCE_FRAMES = [
   {type: 'submit', prompt: 'run once'},
   {type: 'appendUserMessage', tabId: 'chat-1', prompt: 'steer once'},
@@ -71,9 +73,12 @@ const ONCE_FRAMES = [
   {type: 'selectModel', tabId: 'chat-1', model: 'my-model'},
   {type: 'recordFileUsage', path: 'a.txt'},
   {type: 'getTaskUpdate', tabId: 'chat-1', refresh: true},
+  {type: 'installSkill', id: 'acme/skills/pdf'},
   {type: 'voiceTranscribe', audio: 'UklGRg=='},
   {type: 'startCodexLogin'},
   {type: 'openExternal', url: 'https://example.test/'},
+  {type: 'openInBrowser', path: 'page.html'},
+  {type: 'openWithDefaultApp', path: 'report.docx'},
   {type: 'shareChat', tabId: 'chat-1', html: '<p>chat</p>'},
   {type: 'browserOpen', url: ''},
   {type: 'browserNavigate', tab_id: 'browser-1', action: 'back', url: ''},
@@ -86,16 +91,19 @@ const ONCE_FRAMES = [
   {type: 'updateModels'},
   {type: 'worktreeAction', action: 'merge', tabId: 'chat-1'},
   {type: 'autocommitAction', tabId: 'chat-1'},
+  {type: 'createPrAction', tabId: 'chat-1'},
   {type: 'signinLogin', provider: 'x'},
   {type: 'signinPaste', text: 'code-123'},
   {type: 'signinCancel'},
 ];
 
 // The requests main.js gives up the moment it hears that the connection
-// is gone: a file save ("Save failed: the server connection dropped")
-// and whatever the Explorer or the Source Control view awaited a reply
-// to ("the pending Explorer/Git action was not completed. Try again once
-// it reconnects").  Its reply would find no request any more.
+// is gone: a file save ("Save failed: the server connection dropped"),
+// whatever the Explorer or the Source Control view awaited a reply to
+// ("the pending Explorer/Git action was not completed. Try again once
+// it reconnects") and a project's save ("The server connection dropped
+// before this save was confirmed").  Its reply would find no request
+// any more.
 const SAVE_FRAME = {
   type: 'saveFile',
   path: 'notes.txt',
@@ -116,11 +124,16 @@ const PICK_FRAME = {
   sha: 'abc1234',
   token: 'git:1',
 };
-// Posted while the daemon is unreachable, a save or a show travels in
-// the reconnect's batch; a paste or a cherry-pick waits for its pong
-// (the daemon would act twice on a re-sent one).
+const PROJECT_FRAME = {
+  type: 'saveProject',
+  project: {name: 'Paper'},
+  requestId: 'project-save-1',
+};
+// Posted while the daemon is unreachable, a file save or a show travels
+// in the reconnect's batch; a paste, a cherry-pick or a project's save
+// waits for its pong (the daemon would act twice on a re-sent one).
 const BATCHED_GIVEN_UP = [SAVE_FRAME, SHOW_FRAME];
-const HELD_GIVEN_UP = [PASTE_FRAME, PICK_FRAME];
+const HELD_GIVEN_UP = [PASTE_FRAME, PICK_FRAME, PROJECT_FRAME];
 const GIVEN_UP_FRAMES = [...BATCHED_GIVEN_UP, ...HELD_GIVEN_UP];
 
 // Every other command of the page (media/api.js).  A second delivery
@@ -140,9 +153,19 @@ const REPLAYABLE = [
   'setFavorite',
   'setChatSummary',
   'setChatFavorite',
+  'setPinned',
+  'setChatPinned',
+  'getTaskTags',
+  'setTaskTags',
   'deleteTask',
   'deleteChat',
+  'getProjects',
+  'deleteProject',
+  'setProjectPinned',
+  'setChatProject',
   'getInputHistory',
+  'saveInputDraft',
+  'getInputDraft',
   'getSeaCommands',
   'getWelcomeInfo',
   'getModels',
@@ -156,6 +179,7 @@ const REPLAYABLE = [
   'setMachine',
   'getFiles',
   'openFile',
+  'stageHtmlView',
   'checkPaths',
   'getReplayImage',
   'getTaskEvents',
@@ -163,6 +187,8 @@ const REPLAYABLE = [
   'getMachines',
   'getMachineWorkDirs',
   'getAppsStatus',
+  'getSkills',
+  'searchSkills',
   'getSpendReport',
   'getRecommendations',
   'listDir',

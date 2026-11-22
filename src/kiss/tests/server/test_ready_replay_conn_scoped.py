@@ -82,6 +82,16 @@ def _seed_subagent_row(parent_task_id: str, chat_id: str, text: str) -> str:
     return task_id
 
 
+def _running(task_id: str, chat_id: str, parent_task_id: str) -> AgentState:
+    """Register sub-agent *task_id* of *parent_task_id* as still running; return its state."""
+    state = AgentState(
+        task_id, chat_id=chat_id, tab_id=f"owner-{task_id}", parent_task_id=parent_task_id,
+        server_owned=True, is_task_active=True,
+    )
+    agent_state.register(state)
+    return state
+
+
 class TestReadyReplayConnScoped(TabMirroringBase):
     """``ready``-driven replays are private to the requesting client."""
 
@@ -323,12 +333,13 @@ class TestReadyReplayConnScoped(TabMirroringBase):
     async def test_persisted_subagent_tabs_follow_the_replay_scope(
         self,
     ) -> None:
-        """B's ready reopens the parent's sub-agent tabs for B only."""
+        """B's ready announces the parent's running sub-agent to B only."""
         parent_id, chat_id = self._seed_chat("Parent task", [
             {"type": "prompt", "text": "fan out"},
         ])
         sub_id = _seed_subagent_row(parent_id, chat_id, "child transcript")
         sub_tab = f"tab-p__sub_{sub_id}"
+        self.addCleanup(agent_state.unregister, sub_id, _running(sub_id, chat_id, parent_id))
 
         ws_a = await self._connect_ok()
         await self._ready(ws_a)
@@ -390,21 +401,23 @@ class TestReadyReplayConnScoped(TabMirroringBase):
         )
 
     async def test_deferred_parent_announces_its_subagent_tabs(self) -> None:
-        """A deferred parent's children are announced (offered) as well."""
+        """A deferred parent's running child is announced (offered); its finished one is ended."""
         parent_id, chat_id = self._seed_chat("Parent task", [
             {"type": "prompt", "text": "fan out"},
         ])
         sub_id = _seed_subagent_row(parent_id, chat_id, "child transcript")
         sub_tab = f"tab-p__sub_{sub_id}"
+        self.addCleanup(agent_state.unregister, sub_id, _running(sub_id, chat_id, parent_id))
+        done_id = _seed_subagent_row(parent_id, chat_id, "finished child")
+        kinds = {"task_events", "openSubagentTab", "replay_deferred", "subagentDone"}
         ws_a = await self._connect_ok()
         await self._ready(ws_a)
         await self._bind_tab(ws_a, "tab-p", chat_id)
+        await self._collect(ws_a, kinds)  # what A's own click brought
 
         ws_b = await self._connect_ok()
         await self._ready(ws_b, tab_id="elsewhere")
-        got_b = await self._collect(
-            ws_b, {"task_events", "openSubagentTab", "replay_deferred"},
-        )
+        got_b = await self._collect(ws_b, kinds)
         self.assertEqual(
             [ev.get("tabId") for ev in got_b if ev.get("type") == "task_events"],
             [],
@@ -425,6 +438,16 @@ class TestReadyReplayConnScoped(TabMirroringBase):
             ),
             sorted(["tab-p", sub_tab]),
         )
+        # A finished child has no tab: the page that missed its end is
+        # told it, with the sub-agent's task, and no other page is.
+        self.assertEqual(
+            [
+                (ev.get("tab_id"), ev.get("task_id")) for ev in got_b
+                if ev.get("type") == "subagentDone"
+            ],
+            [(f"tab-p__sub_{done_id}", done_id)],
+        )
+        self.assertEqual(await self._collect(ws_a, kinds), [], "B's ready reached A")
 
     async def test_deferred_offer_names_the_task_whose_subagents_it_announces(
         self,
@@ -462,11 +485,14 @@ class TestReadyReplayConnScoped(TabMirroringBase):
             "scoped": True,
         })
         answer = await self._wait_for_event(
-            ws_b, "openSubagentTab", pred=lambda ev: ev.get("tab_id") == sub_tab,
+            ws_b, "subagentDone", pred=lambda ev: ev.get("tab_id") == sub_tab,
         )
         assert answer is not None, "the child asked about by name was not answered"
-        self.assertIs(answer.get("isDone"), True)
-        self.assertEqual(answer.get("parent_task_id"), old_task)
+        self.assertEqual(answer.get("task_id"), sub_id)
+        self.assertEqual(
+            await self._collect(ws_a, {"subagentDone", "openSubagentTab"}), [],
+            "the answer reached a page that did not ask",
+        )
 
     async def test_legacy_seeding_ready_broadcasts_the_replays(
         self,

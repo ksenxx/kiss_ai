@@ -3,24 +3,23 @@
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
 //
-// End-to-end (jsdom) tests for which tabs a close keeps and which tab
-// comes on screen after it (media/main.js):
-// * "Close Inactive" keeps an idle chat whose sub-agent still runs (a
-//   user's close takes the descendants along, the running one too);
-// * "Close Others" from a file in the content pane closes the chats in
-//   the chat pane without restoring and fetching each one in between;
+// End-to-end (jsdom) tests for which tabs the user can close and which
+// tab comes on screen after a close (media/main.js):
+// * a chat's and a sub-agent's tab have no close control and no
+//   gesture closes them; a file's tab keeps its close control;
 // * closing a file on the stacked (phone) layout lands on the chat that
 //   opened it, not on whichever chat sits next to it in the tab list;
+// * when the page's last chat tab closes (a finished sub-agent's), a
+//   file takes the screen on the stacked layout, a fresh chat anywhere
+//   else, and closing the last file opens a fresh chat too;
 // * widening the window while a file whose chat is gone is on screen
-//   puts another open chat in the chat pane instead of a new chat;
-// * closing a sub-agent's tab that sits behind its own sub-agent's on
-//   the strip lands on their chat instead of a new chat.
+//   puts another open chat in the chat pane instead of a new chat.
 'use strict';
 
 const assert = require('assert');
 const harness = require('./simplify2_harness');
 const h = require('./ui_antipattern_harness');
-const {tabEl, deferChatTranscripts} = require('./subagent_tab_helpers');
+const {tabEl} = require('./subagent_tab_helpers');
 
 const {test, report} = h.makeRunner();
 
@@ -42,33 +41,59 @@ function page(desktop) {
   return {win, posted, tabA, fire};
 }
 
-/** Register chats A (the boot tab), B and C; B and C have deferred
- *  transcripts, fetched the first time they come on screen. */
-function threeChats(win, tabA) {
-  h.send(win, {
-    type: 'tabs_state',
-    tabs: [
-      {tabId: tabA, chatId: '', title: 'A', workDir: ''},
-      {tabId: 'tab-b', chatId: 'c-b', title: 'B', workDir: ''},
-      {tabId: 'tab-c', chatId: 'c-c', title: 'C', workDir: ''},
-    ],
-  });
-  deferChatTranscripts(win);
-}
-
-/** Open /ws/a.py from chat *owner*; returns the file tab's id. */
-function openFile(win, owner) {
+/** Open /ws/*name* from chat *owner*; returns the file tab's id. */
+function openFile(win, owner, name = 'a.py') {
+  const path = '/ws/' + name;
   h.send(win, {
     type: 'fileContent',
     tabId: owner,
-    path: '/ws/a.py',
-    name: 'a.py',
+    path,
+    name,
     content: 'print(1)\n',
     version: 'v1',
   });
-  const file = win._testApi.openTabs().find(t => t.isContentTab);
+  const file = win._testApi.openTabs().find(t => t.contentPath === path);
   assert.ok(file, 'the file opened in a tab');
   return file.id;
+}
+
+const SOLO = 'task__sub_solo';
+
+/**
+ * A page whose last chat tab is a sub-agent's, on screen: the
+ * sub-agent of a task that has no tab (its `new_tab` names no parent)
+ * is a group of its own, and the registry dropped the page's chat.
+ * The files *names*, opened from that chat, stay.
+ */
+function lastChatTabIsASubagents(desktop, names) {
+  const {win, tabA} = page(desktop);
+  const files = names.map(name => openFile(win, tabA, name));
+  h.send(win, {type: 'new_tab', task_id: 'solo', parent_tab_id: '', taskId: ''});
+  h.send(win, {
+    type: 'tabs_state',
+    tabs: [{tabId: tabA, chatId: 'c-a', title: 'A', workDir: ''}],
+  });
+  h.send(win, {type: 'tabs_state', tabs: []});
+  win._testApi.switchToTab(SOLO);
+  // The daemon's answer to the tab's resumeSession: what the sub-agent
+  // did so far, under its task.
+  h.send(win, {
+    type: 'task_events',
+    tabId: SOLO,
+    task: 'solo task',
+    task_id: 'solo',
+    events: [{type: 'text_delta', text: 'working'}],
+  });
+  assert.deepStrictEqual(harness.tabIds(win), [...files, SOLO]);
+  return {win, files};
+}
+
+/** Asserts that the page's one chat tab is a fresh chat, on screen. */
+function assertFreshChatShows(win, why) {
+  const chats = win._testApi.openTabs().filter(t => !t.isContentTab);
+  assert.strictEqual(chats.length, 1, why);
+  assert.ok(!chats[0].isSubagentTab, why);
+  assert.strictEqual(win._testApi.getActiveTabId(), chats[0].id, why);
 }
 
 function closeWithX(win, tabId) {
@@ -77,22 +102,18 @@ function closeWithX(win, tabId) {
   h.click(win, el.querySelector('.chat-tab-close'));
 }
 
-/** The daemon announces sub-agent tab *tabId* below tab *parentId*. */
-function announceSubagent(win, tabId, parentId, extra) {
-  h.send(win, {
-    type: 'openSubagentTab',
-    tab_id: tabId,
-    parent_tab_id: parentId,
-    description: tabId,
-    task_id: 'task-' + tabId,
-    ...extra,
-  });
+/** A press of the middle mouse button on *el*. */
+function middleClick(win, el) {
+  for (const type of ['mousedown', 'mouseup', 'auxclick']) {
+    el.dispatchEvent(
+      new win.MouseEvent(type, {bubbles: true, cancelable: true, button: 1}),
+    );
+  }
 }
 
 async function main() {
-  await test('Close Inactive keeps an idle chat whose sub-agent runs', () => {
-    const {win, posted, tabA} = page(true);
-    threeChats(win, tabA);
+  await test("a chat's and a sub-agent's tab cannot be closed by the user", () => {
+    const {win, posted, tabA} = page(false);
     h.send(win, {
       type: 'openSubagentTab',
       tab_id: 'sub-a',
@@ -100,40 +121,35 @@ async function main() {
       description: 'a sub-agent',
       task_id: 'sub-task-a',
       taskIndex: 0,
-      isSubagentTab: true,
     });
-    h.send(win, {type: 'status', running: false, tabId: tabA});
-    const subA = win._testApi.openTabs().find(t => t.id === 'sub-a');
-    assert.ok(subA.isRunning, 'precondition: the sub-agent runs');
-    h.pickTabMenuItem(win, tabEl(win, tabA), 'Close Inactive');
-    assert.deepStrictEqual(
-      harness.tabIds(win),
-      [tabA, 'sub-a'],
-      'B and C close, A stays',
-    );
-    const closed = h.ofType(posted, 'closeTab').map(m => m.tabId);
-    assert.deepStrictEqual([...closed].sort(), ['tab-b', 'tab-c']);
-    win.close();
-  });
-
-  await test('Close Others from a file in the content pane fetches no chat', () => {
-    const {win, posted, tabA} = page(true);
-    threeChats(win, tabA);
+    // Both layouts' rows: the group strip lists the chat and its
+    // sub-agent, whichever of the two is on screen.
+    for (const shown of [tabA, 'sub-a']) {
+      win._testApi.switchToTab(shown);
+      for (const id of [tabA, 'sub-a']) {
+        const el = tabEl(win, id);
+        assert.ok(el, `tab ${id} is on the strip`);
+        assert.strictEqual(
+          el.querySelector('.chat-tab-close'),
+          null,
+          `tab ${id} has no close control`,
+        );
+        el.focus();
+        for (const key of ['Delete', 'Backspace', 'Escape']) h.key(win, el, key);
+        for (const mod of ['ctrlKey', 'metaKey']) {
+          h.key(win, el, 'w', {[mod]: true});
+          h.key(win, el, 'F4', {[mod]: true});
+        }
+        middleClick(win, el);
+        el.dispatchEvent(new win.MouseEvent('dblclick', {bubbles: true}));
+      }
+    }
+    assert.deepStrictEqual(harness.tabIds(win), [tabA, 'sub-a']);
+    assert.deepStrictEqual(h.ofType(posted, 'closeTab'), []);
+    // A file's tab is the user's to close.
+    win._testApi.switchToTab(tabA);
     const file = openFile(win, tabA);
-    const fileTab = win.document.querySelector(
-      '#content-tab-list .chat-tab[data-tab-id="' + file + '"]',
-    );
-    assert.ok(fileTab, 'the file is on the content pane strip');
-    h.pickTabMenuItem(win, fileTab, 'Close Others');
-    const tabs = win._testApi.openTabs();
-    assert.strictEqual(tabs.length, 2, 'the file and one fresh chat');
-    assert.strictEqual(tabs[0].id, file);
-    assert.ok(!tabs[1].isContentTab && tabs[1].id !== tabA);
-    assert.deepStrictEqual(
-      [...h.scopedFetches(posted, ['tab-b', 'tab-c'])],
-      [],
-      'no chat closed by the same action was restored and fetched',
-    );
+    assert.ok(tabEl(win, file).querySelector('.chat-tab-close'));
     win.close();
   });
 
@@ -157,6 +173,44 @@ async function main() {
     win.close();
   });
 
+  await test('the last chat tab closing leaves a file or a fresh chat', () => {
+    const done = {type: 'subagentDone', tab_id: SOLO, task_id: 'solo'};
+    const shown = w => w._testApi.getActiveTabId();
+
+    // No other tab: a fresh chat opens.
+    let {win, files} = lastChatTabIsASubagents(false, []);
+    h.send(win, done);
+    assertFreshChatShows(win, 'a fresh chat replaces the last tab');
+    assert.strictEqual(harness.tabIds(win).length, 1);
+    win.close();
+
+    // Phone layout, files open: the nearest file takes the screen over
+    // a blank chat surface, and closing the last file opens a chat.
+    ({win, files} = lastChatTabIsASubagents(false, ['a.py', 'b.py']));
+    h.send(win, done);
+    assert.deepStrictEqual(harness.tabIds(win), files);
+    assert.strictEqual(shown(win), files[1], 'the nearest file shows');
+    assert.strictEqual(
+      win.document.getElementById('output').children.length,
+      0,
+      "the sub-agent's transcript is gone from under the file",
+    );
+    closeWithX(win, files[1]);
+    assert.strictEqual(shown(win), files[0], 'then the other file');
+    closeWithX(win, files[0]);
+    assertFreshChatShows(win, 'a fresh chat replaces the last file');
+    assert.strictEqual(harness.tabIds(win).length, 1);
+    win.close();
+
+    // Desktop layout: the chat pane never shows a file, so it gets a
+    // fresh chat and the file stays in the content pane.
+    ({win, files} = lastChatTabIsASubagents(true, ['a.py']));
+    h.send(win, done);
+    assertFreshChatShows(win, 'the chat pane gets a fresh chat');
+    assert.ok(harness.tabIds(win).includes(files[0]), 'the file stays open');
+    win.close();
+  });
+
   await test('widening onto a file whose chat closed shows an open chat', () => {
     const {win, posted, tabA, fire} = page(false);
     h.send(win, {
@@ -167,9 +221,11 @@ async function main() {
       ],
     });
     const file = openFile(win, tabA);
-    win._testApi.switchToTab(tabA);
-    closeWithX(win, tabA);
-    win._testApi.switchToTab(file);
+    // The registry no longer lists chat A; its file stays on screen.
+    h.send(win, {
+      type: 'tabs_state',
+      tabs: [{tabId: 'tab-b', chatId: 'c-b', title: 'B', workDir: ''}],
+    });
     assert.strictEqual(win._testApi.getActiveTabId(), file, 'the file shows');
     const before = h.ofType(posted, 'newChat').length;
     fire(true);
@@ -180,42 +236,6 @@ async function main() {
     );
     assert.strictEqual(win._testApi.getActiveTabId(), 'tab-b');
     assert.deepStrictEqual(harness.tabIds(win), ['tab-b', file]);
-    win.close();
-  });
-
-  await test("closing a sub-agent behind its own sub-agent's tab lands on their chat", () => {
-    const {win, posted, tabA} = page(true);
-    // sub-c dispatched sub-g and finished first: its tab closed, sub-g's
-    // stayed.  sub-c's history was then reopened (behind sub-g on the
-    // strip) and the daemon announced the running sub-g below it again.
-    announceSubagent(win, 'sub-c', tabA);
-    announceSubagent(win, 'sub-g', 'sub-c');
-    h.send(win, {type: 'subagentDone', tab_id: 'sub-c'});
-    announceSubagent(win, 'sub-c', tabA, {isDone: true, reopened: true});
-    announceSubagent(win, 'sub-g', 'sub-c');
-    assert.deepStrictEqual(
-      harness.tabIds(win),
-      [tabA, 'sub-g', 'sub-c'],
-      'precondition: the reopened sub-agent sits behind its own sub-agent',
-    );
-    win._testApi.switchToTab('sub-c');
-    const before = h.ofType(posted, 'newChat').length;
-    closeWithX(win, 'sub-c');
-    assert.deepStrictEqual(
-      harness.tabIds(win),
-      [tabA],
-      'the user closed the sub-agent and, with it, its own sub-agent',
-    );
-    assert.strictEqual(
-      win._testApi.getActiveTabId(),
-      tabA,
-      'their chat, still open, comes on screen',
-    );
-    assert.strictEqual(
-      h.ofType(posted, 'newChat').length,
-      before,
-      'no new chat is opened',
-    );
     win.close();
   });
 

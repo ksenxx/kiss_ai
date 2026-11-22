@@ -483,13 +483,17 @@ class Sea(BaseSea):
     broken = sea_commands.help_text_if_command("/broken CHECK")
     assert broken is not None and broken.startswith("/broken is broken: SEA ")
     assert "settings() key 'kind' was removed: what a SEA is became its base class" in broken
-    # The picker getters are validated too, and a tool without a
-    # ``__name__`` (a partial) is reported by its type, not a crash.
-    picker = _write(
-        tmp_path / "picker_sea.py",
-        """
+    # The picker getters are validated too.  A tool without a ``__name__`` (a
+    # partial) is refused, as the run refuses it: a tool is registered under
+    # that name.  A named function that wraps the partial is a tool.
+    picker_source = """
 import functools
 from kiss.agents.seas.base.base_sea import BaseSea
+
+def show() -> None:
+    '''Print x.'''
+    functools.partial(print, 'x')()
+
 class Sea(BaseSea):
     def description(self):
         return 'Picker.'
@@ -501,12 +505,20 @@ class Sea(BaseSea):
         return 'ok'
 
     def tools(self, tools):
-        return tools + [functools.partial(print, 'x')]
-""",
-    )
+        return tools + [TOOL]
+"""
+    picker = _write(tmp_path / "picker_sea.py", picker_source.replace("TOOL", "show"))
     report = sea_commands.sea_check("picker", picker)
-    assert "tools added: partial" in report
+    assert "tools added: show" in report
     assert "methods defined: tools, register_as_model, on_picked_as_model" in report
+    nameless = _write(
+        tmp_path / "nameless_sea.py",
+        picker_source.replace("TOOL", "functools.partial(print, 'x')"),
+    )
+    assert sea_commands.sea_check("nameless", nameless) == (
+        f"/nameless is broken: tools() of SEA {str(nameless)!r} returned a tool that has "
+        "no __name__ (a partial); a run registers a tool under it: wrap it in a named function"
+    )
     bad_register = _write(
         tmp_path / "bad_register_sea.py",
         """

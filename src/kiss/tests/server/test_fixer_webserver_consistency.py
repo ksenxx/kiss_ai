@@ -210,6 +210,38 @@ class TestPromptTruncationIsByteBased(_LocalHarness):
         self.assertNotIn("setTaskText", types)
         self.assertNotIn("clear", types)
 
+    def test_a_prompt_that_is_not_text_is_refused(self) -> None:
+        """A ``submit`` whose prompt is no string starts no task."""
+        writer, received, _got = self._open_conn()
+        self._send_line(writer, {
+            "type": "submit",
+            "prompt": ["not", "text"],
+            "promptId": "odd-prompt-id",
+            "tabId": "tab-odd",
+            "model": "",
+            "attachments": [],
+        })
+
+        def _refusal() -> dict[str, Any] | None:
+            for d in self._decoded(received):
+                if d.get("type") == "error" and d.get("tabId") == "tab-odd":
+                    return d
+            return None
+
+        self._wait_for(
+            lambda: _refusal() is not None, "never refused", timeout=10.0,
+        )
+        refusal = _refusal()
+        assert refusal is not None
+        self.assertEqual(refusal["code"], "prompt_refused")
+        self.assertIn("must be text", refusal["text"])
+        types = [
+            d["type"] for d in self._decoded(received)
+            if d.get("tabId") == "tab-odd"
+        ]
+        self.assertNotIn("setTaskText", types)
+        self.assertNotIn("clear", types)
+
     def test_lone_surrogate_prompt_does_not_kill_transport(self) -> None:
         """JSON permits escaped lone surrogates; prompt sizing must too.
 

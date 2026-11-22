@@ -18,8 +18,8 @@ Four cues must read at a glance in a real Chromium:
 * the task panel whose chat page is on screen
   (``.running-item.history-active-task``): the same selection fill and
   text, with no accent tint and no outline;
-* a sub-agent's tab in the chat tab strip: purple tint, purple text,
-  purple spinner while it runs and purple tick once it is done.
+* a sub-agent's tab in the chat tab strip: purple tint, purple text
+  and a purple spinner (a sub-agent has a tab only while it runs).
 
 The harness ``:root`` maps ``--purple`` to ``#c586c0`` (see
 ``test_history_failed_red_cross._build_test_page``) and leaves the
@@ -34,7 +34,6 @@ from __future__ import annotations
 import pytest
 from playwright.sync_api import sync_playwright
 
-from kiss.tests.conftest import click_row_menu_item
 from kiss.tests.webapp.test_codex_task_panel_style import (
     _alpha_of,
     _chroma_of,
@@ -47,6 +46,7 @@ from kiss.tests.webapp.test_history_failed_red_cross import (
     _post_history,
     _sample_sessions,
 )
+from kiss.tests.webapp.test_history_filter_menu import pick_filter_option
 
 _REMOTE_CSS = _MEDIA_DIR / "remote-codex.css"
 
@@ -133,7 +133,7 @@ _HEADER_LINE_JS = r"""(expand) => {
   const g = list.querySelector('.history-chat-group');
   const h = g.querySelector('.history-chat-header');
   const menu = h.querySelector(':scope > .sidebar-item-actions');
-  const chevron = menu.querySelector(':scope > .history-chat-collapse');
+  const chevron = h.querySelector(':scope > .history-chat-collapse');
   if (g.classList.contains('collapsed') === expand) chevron.click();
   const lr = list.getBoundingClientRect();
   const gr = g.getBoundingClientRect();
@@ -142,6 +142,7 @@ _HEADER_LINE_JS = r"""(expand) => {
   const tr = h.querySelector('.history-chat-title').getBoundingClientRect();
   const more = h.querySelector(':scope > .sidebar-item-more');
   const mr = more.getBoundingClientRect();
+  const cr = chevron.getBoundingClientRect();
   const menuBox = menu.getBoundingClientRect();
   const row = g.querySelector('.history-chat-body > .sidebar-item');
   const rr = row ? row.getBoundingClientRect() : null;
@@ -159,6 +160,11 @@ _HEADER_LINE_JS = r"""(expand) => {
     moreOnTitleLine: mr.top < tr.bottom && mr.bottom > tr.top,
     moreAfterTitle: mr.left >= tr.right,
     moreToFillEdge: hr.right - mr.right,
+    chevronOnTitleLine: cr.top < tr.bottom && cr.bottom > tr.top,
+    chevronAfterTitle: cr.left >= tr.right,
+    chevronToMore: mr.left - cr.right,
+    chevronBox: [cr.width, cr.height],
+    moreBox: [mr.width, mr.height],
     moreOpensMenu: more.popoverTargetElement === menu,
     menuOpen: menu.matches(':popover-open'),
     menuBox: [menuBox.width, menuBox.height],
@@ -174,13 +180,13 @@ _HEADER_LINE_JS = r"""(expand) => {
 @pytest.mark.parametrize("expand", [False, True])
 def test_chat_panel_header_is_one_inset_line(_browser, expand: bool) -> None:
     """The header row is one line: the title and, at its right end, the
-    "…" button, which does not make the row taller.  The row's fill
-    (pointer, chat on screen) keeps 8px from the list's left and right
-    edges - the room the list keeps for its scrollbar counted in - and
-    1px from the rows above and below, under an 8px corner.  The
-    row's actions (the "Show details" chevron among them) and the
-    chat's "... ago" label are in the button's menu, closed until the
-    button opens it; the task rows the chevron unfolds are indented
+    "Show details" chevron and the "…" button, two boxes of one size
+    that do not make the row taller.  The row's fill (pointer, chat on
+    screen) keeps 8px from the list's left and right edges - the room
+    the list keeps for its scrollbar counted in - and 1px from the rows
+    above and below, under an 8px corner.  The row's actions and the
+    chat's "... ago" label are in the "…" button's menu, closed until
+    the button opens it; the task rows the chevron unfolds are indented
     behind the nesting guide and their fills end where the header's
     does."""
     context, page = _open_history_page(_browser)
@@ -200,6 +206,10 @@ def test_chat_panel_header_is_one_inset_line(_browser, expand: bool) -> None:
         assert probe["moreOnTitleLine"] is True, probe
         assert probe["moreAfterTitle"] is True, probe
         assert probe["moreToFillEdge"] == pytest.approx(4, abs=0.5), probe
+        assert probe["chevronOnTitleLine"] is True, probe
+        assert probe["chevronAfterTitle"] is True, probe
+        assert probe["chevronToMore"] == pytest.approx(0, abs=0.5), probe
+        assert probe["chevronBox"] == probe["moreBox"], probe
         assert probe["moreOpensMenu"] is True, probe
         assert probe["menuOpen"] is False and probe["menuBox"] == [0, 0], probe
         assert probe["launchedText"].endswith(" ago"), probe
@@ -227,31 +237,28 @@ _TITLE_EDGES_JS = r"""() => [...document.querySelectorAll(
     title: left(h.querySelector('.history-chat-title')),
     more: h.getBoundingClientRect().right
       - h.querySelector(':scope > .sidebar-item-more').getBoundingClientRect().right,
-    iconCentre: icon ? left(icon) + icon.getBoundingClientRect().width / 2 : null,
+    iconCentre: left(icon) + icon.getBoundingClientRect().width / 2,
   };
 })"""
 
 
-def test_chat_titles_share_one_edge_with_or_without_a_status_icon(_browser) -> None:
-    """The header's first column is the status icon's slot, reserved
-    whether or not the chat shows one: the titles of a failed, a
-    running, an asking and a settled chat start on one edge (and their
-    "…" buttons end on one), so a title stays put when an icon comes or
-    goes; each icon, the narrow "?" included, is centred in the 12px
-    slot that ends 6px before the title."""
+def test_chat_titles_share_one_edge_behind_any_status_icon(_browser) -> None:
+    """The header's first column is the status icon's slot: the titles
+    of a failed, a running, an asking and a succeeded chat start on one
+    edge (and their "…" buttons end on one), so a title stays put when
+    its icon changes; each icon, the narrow "?" included, is centred in
+    the 12px slot that ends 6px before the title."""
     context, page = _open_history_page(_browser)
     try:
         sessions = _sample_sessions()
         asking = {**sessions[1], "id": "chat-ask", "task_id": 1004, "awaiting_answer": True}
         _post_history(page, [*sessions, asking])
         rows = page.evaluate(_TITLE_EDGES_JS)
-        without_icon = [row for row in rows if row["iconCentre"] is None]
-        assert len(rows) == 4 and len(without_icon) == 1, rows
+        assert len(rows) == 4, rows
         for row in rows:
             assert row["title"] == pytest.approx(rows[0]["title"], abs=0.5), rows
             assert row["more"] == pytest.approx(rows[0]["more"], abs=0.5), rows
-            if row["iconCentre"] is not None:
-                assert row["title"] - row["iconCentre"] == pytest.approx(12, abs=0.5), rows
+            assert row["title"] - row["iconCentre"] == pytest.approx(12, abs=0.5), rows
     finally:
         context.close()
 
@@ -365,7 +372,7 @@ def test_legacy_list_rows_stay_inset(_browser) -> None:
     try:
         _use_remote_surface(page)
         _assert_seamless_panels(page, "the history drawer")
-        page.click("#history-view-toggle")
+        pick_filter_option(page, "group", "None")
         page.wait_for_selector("#history-list.legacy-view > .running-item")
         e = page.evaluate(
             "() => { const r = document.querySelector("
@@ -451,9 +458,9 @@ def _show_active_task(page) -> None:
 
 
 def _fold_active_chat(page) -> None:
-    """The user folds the chat on screen through the chevron line of
-    its "…" menu: the task row hides, the header stays."""
-    click_row_menu_item(page.locator(_ACTIVE_HEADER), ".history-chat-collapse")
+    """The user folds the chat on screen through the chevron left of
+    its "…" button: the task row hides, the header stays."""
+    page.click(_ACTIVE_HEADER + " > .history-chat-collapse")
     page.wait_for_selector(_ACTIVE_ROW, state="hidden")
 
 
@@ -517,66 +524,61 @@ def test_active_chat_header_carries_the_selection_fill(_browser) -> None:
 
 
 def _open_subagent_tabs(page) -> None:
-    """Open a running (``sub-run``) and a finished (``sub-done``)
-    sub-agent tab under the active tab, then uncover the tab strip."""
+    """Open two running sub-agent tabs (``sub-idle``, ``sub-shown``)
+    under the active tab, then uncover the tab strip."""
     parent_id = page.evaluate("() => window._testApi.getActiveTabId()")
     page.evaluate(
         "(id) => window.__post({type: 'status', running: true, tabId: id,"
         " startTs: 1700000000000, taskId: 'parent-task'})",
         parent_id,
     )
-    for sub_id, is_done in (("sub-run", False), ("sub-done", True)):
+    for sub_id in ("sub-idle", "sub-shown"):
         page.evaluate(
-            "([id, parent, done]) => window.__post({type: 'openSubagentTab',"
+            "([id, parent]) => { window.__post({type: 'openSubagentTab',"
             " tab_id: id, parent_tab_id: parent, description: 'child ' + id,"
-            " task_id: 'task-' + id, isSubagentTab: true, isDone: done})",
-            [sub_id, parent_id, is_done],
+            " task_id: 'task-' + id, isSubagentTab: true});"
+            " window.__post({type: 'status', running: true, tabId: id,"
+            " startTs: 1700000000000, taskId: 'task-' + id}); }",
+            [sub_id, parent_id],
         )
-    page.evaluate(
-        "() => window.__post({type: 'status', running: true, tabId: 'sub-run',"
-        " startTs: 1700000000000, taskId: 'task-sub-run'})"
-    )
     # The harness opens the history sidebar over the tab strip.
     page.evaluate("() => document.getElementById('sidebar').classList.remove('open')")
 
 
-_RUNNING_TAB = '.chat-tab.subagent-tab[data-tab-id="sub-run"]'
-_DONE_TAB = '.chat-tab.subagent-tab[data-tab-id="sub-done"]'
+_IDLE_TAB = '.chat-tab.subagent-tab[data-tab-id="sub-idle"]'
+_SHOWN_TAB = '.chat-tab.subagent-tab[data-tab-id="sub-shown"]'
 
 
 def _assert_purple_tabs(page) -> None:
     """Both sub-agent tabs are tinted purple, the active one more
-    strongly, with purple text; the running one's spinner and the done
-    one's tick are purple too."""
+    strongly, with purple text and a purple spinner."""
     purple = _var_color(page, "--purple")
-    page.click(_DONE_TAB)
-    page.wait_for_selector(_DONE_TAB + ".active", state="attached")
+    page.click(_SHOWN_TAB)
+    page.wait_for_selector(_SHOWN_TAB + ".active", state="attached")
     # A tab keeps its node when it becomes active, so on the remote page
     # its chip fades to the active colours (``transition`` in
     # remote-codex.css): the colours are read once that has run.
     page.wait_for_function(
         "() => !document.getAnimations().some(a => a instanceof CSSTransition)"
     )
-    for sel in (_RUNNING_TAB, _DONE_TAB):
+    for sel in (_IDLE_TAB, _SHOWN_TAB):
         _assert_tint(_style(page, sel, "backgroundColor"), purple, f"tab {sel}", _MIN_TAB_ALPHA)
-    assert _alpha_of(_style(page, _DONE_TAB, "backgroundColor")) > _alpha_of(
-        _style(page, _RUNNING_TAB, "backgroundColor")
+        spinner = sel + " .subagent-indicator.status-spinner"
+        assert _style(page, spinner, "borderTopColor") == purple
+        assert _style(page, spinner, "animationName") == "status-spin"
+    assert _alpha_of(_style(page, _SHOWN_TAB, "backgroundColor")) > _alpha_of(
+        _style(page, _IDLE_TAB, "backgroundColor")
     ), "the active sub-agent tab is tinted more strongly"
-    assert _style(page, _DONE_TAB, "color") == purple
-    assert _hue_of(_style(page, _RUNNING_TAB, "color")) == pytest.approx(
+    assert _style(page, _SHOWN_TAB, "color") == purple
+    assert _hue_of(_style(page, _IDLE_TAB, "color")) == pytest.approx(
         _hue_of(purple), abs=2
     )
-    spinner = _RUNNING_TAB + " .subagent-indicator.status-spinner"
-    assert _style(page, spinner, "borderTopColor") == purple
-    assert _style(page, spinner, "animationName") == "status-spin"
-    tick = _DONE_TAB + " .subagent-indicator.done.status-tick"
-    assert _style(page, tick, "backgroundColor") == purple
 
 
 def test_subagent_tab_is_purple(_browser) -> None:
     """The tab strip is quiet neutral chips (``remote-codex.css`` under
     ``body.remote-chat``); a sub-agent's tab reads purple whether idle
-    or active, and so do its spinner (running) and tick (done)."""
+    or active, and so does its spinner."""
     context, page = _open_history_page(_browser)
     try:
         _open_subagent_tabs(page)

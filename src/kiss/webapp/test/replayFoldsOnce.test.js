@@ -13,12 +13,14 @@
 // collapse pass skips panels that are already folded.
 //
 // Covered here:
-//   * a 150-step running-task replay (302 panels) writes each panel's
+//   * a 150-step running-task replay (303 panels) writes each panel's
 //     preview at most once (the quadratic pass wrote it once per event)
-//     and ends with every older panel folded, exactly as before;
+//     and ends with every older panel folded, exactly as before: the
+//     failure that starts open too, which only that fold closes;
 //   * live streaming after the replay folds older panels again (a
-//     finished fan-out folds once two newer panels follow it), so the
-//     replay-only shortcut does not leak into the stream.
+//     failure with no tool-call panel to go into folds once two newer
+//     panels follow it), so the replay-only shortcut does not leak into
+//     the stream.
 
 /* global require, console */
 'use strict';
@@ -65,6 +67,11 @@ function isThoughts(p) {
 /** Folded, or a Thoughts panel (which no pass folds). */
 function isFoldedOrThoughts(p) {
   return isThoughts(p) || isCollapsed(p);
+}
+
+/** What panel `p`'s header shows after its title while it is folded. */
+function preview(p) {
+  return p.querySelector('.collapse-preview').textContent;
 }
 
 /** One thinking + Read step of a run. */
@@ -119,22 +126,45 @@ function replayRunning(win, tab, events) {
 function testLongReplayFoldsOnceAndFast() {
   const {win} = makePage();
   const tab = win._testApi.getActiveTabId();
-  const previewWrites = replayRunning(win, tab, longRun(STEPS));
+  // The failed result of a call the transcript does not hold has no
+  // tool-call panel to go into: it is a panel of its own that starts
+  // open, so only the replay's fold closes it (tool-call panels start
+  // folded and Thoughts panels never fold).
+  const events = longRun(STEPS);
+  events.splice(1, 0, {
+    type: 'tool_result',
+    content: 'boom',
+    is_error: true,
+    ts: TS,
+  });
+  const previewWrites = replayRunning(win, tab, events);
 
   const ps = panels(win);
   assert.strictEqual(
     ps.length,
-    STEPS * 2 + 2,
-    'each step renders a thoughts + a tool panel, plus the prompt and ' +
-      'the thoughts panel the last result arms',
+    STEPS * 2 + 3,
+    'each step renders a thoughts + a tool panel, plus the prompt, the ' +
+      'failure and the thoughts panel the last result arms',
   );
   // Every older panel is folded: the replay's final collapse pass did
   // the work the per-event pass used to redo hundreds of times.
   const older = ps.slice(0, -2);
+  const failure = win.document.querySelector('#output > .tr.err');
+  assert.ok(
+    older.includes(failure) && isCollapsed(failure),
+    'the replay folds the failure, which started open',
+  );
   assert.ok(
     older.every(isFoldedOrThoughts),
     'every older tool panel of a replayed running task is folded',
   );
+  // A folded panel shows its preview: the prompt, the failure and the
+  // first Read here.
+  assert.deepStrictEqual(older.filter(isCollapsed).slice(0, 3).map(preview), [
+    'read every file',
+    'boom',
+    'src/file0.py',
+  ]);
   assert.ok(
     ps.filter(isThoughts).length >= STEPS &&
       !ps.filter(isThoughts).some(isCollapsed),
@@ -154,28 +184,34 @@ function testLongReplayFoldsOnceAndFast() {
 function testLiveStreamAfterReplayFoldsAgain() {
   const {win} = makePage();
   const tab = win._testApi.getActiveTabId();
-  replayRunning(win, tab, longRun(3));
+  replayRunning(win, tab, longRun(0));
   const before = panels(win).length;
 
-  // The task keeps streaming after the replay.  A finished fan-out with
-  // no sub-agents starts open, and only the live collapse pass folds it,
-  // once two newer panels follow it: that pass must run again (the
-  // replay flag is cleared).  Read and Bash panels start folded and
+  // The task keeps streaming after the replay.  The failed result of a
+  // call this page never saw has no tool-call panel to go into: it is a
+  // panel of its own that starts open, and only the live collapse pass
+  // folds it, once two newer panels follow it: that pass must run again
+  // (the replay flag is cleared).  Tool-call panels start folded and
   // Thoughts panels never fold, so they cannot show this.
-  send(win, {type: 'tool_call', name: 'run_parallel', ts: TS, tabId: tab});
-  send(win, {type: 'tool_result', content: 'no tasks', ts: TS, tabId: tab});
-  const fanout = win.document.querySelector('#output > .tc-run-parallel');
-  assert.ok(fanout && !isCollapsed(fanout), 'a fan-out panel starts open');
-  for (const ev of [...step(3), ...step(4)]) send(win, {...ev, tabId: tab});
+  send(win, {
+    type: 'tool_result',
+    content: 'boom',
+    is_error: true,
+    ts: TS,
+    tabId: tab,
+  });
+  const failure = win.document.querySelector('#output > .tr.err');
+  assert.ok(failure && !isCollapsed(failure), 'a lone failure starts open');
+  for (const ev of [...step(0), ...step(1)]) send(win, {...ev, tabId: tab});
   assert.ok(
-    isCollapsed(fanout),
-    'the live collapse pass folds the fan-out once newer panels follow',
+    isCollapsed(failure),
+    'the live collapse pass folds the failure once newer panels follow',
   );
   const ps = panels(win);
   assert.strictEqual(
     ps.length,
-    before + 5,
-    'the fan-out plus two more steps add five panels',
+    before + 6,
+    'the failure and two more steps add a tool and a Thoughts panel each',
   );
   assert.deepStrictEqual(
     ps.slice(-2).map(isCollapsed),

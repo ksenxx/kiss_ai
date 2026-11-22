@@ -76,9 +76,11 @@ function testReopenedPanelShowsTheServerValueNotTheOldEdit() {
   typeInto(win, 'cfg-custom-endpoint', 'https://mine.example/v1');
   closeSettings(win);
 
+  // Only what the reopening posts counts: the first opening asked too.
+  const reopened = posted.length;
   openSettings(win);
   assert.ok(
-    lastMsg(posted, 'getConfig'),
+    lastMsg(posted.slice(reopened), 'getConfig'),
     'reopening the panel must re-request the config',
   );
   // The daemon rejected/normalised the edit and reports something else.

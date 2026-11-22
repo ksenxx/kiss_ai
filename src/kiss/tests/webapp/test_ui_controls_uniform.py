@@ -12,7 +12,8 @@ visualizer:
 * native inputs and buttons inherit the body typeface instead of the
   browser's Arial;
 * the settings dialog's fields are body-sized and its section toggles
-  (API Keys, Custom Models) share the history panel's Filters toggle;
+  (API Keys, Custom Models) are set like a section header of the
+  right panel;
 * the history panel's collapsible chat headers are not bold;
 * checkboxes take the accent, and ``color-scheme`` follows the theme so
   select popups and scrollbars are drawn dark on dark;
@@ -86,7 +87,7 @@ _PROBE_JS = """
   header.className = 'history-chat-header';
   header.textContent = 'chat';
   document.getElementById('sidebar').appendChild(header);
-  const filters = document.getElementById('history-filters-toggle');
+  const panelHeader = document.querySelector('#meta-panel .sidebar-hdr');
   const subpanel = document.querySelector('.config-subpanel-toggle');
   return {
     bodyFont: cs(body).fontFamily,
@@ -97,8 +98,8 @@ _PROBE_JS = """
     budgetSize: cs(document.getElementById('cfg-max-budget')).fontSize,
     selectSize: cs(document.querySelector('.config-label select')).fontSize,
     headerWeight: cs(header).fontWeight,
-    filters: [cs(filters).textTransform, cs(filters).fontSize,
-              cs(filters).letterSpacing, cs(filters).color],
+    panelHeader: [cs(panelHeader).textTransform, cs(panelHeader).fontSize,
+                  cs(panelHeader).letterSpacing, cs(panelHeader).color],
     subpanel: [cs(subpanel).textTransform, cs(subpanel).fontSize,
                cs(subpanel).letterSpacing, cs(subpanel).color],
     checkboxAccent: cs(document.getElementById('cfg-use-web-tools')).accentColor,
@@ -188,9 +189,9 @@ _CUT_RINGS_JS = """
 
 def test_remote_page_controls_share_typeface_scale_and_scheme(tmp_path: Path) -> None:
     """Served remote page: inherited typeface, body-sized settings
-    fields, shared section toggles, non-bold chat headers, accent
-    checkboxes, dark/light colour scheme, one keyboard-focus ring, and
-    no send-button glow."""
+    fields, section toggles set like a section header of the right
+    panel, non-bold chat headers, accent checkboxes, dark/light colour
+    scheme, one keyboard-focus ring, and no send-button glow."""
     ready = threading.Event()
     done = threading.Event()
     state: dict[str, object] = {}
@@ -257,8 +258,8 @@ def test_remote_page_controls_share_typeface_scale_and_scheme(tmp_path: Path) ->
     assert light["budgetSize"] == light["bodySize"], light
     assert light["selectSize"] == light["bodySize"], light
     assert light["headerWeight"] == "400", light
-    assert light["filters"][0] == "none", light
-    assert light["filters"] == light["subpanel"], light
+    assert light["panelHeader"][0] == "none", light
+    assert light["panelHeader"] == light["subpanel"], light
     # The light palette's textLink.foreground drives the accent.
     accent = re.search(r"--theme-textLink-foreground: #([0-9a-f]{6});", _LIGHT_THEME_CSS)
     assert accent, "the light palette declares its accent"

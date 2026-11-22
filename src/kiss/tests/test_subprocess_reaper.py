@@ -12,19 +12,23 @@ started -- and deliberately never stopped -- are gone, and that the run
 reported who leaked them.
 
 Not exercised here: the Windows branches of ``_leads_own_group`` /
-``kill_process_group`` (POSIX host), and the ``ProcessLookupError`` /
-``OSError`` fallbacks that only fire when a child exits in the
-microseconds between ``poll()`` and the signal.
+``kill_process_group`` (POSIX host), and what only fires when a child
+exits, or is reaped by another thread, in the microseconds between the
+liveness check and the signal (the ``ProcessLookupError`` / ``OSError``
+fallbacks, and the group signal ``_signal`` then skips).
 """
 
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 import textwrap
 import time
 from pathlib import Path
+
+import pytest
 
 from kiss.core.processes import pid_alive
 from kiss.tests.conftest import IS_WINDOWS, posix_only
@@ -61,12 +65,15 @@ def test_earlier_process_is_still_running():
 """
 
 
-def _run_pytest(project: Path) -> subprocess.CompletedProcess[str]:
-    """Run pytest on *project* in a fresh interpreter with the reaper plugin loaded."""
+def _run_pytest(project: Path, *launcher: str) -> subprocess.CompletedProcess[str]:
+    """Run pytest on *project* in a fresh interpreter with the reaper plugin loaded.
+
+    *launcher* is a command line the interpreter is started through (``unshare ...``).
+    """
     env = {key: value for key, value in os.environ.items() if not key.startswith("PYTEST_")}
     return subprocess.run(
         [
-            sys.executable, "-m", "pytest", "-p", "kiss.tests.subprocess_reaper",
+            *launcher, sys.executable, "-m", "pytest", "-p", "kiss.tests.subprocess_reaper",
             "-p", "no:cacheprovider", "-q", str(project),
         ],
         capture_output=True, text=True, env=env, cwd=project, timeout=180, check=False,
@@ -354,10 +361,13 @@ def test_group_leader_is_terminated_with_its_descendants(tmp_path: Path) -> None
 def test_group_survivors_are_killed_after_the_leader_exits(tmp_path: Path) -> None:
     """The double-fork daemon shape: the leader forks a SIGTERM-ignoring
     grandchild into its own process group and exits at once, so at sweep
-    time only the group -- not the tracked child -- is alive."""
+    time only the group -- not the tracked child -- is alive.  The test
+    waits for the leader's exit without reaping it, as a test that drops
+    its ``Popen`` does: the leader's pid names the group only until it is
+    reaped (the next test)."""
     _write(
         tmp_path, "test_daemon.py", """
-        import subprocess, sys
+        import os, subprocess, sys
         from pathlib import Path
 
         GRANDCHILD = (
@@ -377,7 +387,8 @@ def test_group_survivors_are_killed_after_the_leader_exits(tmp_path: Path) -> No
                 [sys.executable, "-c", LEADER, GRANDCHILD, str(ready), str(grandchild_pid)],
                 start_new_session=True,
             )
-            assert proc.wait(timeout=60) == 0  # the leader is gone before the sweep
+            # the leader is gone before the sweep
+            assert os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOWAIT).si_status == 0
             while not ready.exists() or not ready.read_text():
                 pass
         """,
@@ -389,6 +400,100 @@ def test_group_survivors_are_killed_after_the_leader_exits(tmp_path: Path) -> No
     assert "left 1 subprocess(es)" in result.stdout
     assert "(still running)" not in result.stdout
     assert not pid_alive(_leaked_pid(tmp_path, "grandchild.pid"))
+
+
+@posix_only("process groups")
+def test_group_leader_that_exited_alone_is_reaped_and_not_reported(tmp_path: Path) -> None:
+    """A leader nobody waited for is a zombie, itself a member of its group: the sweep
+    counts the other members, finds none, reaps it and reports no leak."""
+    _write(
+        tmp_path, "test_quick_leader.py", """
+        import os, subprocess, sys
+        import pytest
+
+        PIDS = []
+
+        def test_start_a_leader_and_never_wait_for_it():
+            proc = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True)
+            os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOWAIT)
+            PIDS.append(proc.pid)
+
+        def test_the_sweep_reaped_it():
+            with pytest.raises(ChildProcessError):
+                os.waitid(os.P_PID, PIDS[0], os.WEXITED | os.WNOHANG | os.WNOWAIT)
+        """,
+    )
+
+    result = _run_pytest(tmp_path)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "2 passed" in result.stdout
+    assert "LeakedSubprocessWarning" not in result.stdout
+
+
+def test_stranger_with_the_pid_of_a_reaped_group_leader_is_not_signalled(tmp_path: Path) -> None:
+    """A group leader the test reaped, its group empty, has no pid of its own any more:
+    the kernel may hand the number to an unrelated process, and the group that process
+    leads is not the test's, whether the stranger still runs or has left a child in its
+    group and been reaped itself.  The inner run is pid 1 of a private PID namespace,
+    where ``ns_last_pid`` chooses the next pid and orphans become the run's children;
+    the strangers are no ``Popen``, so the plugin does not track them, and a second
+    inner test finds them running (their pids mean nothing outside the namespace)."""
+    unshare = ("unshare", "--user", "--map-root-user", "--pid", "--fork", "--kill-child",
+               "--mount-proc")
+    if shutil.which("unshare") is None or subprocess.run(
+            [*unshare, "true"], capture_output=True, check=False, timeout=30).returncode != 0:
+        pytest.skip("needs a pid namespace of its own (unshare, user namespaces)")
+    _write(
+        tmp_path, "test_a_recycle.py", f"""
+        import os, subprocess, sys
+        from pathlib import Path
+
+        HERE = Path(__file__).parent
+        PARENT = (
+            "import subprocess, sys; "
+            "child = subprocess.Popen([sys.executable, '-c', {_SLEEPER!r}]); "
+            "open(sys.argv[1], 'w').write(str(child.pid))"
+        )
+
+        def stranger_with_the_pid_of(leader, *args):
+            Path("/proc/sys/kernel/ns_last_pid").write_text(str(leader.pid - 1))
+            stranger = os.posix_spawn(
+                sys.executable, [sys.executable, "-c", *args], os.environ, setpgroup=0
+            )
+            assert stranger == leader.pid
+            return stranger
+
+        def test_reap_leaders_whose_pids_strangers_get():
+            leader = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True)
+            leader.wait()
+            (HERE / "leaked.pid").write_text(str(stranger_with_the_pid_of(leader, {_SLEEPER!r})))
+            # reaped behind the ``Popen``'s back, and so is the stranger, which leaves a child
+            leader = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True)
+            os.waitpid(leader.pid, 0)
+            parent = stranger_with_the_pid_of(leader, PARENT, str(HERE / "orphan.pid"))
+            assert os.waitpid(parent, 0) == (parent, 0)
+            assert os.getpgid(int((HERE / "orphan.pid").read_text())) == leader.pid
+        """,
+    )
+    _write(
+        tmp_path, "test_b_check.py", """
+        import os, signal
+        from pathlib import Path
+
+        def test_strangers_are_still_running():
+            for name in ("leaked.pid", "orphan.pid"):
+                stranger = int(Path(__file__).with_name(name).read_text())
+                assert os.waitpid(stranger, os.WNOHANG) == (0, 0), name
+                os.kill(stranger, signal.SIGKILL)
+        """,
+    )
+
+    result = _run_pytest(tmp_path, *unshare)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "2 passed" in result.stdout
+    assert "LeakedSubprocessWarning" not in result.stdout
 
 
 def test_fixture_and_teardown_cleanup_run_before_the_sweep(tmp_path: Path) -> None:

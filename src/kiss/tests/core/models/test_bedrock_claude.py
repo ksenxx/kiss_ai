@@ -34,7 +34,6 @@ import base64
 import json
 import os
 import struct
-import threading
 import zlib
 from typing import Any
 
@@ -664,58 +663,6 @@ def test_key_store_round_trip(tmp_path, monkeypatch) -> None:
     assert model_info.bedrock_credentials_configured() is False
 
 
-def test_blank_token_cleanup_cannot_delete_a_token_saved_meanwhile(tmp_path, monkeypatch) -> None:
-    """The constructor's unset of an empty ``AWS_BEARER_TOKEN_BEDROCK`` is atomic with the store.
-
-    The constructor reads the empty exported value, and before it deletes
-    the variable the settings panel saves a real token into the
-    environment: the deletion must not take the new token with it, so
-    the check and the deletion run under the key store's lock.
-    """
-    import httpx2
-
-    from kiss.core.models.anthropic_model import _bedrock_client
-    from kiss.core.user_config import save_api_key
-    from kiss.tests.server.pause import Pause
-
-    for field in _AWS_FIELDS:
-        _pin_env(monkeypatch, field)
-        monkeypatch.setattr(
-            config_module.DEFAULT_CONFIG, field, getattr(config_module.DEFAULT_CONFIG, field)
-        )
-        monkeypatch.delenv(field, raising=False)
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setenv("KISS_HOME", str(tmp_path / ".kiss"))
-    monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "")
-    errors: list[BaseException] = []
-
-    def construct() -> None:
-        try:
-            _bedrock_client("", ("", "", "", "us-east-1"), httpx2.Timeout(5.0))
-        except BaseException as exc:  # noqa: BLE001 - reported below
-            errors.append(exc)
-
-    def deleting_the_token(frame_locals: dict[str, Any]) -> bool:
-        return frame_locals.get("key") == "AWS_BEARER_TOKEN_BEDROCK"
-
-    with Pause(os._Environ.__delitem__.__code__, deleting_the_token) as held:
-        constructor = threading.Thread(target=construct, daemon=True)
-        constructor.start()
-        assert held.paused.wait(10), "the constructor never reached the deletion"
-        saver = threading.Thread(
-            target=save_api_key, args=("AWS_BEARER_TOKEN_BEDROCK", "fresh-token"), daemon=True
-        )
-        saver.start()
-        saver.join(0.5)  # blocked on the lock the constructor holds, or (pre-fix) done
-        held.release()
-        constructor.join(10)
-        saver.join(10)
-    assert not constructor.is_alive() and not saver.is_alive()
-    assert errors == []
-    assert os.environ.get("AWS_BEARER_TOKEN_BEDROCK") == "fresh-token"
-    assert config_module.DEFAULT_CONFIG.AWS_BEARER_TOKEN_BEDROCK == "fresh-token"
-
-
 # --------------------------------------------------------------------------
 # Live Bedrock (only with real credentials in the environment)
 # --------------------------------------------------------------------------
@@ -816,6 +763,52 @@ def test_sigv4_turn_with_key_pair(monkeypatch) -> None:
     assert auth.startswith("AWS4-HMAC-SHA256 Credential=AKIATESTKEY/")
     assert "/ap-northeast-1/bedrock/aws4_request" in auth
     assert headers["x-amz-security-token"] == "session-token"
+
+
+def test_token_saved_after_a_model_chose_its_key_pair_is_kept_out_of_its_client(
+    tmp_path, monkeypatch
+) -> None:
+    """A model created without a bearer token signs with the key pair whatever is saved later.
+
+    The settings panel saves a token (the real ``save_api_key``, which
+    exports it) after one model ran a turn and another was created.  The
+    SDK re-read the environment whenever it built a client without an
+    api_key and refused the pair next to the new token (``ValueError``):
+    for the running model when it copied its client for a keep-alive
+    ping (``with_options``), for the other when it built its own.  A
+    model without a pair (boto3's credential chain signs) sent the new
+    token instead.  All three still sign with their credentials, and the
+    saved token stays exported for the models created after it.
+    """
+    from kiss.core.user_config import save_api_key
+
+    pair = {"AWS_ACCESS_KEY_ID": "AKIATESTKEY", "AWS_SECRET_ACCESS_KEY": "test-secret"}
+    for field in _AWS_FIELDS:
+        _pin_env(monkeypatch, field)
+        monkeypatch.delenv(field, raising=False)
+    for field, value in pair.items():  # in the environment too: a save re-reads every key from it
+        monkeypatch.setenv(field, value)
+    _set_aws(monkeypatch, **pair)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("KISS_HOME", str(tmp_path / ".kiss"))
+    with _bedrock_server() as server:
+        running = _run_turn(server, monkeypatch, bearer="")
+        created = model_info.model(_OPUS)
+        assert isinstance(created, AnthropicModel) and created.api_key == ""
+        save_api_key("AWS_BEARER_TOKEN_BEDROCK", "fresh-token")
+        assert running.keep_prompt_cache_warm({}) is not None
+        ping_auth = server.request_headers[-1]["authorization"]
+        created.initialize("Say ok.")
+        created.generate()
+        turn_auth = server.request_headers[-1]["authorization"]
+        assert config_module.DEFAULT_CONFIG.AWS_BEARER_TOKEN_BEDROCK == "fresh-token"
+        _set_aws(monkeypatch)  # no pair in the settings: the chain finds the environment's
+        _run_turn(server, monkeypatch, bearer="")
+        chain_auth = server.request_headers[-1]["authorization"]
+    for auth in (ping_auth, turn_auth, chain_auth):
+        assert auth.startswith("AWS4-HMAC-SHA256 Credential=AKIATESTKEY/"), auth
+    assert created.client.api_key is None and created.client.aws_access_key == "AKIATESTKEY"
+    assert os.environ.get("AWS_BEARER_TOKEN_BEDROCK") == "fresh-token"
 
 
 def test_region_selects_endpoint_and_defaults_to_us_east_1(monkeypatch) -> None:
@@ -1129,50 +1122,6 @@ def test_bedrock_conversation_breakpoint_is_off_with_caching_off(monkeypatch) ->
     assert body["system"] == "Be terse."
     assert "cache_control" not in body
     assert _breakpoint_blocks(body["messages"]) == []
-
-
-def test_concurrent_initialize_tolerates_empty_exported_bearer_token(monkeypatch) -> None:
-    """Two tasks building Bedrock clients at once both survive an empty exported token.
-
-    ``_bedrock_client`` unsets an empty ``AWS_BEARER_TOKEN_BEDROCK`` so the
-    SDK does not take ``""`` for a token.  Two task threads (two chats, or
-    ``run_parallel`` sub-agents) could both read the empty value before
-    either removed it; the loser of that race used to die with
-    ``KeyError``.  The check and the deletion now run under the key
-    store's lock: the first thread is held inside the deletion (the real
-    ``os.environ.__delitem__``) while the second constructs, and the
-    second must neither raise nor get past its own check before the
-    first is done.
-    """
-    from kiss.tests.server.pause import Pause
-
-    monkeypatch.delenv("ANTHROPIC_BEDROCK_BASE_URL", raising=False)
-    _set_aws(monkeypatch, AWS_ACCESS_KEY_ID="AKIA", AWS_SECRET_ACCESS_KEY="secret")
-    monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "")
-    errors: list[BaseException] = []
-
-    def build_client() -> None:
-        try:
-            AnthropicModel(_OPUS, api_key="", bedrock=True).initialize("hi")
-        except BaseException as exc:
-            errors.append(exc)
-
-    def deleting_the_token(frame_locals: dict[str, Any]) -> bool:
-        return frame_locals.get("key") == "AWS_BEARER_TOKEN_BEDROCK"
-
-    with Pause(os._Environ.__delitem__.__code__, deleting_the_token) as held:
-        threads = [threading.Thread(target=build_client) for _ in range(2)]
-        threads[0].start()
-        assert held.paused.wait(10), "the first constructor never reached the deletion"
-        threads[1].start()
-        threads[1].join(timeout=0.5)
-        assert threads[1].is_alive(), "the second constructor ran its check during the deletion"
-        held.release()
-        for thread in threads:
-            thread.join(timeout=30)
-    assert not any(thread.is_alive() for thread in threads)
-    assert errors == []
-    assert "AWS_BEARER_TOKEN_BEDROCK" not in os.environ
 
 
 def test_direct_anthropic_route_unchanged(monkeypatch) -> None:
@@ -1526,11 +1475,12 @@ def test_empty_bearer_token_in_the_environment_counts_as_unset(monkeypatch) -> N
         auth = server.request_headers[-1]["authorization"]
         # keep_prompt_cache_warm() sends through ``with_options(...)``, a
         # copy built by the SDK constructor: it must not trip over the
-        # empty variable either (the empty export is unset for the SDK).
+        # empty variable either (the SDK is kept from reading it).
         copy = adapter.client.with_options(max_retries=0)
     assert adapter.client.api_key is None
     assert copy.api_key is None and copy.aws_access_key == "AKIATESTKEY"
-    assert "AWS_BEARER_TOKEN_BEDROCK" not in os.environ
+    # Left as exported: deleting it raced with a token being saved and with another deletion.
+    assert os.environ["AWS_BEARER_TOKEN_BEDROCK"] == ""
     assert auth.startswith("AWS4-HMAC-SHA256 Credential=AKIATESTKEY/")
     assert "/us-west-2/bedrock/aws4_request" in auth
 

@@ -299,7 +299,18 @@ class TestChatContextCache(_TempDbTestBase):
         )
 
 
-def test_nan_never_reaches_json(tmp_path: Path) -> None:
-    """_dumps_extra sanitises non-finite floats to null."""
-    out = th._dumps_extra({"cost": float("nan"), "n": [float("inf"), 1]})
-    assert out == '{"cost": null, "n": [null, 1]}'
+class TestNonFiniteColumns(_TempDbTestBase):
+    """A non-finite number in a row never reaches the ``extra`` JSON of a history entry."""
+
+    def test_nan_never_reaches_json(self) -> None:
+        th._add_task("t")
+        db = th._get_db()
+        # A foreign tool's row: SQLite keeps an infinity in a REAL column.
+        infinities = (float("inf"), float("-inf"))
+        db.execute("UPDATE task_history SET cost = ?, max_budget = ?", infinities)
+        stored = db.execute("SELECT cost, max_budget FROM task_history").fetchone()
+        assert tuple(stored) == infinities
+        extra = str(th._load_history(limit=1)[0]["extra"])
+        # ``parse_constant`` is called for NaN and the infinities only: RFC 8259 has none.
+        shown = json.loads(extra, parse_constant=pytest.fail)
+        assert (shown["cost"], shown["max_budget"]) == (0.0, 0.0)

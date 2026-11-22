@@ -25,6 +25,8 @@ from kiss.scripts.update_models import (
 _OR_OPUS = "openrouter/anthropic/claude-opus-5.5"
 _OR_OPUS_4_1 = "openrouter/anthropic/claude-opus-4.1"
 _FULL = ("low", "medium", "high", "xhigh", "max")
+# What the sync records for the level-less, flagged slug of ``_catalog``.
+_LEVELLED = {"thinking": "max", "use_responses_api": False}
 
 
 def _entry(inp: float, out: float, thinking: str | None = None, **extra) -> dict:
@@ -76,12 +78,14 @@ def test_twin_key_maps_dotted_slugs_to_hyphenated_claude_ids() -> None:
 
 
 def test_level_less_slug_gets_its_twin_maximum() -> None:
-    """A drift between the slug and its twin counts as an update at change computation."""
+    """A drift between the slug and its twin counts as an update at change computation.
+
+    Audit X3-1: the slug's ``use_responses_api`` was verified with no effort, so it does not
+    go on beside the default of ``high`` the level brings.
+    """
     updates, new_models = _changes(_catalog())
     assert new_models == []
-    assert updates == [
-        {"name": _OR_OPUS, "changes": {"thinking": "max"}, "source": "openrouter-claude"}
-    ]
+    assert updates == [{"name": _OR_OPUS, "changes": _LEVELLED, "source": "openrouter-claude"}]
 
 
 def test_slug_in_step_with_its_twin_is_left_alone() -> None:
@@ -111,7 +115,7 @@ def test_retested_twin_hands_its_new_level_to_the_slug() -> None:
     _sync_openrouter_claude_thinking(current, updates, [])
     assert updates[1] == {
         "name": _OR_OPUS,
-        "changes": {"thinking": "high"},
+        "changes": {"thinking": "high", "use_responses_api": False},
         "source": "openrouter-claude",
     }
 
@@ -121,10 +125,16 @@ def test_retested_twin_hands_its_new_level_to_the_slug() -> None:
     assert updates == [
         {
             "name": _OR_OPUS,
-            "changes": {"input_price_per_1M": 4.5, "thinking": "max"},
+            "changes": {"input_price_per_1M": 4.5, **_LEVELLED},
             "source": "openrouter",
         }
     ]
+
+    # A flag from the slug's own retest this run was verified at its stored default too.
+    current[_OR_OPUS]["use_responses_api"] = False
+    updates = [{"name": _OR_OPUS, "changes": {"use_responses_api": True}, "source": "retest"}]
+    _sync_openrouter_claude_thinking(current, updates, [])
+    assert updates == [{"name": _OR_OPUS, "changes": _LEVELLED, "source": "retest"}]
 
 
 def test_gated_probe_verdict_on_the_slug_is_overridden() -> None:
@@ -171,13 +181,13 @@ def test_apply_writes_the_anthropic_ladder_for_the_slug(tmp_path: Path, monkeypa
     apply_updates_to_file(updates, [], [], current)
     data = json.loads(target.read_text(encoding="utf-8"))
     assert data[_OR_OPUS]["thinking"] == "high"
-    assert data[_OR_OPUS]["use_responses_api"] is True
+    assert "use_responses_api" not in data[_OR_OPUS]
     for level in _FULL:
         sibling = data[f"{_OR_OPUS}-{level}"]
         assert sibling["thinking"] == level
         assert sibling["alias_of"] == _OR_OPUS
         assert sibling["input_price_per_1M"] == 4.0
-        assert sibling["use_responses_api"] is True
+        assert "use_responses_api" not in sibling
     assert f"{_OR_OPUS}-xhigh-xhigh" not in data
 
 

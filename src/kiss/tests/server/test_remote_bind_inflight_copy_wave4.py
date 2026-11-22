@@ -114,15 +114,27 @@ class BindRacesALocalCopyTest(_BindHarness):
         hold.release()
 
     async def _watch_the_local_run(self) -> str:
-        """Run a task here in RUNNER, open its chat in VIEWER; return the task's key."""
+        """Run a task here in RUNNER, open its chat in VIEWER; return the task's key.
+
+        Returns once the replay that opens the chat has sent its
+        transcript, its last frame here: the tab is a viewer by then.
+        The replay subscribes the tab headless first, and a ``talk``
+        copy for a headless tab goes to local peers only, past the
+        delivery the test holds it in.  It makes the tab a viewer when
+        it commits the tab's view, and takes the delivery lock for
+        that and for its frames: a copy held in that lock stops the
+        replay, and the bind, which the connection dispatches after it.
+        """
         printer = self.server._printer
         await self._submit(RUNNER, "Work here", "")
         self.assertTrue(await asyncio.to_thread(self.entered.wait, 60), "the local run started")
         await self._poll("the runner's chat", lambda: (self._row(RUNNER) or {}).get("chatId"))
         chat_id = self._row(RUNNER)["chatId"]  # type: ignore[index]
         await self._send({"type": "resumeSession", "chatId": chat_id, "tabId": VIEWER})
-        await self._poll("the viewer's subscription", lambda: printer.tasks_for_tab(VIEWER))
-        return printer.tasks_for_tab(VIEWER)[0]
+        await self._until("task_events", VIEWER)
+        task_key = printer.tasks_for_tab(VIEWER)[0]
+        self.assertIn(VIEWER, printer.viewer_tab_ids(task_key), "the tab watches on a surface")
+        return task_key
 
     async def _bind_with_a_copy_in_flight(
         self, hold: Pause, send: Callable[[], None],

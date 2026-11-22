@@ -699,10 +699,10 @@ def _build_exhaustion_summary(summaries: list[str], banner: str) -> str:
     ``<h3>Final Session</h3>`` summary on a normal finish) is appended
     AFTER a "<h3>Previous Session N</h3>" section when any prior
     session summaries exist. This layout matches the front-end
-    (``splitMultiSessionSummary`` in ``main.js``): it splits on the
-    trailing ``\\n\\n---\\n\\n`` separator so the banner renders as the
-    terminal ``Result`` panel while the prior sessions become the
-    ``Previous Sessions`` panel.
+    (``finalSessionSummary`` in ``main.js``): it splits on the
+    trailing ``\\n\\n---\\n\\n`` separator and shows the banner alone as
+    the ``Result`` panel; the prior sessions stay in the stored result
+    but are not shown.
 
     Args:
         summaries: Prior session summaries (from ``is_continue=True``
@@ -764,7 +764,7 @@ def _partial_result_html(
         return heading + (
             "<p>The sub-agent's budget ran out between sessions, before "
             "the next session could start.  Only the previous sessions' "
-            "summaries above exist; the task is incomplete.</p>"
+            "summaries exist; the task is incomplete.</p>"
         )
     steps = [
         _USAGE_BLOCK_RE.sub("", str(m["content"])).strip()

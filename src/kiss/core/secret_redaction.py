@@ -39,6 +39,11 @@ _MIN_SECRET_CHARS = 8
 """A shorter value is not replaced: ordinary output would hold it by chance."""
 
 
+def _is_secret(name: str, value: str) -> bool:
+    """Return whether *value*, the value of variable *name*, is replaced in tool output."""
+    return len(value) >= _MIN_SECRET_CHARS and name not in _NOT_SECRET
+
+
 class _Secrets:
     """The secrets of one reading of the key store, and those read from it earlier.
 
@@ -62,7 +67,7 @@ class _Secrets:
         self.names: dict[str, str] = {}
         assignments = filter(None, map(_parse_env_assignment, store_text.splitlines()))
         for name, value in sorted(assignments):
-            if len(value) >= _MIN_SECRET_CHARS and name not in _NOT_SECRET:
+            if _is_secret(name, value):
                 self.names.setdefault(value, name)
         self.names = earlier | self.names
         values = sorted(self.names, key=len, reverse=True)
@@ -120,6 +125,8 @@ class _Secrets:
 _NO_SECRETS = _Secrets("", {})
 _cache: tuple[tuple[str, int, int, int] | None, _Secrets] = (None, _NO_SECRETS)
 """The last reading of the key store, under the state of the file it was read from."""
+_outside_store = _NO_SECRETS
+"""The secrets kept elsewhere than in the key store (:func:`add_secrets`)."""
 _reading = threading.RLock()
 """Held while a changed store is read and merged into :data:`_cache`.
 
@@ -167,7 +174,7 @@ def _read_changed_store(path: Path, found: tuple[str, int, int, int] | None) -> 
     global _cache
     state, known = _cache
     if state is None or state[0] != str(path):
-        state, known = None, _NO_SECRETS
+        state, known = None, _outside_store
     if found is not None and found != state:
         try:
             known = _Secrets(_read_user_text(path), known.names)
@@ -175,6 +182,36 @@ def _read_changed_store(path: Path, found: tuple[str, int, int, int] | None) -> 
             return known
         _cache = (found, known)
     return known
+
+
+def add_secrets(named: dict[str, str]) -> None:
+    """Treat the values of *named* as secrets from now on, like those of the key store.
+
+    For the credentials kept elsewhere than in ``api_keys.env``: the API
+    keys of a project (``history.db``, table ``projects``), which a task
+    can print with a query of that database or find in the environment
+    of its commands.  As for the store, a value under 8 characters and
+    the region are left alone, and a value stays a secret while the
+    process lives.
+
+    Args:
+        named: Variable name to value.
+    """
+    locked_call(_reading, _add_secrets_locked, named)
+
+
+def _add_secrets_locked(named: dict[str, str]) -> None:
+    """Add the secrets of *named* to what is known; runs under :data:`_reading`."""
+    global _cache, _outside_store
+    state, known = _cache
+    added = {
+        value: name
+        for name, value in sorted(named.items(), reverse=True)
+        if _is_secret(name, value) and value not in known.names
+    }
+    if added:
+        _outside_store = _Secrets("", _outside_store.names | added)
+        _cache = (state, _Secrets("", known.names | added))
 
 
 def redact_secrets(text: str) -> str:

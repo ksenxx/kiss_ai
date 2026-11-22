@@ -43,11 +43,16 @@ that leads its own process group (``start_new_session=True``,
 ``process_group=0``) is signalled as a group and counts as alive while
 *any* member of the group exists, so its descendants die with it even
 when the leader itself has already exited (the double-fork daemon
-pattern); on Windows :func:`kiss.core.processes.kill_process_group`
-terminates the child's Job Object or process tree instead (``taskkill
-/F`` knows no graceful phase there).  Each sweep that had to terminate
-something reports a :class:`LeakedSubprocessWarning` naming the test or
-fixture and the commands, so the leak can be fixed at its source.
+pattern).  A group has no name but its leader's pid, and that number is
+the group's only while the leader is this process's unreaped child (the
+kernel gives it to nobody else until then): the sweep reaps an exited
+leader once its group is empty, and neither probes nor signals the old
+group id of a leader something else has reaped.  On Windows
+:func:`kiss.core.processes.kill_process_group` terminates the child's
+Job Object or process tree instead (``taskkill /F`` knows no graceful
+phase there).  Each sweep that had to terminate something reports a
+:class:`LeakedSubprocessWarning` naming the test or fixture and the
+commands, so the leak can be fixed at its source.
 
 Effects and limits
 ------------------
@@ -56,7 +61,10 @@ the test neither reads nor closes stays open until the test ends
 (``subprocess.run`` and ``with Popen(...)`` close theirs).  Processes
 created without a ``Popen`` (``os.fork``, ``os.posix_spawn``,
 :mod:`multiprocessing`) are not tracked, and a non-leader child's own
-children cannot be found from the parent alone.
+children cannot be found from the parent alone.  Neither can what a
+group leader left running once the test itself has reaped that leader
+(``wait()``, ``subprocess.run``): its pid may be a stranger's group by
+then, and nothing tells the two apart.
 """
 
 from __future__ import annotations
@@ -78,7 +86,13 @@ from typing import Any
 
 import pytest
 
-from kiss.core.processes import IS_WINDOWS, kill_process_group
+from kiss.core.processes import (
+    IS_WINDOWS,
+    _other_group_members,
+    exited_unreaped,
+    kill_process_group,
+    waitid_exited,
+)
 
 _TERM_GRACE_SECONDS = 5.0
 _KILL_GRACE_SECONDS = 3.0
@@ -154,39 +168,63 @@ def _close_bucket(bucket: Bucket) -> None:
         assert _stack.pop() is bucket
 
 
-def _group_exists(pid: int) -> bool:
-    if IS_WINDOWS:  # pragma: no cover — Windows descendants die with the leader's Job Object
+def _unreaped(proc: subprocess.Popen[Any]) -> bool:
+    """Return whether *proc* is still this process's unreaped child, running or exited (POSIX).
+
+    Only then is its pid the id of the group it leads: once a leader is
+    reaped and its group is empty, the kernel may give the number to a
+    new process, and the group that one leads or leaves behind is a
+    stranger's.  ``waitid`` is asked as well as ``returncode``, which a
+    reap that bypassed the ``Popen`` (``os.waitpid``, as asyncio's child
+    watchers call it) leaves unset.  A parent can know no more without
+    a descriptor held since the child started: after such a reap, a
+    later child of this very process that got the same pid passes for
+    the leader.
+    """
+    if proc.returncode is not None:
         return False
     try:
-        os.killpg(pid, 0)
-    except ProcessLookupError:
+        waitid_exited(proc.pid)
+    except ChildProcessError:
         return False
-    except PermissionError:  # pragma: no cover — a member we may not signal (setuid)
-        return True
     return True
 
 
 def _alive(entry: _Tracked) -> bool:
-    """Return whether the child, or any member of the group it leads, still exists."""
-    if entry.proc.poll() is None:
+    """Return whether the child, or any member of the group it leads, still exists.
+
+    A leader that has exited is reaped here only once its group is
+    empty, so that its pid stays the group's for as long as the sweep
+    signals it.  A leader something else has reaped (the test's own
+    ``wait()``) took the group's name with it (see :func:`_unreaped`):
+    whatever runs under that number now is left alone.
+    """
+    proc = entry.proc
+    if IS_WINDOWS or not entry.leads_group:  # Windows descendants die with the Job Object
+        return proc.poll() is None
+    if not _unreaped(proc):
+        return False
+    if not exited_unreaped(proc) or _other_group_members(proc.pid):
         return True
-    return entry.leads_group and _group_exists(entry.proc.pid)
+    proc.poll()  # exited and alone in its group: reaped
+    return False
 
 
 def _signal(entry: _Tracked, force: bool) -> None:
     sig = _FORCE_SIGNAL if force else signal.SIGTERM
+    proc = entry.proc
     try:
-        if entry.leads_group:
-            kill_process_group(entry.proc.pid, sig)
-        else:
-            entry.proc.send_signal(sig)
+        if not entry.leads_group:
+            proc.send_signal(sig)
+        elif IS_WINDOWS or _unreaped(proc):  # reaped since the liveness check: not its group's id
+            kill_process_group(proc.pid, sig)
     except ProcessLookupError:  # pragma: no cover — exited since the liveness check
         pass
     except OSError:  # pragma: no cover — tree kill refused (Windows, EPERM member)
         # ``send_signal`` is a no-op for an already reaped child and
         # raises ``ProcessLookupError`` for one that died meanwhile.
         try:
-            entry.proc.send_signal(sig)
+            proc.send_signal(sig)
         except ProcessLookupError:
             pass
 

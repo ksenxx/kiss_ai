@@ -205,12 +205,17 @@ class TestGetHistoryCommand:
 
 
 class TestDropdownMarkup:
-    """``chat.html`` holds the WORKDIR dropdown with only the All option:
-    the daemon's reply fills in the directories."""
+    """``chat.html`` holds the Work dir select with only the All option:
+    the daemon's reply fills in the directories.  The select is the
+    state of the Filter and group menu's Work dir row."""
 
     def test_chat_html_has_the_workdir_select(self) -> None:
         html = (web_server.MEDIA_DIR / "chat.html").read_text(encoding="utf-8")
         select = re.search(r'<select id="hf-workdir".*?</select>', html, re.S)
         assert select is not None
         assert re.findall(r'<option value="([^"]*)"', select.group(0)) == [""]
-        assert re.search(r'<label for="hf-workdir"[^>]*>Workdir</label>', html)
+        assert re.search(
+            r'<button[^>]*class="fg-row" data-fg="workdir"[^>]*popovertarget="fg-workdir"[^>]*>'
+            r'<span class="fg-row-name">Work dir</span>',
+            html,
+        )

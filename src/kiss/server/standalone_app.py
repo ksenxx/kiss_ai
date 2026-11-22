@@ -129,6 +129,7 @@ from kiss.core.file_lock import exclusive_file_lock
 from kiss.core.processes import run_process_group
 from kiss.core.utils import atomic_write_text
 from kiss.server.helpers import MEDIA_DIR
+from kiss.server.speech import _WatchedHandler
 
 ICON_FILE = MEDIA_DIR / "kiss-icon.png"
 PROFILE_DIR_NAME = "webapp-profile"
@@ -193,27 +194,62 @@ def read_loopback_url(url_file: Path) -> str | None:
     return None
 
 
-_DIRECT_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-"""Opens the daemon's URL without the environment's proxy.
+def _app_window_answer(url: str, timeout: float, body: bool) -> bytes:
+    """Ask the daemon at *url* for :data:`APP_WINDOW_API`, all of it within *timeout* seconds.
 
-The probes below ask the daemon on this machine: an ``http_proxy``
-without a matching ``no_proxy`` would send them to a proxy, which cannot
-reach this machine's loopback, and the daemon would never seem to answer.
-"""
+    Asked without the environment's proxy: an ``http_proxy`` without a
+    matching ``no_proxy`` would send the request to a proxy, which cannot
+    reach this machine's loopback, and the daemon would never seem to
+    answer.
+
+    ``urlopen``'s timeout bounds each socket read, not the exchange: a
+    peer on the port that trickles its headers or its body a byte at a
+    time kept the probe waiting for as long as it sent, and ``kiss-app``
+    with it, which asks before it opens its window.  So the connection's
+    socket is shut down *timeout* seconds from now, wherever the exchange
+    is (:class:`~kiss.server.speech._WatchedHandler`, the watch of a
+    model download), and an answer not over by then is a
+    ``TimeoutError``, whatever arrived of it.
+
+    Args:
+        url: The daemon's URL.
+        timeout: Seconds the address lookup, the connect, the headers
+            and the body may take together.
+        body: Whether the answer's body is read too (the headers are
+            the whole answer otherwise).
+
+    Returns:
+        The body (``b""`` unless *body*).
+    """
+    watch = _WatchedHandler(time.monotonic() + timeout)
+    cut_off = threading.Timer(timeout, watch.expire)
+    cut_off.daemon = True
+    cut_off.start()
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), watch)
+    try:
+        with opener.open(urllib.parse.urljoin(url, APP_WINDOW_API), timeout=timeout) as answer:
+            return answer.read() if body else b""
+    finally:
+        cut_off.cancel()
+        if watch.passed():
+            # Whatever the cut-off connection made of the exchange: headers
+            # that end where they were cut parse, and so may a body.
+            raise TimeoutError(f"no answer from {url} within {timeout:g}s")
 
 
 def daemon_answers(url: str) -> bool:
     """Whether an HTTP server answers at *url* (with any status: a 404 is an answer too).
 
-    Another server on the port that does not speak HTTP is no answer.
+    Another server on the port that does not speak HTTP is no answer,
+    nor is one whose headers are not in within two seconds.
     """
     try:
-        with _DIRECT_OPENER.open(urllib.parse.urljoin(url, APP_WINDOW_API), timeout=2.0):
-            return True
+        _app_window_answer(url, 2.0, body=False)
     except urllib.error.HTTPError:
         return True
     except (OSError, ValueError, http.client.HTTPException):
         return False
+    return True
 
 
 def wait_for_url(url_file: Path, url: str | None, timeout: float) -> str | None:
@@ -1029,13 +1065,12 @@ def sweep_windowless_app(bundle: Path) -> bool:
 def ask_app_window_open(url: str, timeout: float = 2.0) -> bool | None:
     """Ask the daemon at *url* whether the app window is open.
 
-    None when it does not answer, or answers anything but the state
-    (no HTTP, a body cut short as the daemon goes down).
+    None when it does not answer within *timeout* seconds, or answers
+    anything but the state (no HTTP, a body cut short as the daemon
+    goes down).
     """
     try:
-        api = urllib.parse.urljoin(url, APP_WINDOW_API)
-        with _DIRECT_OPENER.open(api, timeout=timeout) as answer:
-            state = json.loads(answer.read())
+        state = json.loads(_app_window_answer(url, timeout, body=True))
         return bool(state["open"])
     except (OSError, ValueError, KeyError, TypeError, http.client.HTTPException):
         return None

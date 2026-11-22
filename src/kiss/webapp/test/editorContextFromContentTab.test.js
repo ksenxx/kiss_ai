@@ -18,9 +18,12 @@ const {
   clickTab,
   recordTimers,
   fireTimers,
-  pickMachine,
 } = require('./simplify2_harness');
-const {writeReport: writeReportAs} = require('./subagent_tab_helpers');
+const {
+  writeReport,
+  reportRequests,
+  answerReport,
+} = require('./subagent_tab_helpers');
 const {MACHINES} = require('./picked_machine_helpers');
 
 const pages = [];
@@ -267,8 +270,12 @@ function testVirtualAndDirectoryTabsAreNoEditorContext() {
   );
 }
 
-function writeReport(win, filePath, content) {
-  writeReportAs(win, filePath, content, {tabId: 'a1'});
+// The task of chat a1 writes report *filePath* and ends; the daemon
+// answers the request the end makes for the report.
+function finishWithReport({win, posted}, filePath, content) {
+  writeReport(win, filePath, content, {tabId: 'a1'});
+  send(win, {type: 'task_done', success: true, tabId: 'a1'});
+  answerReport(win, reportRequests(posted).pop(), content);
 }
 
 function testReportTabReportsItsMarkdownSource() {
@@ -280,8 +287,7 @@ function testReportTabReportsItsMarkdownSource() {
   const {win, posted} = page;
   openChat(win);
   const reportPath = '/ws/a/reports/summary.md';
-  writeReport(win, reportPath, '# Report\n\noldReportIdentifier\n');
-  send(win, {type: 'task_done', success: true, tabId: 'a1'});
+  finishWithReport(page, reportPath, '# Report\n\noldReportIdentifier\n');
   contentTabId(win);
   clickTab(win, 'a1');
   send(win, {type: 'status', running: false, tabId: 'a1'});
@@ -295,8 +301,7 @@ function testReportTabReportsItsMarkdownSource() {
   );
 
   send(win, {type: 'status', running: true, tabId: 'a1'});
-  writeReport(win, reportPath, '# Report\n\nnewReportIdentifier\n');
-  send(win, {type: 'task_done', success: true, tabId: 'a1'});
+  finishWithReport(page, reportPath, '# Report\n\nnewReportIdentifier\n');
   clickTab(win, 'a1');
   send(win, {type: 'status', running: false, tabId: 'a1'});
   requestGhost(page, 'newRe');
@@ -340,9 +345,9 @@ function testReadOnlyPreviewReportsNoBuffer() {
   assert.ok(frame.srcdoc.indexOf('first piece') >= 0, 'with its first piece');
   assert.ok(frame.srcdoc.indexOf('last piece') >= 0, 'and its last');
   assert.strictEqual(
-    win.document.querySelector('.content-save-bar'),
+    win.document.querySelector('.content-save-btn'),
     null,
-    'read-only: no Save bar',
+    'read-only: nothing to save',
   );
   clickTab(win, 'a1');
   assert.strictEqual(
@@ -404,7 +409,8 @@ function testAFileOfAnotherMachineIsNoContextForThisOne() {
     machine: 'laptop',
   });
   send(win, {type: 'machines', machines: MACHINES, checkedAt: 1});
-  // a1 shows a task of this machine; a2 is a new chat picked onto gpu-box.
+  // a1 shows a task of this machine; a2 is a chat of gpu-box (the
+  // daemon's binding).
   clickTab(win, 'a1');
   send(win, {
     type: 'task_events',
@@ -414,8 +420,8 @@ function testAFileOfAnotherMachineIsNoContextForThisOne() {
     chat_id: 'chat-1',
   });
   send(win, {type: 'status', running: false, tabId: 'a1'});
+  send(win, {type: 'tabMachine', tabId: 'a2', machine: 'gpu-box'});
   clickTab(win, 'a2');
-  pickMachine(win, 'gpu-box');
   // gpu-box answers a2's open of /same/path.py (the daemon stamps the
   // machine on every reply a registered machine answered).
   send(win, {

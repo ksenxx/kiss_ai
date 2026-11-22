@@ -28,11 +28,11 @@ What else the stream carries:
   of the bound tab is relayed; every surface then creates its own
   sub-agent tab and asks for the transcript with ``resumeSession
   {taskId, tabId}``, which is forwarded (the sub-agent tab joins the
-  stream's tabs, so its frames and its ``subagentDone`` are relayed and
-  its ``stop``/``closeTab`` reach the remote).  A sub-agent that
-  finished before the chat was opened here announced no ``new_tab``
-  to this daemon: the fan-out panel's resume names its
-  ``parentTabId``, whose stream the sub-agent tab joins.
+  stream's tabs, so its frames are relayed and its ``stop`` reaches
+  the remote).  The ``subagentDone`` the remote ends it with is
+  relayed to every surface, and the tab leaves the stream with it
+  (:meth:`RemoteTabs.end_sub_tab`): a sub-agent's tab is a view the
+  daemons open and end, and no page reports that it closed one.
 * **A path-only prompt.**  A ``submit`` whose prompt is just the path
   of a file on the machine starts no task there: the machine answers
   ``promptOpened`` (the tab takes back the title the prompt displaced
@@ -101,6 +101,7 @@ from kiss.agents.sorcar.machines import Machine, MachineError
 from kiss.agents.sorcar.persistence import _record_steer_input
 from kiss.server.machine_stream import DROPPED_FIELDS, MachineStream
 from kiss.server.remote_views import RemoteViews, registered_machine
+from kiss.server.task_runner import _MAX_PROMPT_ID_CHARS
 
 logger = logging.getLogger(__name__)
 
@@ -164,10 +165,9 @@ the machine's configured one).
 _DROPPED_RUN_FIELDS = tuple(f for f in _DROPPED_FIELDS if f != "workDir")
 
 _CLOSED_KEPT = 1000
-"""How many sub-agent tabs stay known as closed after their streams retired.
+"""How many ended sub-agent tabs stay known after their streams retired.
 
-As many as a page remembers closed itself (``CLOSED_SUBAGENT_TABS_MAX``
-in ``media/main.js``); see :meth:`RemoteTabs._keep_closed`.
+See :meth:`RemoteTabs._keep_closed`.
 """
 
 
@@ -188,22 +188,20 @@ class RemoteTab(MachineStream):
             resumed yet (a resume maps the tab, an ``openSubagentTab``
             adopts it, its ``subagentDone`` ends it): a stream lost
             meanwhile ends those tabs too, or they would spin for good.
-        closed_tabs: By sub-agent tab closed on every surface online
-            while it was the stream's, and not opened since, the frame
-            that closes it on a surface connecting later
+        closed_tabs: By sub-agent tab whose sub-agent ended while the
+            tab was the stream's, the ``subagentDone`` relayed for it,
+            which closes the tab on a surface connecting later
             (:meth:`RemoteTabs.replay_to`): a page that was away keeps
             the tab (the registry snapshot never listed it) and would
-            show it for good, spinning.  The ``subagentDone`` relayed
-            for the tab, kept across the ``closeTab`` a page online
-            answers it with; for a tab closed with no such end, a
-            ``closeSubagentTab``: a user's ``closeTab`` on a surface of
-            this daemon, or the machine's word of a close that stood
-            there (:meth:`RemoteTabs.close_sub_tab`).  Apart from
-            ``revoked``, which a takeover of the tab enters too: what
-            took the tab over is not to be closed.  In the order the
-            tabs closed.  Forgotten when the tab shows something else
-            again (a resume into it, a fan-out panel reopening the
-            finished child, a new chat, a bind:
+            show it for good, spinning.  The tab left the stream with
+            that end (:meth:`RemoteTabs.end_sub_tab`), and the end the
+            machine repeats in every replay of the parent is not
+            relayed for a tab that left.
+            Apart from ``revoked``, which a takeover of the tab enters
+            too: what took the tab over is not to be closed.  In the
+            order the tabs ended.  Forgotten when the tab shows
+            something else again (a resume into it, a new chat, a
+            bind, its machine announcing its sub-agent running:
             :meth:`RemoteTabs._forget_closed`); a stream that retires
             leaves it to its owner (:meth:`RemoteTabs._retire`).
         subagent: Whether the bound tab's run is a sub-agent run of a
@@ -229,6 +227,22 @@ class RemoteTab(MachineStream):
             latest task: a surface connecting later is replayed at it.
             Cleared by a submit, whose task becomes the latest; never
             set by a relayed frame, whose replay may predate a submit.
+        navigation: Held while a ``resumeSession`` that picks what the
+            root tab shows on the machine is chosen and sent: the click
+            that records ``chat_id`` and ``shown_task_id``, the replay
+            of what they say and the tab's own fetch of it
+            (:meth:`RemoteTabs._resume`, :meth:`RemoteTabs.replay_to`,
+            :meth:`RemoteTabs._fetch`).
+            The machine takes each of them as navigation, so they reach
+            it in the order this daemon recorded the views: a replay
+            read before a click is not sent after it, which would
+            switch the machine's tab back to the chat the click left.
+            Held too while a ``submit`` or ``run`` drops the pin and is
+            sent (:meth:`RemoteTabs.route`): the task takes the pin off
+            the machine's tab, and a replay of the pin sent after it
+            would put it back there alone.
+            Taken while holding no other lock, never by the relay
+            thread.
         displaced_titles: By tab (the root tab or a sub-agent tab the
             stream relays), what the latest forwarded ``submit`` of
             that tab did to the registry: the id the submit was
@@ -237,11 +251,29 @@ class RemoteTab(MachineStream):
             the tab had none) and the generation token of that
             publication.  A prompt that is just the path of a file on
             the machine starts no task there: its ``promptOpened`` puts
-            the title back (:meth:`_relay_frame`), as a local tab's
-            page drops the claim it stamped for such a prompt --
-            provided the id is the pending submit's and nothing
-            republished the tab since (a later real submit's title
-            must not be undone by an earlier file prompt's late answer).
+            the title back (:meth:`RemoteTabs.retitle`), as a
+            local tab's page drops the claim it stamped for such a
+            prompt -- provided nothing republished the tab since (a
+            later real submit's title must not be undone by an earlier
+            file prompt's late answer).  The owner's, like
+            ``earlier_titles``: read and written under its lock.
+        earlier_titles: By tab, the submits published before the latest
+            one with nothing but submits in between, oldest first: the
+            id of each and the title it replaced.  The prompt of each
+            is the title the submit published after it replaced, and
+            no title to put back once it turns out to be a file prompt
+            itself: its ``promptOpened`` hands the title it replaced
+            to that later submit (:meth:`RemoteTabs.retitle`).  A
+            submit the machine took for a task is never answered
+            ``promptOpened``: the frames naming its prompt
+            (``promptIds``) tell that its title stands, and the
+            submits published before it are forgotten
+            (:meth:`RemoteTabs.settle_titles`), as are those before a
+            submit whose prompt is no text, which opens no file
+            (:meth:`RemoteTabs._publish`).  What is kept is that
+            submit and the ones the machine has not answered yet,
+            however many: forgotten, a file prompt would leave its
+            path as the title the later ones give back.
         replay_sinks: By replay id, the connection waiting for the
             answer to the forwarded ``resumeSession`` stamped with it
             (:meth:`stamp_replay`).  The remote echoes the id on every
@@ -261,18 +293,6 @@ class RemoteTab(MachineStream):
             tells its answer by that id, as this daemon's own replay
             echoes it: the frames of the answer reach it under it, and
             so does the ``replayDone``.  Released with the sink.
-        reopens: By the replay id of a forwarded resume that is a
-            fan-out panel's ``reopen`` (:meth:`stamp_replay`), the tab
-            whose reopening the machine has still to announce ("" once
-            it has).  The ``openSubagentTab`` such a replay announces
-            its tab ``reopened`` with goes to every client, as this
-            daemon broadcasts the reopening of a tab of its own: the
-            tab opens again on every surface, its transcript on the
-            asking one (:meth:`RemoteTabs.offer_replay` offers it to
-            the others).  Until then the machine's word of a close of
-            the tab is of one the reopening undid
-            (:meth:`machine_closes`).  Released by ``replayDone``, as
-            the sink is.
     """
 
     def __init__(
@@ -294,8 +314,8 @@ class RemoteTab(MachineStream):
         self.announced: dict[str, str] = {}
         self.revoked: set[str] = set()
         self.orphan_generations: dict[str, int] = {}
-        # By sub-agent tab open on every surface (its sub-agent runs, or
-        # a user reopened it since), its announcement without replay stamps.
+        # By sub-agent tab open on every surface (its sub-agent runs),
+        # its announcement without replay stamps.
         self.children: dict[str, str] = {}
         self.closed_tabs: dict[str, str] = {}
         self.subagent = subagent
@@ -304,10 +324,11 @@ class RemoteTab(MachineStream):
         self.spawn = ""
         self.chat_id = ""
         self.shown_task_id = ""
+        self.navigation = threading.Lock()
         self.displaced_titles: dict[str, tuple[str, str, int]] = {}
+        self.earlier_titles: dict[str, list[tuple[str, str]]] = {}
         self.replay_sinks: dict[str, str] = {}
         self.asker_replay_ids: dict[str, str] = {}
-        self.reopens: dict[str, str] = {}
         self.last_status: dict[str, str] = {}
         """The latest ``status`` frame relayed for each of the stream's tabs, by tab id.
 
@@ -325,9 +346,9 @@ class RemoteTab(MachineStream):
 
         Called under ``lock``, before the command is forwarded: the
         remote echoes the id on every frame of the answer
-        (:attr:`replay_sinks`).  A ``reopen`` is noted (:attr:`reopens`),
-        and so is the id the asker stamped itself, which is not unique
-        among the askers (:attr:`asker_replay_ids`).
+        (:attr:`replay_sinks`).  The id the asker stamped itself, which
+        is not unique among the askers, is noted
+        (:attr:`asker_replay_ids`).
 
         Args:
             cmd: The ``resumeSession`` command about to be forwarded
@@ -339,9 +360,26 @@ class RemoteTab(MachineStream):
         asker_id = str(cmd.get("replayId") or "")
         if asker_id:
             self.asker_replay_ids[replay_id] = asker_id
-        if cmd.get("reopen") is True:
-            self.reopens[replay_id] = str(cmd.get("tabId") or "")
         cmd["replayId"] = replay_id
+
+    def name_view(self, resume: dict[str, Any]) -> bool:
+        """Make the ``resumeSession`` *resume* one of what the root tab shows.
+
+        Called under ``lock``: the chat the tab shows and the task it
+        is pinned to (none while it tracks the chat's latest) replace
+        whatever *resume* named.
+
+        Returns:
+            False when the tab shows no chat (the first task of a tab
+            just bound is starting): there is nothing to replay.
+        """
+        if not self.chat_id:
+            return False
+        resume["chatId"] = self.chat_id
+        resume.pop("taskId", None)
+        if self.shown_task_id:
+            resume["taskId"] = self.shown_task_id
+        return True
 
     def _relay_frame(self, msg: dict[str, Any], text: str) -> None:
         """Deliver one decoded frame when it belongs to this stream's tabs.
@@ -349,16 +387,9 @@ class RemoteTab(MachineStream):
         A frame echoing the id of a pending replay goes to the
         connection that asked for it, under the id that asker named the
         replay itself if it did (``replayDone`` releases the sink and
-        reaches such an asker only), except the ``reopened`` announcement of a
-        forwarded ``reopen``, which goes to every client
-        (:attr:`reopens`); an ``openSubagentTab`` (a replay
+        reaches such an asker only); an ``openSubagentTab`` (a replay
         announcing a running sub-agent) adopts the sub-agent tab;
         everything else goes to every client.
-
-        A ``closeSubagentTab`` (a user closed a sub-agent tab on a
-        surface of the machine, or a replay repeats that it is closed
-        there) reaches nobody as it is: the owner closes the tab here
-        when the stream still has it (:meth:`RemoteTabs.close_sub_tab`).
 
         A path-only ``submit`` (a prompt that is just the path of a
         file on the machine) starts no task there: the machine answers
@@ -369,7 +400,9 @@ class RemoteTab(MachineStream):
         (:func:`~kiss.server.sidebar_panels.machine_workspace_reply`):
         the webapp binds the editor tab to the machine named in the
         stamp, so its ``saveFile`` and reload go back there instead of
-        to this daemon, which has no such file.
+        to this daemon, which has no such file.  Any other answer to a
+        ``submit`` names its prompt (``promptIds``): the title the
+        submit published stands (:meth:`RemoteTabs.settle_titles`).
         """
         kind = msg.get("type")
         parent = str(msg.get("parent_tab_id") or "")
@@ -380,10 +413,9 @@ class RemoteTab(MachineStream):
         adopt = ""
         learnt = False  # the frame told the bound tab's chat
         spawn = ""  # the run's own new_tab, learnt to be ours by this frame
-        restore: tuple[str, str, int] | None = None  # a path-only prompt's displaced title
-        if kind == "closeSubagentTab":
-            self._owner.close_sub_tab(self, sub_tab)  # takes the owner's lock: outside ours
-            return
+        opened = ""  # the tab whose path-only prompt the frame answers
+        ended = False  # the frame ends a sub-agent tab of the stream, which leaves it
+        named: list[Any] = []  # the prompts a frame of one of the stream's tabs is about
         with self.lock:
             if self.retired:
                 return
@@ -393,17 +425,8 @@ class RemoteTab(MachineStream):
                 if asker_id:
                     msg["replayId"] = asker_id
                     text = json.dumps(msg)
-            # The tab a forwarded ``reopen`` asked for again opens on every
-            # surface; the transcript that follows stays the asker's.
-            reopening = (kind == "openSubagentTab" and bool(msg.get("reopened"))
-                         and replay_id in self.reopens)
-            if reopening:
-                self.reopens[replay_id] = ""  # announced: a close from here on is one
-                to = []
-                text = json.dumps(_without_replay_id(msg))
             if kind == "replayDone":
                 self.replay_sinks.pop(replay_id, None)
-                self.reopens.pop(replay_id, None)
                 if not self.asker_replay_ids.pop(replay_id, ""):
                     to = None
             elif kind == "new_tab" and self._owns_sub_tab(parent):
@@ -439,10 +462,12 @@ class RemoteTab(MachineStream):
                     return
                 adopt = sub_tab
             elif kind == "subagentDone" and self._ends_tab(sub_tab):
-                self.announced.pop(_sub_task_id(sub_tab), None)
-                self.children.pop(sub_tab, None)
-                self.last_status.pop(sub_tab, None)
-                self.closed_tabs[sub_tab] = json.dumps(_without_replay_id(msg))
+                ended = sub_tab != self.tab_id
+                if not ended:
+                    self.announced.pop(_sub_task_id(sub_tab), None)
+                    self.children.pop(sub_tab, None)
+                    self.last_status.pop(sub_tab, None)
+                    self.closed_tabs[sub_tab] = json.dumps(_without_replay_id(msg))
             elif msg.get("tabId") in self.tab_ids:
                 tab_id = str(msg["tabId"])
                 if tab_id == self.tab_id and not self.chat_id and msg.get("chat_id"):
@@ -461,25 +486,24 @@ class RemoteTab(MachineStream):
                     msg["machine"] = self.machine.name
                     text = json.dumps(msg)
                 elif kind == "promptOpened":
-                    pending = self.displaced_titles.get(tab_id)
-                    if pending and pending[0] == str(msg.get("promptId") or ""):
-                        del self.displaced_titles[tab_id]
-                        restore = (tab_id, pending[1], pending[2])
-            elif not reopening:
-                # A reopening passes whatever its parent: the tab of a local
-                # task's run is under the caller's tab, which no stream owns.
-                # The delivery below still requires the tab to be the stream's.
+                    opened = tab_id
+                if isinstance(msg.get("promptIds"), list):
+                    named = msg["promptIds"]
+            else:
                 to = None
         if to is None:
             return
-        if restore:
-            self._owner.retitle(*restore)
-        # Open on every surface from here on: the tab of a running
-        # sub-agent, or of a finished one a user reopened (the machine says
-        # so in every replay until the tab closes again).  Not finished
-        # history: each page's fan-out panel shows or hides that.
-        shown = bool(adopt) and (bool(msg.get("reopened")) or not msg.get("isDone"))
-        if adopt and not self._owner.adopt(self, adopt, shown):
+        if ended:
+            # To every client, whichever replay the end answered: the
+            # tab leaves the stream for all of them, under the owner's
+            # lock (taken before ours).
+            self._owner.end_sub_tab(self, _without_replay_id(msg))
+            return
+        if opened:
+            self._owner.retitle(self, opened, str(msg.get("promptId") or ""))
+        if named:
+            self._owner.settle_titles(self, addressed, named)
+        if adopt and not self._owner.adopt(self, adopt):
             return  # the child left while this announcement was in flight
         # Delivered under the lock retirement takes: a retired stream
         # delivers nothing more (the sends themselves are scheduled, not
@@ -497,7 +521,7 @@ class RemoteTab(MachineStream):
                 return
             if kind == "new_tab" and _sub_tab_id(msg) in self.revoked:
                 return
-            if shown:  # not the run's own tab: ``spawn`` tells it
+            if adopt:  # not the run's own tab: ``spawn`` tells it
                 self.children[sub_tab] = json.dumps(_without_replay_id(msg))
             if spawn:
                 self._owner.deliver("", spawn)
@@ -508,9 +532,6 @@ class RemoteTab(MachineStream):
                 # is global, as the daemon's own broadcast of it is: a
                 # peer that only addressed other tabs still gets it.
                 self._owner.deliver(addressed, text)
-            if reopening:
-                self._owner.offer_replay(
-                    sub_tab, str(msg.get("task_id") or ""), self.replay_sinks.get(replay_id, ""))
         if learnt:
             # After the frame: closing the chat's other tab can wait on
             # its socket's close handshake, the run's output must not.
@@ -545,35 +566,6 @@ class RemoteTab(MachineStream):
         """
         return self._owns_sub_tab(tab_id) and (
             tab_id != self.tab_id or _sub_task_id(tab_id) in ("", self.shown_task_id)
-        )
-
-    def machine_closes(self, tab_id: str) -> bool:
-        """Whether the machine's ``closeSubagentTab`` naming *tab_id* closes a tab of this stream.
-
-        Called under ``lock``.  The machine sends the frame for every
-        sub-agent tab closed there, the ``api-…`` tab of a run that
-        ended and the tabs of its own surfaces included.  True for a
-        sub-agent tab the surfaces opened through this stream (joined,
-        or announced so far), never for the bound tab: a tab bound
-        under a sub-agent's id shows a chat, and no bound tab closes
-        here because it closed there.  False while a ``reopen`` of the
-        tab is still to be announced (:attr:`reopens`): the machine
-        decides a close and a reopening in one order and sends its
-        word of each in that order, so a close in before the
-        announcement preceded the reopening there and was undone by it
-        -- as a rule the machine's echo of the ``closeTab`` this daemon
-        forwarded.
-
-        Args:
-            tab_id: The tab the machine's frame names.
-
-        Returns:
-            Whether the tab is to close on this daemon's surfaces.
-        """
-        return (
-            tab_id != self.tab_id
-            and (tab_id in self.tab_ids or self.announced.get(_sub_task_id(tab_id)) == tab_id)
-            and tab_id not in self.reopens.values()
         )
 
     def _own_run_frame(self, kind: Any, msg: dict[str, Any]) -> str:
@@ -647,10 +639,8 @@ class RemoteTabs:
         A ``resumeSession`` naming a machine binds the tab to it too
         (the machine's chat is replayed into the tab); one of a
         sub-agent task joins its tab to the stream; ``resumeSession``
-        of anything else, ``newChat`` and a user's ``closeTab`` unbind
-        the tab and are still handled here.  A ``closeTab`` a page made
-        by itself (it names the tab's ``incarnation``) unbinds nothing
-        (:meth:`_pages_own_close`).
+        of anything else, ``newChat`` and ``closeTab`` unbind the tab
+        and are still handled here.
 
         Returns:
             True when the command was consumed (forwarded, or refused
@@ -664,8 +654,6 @@ class RemoteTabs:
             return False
         if name == "resumeSession":
             return self._resume(tab_id, str(cmd.get("taskId", "") or ""), conn_id, cmd)
-        if name == "closeTab" and isinstance(cmd.get("incarnation"), int):
-            return self._pages_own_close(tab_id, cmd["incarnation"])
         if name in ("closeTab", "newChat"):
             self._unbind(tab_id, forward_close=name == "closeTab")
             return False
@@ -680,9 +668,6 @@ class RemoteTabs:
             tab = self._bind(tab_id, machine_name, cmd, str(cmd.get("prompt", "") or ""))
             if tab is None:
                 return True
-            with tab.lock:
-                # The new task becomes the chat's latest: no pin to replay.
-                tab.shown_task_id = ""
         else:
             with self._lock:
                 tab = self._tabs.get(tab_id)
@@ -693,35 +678,18 @@ class RemoteTabs:
                 _record_steer_input(str(cmd.get("prompt", "") or ""))
             except Exception:
                 logger.warning("typed text not recorded", exc_info=True)
-        self._forward(tab, tab_id, cmd)
-        return True
-
-    def _pages_own_close(self, tab_id: str, incarnation: int) -> bool:
-        """Leave a page's own close of the sub-agent tab *tab_id* to the machine the tab is on.
-
-        A page closes a finished sub-agent's tab, or a folded fan-out
-        panel's, by itself and names the *incarnation* of the tab it
-        closed: the close may be in only after a client reopened the
-        tab, or after a chat was resumed into the tab id, and closes
-        neither.  The machine counts the incarnations of its
-        sub-agents' tabs, so the close of a tab on one of its streams
-        goes to it as it is and changes nothing here: when the close
-        stands, the machine tells every client (``closeSubagentTab``),
-        which closes the tab here as well (:meth:`close_sub_tab`).
-        Any other tab (a bound one, one that left its stream) is this
-        daemon's to answer, and no stream's to note as closed.
-
-        Returns:
-            True when the close is the machine's to judge (consumed).
-        """
-        with self._lock:
-            tab = self._tabs.get(tab_id)
-        if tab is None or tab.tab_id == tab_id:
-            return False
-        try:
-            tab.send({"type": "closeTab", "tabId": tab_id, "incarnation": incarnation})
-        except MachineError:
-            pass  # the failed send ends the stream, whose end closes the tab (:meth:`dropped`)
+        if name not in BINDING_COMMANDS:
+            self._forward(tab, tab_id, cmd)
+            return True
+        # The pin is dropped and the task sent as one step
+        # (:attr:`RemoteTab.navigation`): a replay that read the pin
+        # before is sent before the task, whose run takes the pin off
+        # the machine's tab too, never after it.
+        with tab.navigation:
+            with tab.lock:
+                # The new task becomes the chat's latest: no pin to replay.
+                tab.shown_task_id = ""
+            self._forward(tab, tab_id, cmd)
         return True
 
     def _forward(self, tab: RemoteTab, tab_id: str, cmd: dict[str, Any]) -> None:
@@ -983,11 +951,11 @@ class RemoteTabs:
         """Drop what closes *tab_id* on a surface connecting later, under the lock.
 
         The tab shows something again from here on (a chat resumed into
-        it, a fan-out panel reopening it, its machine announcing it
-        open, a new chat, a bind): neither the end of the sub-agent it
-        showed nor the close of it (:attr:`RemoteTab.closed_tabs`), on
-        a stream in service or kept from one that retired, must close
-        it on a surface connecting later.
+        it, its machine announcing its sub-agent running, a new chat, a
+        bind): the end of the sub-agent it showed
+        (:attr:`RemoteTab.closed_tabs`), on a stream in service or kept
+        from one that retired, must not close it on a surface
+        connecting later.
         """
         self._closed_tabs.pop(tab_id, None)
         for stream in {id(t): t for t in self._tabs.values()}.values():
@@ -1031,17 +999,14 @@ class RemoteTabs:
         shows something else (a local chat, the chat of a binding of
         its own).  No bind stands down for it: that is an unbind's
         (:meth:`_detach`).  With
-        *closed* (a close that stood: the tab is gone from every
-        surface online, not shown again) the ``subagentDone`` kept for
-        a sub-agent tab stays, to end it on the surfaces that were away,
-        and a tab without one gets its close kept for them
-        (:attr:`RemoteTab.closed_tabs`);
+        *closed* (a ``closeTab``: the tab is gone, not shown again) the
+        ``subagentDone`` kept for a sub-agent tab stays, to end it on
+        the surfaces that were away (:attr:`RemoteTab.closed_tabs`);
         otherwise the tab shows something else from here on and what
         was kept goes (:meth:`_forget_closed`), whether or not the tab
         is still a stream's: a closed tab left the stream (and a viewer
-        tab's id need not name it) with its end or its close kept, so
-        the local chat resumed into the id now is what either would
-        close.
+        tab's id need not name it) with its end kept, so the local chat
+        resumed into the id now is what that end would close.
         """
         tab = self._tabs.get(tab_id)
         if not closed:
@@ -1059,8 +1024,6 @@ class RemoteTabs:
                     stream.announced.pop(_sub_task_id(tab_id), None)
                     if tab_id != stream.tab_id:
                         stream.tab_ids.discard(tab_id)
-                    if closed:
-                        stream.closed_tabs.setdefault(tab_id, _close_frame(tab_id))
         if tab is None:
             return None, []
         if tab.tab_id == tab_id:
@@ -1082,7 +1045,11 @@ class RemoteTabs:
         ever stop their spinners; kept for the surfaces away,
         :meth:`_keep_closed`), the tab's binding is announced gone
         (dropped by :meth:`_announce` when another stream has the tab
-        by now) and the machine's view stream is released.
+        by now) and the machine's view stream is released.  That
+        ``subagentDone`` names no task (``task_id`` empty): it ends the
+        tab, not the sub-agent, which another stream may announce under
+        another tab (its chat opened there), and a page closes the tab
+        showing a task a ``subagentDone`` names.
 
         Child completion is qualified by the registry generation captured
         at retirement: a local chat published during the close handshake
@@ -1094,7 +1061,9 @@ class RemoteTabs:
             for tid in dict.fromkeys(tab_ids):
                 if (tid != tab.tab_id and tid not in self._tabs
                         and registry.generation(tid) == tab.orphan_generations.get(tid)):
-                    done = json.dumps({"type": "subagentDone", "tab_id": tid, "tabId": ""})
+                    done = json.dumps({
+                        "type": "subagentDone", "tab_id": tid, "task_id": "", "tabId": "",
+                    })
                     self._keep_closed(tid, done)
                     self.deliver("", done)
         self._announce(tab.tab_id, None)
@@ -1198,38 +1167,57 @@ class RemoteTabs:
         path-only prompt is no task, and the tab takes back the title
         it displaced if nothing republished it meanwhile.  That title
         is read in the same critical section: read before it, a submit
-        of another surface published in between would be undone.
+        of another surface published in between would be undone.  So
+        is the submit it was published right on top of remembered
+        there (:attr:`RemoteTab.earlier_titles`): that one's answer,
+        still to come, may tell that the title read was no title.
+        Nothing is remembered beneath a submit whose prompt is no text:
+        the machine opens no file for it, so its title stands.  The
+        machine names such a prompt in no answer, nor one whose
+        ``promptId`` is too long for an id (``task_runner._prompt_of``),
+        which is replaced like a missing one: unnamed, a submit would
+        stay remembered until a later one is named.
 
         Returns:
             False when the tab left *tab*'s stream before the publication.
         """
         server = self._backend._agent_server
+        registry = server.tab_registry
         with self._lock:
             if self._tabs.get(tab_id) is not tab:
                 return False
             old_title = self._registry_title(tab_id)
-            # No chat id: nothing is displaced (one tab per local chat).
-            changed, _, generation = server.tab_registry.update_tab(
-                tab_id,
-                chat_id="",
-                title=title,
-                work_dir=str(cmd.get("workDir", "") or ""),
-                task_id="",
-                create=True,
-            )
+            with registry._lock:  # the stamp found and the one given: one step
+                before = registry.generation(tab_id)
+                # No chat id: nothing is displaced (one tab per local chat).
+                changed, _, generation = registry.update_tab(
+                    tab_id,
+                    chat_id="",
+                    title=title,
+                    work_dir=str(cmd.get("workDir", "") or ""),
+                    task_id="",
+                    create=True,
+                )
             with server._state_lock:
                 server._tab_chat_views.pop(tab_id, None)
                 server._tab_opened_task_ids.pop(tab_id, None)
                 server._printer_cleanup_tab(tab_id)
+            if cmd.get("type") == "submit":
+                # The page's own id when it sent one: the machine names the
+                # prompt by it in every answer, which the page matches.
+                prompt_id = str(cmd.get("promptId") or "")
+                if not 0 < len(prompt_id) <= _MAX_PROMPT_ID_CHARS:
+                    prompt_id = uuid.uuid4().hex
+                cmd["promptId"] = prompt_id
+                latest = tab.displaced_titles.get(tab_id)
+                earlier = tab.earlier_titles.pop(tab_id, [])
+                if latest and latest[2] == before and isinstance(cmd.get("prompt"), str):
+                    # Nothing republished the tab since the latest submit,
+                    # and this one may be the path of a file.
+                    tab.earlier_titles[tab_id] = [*earlier, latest[:2]]
+                tab.displaced_titles[tab_id] = (prompt_id, old_title, generation)
         if changed:
             server._publish_tabs_state()
-        if cmd.get("type") == "submit":
-            # The page's own id when it sent one: the machine names the
-            # prompt by it in every answer, which the page matches.
-            prompt_id = str(cmd.get("promptId") or "") or uuid.uuid4().hex
-            cmd["promptId"] = prompt_id
-            with tab.lock:
-                tab.displaced_titles[tab_id] = (prompt_id, old_title, generation)
         return True
 
     def _registry_title(self, tab_id: str) -> str:
@@ -1240,59 +1228,117 @@ class RemoteTabs:
             "",
         )
 
-    def retitle(self, tab_id: str, title: str, generation: int) -> None:
-        """Put *title* back as *tab_id*'s registry title on every surface.
+    def retitle(self, tab: RemoteTab, tab_id: str, prompt_id: str) -> None:
+        """Take back the title the forwarded ``submit`` *prompt_id* gave *tab_id*.
 
-        Called by a tab's stream when the machine answered its
-        forwarded ``submit`` with ``promptOpened``: the prompt was the
-        path of a file, no task started, and the title the bind gave
-        the tab (the prompt) goes back to what it was -- unless a later
-        publication (another submit, a resume) stamped the tab since,
+        Called by a tab's stream when the machine answered the submit
+        with ``promptOpened``: the prompt was the path of a file, no
+        task started, and the prompt the bind published as the tab's
+        title is taken back.  When the submit is the tab's latest, the
+        title it replaced goes back on every surface ("" restores
+        nothing: the tab had no registry entry before) -- unless a
+        later publication (a resume, a rename) stamped the tab since,
         whose title stands
         (:meth:`~kiss.server.tab_registry.TabRegistry.retitle_if_generation`),
         or the tab left its stream meanwhile (unbound, or displaced by
         another tab of its chat): the restore is a publication of the
         stream's own, and one landing after the displacement captured
         the tab's generation would keep the tab from the close that
-        follows (:meth:`_close_displaced`).  Decided under the lock
-        the displacement takes.
+        follows (:meth:`_close_displaced`).  The title put back is the
+        prompt of the submit published before it
+        (:attr:`RemoteTab.earlier_titles`), which is the latest again
+        under the restore's stamp: its own answer, relayed after this
+        one when the two were sent in the other order, takes that
+        title back in turn.  When the submit is an earlier one, the
+        submit published after it replaced a title that never stood,
+        and is handed the title this one replaced.  Decided under the
+        lock the displacement and a submit's publication
+        (:meth:`_publish`) take.
 
         Args:
-            tab_id: The bound tab.
-            title: The title the prompt displaced ("" restores nothing:
-                the tab had no registry entry before).
-            generation: The token of the bind's publication.
+            tab: The stream that relayed the answer.
+            tab_id: The tab the answer names (one of the stream's).
+            prompt_id: The id the machine echoed ("" when it named none).
         """
         server = self._backend._agent_server
+        registry = server.tab_registry
+        restored = False
         with self._lock:
-            if tab_id not in self._tabs:
+            latest = tab.displaced_titles.get(tab_id)
+            if latest is None or tab_id not in self._tabs:
                 return
-            restored = bool(title) and server.tab_registry.retitle_if_generation(
-                tab_id, title, generation,
-            )
+            claims = [*tab.earlier_titles.get(tab_id, []), latest[:2]]
+            ids = [claim[0] for claim in claims]
+            if prompt_id not in ids:
+                return
+            at = ids.index(prompt_id)
+            if at < len(claims) - 1:  # an earlier submit
+                claims[at + 1] = (claims[at + 1][0], claims[at][1])
+                del claims[at]
+                tab.earlier_titles[tab_id] = claims[:-1]
+                tab.displaced_titles[tab_id] = (*claims[-1], latest[2])
+                return
+            del tab.displaced_titles[tab_id]
+            earlier = tab.earlier_titles.pop(tab_id, [])
+            stamp = 0
+            with registry._lock:  # the restore and the stamp it leaves: one step
+                if registry.generation(tab_id) == latest[2]:
+                    restored = bool(latest[1]) and registry.retitle_if_generation(
+                        tab_id, latest[1], latest[2],
+                    )
+                    stamp = registry.generation(tab_id)
+            if stamp and earlier:
+                tab.displaced_titles[tab_id] = (*earlier.pop(), stamp)
+                tab.earlier_titles[tab_id] = earlier
         if restored:
             server._publish_tabs_state()
 
-    def adopt(self, tab: RemoteTab, sub_tab_id: str, shown: bool) -> bool:
-        """Map the sub-agent tab *sub_tab_id* a replay announced to *tab*'s stream.
+    def settle_titles(self, tab: RemoteTab, tab_id: str, prompt_ids: list[Any]) -> None:
+        """Forget the submits of *tab_id* published before one the machine named.
+
+        Called by a tab's stream for a frame naming the prompts it is
+        about (``promptIds``): the machine took each for a task or a
+        message, or refused it, and none for the path of a file, so the
+        title its submit published stands and no ``promptOpened`` takes
+        it back.  The submits published before it
+        (:attr:`RemoteTab.earlier_titles`) replaced titles that one
+        covers for good: whatever their own answers tell, it is handed
+        nothing, and they are forgotten.  The submit named stays,
+        beneath the ones the machine has not answered yet: a tab
+        remembers as many submits as it is owed answers, and one more.
+        An older daemon names no prompt: the submits it took for tasks
+        are owed their answers until the stream ends.
+
+        Args:
+            tab: The stream that relayed the frame.
+            tab_id: The tab the frame names (one of the stream's).
+            prompt_ids: The ids the machine named.
+        """
+        with self._lock:
+            earlier = tab.earlier_titles.get(tab_id)
+            if not earlier:
+                return
+            ids = [*(claim[0] for claim in earlier), tab.displaced_titles[tab_id][0]]
+            named = max((at for at, i in enumerate(ids) if i in prompt_ids), default=0)
+            del earlier[:named]
+
+    def adopt(self, tab: RemoteTab, sub_tab_id: str) -> bool:
+        """Map the sub-agent tab *sub_tab_id* a replay announced running to *tab*'s stream.
 
         The tab's binding is announced as a bound tab's is: the
         surfaces show the machine for the sub-agent tab too. Return False
         when the child was detached or a different stream owns it. Membership
         and mapping change together, before any announcement is delivered.
-        A tab announced open on every surface (*shown*: its sub-agent
-        runs, or a user reopened it) is closed by nothing kept from
-        before (:meth:`_forget_closed`): its machine opened it again
-        unasked, on a surface of its own or after the stream that
-        ended it here was lost.
+        The tab is closed by nothing kept from before
+        (:meth:`_forget_closed`): its sub-agent runs, whatever end the
+        loss of an earlier stream told here.
         """
         with self._lock, tab.lock:
             if (self._tabs.get(tab.tab_id) is not tab or tab.retired
                     or sub_tab_id in tab.revoked
                     or self._tabs.get(sub_tab_id) not in (None, tab)):
                 return False
-            if shown:
-                self._forget_closed(sub_tab_id)
+            self._forget_closed(sub_tab_id)
             if self._tabs.get(sub_tab_id) is not tab:
                 self._tabs[sub_tab_id] = tab
                 tab.tab_ids.add(sub_tab_id)
@@ -1300,33 +1346,55 @@ class RemoteTabs:
                 self.deliver("", _tab_machine_frame(sub_tab_id, tab.machine.name))
             return True
 
-    def close_sub_tab(self, tab: RemoteTab, sub_tab_id: str) -> None:
-        """Close *sub_tab_id* here when *tab*'s machine says the tab closed there.
+    def end_sub_tab(self, tab: RemoteTab, done: dict[str, Any]) -> None:
+        """End the sub-agent tab the machine's ``subagentDone`` *done* names on *tab*'s stream.
 
-        A user closed it on a surface of the machine, or a page's own
-        close this daemon passed on stood there
-        (:meth:`_pages_own_close`).  The machine tells every client of
-        the close (``closeSubagentTab``), repeats a user's in the
-        replays of the parent while the tab stays closed, and sends
-        the tab none of its sub-agent's events.  The tab leaves the
-        stream as on a user's ``closeTab`` on a surface of this daemon
-        (:meth:`_unbind`; the machine needs no telling), and every
-        client is told in turn, which closes the tab without an echo.
-        Nothing happens for a tab that is not the stream's to close
-        (:meth:`RemoteTab.machine_closes`), nor on a stream retired
-        meanwhile: the tabs it had are ended, and may show something
-        else by now.
+        The stream's other tabs announced for the ended task
+        (:attr:`RemoteTab.children`) end with it: a page closes the tab
+        showing the task a ``subagentDone`` names, and the machine does
+        not end such a tab itself once a chat was opened in it there.
+        Every client is told the end of each of those tabs, whichever
+        replay *done* answered, and the tab leaves the stream and this
+        daemon's tabs in the same critical section, announced as on no
+        machine.  One end per tab, whichever of them the machine named
+        first: what the surfaces are told and what is kept for the ones
+        away (:attr:`RemoteTab.closed_tabs`) does not depend on the
+        order the machine ends its views in.  Nothing is sent to the
+        machine: its daemon ended its own views of the sub-agent.
+
+        A tab that left is revoked (:meth:`RemoteTab._owns_sub_tab`), so
+        neither the end the machine tells for it later, or repeats in
+        every replay of the parent, nor an announcement or a resume in
+        late touches what the tab shows by then.  The task stays the
+        stream's: a page asking for the tab by name gets the end kept
+        for it (:meth:`_resume`).
 
         Args:
-            tab: The stream the machine's word came on.
-            sub_tab_id: The tab it names.
+            tab: The stream that relays the end.
+            done: The ``subagentDone`` frame, without a replay's stamp;
+                it names a tab other than the stream's bound one.
         """
-        with self._lock:
-            with tab.lock:
-                if tab.retired or not tab.machine_closes(sub_tab_id):
-                    return
-            self._detach(sub_tab_id, closed=True)
-            self.deliver("", _close_frame(sub_tab_id))
+        sub_tab_id, task_id = str(done.get("tab_id") or ""), str(done.get("task_id") or "")
+        with self._lock, tab.lock:
+            if tab.retired or not tab._ends_tab(sub_tab_id):
+                return  # its tabs ended with the stream, or the tab shows something else since
+            shown = [
+                tid for tid, announcement in tab.children.items()
+                if task_id and tid != tab.tab_id
+                and str(json.loads(announcement).get("task_id") or "") == task_id
+            ]
+            for tid in dict.fromkeys([sub_tab_id, *shown]):
+                frame = json.dumps({**done, "tab_id": tid})
+                self.deliver("", frame)
+                tab.closed_tabs[tid] = frame
+                tab.revoked.add(tid)
+                tab.tab_ids.discard(tid)
+                tab.children.pop(tid, None)
+                tab.last_status.pop(tid, None)
+                tab.announced.pop(_sub_task_id(tid), None)
+                if self._tabs.get(tid) is tab:
+                    del self._tabs[tid]
+                    self.deliver("", _tab_machine_frame(tid, ""))
 
     def displace(self, tab: RemoteTab) -> None:
         """Displace the other tabs showing the chat *tab*'s stream just learnt it carries.
@@ -1353,17 +1421,16 @@ class RemoteTabs:
         then sets it, as a local chat's would).  A resume of a
         sub-agent task joins its tab to the task's stream: the stream
         that announced the task (``new_tab``) or carries it as its own
-        run, else the stream of the ``parentTabId`` the resume names (a
-        finished sub-agent of a replayed chat, whose ``new_tab`` this
-        daemon never saw).  A tab that left that stream (closed, or
-        showing something else since) joins it again only on a
-        ``reopen``, the fan-out panel's: a page's own resume of the
-        ``new_tab`` it was sent before the close, landing after it, is
-        consumed and changes nothing, as this daemon keeps a closed
-        sub-agent tab of its own closed (``_replay_session``).  The
-        machine's ``reopened`` announcement answering the ``reopen`` is
-        relayed to every client, the transcript to the asking one
-        (:attr:`RemoteTab.reopens`).  A
+        run.  A tab that left that stream (its sub-agent over, closed,
+        or showing something else since) does not join it again: a
+        page's own resume of the ``new_tab`` it was sent before, landing
+        after the tab left, is consumed and changes nothing; it is
+        answered with the end the tab left with, while that end is kept
+        (:meth:`end_sub_tab`), so the page closes the tab it asked for.
+        So is a resume of the sub-agent a tab is named after once the
+        tab ended with its stream (:meth:`_end_stream`) and no stream
+        announces the sub-agent: this daemon has nothing to show for
+        it, and the end stays kept for the surfaces away.  A
         ``scoped`` resume of the chat a bound tab shows is the tab's
         own fetch of the transcript :meth:`replay_to` deferred (the
         client answering the ``replay_deferred`` offer when the user
@@ -1372,36 +1439,44 @@ class RemoteTabs:
         sub-agent tab on a stream is named after: the machine's replay
         of the parent offers that transcript too, with the sub-agent's
         chat, to a stream that never saw the sub-agent's ``new_tab``
-        when the chat was opened here while it ran.  Any other resume
-        into a bound tab, or one whose bind is still connecting, shows
-        a local chat there: the tab is unbound (the bind stands down)
-        and the resume handled here.  A sub-agent tab on a stream
-        leaves it for a chat (``chatId``) the same way, but keeps it on
-        a resume of another task the stream never saw: answered here
-        with nothing running, while the sub-agent runs on.
+        when the chat was opened here while it ran.  A ``scoped``
+        resume of a chat a bound tab showed before (the offer it
+        answers predates a click or a submit of another surface) is
+        such a fetch too, answered with what the tab shows now
+        (:meth:`_fetch`): it neither unbinds the tab nor switches the
+        machine's back.  Any other resume into a bound tab, or one whose
+        bind is still connecting, shows a local chat there: the tab is
+        unbound (the bind stands down) and the resume handled here.  A
+        sub-agent tab on a stream leaves it for a chat (``chatId``) the
+        same way, but keeps it on a resume of another task the stream
+        never saw: answered here with nothing running, while the
+        sub-agent runs on.
         """
         machine_name = str(cmd.get("machine", "") or "")
         if machine_name:
             tab = self._bind(tab_id, machine_name, cmd, str(cmd.get("title", "") or ""))
             if tab is None:
                 return True
-            with self._lock:
-                with tab.lock:
-                    # The tab shows this chat, at this task, from here on
-                    # (a later ``ready`` replays those); taken from the
-                    # click, not from the replay it gets, which can cross a
-                    # later submit on the socket.
-                    tab.chat_id = str(cmd.get("chatId") or cmd.get("id") or "")
-                    tab.shown_task_id = str(cmd.get("taskId") or "")
-                    if cmd.get("scoped") and conn_id:
-                        tab.stamp_replay(cmd, conn_id)
-                # One tab per chat, as for a local chat: the tab that
-                # showed the chat is displaced in the critical section
-                # that claims it, so two resumes of the chat racing
-                # each other leave exactly one tab.
-                displaced = self._displace_locked(tab)
-            self._close_displaced(displaced)
-            self._forward(tab, tab_id, cmd)
+            # Recorded and sent as one step (:attr:`RemoteTab.navigation`):
+            # the machine's tab ends on the chat recorded last.
+            with tab.navigation:
+                with self._lock:
+                    with tab.lock:
+                        # The tab shows this chat, at this task, from here on
+                        # (a later ``ready`` replays those); taken from the
+                        # click, not from the replay it gets, which can cross a
+                        # later submit on the socket.
+                        tab.chat_id = str(cmd.get("chatId") or cmd.get("id") or "")
+                        tab.shown_task_id = str(cmd.get("taskId") or "")
+                        if cmd.get("scoped") and conn_id:
+                            tab.stamp_replay(cmd, conn_id)
+                    # One tab per chat, as for a local chat: the tab that
+                    # showed the chat is displaced in the critical section
+                    # that claims it, so two resumes of the chat racing
+                    # each other leave exactly one tab.
+                    displaced = self._displace_locked(tab)
+                self._close_displaced(displaced)
+                self._forward(tab, tab_id, cmd)
             return True
         ended: RemoteTab | None = None
         orphans: list[str] = []
@@ -1412,30 +1487,36 @@ class RemoteTabs:
                  if task_id and (task_id in t.task_ids or task_id == t.task_id)),
                 None,
             )
-            if tab is None and task_id:
-                tab = self._tabs.get(str(cmd.get("parentTabId", "") or ""))
-            if tab is not None and cmd.get("reopen") is not True:
+            if tab is not None:
                 with tab.lock:
                     if tab_id in tab.revoked:
-                        return True  # the tab's leaving stands: see the docstring
+                        # The tab's leaving stands: see the docstring.
+                        closing = tab.closed_tabs.get(tab_id)
+                        if closing and conn_id:
+                            self.deliver_to(conn_id, closing)
+                        return True
+            elif (task_id and task_id == _sub_task_id(tab_id)
+                    and tab_id not in self._tabs and tab_id in self._closed_tabs):
+                # The tab ended with its stream and no stream announces
+                # its sub-agent: answered likewise, the end stays kept.
+                if conn_id:
+                    self.deliver_to(conn_id, self._closed_tabs[tab_id])
+                return True
             previous = self._tabs.get(tab_id)
             own_fetch = False
-            if tab is None and previous is not None:
+            if tab is None and previous is not None and cmd.get("scoped") and conn_id:
                 # The tab's own fetch of what it shows (the answer to a
                 # deferred replay's offer): nothing to bind or unbind,
                 # the machine replays it to this connection.  A bound
-                # tab shows its chat; a sub-agent tab on the stream
-                # shows the task its id names, whatever chat the
-                # machine's offer, and so the fetch, names with it.
-                with previous.lock:
-                    if previous.tab_id == tab_id:
-                        shown = bool(previous.chat_id) and previous.chat_id == str(
-                            cmd.get("chatId") or cmd.get("id") or "")
-                    else:
-                        shown = bool(task_id) and task_id == _sub_task_id(tab_id)
-                    own_fetch = bool(shown and cmd.get("scoped") and conn_id)
-                    if own_fetch:
-                        previous.stamp_replay(cmd, conn_id)
+                # tab's names a chat (the one it shows, or showed when
+                # the offer was made: :meth:`_fetch` tells); a
+                # sub-agent tab on the stream shows the task its id
+                # names, whatever chat the machine's offer, and so the
+                # fetch, names with it.
+                if previous.tab_id == tab_id:
+                    own_fetch = bool(cmd.get("chatId") or cmd.get("id"))
+                else:
+                    own_fetch = bool(task_id) and task_id == _sub_task_id(tab_id)
             if own_fetch:
                 tab = previous
             elif tab is None:
@@ -1457,7 +1538,6 @@ class RemoteTabs:
                 self._tabs[tab_id] = tab
                 self._forget_closed(tab_id)
                 with tab.lock:
-                    tab.revoked.discard(tab_id)
                     tab.tab_ids.add(tab_id)
                     tab.task_ids.add(task_id)
                     tab.announced.pop(task_id, None)
@@ -1472,7 +1552,7 @@ class RemoteTabs:
                     # Delivered under the stream's lock that just made
                     # the tab one of its own: a frame of the tab already
                     # on the stream (the ``replay_deferred`` offer of a
-                    # finished sub-agent, which a history click's replay
+                    # sub-agent, which a history click's replay
                     # sends to every window after the parent's) is
                     # relayed under that lock too, so it follows the
                     # binding instead of landing in the gap before an
@@ -1480,7 +1560,7 @@ class RemoteTabs:
                     # To every client, as :meth:`_announce` sends it.
                     self.deliver("", _tab_machine_frame(tab_id, tab.machine.name))
         if own_fetch and tab is not None:
-            self._forward(tab, tab_id, cmd)
+            self._fetch(tab, tab_id, conn_id, cmd)
             return True
         if ended is not None:
             self._end_stream(ended, orphans)
@@ -1492,6 +1572,34 @@ class RemoteTabs:
             return False
         self._forward(tab, tab_id, cmd)
         return True
+
+    def _fetch(self, tab: RemoteTab, tab_id: str, conn_id: str, cmd: dict[str, Any]) -> None:
+        """Forward *cmd*, *tab_id*'s own fetch of what it shows, answered to *conn_id* alone.
+
+        A sub-agent tab's is forwarded as it is.  The root tab's reads
+        the tab, as a scoped resume of a local chat does, while the
+        machine takes a forwarded resume as navigation.  So a page's
+        (its answer to a ``replay_deferred`` offer) is sent as a step
+        of the stream's (:attr:`RemoteTab.navigation`), naming the chat
+        and the task the tab shows by then: the offer may predate a
+        click or a submit of another surface, and a fetch of the view
+        it named would switch the machine's tab back, or unbind the tab
+        when taken for a resume of a local chat.  A reconnecting API
+        caller's (``recovery``) names its run, for which the machine
+        publishes nothing: sent as it is while the tab shows the run's
+        chat.  A tab that shows no chat yet, or no longer the caller's,
+        has nothing to send: the fetch changes nothing.
+        """
+        with tab.navigation:
+            with tab.lock:
+                if tab_id == tab.tab_id:
+                    if cmd.get("recovery"):
+                        if str(cmd.get("chatId") or cmd.get("id") or "") != tab.chat_id:
+                            return
+                    elif not tab.name_view(cmd):
+                        return
+                tab.stamp_replay(cmd, conn_id)
+            self._forward(tab, tab_id, cmd)
 
     def replay_bindings(self, conn_id: str) -> None:
         """Tell *conn_id*, whose ``ready`` is being answered, which machine every tab is on.
@@ -1553,8 +1661,8 @@ class RemoteTabs:
         nothing) never reaches the client ahead of the binding its file
         links are checked on.  A stream carrying a sub-agent run of a
         local task has no tab of its own to replay: the client gets the
-        run's ``new_tab`` again (if it is still running and no user
-        closed its tab) and opens and resumes the nested tab itself.
+        run's ``new_tab`` again (if it is still running and its tab has
+        not left the stream) and opens and resumes the nested tab itself.
 
         Only the tab the client is looking at (*shown_tab_id*, the
         ``ready``'s ``tabId``) gets its transcript, as a local tab does
@@ -1565,14 +1673,12 @@ class RemoteTabs:
         and asks for the transcript with a ``scoped`` ``resumeSession``
         when the user opens the tab (:meth:`_resume` forwards it to the
         machine).  The sub-agents that finished on the stream end again
-        (:attr:`RemoteTab.closed_tabs`), shown tab or not, their tabs
-        closed by a page online since or not: a page that was away when
-        the child finished still has its tab, and the parent's
-        transcript, when the page asks for it, announces the child done
-        but closes nothing.  The tabs closed with no end kept close
-        again, for the same page, and so do, last, the tabs of the
-        streams that retired (:meth:`_keep_closed`): a stream retiring
-        during this replay has left its own there by then.
+        (:attr:`RemoteTab.closed_tabs`), shown tab or not: a page that
+        was away when the child finished still has its tab, and the end
+        the machine repeats in its replay of the parent is not relayed
+        for a tab that left the stream.  So do, last, the tabs of the streams
+        that retired (:meth:`_keep_closed`): a stream retiring during
+        this replay has left its own there by then.
         Replaying every bound tab used to send each
         connecting page every machine's transcripts, sub-agents
         included (megabytes, ahead of the page's CHATS rows on a slow
@@ -1590,8 +1696,8 @@ class RemoteTabs:
             with tab.lock:
                 if tab.retired:
                     continue
-                # The run's tab a user closed stays closed on this surface
-                # too, until a ``reopen`` brings it back (``_resume``).
+                # The run's tab that left the stream (closed, or showing
+                # something else since) is not announced again.
                 if (tab.subagent and tab.spawn
                         and _sub_tab_id(json.loads(tab.spawn)) not in tab.revoked):
                     self.deliver_to(conn_id, tab.spawn)
@@ -1605,31 +1711,33 @@ class RemoteTabs:
                     self.deliver_to(conn_id, closing)
             if tab.subagent:
                 continue
+            if tab_id != shown_tab_id:
+                with tab.lock:
+                    if tab.chat_id and not tab.retired:
+                        status = tab.last_status.get(tab_id)
+                        if status:
+                            self.deliver_to(conn_id, status)
+                        self.deliver_to(
+                            conn_id,
+                            _replay_deferred_frame(tab_id, tab.chat_id, tab.shown_task_id),
+                        )
+                continue
             resume: dict[str, Any] = {"type": "resumeSession", "tabId": tab_id}
             if lazy:
                 resume["lazy"] = True
-            with tab.lock:
-                if not tab.chat_id:
-                    continue
-                if tab_id != shown_tab_id:
-                    if tab.retired:
+            # What the tab shows is read and its replay sent as one step
+            # (:attr:`RemoteTab.navigation`): the machine takes the replay
+            # as navigation, and one sent after a click it predates would
+            # switch the machine's tab back to the chat the click left.
+            with tab.navigation:
+                with tab.lock:
+                    if not tab.name_view(resume):
                         continue
-                    status = tab.last_status.get(tab_id)
-                    if status:
-                        self.deliver_to(conn_id, status)
-                    self.deliver_to(
-                        conn_id,
-                        _replay_deferred_frame(tab_id, tab.chat_id, tab.shown_task_id),
-                    )
-                    continue
-                resume["chatId"] = tab.chat_id
-                if tab.shown_task_id:
-                    resume["taskId"] = tab.shown_task_id
-                tab.stamp_replay(resume, conn_id)
-            try:
-                tab.send(resume)
-            except MachineError:
-                pass
+                    tab.stamp_replay(resume, conn_id)
+                try:
+                    tab.send(resume)
+                except MachineError:
+                    pass
         with self._lock:
             for closing in self._closed_tabs.values():
                 self.deliver_to(conn_id, closing)
@@ -1665,18 +1773,6 @@ class RemoteTabs:
     def deliver_to(self, conn_id: str, text: str) -> None:
         """Send one frame of the remote daemon to the connection *conn_id* only."""
         self._backend._printer._send_to_conn(conn_id, text)
-
-    def offer_replay(self, tab_id: str, task_id: str, asker: str) -> None:
-        """Offer the transcript of the reopened *tab_id* to every surface but *asker*'s.
-
-        A forwarded ``reopen`` replays it to *asker* alone: each other
-        connection a broadcast of the tab reaches gets ``replay_deferred``,
-        and fetches it when its user opens the tab (:meth:`_resume`).
-        """
-        offer = _replay_deferred_frame(tab_id, "", task_id)
-        for conn_id in self._backend._printer.replay_conn_ids(tab_id):
-            if conn_id != asker:
-                self.deliver_to(conn_id, offer)
 
     def dropped(self, tab: RemoteTab, lost: bool) -> None:
         """A stream ended: forget its tabs, and when it was *lost* end the tab's task.
@@ -1717,11 +1813,6 @@ class RemoteTabs:
 def _tab_machine_frame(tab_id: str, machine_name: str) -> str:
     """The ``tabMachine`` frame announcing *tab_id*'s binding."""
     return json.dumps({"type": "tabMachine", "tabId": tab_id, "machine": machine_name})
-
-
-def _close_frame(tab_id: str) -> str:
-    """The ``closeSubagentTab`` frame telling a surface a user closed the sub-agent tab *tab_id*."""
-    return json.dumps({"type": "closeSubagentTab", "tab_id": tab_id, "tabId": ""})
 
 
 def _without_replay_id(msg: dict[str, Any]) -> dict[str, Any]:

@@ -419,14 +419,15 @@ def test_a_step_a_hook_failed_is_retried_with_every_tool_call_answered() -> None
 
 
 class _BusyOncePrinter(Printer):
-    """A printer whose event store is busy for the first ``llm_call`` event."""
+    """A printer whose event store is busy for the first event of type *busy*."""
 
-    def __init__(self) -> None:
+    def __init__(self, busy: str = "llm_call") -> None:
+        self.busy = busy
         self.types: list[str] = []
 
     def print(self, content: Any, type: str = "text", **kwargs: Any) -> None:  # noqa: A002
         self.types.append(type)
-        if type == "llm_call" and self.types.count("llm_call") == 1:
+        if type == self.busy and self.types.count(type) == 1:
             raise RuntimeError("the event store is locked")
 
     def token_callback(self, token: str) -> None:
@@ -466,6 +467,49 @@ def test_a_printer_that_fails_on_the_llm_call_event_does_not_cost_the_reply(
         ("tool_result", "toolu_1")
     ]
     assert printer.types.count("llm_call") == 2
+
+
+FINISHED: list[str] = []
+
+
+def finish(result: str) -> str:
+    """Finish the task.
+
+    Args:
+        result: The result of the task.
+    """
+    FINISHED.append(result)
+    return result
+
+
+@pytest.mark.parametrize("max_steps", [1, 3])
+@pytest.mark.parametrize("busy", ["tool_result", "result"])
+def test_a_printer_that_fails_once_finish_has_run_does_not_cost_the_result(
+    monkeypatch: pytest.MonkeyPatch, busy: str, max_steps: int
+) -> None:
+    """Once ``finish`` has run, its ``tool_result`` event and the run's ``result`` event are
+    printed.  A printer that raised on either was taken for a failed model request: the loop
+    asked the model again (after the ``result`` event with the ``finish`` call unanswered, a
+    request the provider rejects) and ran ``finish`` a second time; a run at its last step
+    ended as out of steps.  Both events record a result the run already has, so their loss
+    is logged and the run returns it: one request, one ``finish``."""
+    FINISHED.clear()
+    script = [anthropic_server.tool_use_message("finish", {"result": "done"}, 100, "toolu_1")]
+    printer = _BusyOncePrinter(busy=busy)
+    with anthropic_server.serve(script) as (url, requests):
+        monkeypatch.setenv("ANTHROPIC_BASE_URL", url)
+        monkeypatch.setattr(DEFAULT_CONFIG, "ANTHROPIC_API_KEY", "local")
+        result = KISSAgent("busy printer").run(
+            model_name=anthropic_server.MODEL,
+            prompt_template="Finish.",
+            tools=[finish],
+            max_steps=max_steps,
+            max_budget=1.0,
+            printer=printer,
+        )
+    assert result == "done" and FINISHED == ["done"]
+    assert len([r for r in requests if r.get("stream")]) == 1, "the model was asked again"
+    assert printer.types.count("tool_result") == printer.types.count("result") == 1
 
 
 class _StoreBusyOnce:

@@ -19,8 +19,10 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
+import time
 from collections.abc import Coroutine
 from datetime import datetime
 from pathlib import Path
@@ -35,6 +37,8 @@ from kiss.server.explorer import (
     DIR_LISTING_MAX_ENTRIES,
     GIT_LOG_DEFAULT_LIMIT,
     GIT_LOG_MAX_LIMIT,
+    birth_time,
+    list_directory,
     parse_git_log,
     parse_porcelain_status,
 )
@@ -201,9 +205,16 @@ class ExplorerHarness:
     def stop(self) -> None:
         """Stop the server, its loop, and restore redirected globals."""
         try:
-            asyncio.run_coroutine_threadsafe(
-                self.server.stop_async(), self.loop,
-            ).result(60)
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    self.server.stop_async(), self.loop,
+                ).result(60)
+            finally:
+                # Join the work the loop started in threads (status probes)
+                # before the loop closes under it.
+                asyncio.run_coroutine_threadsafe(
+                    self.loop.shutdown_default_executor(), self.loop,
+                ).result(60)
         finally:
             self.loop.call_soon_threadsafe(self.loop.stop)
             self._thread.join(timeout=30)
@@ -350,12 +361,19 @@ class TestListDir:
     def test_non_string_fields_are_blanked(self, harness) -> None:
         reply = _request(
             harness,
-            {"type": "listDir", "path": 123, "tabId": 5, "token": ["x"]},
+            {
+                "type": "listDir", "path": 123, "tabId": 5, "token": ["x"],
+                "sort": ["name-desc"],
+            },
             "dirListing",
         )
         assert reply["tabId"] == ""
         assert reply["token"] == ""
         assert Path(reply["path"]) == harness.work_dir.resolve()
+        # A sort that is no string names no order: the listing is by name.
+        assert [e["name"] for e in reply["entries"]] == [
+            "dir", "feature.txt", "main-only.txt", "README.md", "untracked.txt",
+        ]
 
     @posix_only("chmod permission bits")
     def test_unreadable_directory_replies_error(self, harness) -> None:
@@ -401,10 +419,92 @@ class TestListDir:
             reply = _request(
                 harness, {"type": "listDir", "path": "big"}, "dirListing",
             )
+            reverse = _request(
+                harness, {"type": "listDir", "path": "big", "sort": "name-desc"},
+                "dirListing",
+            )
         finally:
             shutil.rmtree(big)
         assert reply["truncated"] is True
         assert len(reply["entries"]) == DIR_LISTING_MAX_ENTRIES
+        assert reply["entries"][0]["name"] == "f00000"
+        # The request's ``sort`` orders the listing before the cap cuts it.
+        assert reverse["truncated"] is True
+        assert len(reverse["entries"]) == DIR_LISTING_MAX_ENTRIES
+        assert reverse["entries"][0]["name"] == f"f{DIR_LISTING_MAX_ENTRIES + 4:05d}"
+        assert reverse["entries"][-1]["name"] == "f00005"
+        assert set(reverse["entries"][0]) == {"name", "path", "isDir"}
+
+
+class TestListDirectorySort:
+    """The ``sort`` orders of :func:`list_directory`, on real files.
+
+    Two branches of :func:`birth_time` need a test double and are not
+    exercised: a libc without ``statx``, and, on Linux, a stat result
+    with the ``st_birthtime`` of macOS and Windows.
+    """
+
+    @staticmethod
+    def _names(directory: Path, sort: str) -> list[str]:
+        return [e["name"] for e in list_directory(directory, sort)["entries"]]
+
+    def test_six_orders_keep_folders_first(self, tmp_path: Path) -> None:
+        mtimes = {"b_dir": 100, "A_dir": 300, "c.txt": 200, "B.txt": 400, "a.txt": 200}
+        for name, mtime in mtimes.items():
+            path = tmp_path / name
+            if name.endswith("_dir"):
+                path.mkdir()
+            else:
+                path.write_text(name)
+            os.utime(path, (mtime, mtime))
+        # A dangling link cannot be stat'ed: a file of time 0.
+        (tmp_path / "gone").symlink_to(tmp_path / "missing")
+        expected = {
+            "name-asc": ["A_dir", "b_dir", "a.txt", "B.txt", "c.txt", "gone"],
+            "name-desc": ["b_dir", "A_dir", "gone", "c.txt", "B.txt", "a.txt"],
+            # a.txt and c.txt, modified at the same time, are in name
+            # order, which the descending order reverses with the rest.
+            "modified-asc": ["b_dir", "A_dir", "gone", "a.txt", "c.txt", "B.txt"],
+            "modified-desc": ["A_dir", "b_dir", "B.txt", "c.txt", "a.txt", "gone"],
+        }
+        assert {sort: self._names(tmp_path, sort) for sort in expected} == expected
+        # No order, or one that is unknown, is the order by name.
+        assert self._names(tmp_path, "size-asc") == expected["name-asc"]
+        assert [e["name"] for e in list_directory(tmp_path)["entries"]] == expected["name-asc"]
+
+    def test_created_is_the_birth_time_where_the_file_system_has_one(
+        self, tmp_path: Path,
+    ) -> None:
+        for name in ("first.txt", "second.txt", "third.txt"):
+            (tmp_path / name).write_text(name)
+            time.sleep(0.05)
+        # Rewritten, the oldest file is the last modified and the last
+        # changed; it was still born first.
+        oldest = tmp_path / "first.txt"
+        oldest.write_text("rewritten")
+        rewritten_last = ["second.txt", "third.txt", "first.txt"]
+        assert self._names(tmp_path, "modified-asc") == rewritten_last
+        born = birth_time(str(oldest), oldest.stat())
+        if born is None:
+            # No birth time on this file system: the change time stands in.
+            assert self._names(tmp_path, "created-asc") == rewritten_last
+            return
+        assert born < oldest.stat().st_mtime
+        by_birth = ["first.txt", "second.txt", "third.txt"]
+        assert self._names(tmp_path, "created-asc") == by_birth
+        assert self._names(tmp_path, "created-desc") == by_birth[::-1]
+
+    @pytest.mark.skipif(sys.platform != "linux", reason="procfs records no birth time")
+    def test_files_without_a_birth_time_are_still_listed(self, tmp_path: Path) -> None:
+        folder = Path("/proc/sys/kernel/random")
+        assert birth_time(str(folder), folder.stat()) is None
+        # A file that is gone by the time it is asked about has none either.
+        assert birth_time(str(tmp_path / "missing"), tmp_path.stat()) is None
+        # The change time orders the listing instead.  procfs stamps a
+        # file when it is first looked at, so only the names are certain.
+        by_name = self._names(folder, "name-asc")
+        assert "uuid" in by_name
+        assert sorted(self._names(folder, "created-asc")) == sorted(by_name)
 
 
 class TestGitStatus:

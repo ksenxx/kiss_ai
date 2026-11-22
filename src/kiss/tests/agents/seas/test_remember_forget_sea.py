@@ -18,13 +18,14 @@ finish text is fixed, so what the model writes is not under test.)
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import time
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from threading import Barrier, Event
+from threading import Barrier, Event, Timer
 from typing import Any
 
 import pytest
@@ -180,27 +181,46 @@ def test_edits_keep_every_other_line_byte_for_byte(_fresh_agents_md: Path) -> No
     assert path.read_bytes() == b"Unrelated prose without trailing newline\n- Rule\n"
 
 
-def _in_a_child(scenario: str, timeout: float) -> tuple[subprocess.Popen[str], str]:
+def _in_a_child(
+    scenario: str, timeout: float, startup: float = 120.0
+) -> tuple[subprocess.Popen[str], str]:
     """Run this module's function *scenario* in a child interpreter; return (reaped child, output).
 
     The concurrency scenarios' executor threads are joined when their
     interpreter exits, and ``shutdown(wait=False, cancel_futures=True)``
     only skips queued work: a worker wedged by a locking regression would
     hang the pytest process itself once the Future timeout fired.  So the
-    deadline is the parent's: a child still running after *timeout*
-    seconds is killed and reaped, and comes back with a non-zero
-    ``returncode`` (0 means every assertion of the scenario held).  The
-    child inherits ``KISS_HOME`` and so works on the session's AGENTS.md.
+    deadline is the parent's: a child still running *timeout* seconds
+    after it started the scenario is killed and reaped, and comes back
+    with a non-zero ``returncode`` (0 means every assertion of the
+    scenario held).  The child says when it starts the scenario with a
+    line of output, ``ready``: its imports, slow on a loaded machine, are
+    no part of *timeout* and have *startup* seconds of their own, after
+    which the child is killed and reaped as well.  The child inherits
+    ``KISS_HOME`` and so works on the session's AGENTS.md.
     """
-    code = f"from {__name__} import {scenario}; {scenario}()"
+    code = f"from {__name__} import {scenario}; print('ready', flush=True); {scenario}()"
     child = subprocess.Popen(
         [sys.executable, "-c", code], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
     )
+    assert child.stdout is not None
+    output = ""
+    limit = Timer(startup, child.kill)
+    limit.start()
     try:
-        output = child.communicate(timeout=timeout)[0]
-    except subprocess.TimeoutExpired:
-        child.kill()
-        output = child.communicate()[0]
+        for line in iter(child.stdout.readline, ""):  # up to ``ready``, or to the child's end
+            output += line
+            if line == "ready\n":
+                break
+        limit.cancel()
+        limit = Timer(timeout, child.kill)
+        limit.start()
+        output += child.stdout.read()  # up to the child's end, its own or the one the limit puts
+        child.wait()
+    finally:  # an interrupted read leaves neither a timer nor a child behind
+        limit.cancel()
+        child.kill()  # nothing to do for a child that was reaped
+        child.wait()
     return child, output
 
 
@@ -306,7 +326,7 @@ def test_a_wedged_worker_fails_at_the_deadline_and_is_reaped() -> None:
     but never exits (the interpreter joins the wedged thread), which is the
     hang the parent's deadline is for.
     """
-    deadline = 10.0  # the child's import of this module must fit too, on a loaded machine
+    deadline = 10.0  # of the scenario alone: the child's import of this module is not counted
     started = time.monotonic()
     child, output = _in_a_child("_wedged_scenario", timeout=deadline)
     assert time.monotonic() - started >= deadline  # ended by the parent, not by the child
@@ -322,6 +342,52 @@ def _wedged_scenario() -> None:
     finally:
         pool.shutdown(wait=False, cancel_futures=True)
         print("the scenario gave up; the interpreter now joins the wedged worker", flush=True)
+
+
+def _start_slowly(seconds: float, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the test's children say a word and sleep *seconds* before their first import.
+
+    Their interpreter does both in the ``sitecustomize`` module put first on its path.
+    """
+    (tmp_path / "sitecustomize.py").write_text(
+        f"import time\nprint('still starting', flush=True)\ntime.sleep({seconds})\n"
+    )
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path), prepend=os.pathsep)
+
+
+def test_a_child_that_never_starts_its_scenario_is_killed_and_reaped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A child stuck before its scenario cannot hang pytest either: its imports have a limit.
+
+    The child never gets to its first import (see :func:`_start_slowly`).
+    """
+    _start_slowly(600, tmp_path, monkeypatch)
+    started = time.monotonic()
+    child, output = _in_a_child("_wedged_scenario", timeout=10.0, startup=1.0)
+    assert time.monotonic() - started >= 1.0  # ended by the parent, not by the child
+    assert child.returncode not in (None, 0)  # killed, then reaped
+    assert output == "still starting\n"  # its word is no ``ready``
+
+
+def test_a_slow_start_takes_nothing_from_the_scenario_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A child whose start outlasts the scenario's deadline still gets the whole deadline.
+
+    The deadline counts from ``ready``, not from the child's start: the
+    scenario gets as far as its own Future timeout (0.1 s) and the child is
+    killed a whole deadline after it said ``ready``.
+    """
+    deadline, slow_start = 2.0, 2.5  # counted from the start, the deadline would end first
+    _start_slowly(slow_start, tmp_path, monkeypatch)
+    started = time.monotonic()
+    child, output = _in_a_child("_wedged_scenario", timeout=deadline)
+    elapsed = time.monotonic() - started
+    assert child.returncode not in (None, 0)  # killed, then reaped
+    assert output.startswith("still starting\n")
+    assert "TimeoutError" in output and "the interpreter now joins the wedged worker" in output
+    assert elapsed >= slow_start + deadline  # ended by the parent, a deadline after ``ready``
 
 
 def test_remember_appends_to_a_hand_written_file(_fresh_agents_md: Path) -> None:

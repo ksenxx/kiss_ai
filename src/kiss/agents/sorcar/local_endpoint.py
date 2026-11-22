@@ -45,6 +45,7 @@ from websockets.sync.client import connect as _ws_connect
 
 from kiss.core.config import kiss_home
 from kiss.core.file_lock import exclusive_file_lock
+from kiss.core.tool_interrupt import call_without_injection
 from kiss.core.utils import atomic_write_text
 
 logger = logging.getLogger(__name__)
@@ -354,11 +355,14 @@ def dial_off_thread(
     outcome: queue.SimpleQueue[ClientConnection | BaseException] = queue.SimpleQueue()
     taken: queue.SimpleQueue[bool] = queue.SimpleQueue()
     result: ClientConnection | BaseException | None = None
+    helper = threading.Thread(
+        target=_hand_over, args=(dial, outcome, taken), name="sorcar-local-connect", daemon=True,
+    )
     try:
-        threading.Thread(
-            target=_hand_over, args=(dial, outcome, taken),
-            name="sorcar-local-connect", daemon=True,
-        ).start()
+        # A Stop raised as a start takes the lock of the thread's event
+        # (the one Python-level lock of this wait) left the thread
+        # blocked on it for good: here and below it is held back.
+        call_without_injection(helper.start)
         result = _await(outcome, timeout)
         if isinstance(result, BaseException):
             raise result
@@ -401,9 +405,10 @@ def call_off_thread[T](call: Callable[[], T], timeout: float) -> T:
         BaseException: Whatever *call* raised.
     """
     outcome: queue.SimpleQueue[T | BaseException] = queue.SimpleQueue()
-    threading.Thread(
+    helper = threading.Thread(
         target=_settle, args=(call, outcome), name="sorcar-off-thread", daemon=True,
-    ).start()
+    )
+    call_without_injection(helper.start)
     result = _await(outcome, timeout)
     if isinstance(result, BaseException):
         raise result
@@ -497,7 +502,7 @@ def send(ws: ClientConnection, text: str, *, timeout: float = 10.0) -> None:
         target=_write, args=(ws, text, ended), name="sorcar-local-send", daemon=True,
     )
     try:
-        worker.start()
+        call_without_injection(worker.start)
         worker.join(timeout)
         late = not ended
         if late:

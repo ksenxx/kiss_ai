@@ -4,8 +4,8 @@
 // add your name here
 
 // End-to-end (jsdom) tests for the "N units ago" launch-age label that
-// every task panel in the task-history panel shows next to its
-// show-details chevron (``.sidebar-item-collapse``).
+// every task panel in the task-history panel shows in its "…" menu
+// (``.sidebar-item-actions``).
 //
 // The label reports how long ago the task was launched using the unit
 // ladder minutes -> hours -> days -> weeks -> months -> years (and
@@ -59,7 +59,7 @@ function makePage(captureTimeouts) {
 }
 
 // ---------------------------------------------------------------------------
-// 1. Every unit of the ladder renders, next to the show-details button.
+// 1. Every unit of the ladder renders, in the row's "…" menu.
 // ---------------------------------------------------------------------------
 
 function testUnitLadder() {
@@ -110,7 +110,7 @@ function testUnitLadder() {
       `row ${i} (${testCase.ago} ms old)`,
     );
     // The label lives in the row's "…" menu (the action strip), under
-    // its buttons, the show-details one among them.
+    // its buttons.
     const actions = row.querySelector('.sidebar-item-actions');
     assert.strictEqual(
       ago.parentElement,
@@ -118,8 +118,8 @@ function testUnitLadder() {
       `row ${i} label sits in the action strip`,
     );
     assert.ok(
-      actions.querySelector('.sidebar-item-collapse ~ .sidebar-item-launched'),
-      `row ${i} label comes after the show-details button`,
+      actions.querySelector('button ~ .sidebar-item-launched'),
+      `row ${i} label comes after the menu's buttons`,
     );
     assert.strictEqual(
       actions.querySelector('.sidebar-item-launched ~ button'),
@@ -133,7 +133,7 @@ function testUnitLadder() {
     );
   });
   win.close();
-  console.log('  ok - full unit ladder renders next to the toggle');
+  console.log('  ok - full unit ladder renders in the "…" menu');
 }
 
 // ---------------------------------------------------------------------------

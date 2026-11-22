@@ -76,7 +76,6 @@
      root (--theme-font-size) so the browser's zoom scales everything. */
   --font-ui: var(--theme-font-family, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif);
   --font-mono: var(--theme-editor-font-family, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace);
-  --fs-xs:  0.769rem;  /* 10px */
   --fs-sm:  0.846rem;  /* 11px */
   --fs-md:  0.923rem;  /* 12px */
   --fs-base: 1rem;     /* 13px */
@@ -153,12 +152,16 @@
   --z-editor-menu: 1000;  /* menus over the embedded editor */
   --z-loading: 9999;      /* server-loading cover */
   --z-tooltip: 10000;     /* tooltips and date picker */
-  --z-toast: 10001;       /* notifications, above everything */
+  --z-toast: 10001;       /* notifications, above everything on screen */
+  --z-statusbar: 2147483647;  /* the strip a phone reads its status bar's
+                                 colour from (it paints nothing): the
+                                 highest there is */
 
   /* Motion.  Durations collapse to 0 under prefers-reduced-motion. */
   --dur-fast: 0.1s;
   --dur-base: 0.15s;
   --dur-slow: 0.2s;
+  --dur-slide: 0.45s;     /* a card sliding across its panel */
   --ease: cubic-bezier(0.165, 0.84, 0.44, 1);
 
   /* Semantic colours.  Success and failure take the palette's chart
@@ -200,6 +203,7 @@
     --dur-fast: 0s;
     --dur-base: 0s;
     --dur-slow: 0s;
+    --dur-slide: 0s;
   }
 }
 
@@ -229,7 +233,7 @@ html.light-theme, body.light-theme { color-scheme: light; }
   outline-offset: 1px;
 }
 
-:where(.history-chat-header, .sidebar-item, .more-menu-item, .scm-section-hdr):focus-visible {
+:where(.history-chat-header, .history-project-header, .projects-row, .sidebar-item, .more-menu-item, .scm-section-hdr):focus-visible {
   outline-offset: -1px;
 }
 
@@ -450,7 +454,7 @@ body {
 #chat-header {
   flex-shrink: 0;
   display: grid;
-  grid-template-columns: minmax(0, max-content) max-content minmax(0, max-content);
+  grid-template-columns: minmax(0, max-content) max-content minmax(0, max-content) max-content minmax(0, max-content);
   align-items: center;
   justify-content: start;
   width: 100%;
@@ -468,6 +472,15 @@ body {
 #chat-header-sep { grid-column: 2; margin: 0 var(--space-1-5); color: var(--faint); font-weight: 400; }
 
 #chat-workdir-wrap { grid-column: 3; }
+
+/* The project of the chat, after a dot: there once a project exists
+   (main.js renderChatProject).  The wrap is a flex box, which the
+   `hidden` attribute alone would not take off the row. */
+#chat-project-sep { grid-column: 4; margin: 0 var(--space-1-5); color: var(--faint); font-weight: 400; }
+
+#chat-project-wrap { grid-column: 5; }
+
+#chat-project-wrap[hidden] { display: none; }
 
 /* Each drop-down is a span holding a label that shows the selected
    entry (main.js renderChatHeaderLabel), the down chevron that marks
@@ -516,7 +529,8 @@ body {
    above and below it: a strip one line tall opens the list over its
    whole height, a finger's target on a phone. */
 #chat-machine,
-#chat-workdir {
+#chat-workdir,
+#chat-project {
   position: absolute;
   top: calc(-1 * var(--space-1-5));
   left: 0;
@@ -551,7 +565,8 @@ body {
 }
 
 #chat-machine option,
-#chat-workdir option { color: var(--fg); background: var(--bg); font-weight: 400; }
+#chat-workdir option,
+#chat-project option { color: var(--fg); background: var(--bg); font-weight: 400; }
 
 /* The machine drop-down (and its chevron) takes no room until a name
    is known (the directory one always offers at least "Choose ..."). */
@@ -704,14 +719,12 @@ body.content-tab-open #chat-header { display: none; }
 .config-divider { border-top: 1px solid var(--border); margin: var(--space-3) 0; }
 
 /* Collapsible section toggles - the settings dialog's API Keys and
-   Custom Models subpanels and the history panel's Filters drawer -
-   share one chevron-toggle pattern: a small sentence-case label in
-   the faint text step, the body colour on hover, chevron turning
-   when open. */
+   Custom Models subpanels - share one chevron-toggle pattern: a
+   small sentence-case label in the faint text step, the body colour
+   on hover, chevron turning when open. */
 .config-subpanel { margin-top: var(--space-2); }
 
-.config-subpanel-toggle,
-.history-filters-toggle {
+.config-subpanel-toggle {
   display: flex; align-items: center; gap: var(--space-1);
   width: 100%; padding: var(--space-0-5) 0; margin: 0 0 var(--space-1-5);
   background: none; border: none;
@@ -721,19 +734,15 @@ body.content-tab-open #chat-header { display: none; }
   cursor: pointer; user-select: none;
 }
 
-.config-subpanel-toggle:hover,
-.history-filters-toggle:hover { color: var(--fg); }
+.config-subpanel-toggle:hover { color: var(--fg); }
 
-.config-subpanel-toggle:focus-visible,
-.history-filters-toggle:focus-visible {
+.config-subpanel-toggle:focus-visible {
   outline: 1px solid var(--accent); outline-offset: 1px;
 }
 
-.config-subpanel-chevron,
-.history-filters-chevron { flex: none; transition: transform var(--dur-slow) var(--ease); }
+.config-subpanel-chevron { flex: none; transition: transform var(--dur-slow) var(--ease); }
 
-.config-subpanel-toggle.expanded .config-subpanel-chevron,
-.history-filters-toggle.expanded .history-filters-chevron {
+.config-subpanel-toggle.expanded .config-subpanel-chevron {
   transform: rotate(90deg);
 }
 
@@ -1025,8 +1034,8 @@ body.remote-chat #tab-bar .chat-tab.subagent-tab.active {
 }
 
 /* Sub-agent tab status: the shared spinner while the sub-agent runs
-   (.status-spinner), the shared tick once it is done (.status-tick),
-   both in the tab's purple. */
+   (.status-spinner), the shared tick of a finished one on the shared
+   page (.status-tick, share.js), both in the tab's purple. */
 .subagent-indicator { color: var(--purple); }
 
 #tab-context-menu {
@@ -1671,15 +1680,15 @@ body.remote-chat:not(.light-theme) .welcome-logo-dark { display: block; }
    wrap it with overflow-wrap: break-word, while the overlay would
    inherit any letter-spacing set on the page and start the ghost off
    the last typed characters.  The right padding (the same as #task-input's)
-   keeps the text clear of the 24px clear button over the box's right
-   end, else a click on the last characters of a full line clears the
-   draft instead of moving the caret. */
+   keeps the text clear of the two 24px buttons (save, clear) over the
+   box's right end, else a click on the last characters of a full line
+   saves or clears the draft instead of moving the caret. */
 #ghost-overlay {
   position: absolute; top: 0; left: 0; right: 0;
   pointer-events: none; white-space: pre-wrap; overflow-wrap: break-word;
   font-family: inherit; font-size: var(--fs-base); line-height: 1.5; letter-spacing: normal;
   color: transparent; min-height: 4.5em;
-  padding: var(--space-0-5) calc(var(--space-6) + var(--space-1)) var(--space-0-5) var(--space-0-5);
+  padding: var(--space-0-5) calc(2 * var(--space-6) + var(--space-1)) var(--space-0-5) var(--space-0-5);
   max-height: 50vh; overflow: hidden; scrollbar-gutter: stable;
 }
 
@@ -1746,10 +1755,12 @@ body.remote-chat:not(.light-theme) .welcome-logo-dark { display: block; }
 #input-area.drawer-collapsed { min-height: 12px; }
 
 /* A tab showing a file or another non-chat view keeps the
-   composer's BUTTON ROW: New chat and ... (more actions) stay
-   reachable whatever the tab shows. The text box and the chat-only
-   controls — Inject promptlet, the model picker, Send/Stop — hide:
-   they act on a chat transcript that is not on screen. */
+   composer's BUTTON ROW: New chat, the mic and ... (more actions)
+   stay reachable whatever the tab shows (a mic that is on can always
+   be turned off; what it hears brings the chat back). The text box
+   and the chat-only controls — Inject promptlet in the ... menu, the
+   model picker, Send/Stop — hide: they act on a chat transcript that
+   is not on screen. */
 body.content-tab-open #input-area > :not(#input-container) { display: none !important; }
 body.content-tab-open #input-container > :not(#input-footer) { display: none !important; }
 
@@ -1812,7 +1823,7 @@ body.remote-chat.ask-answering #input-container:focus-within {
   width: 100%; background: transparent; border: none; color: var(--fg);
   font-size: var(--fs-base); line-height: 1.5;
   resize: none; outline: none;
-  padding: var(--space-0-5) calc(var(--space-6) + var(--space-1)) var(--space-0-5) var(--space-0-5);
+  padding: var(--space-0-5) calc(2 * var(--space-6) + var(--space-1)) var(--space-0-5) var(--space-0-5);
   max-height: 50vh; overflow-y: auto; scrollbar-gutter: stable;
 }
 
@@ -1820,8 +1831,10 @@ body.remote-chat.ask-answering #input-container:focus-within {
    size, the padding grows the hit area so a near miss does not land in
    the input and move the caret instead of clearing.  The same control
    clears the input and the sidebar's search boxes; only its anchor in
-   the box differs. */
+   the box differs.  The input's save button is its twin, one button
+   to the left. */
 #input-clear-btn,
+#input-save-btn,
 .search-clear-btn {
   position: absolute; z-index: var(--z-float-top);
   background: none; border: none; color: var(--faint);
@@ -1831,10 +1844,16 @@ body.remote-chat.ask-answering #input-container:focus-within {
   transition: color var(--dur-base), background var(--dur-base);
 }
 #input-clear-btn { top: 0; right: 0; }
+#input-save-btn { top: 0; right: var(--space-6); }
+
+/* The save keeps a prompt in the making.  An answer to an agent's
+   question is not one: the answer box offers no save. */
+body.ask-answering #input-save-btn { display: none; }
 
 .search-clear-btn { top: 50%; right: 5px; transform: translateY(-50%); }
 
 #input-clear-btn:hover,
+#input-save-btn:hover,
 .search-clear-btn:hover { color: var(--fg); background: var(--hover-strong); }
 
 #input-actions { display: flex; gap: var(--space-2); align-items: center; flex-shrink: 0; }
@@ -1887,7 +1906,7 @@ body.remote-chat.ask-answering #input-container:focus-within {
 #model-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
 
 /* The composer's icon buttons.  remote-codex.css draws them, and
-   .more-menu-item below the two that sit in the "..." menu. */
+   .more-menu-item below the ones that sit in the "..." menu. */
 #menu-btn,
 #meta-drawer-btn,
 #new-chat-btn,
@@ -1912,6 +1931,27 @@ body.remote-chat #voice-btn.active.voice-transcribing { color: var(--warning); a
   0%, 100% { opacity: 1; }
   50% { opacity: 0.45; }
 }
+
+/* The mic (voice.js, "Dictation") in the voice trigger's colours: dim
+   while it starts, pulsing while it listens, red while it hears
+   speech and amber while a transcript is on its way (also after the
+   mic was turned off), and the error colour after a failed start.  The
+   selectors after the first of a group outrank the remote skin's
+   colours for the button at rest, listening and under the pointer. */
+#dictate-btn.dictate-loading { opacity: 0.5; }
+#dictate-btn.active { animation: voice-pulse 1.6s ease-in-out infinite; }
+
+#dictate-btn.dictate-error,
+body.remote-chat #dictate-btn.dictate-error,
+body.remote-chat #dictate-btn.dictate-error:hover { color: var(--error); }
+
+#dictate-btn.dictate-transcribing,
+body.remote-chat #dictate-btn.dictate-transcribing,
+body.remote-chat #dictate-btn.dictate-transcribing:hover,
+body.remote-chat #dictate-btn.active.dictate-transcribing { color: var(--warning); animation: blink-pending 0.8s ease-in-out infinite; }
+
+#dictate-btn.dictate-hearing,
+body.remote-chat #dictate-btn.active.dictate-hearing { color: var(--red); animation: blink-pending 0.8s ease-in-out infinite; }
 
 #more-menu-wrap { position: relative; display: flex; align-items: center; }
 
@@ -1938,16 +1978,6 @@ body.remote-chat #voice-btn.active.voice-transcribing { color: var(--warning); a
 .more-item-icon { display: flex; align-items: center; flex-shrink: 0; }
 .more-item-icon svg { width: 16px; height: 16px; }
 .more-item-label { overflow: hidden; text-overflow: ellipsis; }
-
-/* The "Auto mode" item is a checkbox item: it reads as the current
-   choice (the selected row's fill and strong text) while the palette
-   follows the clock. */
-
-#theme-auto-btn.checked {
-  background: var(--selected);
-  color: var(--fg-strong);
-  font-weight: 500;
-}
 
 /* Anchored to the model button's right edge; positionModelDD() in main.js
    shifts it right when that anchor would push it past the left
@@ -2130,9 +2160,18 @@ body.remote-chat #voice-btn.active.voice-transcribing { color: var(--warning); a
    desktop, a right-hand drawer on mobile).  Its drawer affordances
    (the tab-bar toggle and the close button) exist only on mobile.
    --meta-hdr-row is the height of a section header's icon buttons,
-   and of the header row they sit in (see .meta-section-hdr below). */
+   and of the header row they sit in (see .meta-section-hdr below).
+   --meta-pad-x is the panel's horizontal padding, for the children
+   that span it (the section bodies, .meta-section-body, and the
+   bottom strip, #meta-footer); every rule that changes the padding
+   resets it too.  --meta-bleed is how far a row's fill reaches out of
+   the panel's column on each side, and --meta-gutter the room a body
+   keeps for its scrollbar. */
 #meta-panel {
   --meta-hdr-row: 14px;
+  --meta-pad-x: var(--space-4);
+  --meta-bleed: calc(var(--meta-pad-x) / 2);
+  --meta-gutter: 0px;
 
   display: none;
 }
@@ -2162,7 +2201,9 @@ body.remote-chat #voice-btn.active.voice-transcribing { color: var(--warning); a
    shows its header only.  The resizer
    after a section is the separator line between it and the next
    shown section; it drags the boundary while both sides are expanded
-   (`static` otherwise: still a separator, no longer a handle). */
+   (`static` otherwise: still a separator, no longer a handle).  A
+   section with no toggle is PINNED open (Recommendations, a bare card):
+   it never folds and takes no share (see its body's rule below). */
 .meta-section { display: contents; }
 
 .meta-section[hidden],
@@ -2241,16 +2282,59 @@ body.remote-chat #voice-btn.active.voice-transcribing { color: var(--warning); a
    the user chose until nothing else can shrink.  The minimum height
    is what every expanded body keeps against dragged bodies above it:
    half of an equal share (--meta-body-share, measured by main.js's
-   applyMetaSectionLayout), at most 4.5rem (about a row or two: a
-   schedule row whose detail line wraps once is 53px at the 13px
+   applyMetaSectionLayout), at most 5rem (about a row or two: a
+   schedule row whose detail line wraps once is 63px at the 13px
    Cursor scale).  Without
    it a persisted drag left a section's header over an empty 0px body,
    which read as "the Schedule shows no jobs".  Tied to the share, the
    minimums never add up to more than the panel has. */
 .meta-section-body {
   flex: 1 1 0px;
-  min-height: min(4.5rem, calc(var(--meta-body-share, 0px) / 2));
+  min-height: min(5rem, calc(var(--meta-body-share, 0px) / 2));
   overflow-y: auto;
+}
+
+/* A pinned section's body is as tall as its content, and no taller
+   than an equal share, past which it scrolls: every other expanded
+   body is then left a share at least, so a long recommendation never
+   pushes a section out of the panel.  It neither grows nor gives way
+   (the bodies that share do both), and keeps no minimum: with nothing
+   to show it takes no room. */
+.meta-section:not(:has(.meta-section-toggle)) > .meta-section-body {
+  flex: 0 0 auto;
+  min-height: 0;
+  max-height: var(--meta-body-share, none);
+}
+
+/* A body spans the whole panel, as the history list spans the Chats
+   sidebar (#history-list): negative margins cancel the panel's
+   padding and the body's own padding puts its content back in the
+   panel's column.  So the scrollbar rides at the panel's edge, and a
+   row's fill may reach out of the column (--meta-bleed) to end 8px
+   from the panel's edges, as a chat row's does.  The id outranks the
+   margins and paddings the bodies' own classes set. */
+#meta-panel .meta-section-body {
+  margin-inline: calc(-1 * var(--meta-pad-x));
+  padding-inline: var(--meta-pad-x) max(0px, calc(var(--meta-pad-x) - var(--meta-gutter)));
+}
+
+/* Where the pointer is a mouse, a body keeps the 6px scrollbar's room
+   at all times and counts it into its right padding (as #history-list
+   does), so its content is as wide whether or not it overflows. */
+@media (hover: hover) and (pointer: fine) {
+  #meta-panel { --meta-gutter: 6px; }
+
+  #meta-panel .meta-section-body { scrollbar-gutter: stable; }
+}
+
+/* A view that keeps the rows of the machine or folder the chat just
+   left while the next one answers (main.js holdView, which also makes
+   it inert): they stay as they are for a quick answer and dim after
+   0.4s of waiting, so they are not taken for the new machine's.  The
+   answer takes the class off and the rows are back at once. */
+.is-held {
+  opacity: 0.55;
+  transition: opacity var(--dur-base) linear 0.4s;
 }
 
 /* The separator between two shown sections: a 1px line inside a 9px
@@ -2350,12 +2434,68 @@ body.meta-section-resizing {
 
 .meta-info-status:empty { display: none; }
 
+/* The example line of the Schedule and Machines sections is the first
+   thing in the section's body, over the list: it scrolls away with
+   the rows, so it takes none of the height the panel's headers and
+   status lines need (a short panel has none to spare).  Set like a
+   status line, with a status line's gap to the first row; a panel too
+   narrow for it wraps it.  The padding over it is the room of its
+   command's focus ring, which is drawn outside the command's box and
+   which the body would cut at its top edge. */
+.meta-section-example {
+  margin-bottom: var(--space-1-5);
+  padding-top: var(--space-0-5);
+  font-size: var(--fs-base);
+  line-height: 1.35;
+  color: var(--dim);
+  overflow-wrap: anywhere;
+}
+
+/* A body no taller than the minimum a body keeps (5rem, a row's room:
+   see .meta-section-body) leaves that room to its rows: there the
+   example is not shown, so a body squeezed to its minimum still shows
+   a whole row.  The body is a size container for that question; its
+   size never came from its content (a share of the panel's height or
+   a dragged one, the panel's width), so nothing else changes. */
+.meta-section-body:has(> .meta-section-example) { container-type: size; }
+
+@container (height <= 5rem) {
+  .meta-section-example { display: none; }
+}
+
+/* An example's slash command, which a click, Enter or Space inserts
+   into the message box (main.js): the text's own colour in the dim
+   line, a text button like an id of the Task Info list
+   (.meta-item [data-insert-id], which gives it the pointer and the
+   underline).  It wraps with the line in a narrow panel. */
+.meta-example-cmd { color: var(--fg); }
+
+/* The time the running task has left by its last update's estimate
+   ("About 12 min left (8 to 20 min), done around 09:14"), counted
+   down by main.js.  Set like the status line over it, in the text's
+   own colour: it is the line a glance at the section is for. */
+.meta-info-eta {
+  font-size: var(--fs-base);
+  line-height: 1.35;
+  color: var(--fg);
+  margin: 0 0 var(--space-1-5);
+  overflow-wrap: anywhere;
+}
+
+.meta-info-eta:empty { display: none; }
+
 .meta-info-pending { color: var(--faint); }
 
 /* Schedule and Apps rows (every surface).  A row is a name with an
    optional badge, over a dim second line (a job's schedule and next
    run); an app row is a status dot, the name and its state at the
-   right.  Apps that are not connected render as buttons. */
+   right.  Apps that are not connected render as buttons.
+   The task-info panel is set like the Chats sidebar (.history-chat-header
+   and .history-day-sep): a row's text has a chat summary's size, weight
+   and line height, what is secondary to it (a second line, a badge, a
+   count, an age, a state) and every label is a step smaller, and a row
+   is a chat row's box - its padding, corner and fill under the
+   pointer. */
 .sidebar-panel-list {
   list-style: none;
   margin: 0;
@@ -2363,7 +2503,8 @@ body.meta-section-resizing {
   display: flex;
   flex-direction: column;
   gap: var(--space-0-5);
-  font-size: var(--fs-sm);
+  font-size: var(--fs-base);
+  line-height: 1.35;
   color: var(--fg);
 }
 
@@ -2373,10 +2514,21 @@ body.meta-section-resizing {
   display: flex;
   flex-direction: column;
   gap: 1px;
-  padding: var(--space-1);
-  border-radius: var(--radius-md);
+  padding: var(--space-1-5);
+  border-radius: var(--radius-lg);
   transition: background var(--dur-base), border-color var(--dur-base);
 }
+
+/* The fill of a Schedule, Machines or Apps row reaches out of the
+   panel's column (--meta-bleed) and its padding puts the text back at
+   the column's edge, under the section's chevron (.app-row-main pads
+   an Apps row). */
+.sched-row,
+.machine-row,
+.app-row { margin-inline: calc(-1 * var(--meta-bleed, 0px)); }
+
+.sched-row,
+.machine-row { padding-inline: var(--meta-bleed, var(--space-1-5)); }
 
 .sched-row:hover,
 .sched-row:focus-visible,
@@ -2399,12 +2551,15 @@ body.meta-section-resizing {
 .sched-row .sidebar-item-delete,
 .machine-row .sidebar-item-copy,
 .machine-row .sidebar-item-edit,
-.machine-row .sidebar-item-delete { margin-left: 0; }
+.machine-row .sidebar-item-delete,
+.skill-found-row .sidebar-item-edit { margin-left: 0; }
 
 /* A disabled row button (a running job's Run, the local machine's
-   Delete) is dimmed and keeps its resting look under the pointer. */
+   Delete, the + of a skill being checked) is dimmed and keeps its
+   resting look under the pointer. */
 .sched-row .sidebar-item-edit:disabled,
-.machine-row .sidebar-item-delete:disabled {
+.machine-row .sidebar-item-delete:disabled,
+.skill-found-row .sidebar-item-edit:disabled {
   opacity: 0.4;
   cursor: default;
   color: var(--faint);
@@ -2412,18 +2567,41 @@ body.meta-section-resizing {
   box-shadow: none;
 }
 
+/* The Recommendations body shows ONE task at a time (main.js puts the
+   next one on show every 30 seconds): every task's card fills the
+   same grid cell, so each is as tall as the longest task needs and
+   nothing moves when the card changes.  The body is no taller than a
+   third of the window (nor than an equal share, the cap of a pinned
+   body above), so a long task never makes the pinned card a tall
+   one: it scrolls up and down.  The cards sliding in and out are
+   clipped at the body's sides. */
+#meta-recommendations-list {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  max-height: min(var(--meta-body-share, 33vh), 33vh);
+  overflow-x: hidden;
+}
+
+/* The card is its section's only child (no header): it keeps off the
+   separator over it and off the strip under its section, the panel's
+   last. */
+#meta-recommendations-list:not(:empty) { margin-block: var(--space-1) var(--space-2); }
+
 /* A Recommendations row is a click target (it opens a new chat with
    the task in the composer); the whole sentence shows, wrapped, inside
-   its own raised, bordered box so the five suggestions read as
-   separate cards. */
+   its own raised, bordered box, a card.  The box is the Chats search
+   field's: its fill, hairline and corner. */
 .recommendation-row {
+  grid-area: 1 / 1;
   cursor: pointer;
-  padding: var(--space-1-5) var(--space-2);
+  padding: var(--space-1-5) var(--space-2-5);
   border-width: 1px;
   border-style: solid;
-  border-color: var(--border);
-  border-radius: var(--radius-xl);
+  border-color: var(--border-input);
   background: var(--surface2);
+  transition:
+    background var(--dur-base),
+    border-color var(--dur-base);
 }
 
 .recommendation-row:hover,
@@ -2431,8 +2609,46 @@ body.meta-section-resizing {
   border-color: var(--border-hover);
 }
 
-/* Cards stand a step further apart than plain rows. */
-.recommendation-row + .recommendation-row { margin-top: var(--space-0-5); }
+/* A card off show (main.js makes it inert, so it takes no click and
+   no focus either) is hidden. */
+.recommendation-row[inert] { visibility: hidden; }
+
+/* When the rotation moves on, the next card slides in from the right
+   while the one it replaces slides out to the left and hides (at once
+   under prefers-reduced-motion: --dur-slide is 0 there). */
+.recommendation-row.recommendation-in {
+  animation: recommendation-slide-in var(--dur-slide) var(--ease);
+}
+
+/* The card sliding out is inert already: the animation keeps it in
+   sight until it has left. */
+.recommendation-row.recommendation-out {
+  animation: recommendation-slide-out var(--dur-slide) var(--ease);
+}
+
+@keyframes recommendation-slide-in {
+  from { transform: translateX(100%); opacity: 0; }
+}
+
+@keyframes recommendation-slide-out {
+  from { visibility: visible; }
+  to { visibility: hidden; transform: translateX(-100%); opacity: 0; }
+}
+
+/* The Recommendations card is pinned to the bottom strip: main.js
+   (pinMetaSectionsToBottom) marks the separator over it, or its body
+   when no section shows above it, and that element's auto top margin
+   takes the free height the strip's would, so the empty room opens
+   above the card.  The separator's own top margin becomes a border
+   as high, which stays when there is no free height left. */
+#meta-panel .meta-pin-start { margin-top: auto; }
+
+#meta-panel .meta-section-resizer.meta-pin-start {
+  box-sizing: content-box;
+  border-top: var(--space-0-5) solid transparent;
+}
+
+#meta-panel:has(.meta-pin-start) > #meta-footer { margin-top: 0; }
 
 .recommendation-row .sidebar-panel-name {
   white-space: normal;
@@ -2441,11 +2657,15 @@ body.meta-section-resizing {
 
 .machine-row.unreachable .sidebar-panel-name { opacity: 0.6; }
 
-/* The reachability dot before a machine's name. */
+/* The reachability dot before a machine's name.  With the line's gap
+   the 2px margin makes the dot's slot as wide as a section header's
+   chevron slot, so the name starts under the section's title (as an
+   app's name does, .app-dot). */
 .machine-status {
   flex: 0 0 auto;
   width: 8px;
   height: 8px;
+  margin-right: var(--space-0-5);
   border-radius: var(--radius-round);
   background: var(--status-ok);
 }
@@ -2458,9 +2678,10 @@ body.meta-section-resizing {
 .sidebar-inline-form {
   display: flex;
   flex-direction: column;
-  gap: var(--space-1);
+  gap: var(--space-1-5);
   margin-top: var(--space-1);
-  font-size: var(--fs-sm);
+  font-size: var(--fs-base);
+  line-height: 1.35;
 }
 
 .sidebar-inline-form label {
@@ -2469,19 +2690,22 @@ body.meta-section-resizing {
   gap: 2px;
 }
 
-.sidebar-inline-form-label { color: var(--faint); }
+.sidebar-inline-form-label {
+  font-size: var(--fs-md);
+  color: var(--faint);
+}
 
+/* A field is the Chats search field: its text, padding and box. */
 .sidebar-inline-form input,
 .sidebar-inline-form select,
 .sidebar-inline-form textarea {
   width: 100%;
   font: inherit;
-  font-size: var(--fs-sm);
   color: var(--fg);
   background: var(--surface2);
   border: 1px solid var(--border-input);
   border-radius: var(--radius-lg);
-  padding: var(--space-1) var(--space-1-5);
+  padding: var(--space-1-5) var(--space-2-5);
   transition: border-color var(--dur-base);
 }
 
@@ -2531,7 +2755,7 @@ body.meta-section-resizing {
 }
 
 .sidebar-panel-sub {
-  font-size: var(--fs-xs);
+  font-size: var(--fs-md);
   color: var(--dim);
   overflow-wrap: anywhere;
 }
@@ -2541,7 +2765,7 @@ body.meta-section-resizing {
    badge is in the working colour, its text in --running-fg. */
 .sidebar-panel-badge {
   flex: 0 0 auto;
-  font-size: var(--fs-xs);
+  font-size: var(--fs-md);
   font-weight: 500;
   padding: 0 var(--space-1-5);
   border-radius: var(--radius-sm);
@@ -2558,9 +2782,9 @@ body.meta-section-resizing {
 .app-row-main {
   width: 100%;
   margin: 0;
-  padding: var(--space-1);
+  padding: var(--space-1-5) var(--meta-bleed, var(--space-1-5));
   border: none;
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-lg);
   background: none;
   color: inherit;
   font: inherit;
@@ -2594,6 +2818,7 @@ button.app-row-main:disabled .app-dot { background: var(--brand-clay); }
   flex: 0 0 auto;
   width: 8px;
   height: 8px;
+  margin-right: var(--space-0-5);
   border-radius: var(--radius-round);
   background: var(--faint);
 }
@@ -2604,7 +2829,7 @@ button.app-row-main:disabled .app-dot { background: var(--brand-clay); }
 
 .app-state {
   flex: 0 0 auto;
-  font-size: var(--fs-xs);
+  font-size: var(--fs-md);
   color: var(--dim);
 }
 
@@ -2612,6 +2837,242 @@ button.app-row-main:disabled .app-dot { background: var(--brand-clay); }
 button.app-row-main .app-state {
   color: var(--fg);
   font-weight: 500;
+}
+
+/* Skills section (every surface).  Under the header, the search of
+   the skills on the internet: the Chats search field (#history-search)
+   with its button, a ghost icon button, inside the box at the right
+   (where that field has its clear button, .search-clear-btn).  The
+   row keeps its height over the scrolling body, which lists what the
+   search found and, under the status line, the available skills. */
+.skills-search {
+  position: relative;
+  margin-bottom: var(--space-1-5);
+}
+
+#meta-skills-query {
+  width: 100%;
+  font-size: var(--fs-base);
+  color: var(--fg);
+  background: var(--surface2);
+  border: 1px solid var(--border-input);
+  border-radius: var(--radius-lg);
+  padding: var(--space-1-5) 30px var(--space-1-5) var(--space-2-5);
+  outline: none;
+  transition: border-color var(--dur-base);
+}
+
+#meta-skills-query::placeholder { color: var(--faint); }
+
+#meta-skills-query:focus { border-color: var(--ring-focus); }
+
+.skills-search-btn {
+  position: absolute;
+  top: 50%;
+  right: 3px;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-md);
+  background: none;
+  color: var(--dim);
+  font-size: var(--fs-lg);
+  cursor: pointer;
+  transition: color var(--dur-base), background var(--dur-base);
+}
+
+.skills-search-btn:hover:not(:disabled) {
+  color: var(--fg);
+  background: var(--hover-strong);
+}
+
+.skills-search-btn:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+
+/* While the search is under way the button rests in the working
+   colour (as a turning refresh button does). */
+.skills-search-btn:disabled {
+  cursor: default;
+  color: var(--brand-clay);
+}
+
+/* The status line sits in the body here, over the list it counts;
+   it has no header right above it to tuck under. */
+#meta-skills-status { margin-top: 0; }
+
+/* What the search found: a label line (what was searched for, or
+   the search's failure) with Clear at its right, then the rows; a
+   hairline parts them from the available skills below. */
+#meta-skills-found {
+  margin-bottom: var(--space-2);
+  padding-bottom: var(--space-2);
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.skills-found-hdr {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-1-5);
+  margin-bottom: var(--space-1);
+  font-size: var(--fs-md);
+  line-height: 1.35;
+  color: var(--faint);
+}
+
+#meta-skills-found-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+#meta-skills-found-title.is-error { color: var(--status-fail); }
+
+.skills-clear {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 0 var(--space-1);
+  border: none;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--dim);
+  font: inherit;
+  cursor: pointer;
+  transition: color var(--dur-base), background var(--dur-base);
+}
+
+.skills-clear:hover:not(:disabled) {
+  color: var(--fg);
+  background: var(--hover-strong);
+}
+
+.skills-clear:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.skills-clear:disabled { visibility: hidden; }
+
+/* A skill's row, found or available, is a Schedule row's box: the
+   name line over a dim second line.  Nothing happens on a click of
+   the row itself, so it has no fill under the pointer. */
+.skill-row,
+.skill-found-row {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin-inline: calc(-1 * var(--meta-bleed, 0px));
+  padding: var(--space-1-5) var(--meta-bleed, var(--space-1-5));
+  border-radius: var(--radius-lg);
+}
+
+.skill-found-row:focus { outline: none; }
+
+/* An available skill's description: two lines of it, the rest in
+   the row's tooltip. */
+.skill-row .sidebar-panel-sub {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+
+/* A found skill's name is the link to its page on the registry, as
+   wide as its text (the room after it is not the link's) and in the
+   page's link colour (remote-codex.css); what its + has come to
+   follows at the right end of the line. */
+.skill-found-row .sidebar-panel-name {
+  flex: 0 1 auto;
+  margin-right: auto;
+}
+
+a.sidebar-panel-name {
+  text-decoration: none;
+  border-radius: var(--radius-sm);
+}
+
+a.sidebar-panel-name:hover,
+a.sidebar-panel-name:focus-visible { text-decoration: underline; }
+
+a.sidebar-panel-name:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+
+/* "Checking…", "Added", "Needs review", "Blocked": set like an
+   app's state (.app-state), a verdict in its status colour. */
+.skill-state {
+  flex: 0 0 auto;
+  font-size: var(--fs-md);
+  color: var(--dim);
+}
+
+.skill-state.added { color: var(--status-ok); }
+
+.skill-state.review { color: var(--warning); }
+
+.skill-state.blocked { color: var(--status-fail); }
+
+/* What the check said, in a Recommendations card's box under the
+   row's lines: the sentence, the findings (a severity badge, what was
+   found, and where in the skill's files) and, for a skill a person
+   may still add, the secondary buttons "Add anyway" and "Cancel" side
+   by side (.sidebar-inline-form-buttons). */
+.skill-verdict {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-1-5);
+  margin-top: var(--space-1);
+  padding: var(--space-1-5) var(--space-2-5);
+  border: 1px solid var(--border-input);
+  border-radius: var(--radius-lg);
+  background: var(--surface2);
+  font-size: var(--fs-md);
+  overflow-wrap: anywhere;
+}
+
+.skill-verdict-message:empty { display: none; }
+
+.skill-findings {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.skill-severity {
+  display: inline-block;
+  margin-right: var(--space-0-5);
+  padding: 0 var(--space-1);
+  border-radius: var(--radius-sm);
+  background: var(--hover-strong);
+  color: var(--dim);
+  font-weight: 500;
+}
+
+.skill-severity.critical,
+.skill-severity.high {
+  background: color-mix(in srgb, var(--status-fail) 14%, transparent);
+  color: var(--status-fail);
+}
+
+.skill-severity.medium {
+  background: color-mix(in srgb, var(--warning) 14%, transparent);
+  color: var(--warning);
+}
+
+.skill-finding-where {
+  display: block;
+  color: var(--dim);
 }
 
 /* Spend section (every surface): the all-time totals line, the daily
@@ -2625,20 +3086,19 @@ button.app-row-main .app-state {
 #meta-spend-graph {
   position: relative;
   padding: var(--space-1) var(--space-0-5);
-  font-size: var(--fs-sm);
+  font-size: var(--fs-base);
+  line-height: 1.35;
   color: var(--fg);
 }
 
+/* The totals line reads as the status line of the sections around it
+   (.meta-info-status); a panel too narrow for it wraps it. */
 .spend-total {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: var(--space-1-5);
   padding-bottom: var(--space-1-5);
   color: var(--dim);
   font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-  overflow: hidden;
+  text-align: center;
+  overflow-wrap: anywhere;
 }
 
 /* The heatmap's viewport plus its two pagers, which sit over ITS
@@ -2766,7 +3226,7 @@ button.app-row-main .app-state {
   background: var(--menu-bg);
   box-shadow: var(--shadow-sm);
   color: var(--fg);
-  font-size: var(--fs-sm);
+  font-size: var(--fs-md);
   line-height: 1.2;
   overflow-wrap: anywhere;
   text-align: center;
@@ -2780,33 +3240,33 @@ button.app-row-main .app-state {
   border-top: 1px solid var(--border);
 }
 
+/* A group label, as a day label of the Chats list (.history-day-sep). */
 .spend-models-title {
+  display: block;
   padding-bottom: var(--space-1);
   color: var(--faint);
-  font-size: var(--fs-sm);
-  font-weight: 500;
-  text-align: center;
+  font-size: var(--fs-md);
 }
 
-/* The fill under the pointer reaches 2px past the row's text on both
-   sides (the negative margin is the graph's own padding), so the name
-   and the value stay in line with the heatmap's edges. */
+/* The fill under the pointer reaches out of the panel's column as the
+   other rows' fills do (the negative margin is the graph's own
+   padding plus --meta-bleed), and the row's padding keeps the name
+   and the value in line with the heatmap's edges. */
 .spend-model-row {
   display: flex;
   align-items: center;
   gap: var(--space-1-5);
-  margin: 0 calc(-1 * var(--space-0-5));
-  padding: var(--space-0-5);
-  border-radius: var(--radius-sm);
+  margin: 0 calc(-1 * (var(--space-0-5) + var(--meta-bleed, 0px)));
+  padding: var(--space-0-5) calc(var(--space-0-5) + var(--meta-bleed, 0px));
+  border-radius: var(--radius-lg);
   cursor: default;
 }
 
 .spend-model-row:hover { background: var(--hover); }
 
 .spend-model-name {
-  max-width: 45%;
+  max-width: 50%;
   overflow: hidden;
-  color: var(--dim);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -2831,7 +3291,6 @@ button.app-row-main .app-state {
 .spend-model-value {
   flex-shrink: 0;
   min-width: 34px;
-  color: var(--fg);
   font-variant-numeric: tabular-nums;
   text-align: right;
   white-space: nowrap;
@@ -2843,6 +3302,113 @@ button.app-row-main .app-state {
    long id value after it breaks instead (overflow-wrap: anywhere). */
 .meta-item[hidden] { display: none !important; }
 .meta-item .meta-label { white-space: nowrap; }
+
+/* An id that inserts itself into the message box (main.js,
+   armMetaId): a text button, underlined under the pointer and the
+   keyboard focus as a link is. */
+.meta-item [data-insert-id],
+.meta-example-cmd {
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.meta-item [data-insert-id]:hover,
+.meta-item [data-insert-id]:focus-visible,
+.meta-example-cmd:hover,
+.meta-example-cmd:focus-visible { text-decoration: underline; }
+
+.meta-item [data-insert-id]:focus-visible,
+.meta-example-cmd:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* The Tags row of the task-info list (main.js, renderMetaTags): the
+   task's tags as chips that wrap under one another in a narrow panel,
+   each with the button that removes it, then the select that adds
+   one.  A chip is a badge of the subpanels below
+   (.sidebar-panel-badge); the select is a chip with a dashed edge. */
+.meta-tag,
+.meta-tag-add {
+  box-sizing: border-box;
+  height: 20px;
+  margin: 1px var(--space-1) 1px 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--dim);
+  font: inherit;
+  font-size: var(--fs-md);
+  font-weight: 500;
+  line-height: 18px;
+  vertical-align: middle;
+}
+
+.meta-tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 var(--space-1-5);
+  background: var(--hover-strong);
+  white-space: nowrap;
+}
+
+.meta-tag-remove {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  margin: 0 calc(-1 * var(--space-1)) 0 var(--space-0-5);
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--faint);
+  font: inherit;
+  line-height: 16px;
+  cursor: pointer;
+}
+
+.meta-tag-remove:hover,
+.meta-tag-remove:focus-visible {
+  color: var(--fg);
+  background: var(--hover-strong);
+}
+
+.meta-tag-add {
+  max-width: 100%;
+  padding: 0 var(--space-1);
+  border-style: dashed;
+  border-color: var(--border-input);
+  background: var(--surface2);
+  cursor: pointer;
+}
+
+.meta-tag-remove:focus-visible,
+.meta-tag-add:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.meta-tag-remove:disabled,
+.meta-tag-add:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* Under a finger a chip is taller and its remove button as wide as
+   the chip is tall. */
+@media (hover: none) {
+  .meta-tag,
+  .meta-tag-add {
+    height: 28px;
+    line-height: 26px;
+  }
+
+  .meta-tag-remove {
+    width: 28px;
+    height: 26px;
+    margin-right: calc(-1 * var(--space-1-5));
+    line-height: 26px;
+  }
+}
 
 /* The dimming backdrop behind every side panel -- history sidebar,
    task info drawer, settings, tricks: one rule, four ids. */
@@ -2861,7 +3427,9 @@ button.app-row-main .app-state {
 
 /* A remote machine's settings sheet (renderSettingsMachine in main.js):
    this daemon's URLs and its Update / Reset Server / Update Models
-   buttons act here, not on that machine, so they are not offered. */
+   buttons act here, not on that machine, so they are not offered; nor
+   is the default working directory, a folder of this machine. */
+#settings-panel.for-machine #cfg-default-work-dir-row,
 #settings-panel.for-machine #remote-url,
 #settings-panel.for-machine #cfg-update-btn,
 #settings-panel.for-machine #cfg-server-reset-btn,
@@ -3107,7 +3675,7 @@ body.remote-chat .tricks-item.editing:hover { background: none; filter: none; }
   margin-right: calc(-1 * var(--history-bleed-r));
 }
 
-#history-list > :not(.history-chat-group) {
+#history-list > :not(.history-chat-group, .history-project) {
   margin-left: var(--history-bleed-l);
   margin-right: max(0px, calc(var(--history-bleed-r) - var(--history-gutter, 0px)));
 }
@@ -3155,6 +3723,96 @@ body.remote-chat .tricks-item.editing:hover { background: none; filter: none; }
   min-width: 0;
 }
 
+/* The strips at the bottom of the two side panels: the one under the
+   Chats list (chat.html #sidebar-footer: the user name at the left,
+   the appearance and settings buttons at the right) and its twin
+   under the task-info panel (#meta-footer: the buttons that act on
+   the chat's machine and folder).  A strip is the last item of its
+   panel's column and does not grow, so it stays at the bottom while
+   the list above it scrolls; the task-info panel's is pushed there
+   when every section above it is folded.  It reaches the panel's
+   edges (a hairline across the panel, 8px under the buttons instead
+   of the panel's 16px) and clips for itself: a docked desktop panel
+   does not (remote-codex.css).  The name takes the width of its text,
+   so a short one shares the row with the buttons; a panel too narrow
+   for the name and the buttons side by side gives the buttons a row
+   of their own, and a narrower one wraps them. */
+#sidebar-footer { --strip-pad-x: var(--sidebar-pad-x); }
+#meta-footer { --strip-pad-x: var(--meta-pad-x); }
+
+#sidebar-footer,
+#meta-footer {
+  flex: none;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1);
+  margin: auto calc(-1 * var(--strip-pad-x)) calc(-1 * var(--space-4));
+  padding: var(--space-2) var(--strip-pad-x) calc(var(--space-2) + env(safe-area-inset-bottom, 0px));
+  border-top: 1px solid var(--border-soft);
+  overflow: hidden;
+}
+
+#sidebar-user {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dim);
+  font-size: var(--fs-md);
+}
+
+/* A strip's buttons, at its right end. */
+.strip-tools {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--space-0-5);
+  min-width: 0;
+  margin-left: auto;
+}
+
+/* The task-info strip has no name before its buttons: they start at
+   its left edge, and a row they wrap onto starts there too. */
+#meta-tools {
+  justify-content: flex-start;
+  margin-left: 0;
+}
+
+/* One size for every button of both strips: a 32px square around an
+   18px icon (36px for a finger, remote-codex.css). */
+.sidebar-tool-btn {
+  flex: none; display: flex; align-items: center; justify-content: center;
+  width: 32px; height: 32px; padding: 0;
+  border: none; border-radius: var(--radius-md); color: var(--dim);
+  background: none;
+  cursor: pointer; transition: color var(--dur-base), background var(--dur-base);
+}
+.sidebar-tool-btn[hidden] { display: none; }
+.sidebar-tool-btn svg { width: 18px; height: 18px; }
+.sidebar-tool-btn:hover:enabled { color: var(--fg); background: var(--hover-strong); }
+
+/* Pressed (auto mode is on): the selected fill. */
+.sidebar-tool-btn[aria-pressed="true"] { color: var(--fg-strong); background: var(--selected); }
+
+/* A font button at its limit. */
+.sidebar-tool-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* A button whose request is running (a commit, a pull request): it
+   cannot be pressed again, and pulses instead of looking switched
+   off. */
+.sidebar-tool-btn.is-busy {
+  opacity: 1;
+  color: var(--accent);
+  cursor: progress;
+  animation: blink-pending 1.2s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sidebar-tool-btn.is-busy { animation: none; }
+}
+
 /* The Explorer header's action buttons (open folder, add folder,
    refresh), grouped at the right of the section toggle; the gap keeps
    one button's hover fill off its neighbours. */
@@ -3172,7 +3830,6 @@ body.remote-chat .tricks-item.editing:hover { background: none; filter: none; }
   text-overflow: ellipsis;
   white-space: nowrap;
   max-width: 50%;
-  font-family: var(--font-mono);
 }
 
 /* Explorer tree: one .explorer-row per entry, indented by depth via
@@ -3187,18 +3844,22 @@ body.remote-chat .tricks-item.editing:hover { background: none; filter: none; }
   user-select: none;
 }
 
+/* A row's fill reaches out of the panel's column (--meta-bleed), as
+   the fills of the panel's other rows do; the paddings count the
+   reach in, so the row's content stays where the column puts it. */
 .explorer-row {
   display: flex;
   align-items: center;
   gap: var(--space-1);
   height: 22px;
   line-height: 22px;
-  padding-left: calc(var(--depth, 0) * 12px + 4px);
-  padding-right: var(--space-1-5);
+  margin-inline: calc(-1 * var(--meta-bleed, 0px));
+  padding-left: calc(var(--depth, 0) * 12px + 4px + var(--meta-bleed, 0px));
+  padding-right: calc(var(--space-1-5) + var(--meta-bleed, 0px));
   cursor: pointer;
   white-space: nowrap;
   color: var(--fg);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-lg);
 }
 
 .explorer-row:focus-visible,
@@ -3253,10 +3914,11 @@ body.remote-chat .tricks-item.editing:hover { background: none; filter: none; }
   text-overflow: ellipsis;
 }
 
-/* Top-level folder rows are semibold.  The working directory carries a
+/* Top-level folder rows are in the medium weight, the one emphasis of
+   both side panels.  The working directory carries a
    check mark; an added folder shows "Set as Working Directory" and
    "Remove Folder from Explorer" buttons on hover / focus. */
-.explorer-row.is-root > .explorer-name { font-weight: 600; }
+.explorer-row.is-root > .explorer-name { font-weight: 500; }
 
 .explorer-root-actions {
   display: inline-flex;
@@ -3356,7 +4018,7 @@ body.remote-chat .tricks-item.editing:hover { background: none; filter: none; }
 .scm-count {
   margin-left: auto;
   font-weight: 500;
-  font-size: var(--fs-sm);
+  font-size: var(--fs-md);
   color: var(--dim);
   background: var(--hover-strong);
   border-radius: var(--radius-sm);
@@ -3373,13 +4035,14 @@ body.remote-chat .tricks-item.editing:hover { background: none; filter: none; }
 #scm-hdr-count { margin-left: 0; flex: 0 0 auto; }
 
 /* Under a worktree header (several worktrees) the group headers indent
-   by --depth; a single worktree keeps them flush. */
+   by --depth; a single worktree keeps them flush.  A group header is
+   set as a day label of the Chats list (.history-day-sep). */
 .scm-group-hdr {
   height: 22px;
   line-height: 22px;
   padding-left: calc(var(--depth, 0) * 12px + 4px);
   font-size: var(--fs-md);
-  font-weight: 500;
+  font-weight: 400;
   color: var(--faint);
   white-space: nowrap;
 }
@@ -3390,12 +4053,13 @@ body.remote-chat .tricks-item.editing:hover { background: none; filter: none; }
   gap: var(--space-1-5);
   height: 22px;
   line-height: 22px;
-  padding-left: calc(var(--depth, 0) * 12px + 4px);
-  padding-right: var(--space-1-5);
+  margin-inline: calc(-1 * var(--meta-bleed, 0px));
+  padding-left: calc(var(--depth, 0) * 12px + 4px + var(--meta-bleed, 0px));
+  padding-right: calc(var(--space-1-5) + var(--meta-bleed, 0px));
   cursor: pointer;
   white-space: nowrap;
   color: var(--fg);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-lg);
 }
 
 .scm-path {
@@ -3405,7 +4069,7 @@ body.remote-chat .tricks-item.editing:hover { background: none; filter: none; }
 
 .scm-dir {
   color: var(--faint);
-  font-size: var(--fs-sm);
+  font-size: var(--fs-md);
   overflow: hidden;
   text-overflow: ellipsis;
   flex: 1;
@@ -3416,10 +4080,9 @@ body.remote-chat .tricks-item.editing:hover { background: none; filter: none; }
   flex: 0 0 auto;
   margin-left: auto;
   font-weight: 500;
-  font-size: var(--fs-sm);
+  font-size: var(--fs-md);
   min-width: 12px;
   text-align: center;
-  font-family: var(--font-mono);
 }
 
 /* Built as 'scm-status-' + git's one-letter status in main.js. */
@@ -3439,10 +4102,12 @@ body.remote-chat .tricks-item.editing:hover { background: none; filter: none; }
   display: flex;
   align-items: stretch;
   min-height: 24px;
+  margin-inline: calc(-1 * var(--meta-bleed, 0px));
+  padding-left: var(--meta-bleed, 0);
+  padding-right: calc(var(--space-1-5) + var(--meta-bleed, 0px));
   cursor: pointer;
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-lg);
   color: var(--fg);
-  padding-right: var(--space-1-5);
 }
 
 .scm-graph-cell {
@@ -3450,6 +4115,9 @@ body.remote-chat .tricks-item.editing:hover { background: none; filter: none; }
   display: block;
 }
 
+/* Refs never shrink, so a commit with several of them is wider than
+   the row: what does not fit is cut at the row's own edge, not left to
+   run on under the body's scrollbar. */
 .scm-commit-main {
   flex: 1;
   min-width: 0;
@@ -3459,6 +4127,7 @@ body.remote-chat .tricks-item.editing:hover { background: none; filter: none; }
   height: 24px;
   line-height: 24px;
   white-space: nowrap;
+  overflow: hidden;
 }
 
 .scm-commit-subject {
@@ -3471,7 +4140,7 @@ body.remote-chat .tricks-item.editing:hover { background: none; filter: none; }
 /* A ref of a commit: a branch is an outlined chip. */
 .scm-ref {
   flex: 0 0 auto;
-  font-size: var(--fs-sm);
+  font-size: var(--fs-md);
   font-weight: 500;
   padding: 0 var(--space-1);
   border-radius: var(--radius-md);
@@ -3506,13 +4175,14 @@ body.remote-chat .tricks-item.editing:hover { background: none; filter: none; }
   display: flex;
   align-items: center;
   gap: var(--space-1-5);
-  margin-top: var(--space-1);
-  padding-right: var(--space-1-5);
+  margin: var(--space-1) calc(-1 * var(--meta-bleed, 0px)) 0;
+  padding-left: calc(var(--depth, 0) * 12px + 4px + var(--meta-bleed, 0px));
+  padding-right: calc(var(--space-1-5) + var(--meta-bleed, 0px));
   color: var(--fg);
   font-size: var(--fs-base);
-  font-weight: 600;
+  font-weight: 500;
   cursor: pointer;
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-lg);
 }
 
 /* The header folds the worktree's rows: its chevron points right when
@@ -3612,7 +4282,7 @@ body.remote-chat .tricks-item.editing:hover { background: none; filter: none; }
 
 .tree-ctx-key {
   color: var(--faint);
-  font-size: var(--fs-sm);
+  font-size: var(--fs-md);
 }
 
 .tree-ctx-sep {
@@ -3620,6 +4290,43 @@ body.remote-chat .tricks-item.editing:hover { background: none; filter: none; }
   margin: var(--space-1) var(--space-2);
   background: var(--border);
 }
+
+/* Submenus and radio items (the Explorer's Sort).  A radio item keeps a
+   gutter on its left for the check mark, so the labels of a group line
+   up; an item with a submenu ends with a chevron and stays highlighted
+   while its submenu is open. */
+.tree-ctx-item[role="menuitemradio"] {
+  position: relative;
+  padding-left: calc(var(--space-2) + 1.2em + var(--space-1));
+}
+
+.tree-ctx-check,
+.tree-ctx-chevron {
+  flex: 0 0 auto;
+  width: 1.2em;
+  height: 1.2em;
+  fill: none;
+  stroke: currentcolor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.tree-ctx-check {
+  position: absolute;
+  top: 50%;
+  left: var(--space-2);
+  transform: translateY(-50%);
+}
+
+.tree-ctx-chevron {
+  align-self: center;
+  color: var(--dim);
+}
+
+.tree-ctx-item[aria-haspopup] > .tree-ctx-label { margin-right: auto; }
+
+.tree-ctx-item[aria-expanded="true"] { background: var(--hover); }
 
 /* Folder picker: a modal folder browser opened from the Explorer header. */
 #folder-picker {
@@ -3635,11 +4342,14 @@ body.remote-chat .tricks-item.editing:hover { background: none; filter: none; }
 
 #folder-picker[hidden] { display: none; }
 
+/* The rows that do not shrink can be taller than a short window (a
+   phone held sideways) leaves the dialog: it scrolls them then. */
 .folder-picker-dialog {
   display: flex;
   flex-direction: column;
   width: min(560px, calc(100vw - 32px));
   max-height: 70vh;
+  overflow-y: auto;
   background: var(--menu-bg);
   border: 1px solid var(--border);
   border-radius: var(--radius-2xl);
@@ -3692,7 +4402,8 @@ body.remote-chat .tricks-item.editing:hover { background: none; filter: none; }
   color: var(--fg);
 }
 
-.folder-picker-input {
+.folder-picker-input,
+.folder-picker-new-name {
   flex: 1 1 auto;
   min-width: 0;
   padding: var(--space-1-5) var(--space-2-5);
@@ -3703,7 +4414,8 @@ body.remote-chat .tricks-item.editing:hover { background: none; filter: none; }
   font: inherit;
 }
 
-.folder-picker-input:focus {
+.folder-picker-input:focus,
+.folder-picker-new-name:focus {
   outline: none;
   border-color: var(--ring-focus);
 }
@@ -3781,7 +4493,20 @@ body.remote-chat .tricks-item.editing:hover { background: none; filter: none; }
   padding: var(--space-2) var(--space-4) var(--space-4);
 }
 
+/* "New Folder" (the button at the left end of the actions): a row
+   naming a folder to create in the folder listed above it. */
+.folder-picker-new {
+  display: flex;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-4) 0;
+}
+
+.folder-picker-new[hidden] { display: none; }
+
+.folder-picker-actions .folder-picker-new-btn { margin-right: auto; }
+
 /* Cancel is the secondary button, Select the primary one. */
+.folder-picker-new-create,
 .folder-picker-actions button {
   padding: var(--space-1-5) var(--space-3);
   border: 1px solid var(--border-input);
@@ -3793,6 +4518,7 @@ body.remote-chat .tricks-item.editing:hover { background: none; filter: none; }
   cursor: pointer;
 }
 
+.folder-picker-new-create:hover,
 .folder-picker-actions button:hover {
   background: var(--hover);
   border-color: var(--border-hover);
@@ -3961,7 +4687,7 @@ a.content-binary-note:hover { text-decoration: underline; }
 
 .scm-commit-meta {
   flex: 0 0 auto;
-  font-size: var(--fs-sm);
+  font-size: var(--fs-md);
   color: var(--faint);
   font-variant-numeric: tabular-nums;
 }
@@ -3985,15 +4711,34 @@ a.content-binary-note:hover { text-decoration: underline; }
   margin-bottom: var(--space-2-5);
 }
 
-/* The Chats row: the title at the left, the app's refresh button at
-   the right end.  The drawer's absolute #sidebar-close (right: 12px,
+/* The refresh row, the first of the panel: the app's refresh button at
+   its right end.  The drawer's absolute #sidebar-close (right: 12px,
    ~28px wide) sits in this row's top-right corner, so the row keeps
    that strip free (sidebar padding 16px + 32px reaches past the x);
    remote-codex.css drops the padding where the x is hidden. */
-.sidebar-hdr.chats-hdr { display: flex; align-items: center; justify-content: space-between; gap: var(--space-1-5); padding-right: var(--space-8); }
+.sidebar-refresh-row { flex: none; display: flex; justify-content: flex-end; margin-bottom: var(--space-1); padding-right: var(--space-8); }
 
-/* The 2px margin centres the icon over the wider flat-list switch
-   (#history-view-toggle) in the row below.  The focus ring is drawn
+/* The Projects row, under the refresh row (and so under the drawer's
+   x): it opens the Projects page.  Set as a row of the list is (a
+   chat's header): the icon, the name, a rounded fill under the
+   pointer, which reaches as far left of the icon as the row is
+   padded. */
+.projects-row {
+  flex: none;
+  display: flex; align-items: center; gap: var(--space-2);
+  margin: 0 0 var(--space-2) calc(-1 * var(--space-1-5));
+  padding: var(--space-1-5);
+  background: none; border: none; border-radius: var(--radius-lg);
+  color: var(--fg); font-family: inherit; font-size: var(--fs-base); font-weight: 400; line-height: 1.35;
+  text-align: left; cursor: pointer; transition: background var(--dur-base);
+}
+
+.projects-row:hover { background: var(--hover); }
+
+.projects-row svg { flex: none; color: var(--dim); }
+
+/* The 2px margin centres the icon over the wider Filter and group
+   button (#history-filter-btn) of the search row.  The focus ring is drawn
    inside the box: the button's top edge is the top edge of its
    section, which clips (.sidebar-section). */
 #chats-refresh-btn {
@@ -4024,8 +4769,8 @@ a.content-binary-note:hover { text-decoration: underline; }
 #tricks-add-input:focus { border-color: var(--ring-focus); }
 
 /* The Inject promptlet panel's "new promptlet" box with its Add button,
-   and the History search box with the flat-list / chat-panels switch on
-   its right. */
+   and the History search box with the Filter and group button on its
+   right. */
 #tricks-add-row,
 .history-search-row { display: flex; align-items: center; gap: var(--space-1-5); margin-bottom: var(--space-2-5); }
 
@@ -4033,206 +4778,183 @@ a.content-binary-note:hover { text-decoration: underline; }
 
 .history-search-row .search-wrap { flex: 1; min-width: 0; margin-bottom: 0; }
 
-#history-view-toggle {
-  flex: none; display: flex; align-items: center; justify-content: center;
-  width: 28px; height: 28px; padding: 0;
+/* Filter and group: the button beside the search box, as tall as the
+   box at any text size.  It takes the hover fill while its menu is
+   open and wears a dot in the accent colour while a filter narrows the
+   list: the filters are out of sight when the menu is closed. */
+#history-filter-btn {
+  position: relative;
+  flex: none; align-self: stretch; display: flex; align-items: center; justify-content: center;
+  width: 28px; padding: 0;
   border: none; border-radius: var(--radius-md); color: var(--dim);
   background: none;
   font-size: var(--fs-lg); cursor: pointer; transition: color var(--dur-base), background var(--dur-base);
 }
-#history-view-toggle:hover { color: var(--fg); background: var(--hover-strong); }
 
-/* Pressed (the flat list is on): the selected fill. */
-#history-view-toggle.active {
-  color: var(--fg-strong);
-  background: var(--selected);
+#history-filter-btn:hover,
+#history-filter-btn[aria-expanded="true"] { color: var(--fg); background: var(--hover-strong); }
+
+#history-filter-btn:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
+
+#history-filter-btn.is-filtered::after {
+  content: '';
+  position: absolute; top: 4px; right: 4px;
+  width: 6px; height: 6px;
+  border-radius: var(--radius-round);
+  background: var(--accent);
 }
-#history-view-toggle:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
 
-/* The Filters toggle itself is styled with .config-subpanel-toggle
-   (the shared section-toggle pattern) next to the settings dialog. */
-.history-filters-panel { margin-bottom: var(--space-1); }
-
-.history-filters-body[hidden] { display: none !important; }
-
-.history-filter-bar {
-  display: flex; align-items: center; gap: var(--space-1-5) var(--space-2); flex-wrap: wrap;
-  margin-bottom: var(--space-2-5); font-size: var(--fs-md);
+/* The menu and its submenus (main.js, "The Filter and group menu"):
+   the card of a Chats row's menu (.sidebar-item-actions), as the
+   "Filter and group" menu of Claude Code's session list.  A row names
+   a setting, shows the setting's value in the secondary text step and
+   ends in a chevron; a submenu lists the options, the chosen ones
+   ticked.  main.js gives a card its left and top before it shows;
+   `placing` lays it out, unseen, for that measurement.  Outside those
+   two states a card sets no `display`: one would outrank the browser's
+   `display: none` of a closed popover. */
+.fg-menu {
+  position: fixed;
+  inset: auto;
+  flex-direction: column;
+  width: max-content;
+  min-width: 220px;
+  max-width: calc(100vw - var(--space-4));
+  max-height: calc(100vh - var(--space-4));
+  margin: 0;
+  padding: var(--space-1);
+  overflow: hidden auto;
+  background: var(--menu-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-2xl);
+  box-shadow: var(--shadow-lg);
   color: var(--fg);
+  font-size: var(--fs-base);
+  line-height: 1.35;
+  white-space: nowrap;
 }
 
-.history-filter-chips {
-  display: flex; align-items: center; gap: var(--space-1-5); flex-wrap: wrap;
-  width: 100%;
-}
+.fg-menu:popover-open,
+.fg-menu.placing { display: flex; }
 
-/* A status chip: outlined while off, the selected fill and the strong
-   text colour while on. */
-.hf-chip {
-  position: relative;
-  display: inline-flex; align-items: center; gap: var(--space-1);
-  padding: var(--space-0-5) var(--space-2); border-radius: var(--radius-md);
-  border: 1px solid var(--border-input);
+.fg-menu.placing { visibility: hidden; }
+
+/* A submenu is a card of its own beside the menu, not a part of the
+   menu's column; it is narrower, and a long list scrolls. */
+.fg-submenu { min-width: 180px; max-height: min(420px, calc(100vh - var(--space-4))); }
+
+.fg-row,
+.fg-option,
+.fg-clear {
+  flex: none;
+  display: flex; align-items: center; gap: var(--space-2-5);
+  min-height: 30px;
+  margin: 0;
+  padding: 0 var(--space-2-5);
+  border: none; border-radius: var(--radius-md);
   background: none;
-  color: var(--dim);
-  cursor: pointer; user-select: none;
-  line-height: 1.3; white-space: nowrap;
-  font-size: var(--fs-sm); font-weight: 500;
-  transition: background var(--dur-base), border-color var(--dur-base), color var(--dur-base);
-}
-
-.hf-chip:hover {
-  background: var(--hover);
   color: var(--fg);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
 }
 
-.hf-chip input[type="checkbox"] {
-  position: absolute; opacity: 0; pointer-events: none;
-  width: 0; height: 0; margin: 0;
+.fg-row[hidden] { display: none; }
+
+/* An option can be longer than the window is wide (the path of a work
+   dir on a phone): it wraps inside its card, which keeps the folder's
+   own name and the tick in sight. */
+.fg-option { padding-block: var(--space-1); white-space: normal; overflow-wrap: anywhere; }
+
+.fg-row:hover,
+.fg-row:focus-visible,
+.fg-row[aria-expanded="true"],
+.fg-option:hover,
+.fg-option:focus-visible,
+.fg-clear:hover,
+.fg-clear:focus-visible {
+  background: var(--hover);
+  outline: none;
 }
 
-.hf-chip:has(> input:checked) {
-  background: var(--selected);
-  border-color: var(--border-hover);
-  color: var(--fg-strong);
+.fg-row:disabled { color: var(--faint); cursor: default; background: none; }
+
+.fg-row-name { flex: 1; }
+
+/* The value never pushes the name out: a long one is cut short. */
+.fg-row-value {
+  max-width: 14em;
+  overflow: hidden;
+  color: var(--dim);
+  text-overflow: ellipsis;
 }
 
-/* A chip whose hidden checkbox has the focus takes the focus colour on
-   its border; the :has() form outranks the checked chip's border
-   above. */
-.hf-chip:focus-within,
-.hf-chip:has(> input:checked):focus-within {
-  border-color: var(--ring-focus);
+/* The chevron of a row: a submenu opens beside it. */
+.fg-row::after {
+  content: '';
+  flex: none;
+  width: 6px; height: 6px;
+  border: solid var(--dim);
+  border-width: 1.5px 1.5px 0 0;
+  rotate: 45deg;
 }
 
-/* Chip legends reuse the row status icons (.status-spinner /
-   .status-cross / .status-tick), greyed out while the chip is off.  The
-   Running chip's spinner only turns while that filter is on. */
-.hf-chip-dot {
-  flex: 0 0 auto; width: 9px; height: 9px;
-  color: var(--faint);
+/* The tick of a chosen option, at the row's right end. */
+.fg-option::after {
+  content: '';
+  flex: none;
+  width: 12px; height: 12px;
+  margin-left: auto;
 }
 
-.hf-chip-dot.status-spinner { animation-play-state: paused; }
-
-.hf-chip-running:has(> input:checked) .hf-chip-dot {
-  color: var(--brand-clay);
-  animation-play-state: running;
+.fg-option[aria-checked="true"]::after {
+  background: var(--fg);
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M2.5 8.5l3.5 3.5 7.5-8' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / contain no-repeat;
 }
 
-.hf-chip-errored:has(> input:checked) .hf-chip-dot { color: var(--status-fail); }
+/* A status option leads with the glyph the rows of the list wear, in
+   the colour they wear it; the ring does not turn in a menu. */
+.fg-option > .status-spinner { color: var(--brand-clay); animation: none; }
+.fg-option > .status-cross { color: var(--status-fail); }
+.fg-option > .status-tick { color: var(--status-ok); }
 
-.hf-chip-succeeded:has(> input:checked) .hf-chip-dot { color: var(--status-ok); }
-
-.hf-chip-icon {
-  flex: 0 0 auto; width: 10px; height: 10px;
-  color: var(--faint);
+/* The hairline over Group by, inset to the rows' text. */
+.fg-sep {
+  flex: none;
+  margin: var(--space-1) var(--space-2-5);
+  border-top: 1px solid var(--border);
 }
 
-.hf-chip-favorite:has(> input:checked) .hf-chip-icon {
-  color: var(--favorite);
-}
-
-.hf-chip-cron:has(> input:checked) .hf-chip-icon {
-  color: inherit;
+/* The Date submenu: the From and To boxes, each with its calendar
+   button, and Clear dates while a day is set. */
+.history-filter-date-group {
+  flex: none;
+  display: flex; align-items: center; gap: var(--space-2);
+  min-height: 30px;
+  padding: 0 var(--space-1) 0 var(--space-2-5);
 }
 
 .history-filter-date-lbl {
-  user-select: none; cursor: pointer;
-  font-size: var(--fs-sm);
-  color: var(--faint);
-}
-
-/* The filter fields: the date range, the tag drop-down and the SEA,
-   machine and working-directory drop-downs (.history-filter-sea), each
-   one input box holding its label and bare <select>s or date inputs. */
-.history-filter-daterange,
-.history-filter-tag,
-.history-filter-sea {
-  display: inline-flex; align-items: center; gap: var(--space-1);
-  flex-wrap: nowrap; white-space: nowrap;
-  padding: var(--space-0-5) var(--space-2); border-radius: var(--radius-md);
-  border: 1px solid var(--border-input);
-  background: var(--surface2);
-}
-
-.history-filter-daterange,
-.history-filter-sea { max-width: 100%; }
-
-.history-filter-daterange { overflow: hidden; }
-
-/* The machine field stays `hidden` until a remote machine is registered
-   (refreshHistoryMachineOptions); the field's display must not undo it. */
-.history-filter-sea[hidden] { display: none; }
-
-.hf-daterange-sep {
-  color: var(--faint);
-  user-select: none;
-}
-
-/* The tag field, and the working-directory field, take the selected
-   fill while a tag or a directory is chosen. */
-.history-filter-tag.active,
-.history-filter-workdir.active {
-  border-color: var(--border-hover);
-  background: var(--selected);
-}
-
-/* A field's border takes the focus colour while a control in it has
-   the focus. */
-.history-filter-daterange:focus-within,
-.history-filter-tag:focus-within,
-.history-filter-sea:focus-within { border-color: var(--ring-focus); }
-
-.history-filter-tag-select {
-  background: transparent; border: none; outline: none;
-  color: var(--fg); font-size: var(--fs-sm);
-  padding: var(--space-0-5) 0; cursor: pointer; min-width: 0;
-}
-
-.history-filter-tag-select option,
-.history-filter-sea-select option {
-  background: var(--menu-bg); color: var(--fg);
-}
-
-.hf-date-clear {
-  flex: 0 0 auto;
-  background: none; border: none; border-radius: var(--radius-sm);
+  flex: none;
+  width: 3em;
   color: var(--dim);
-  width: 16px; height: 16px; line-height: 1;
-  padding: 0; cursor: pointer; font-size: var(--fs-base);
-  display: inline-flex; align-items: center; justify-content: center;
+  cursor: pointer; user-select: none;
 }
 
-.hf-date-clear:hover {
-  background: var(--hover-strong);
-  color: var(--fg);
-}
-
-/* The drop-downs and date inputs inside the fields: bare controls (the
-   field around them shows the focus). */
-.history-filter-sea-select,
 .history-filter-date {
-  flex: 1 1 auto; min-width: 0;
-  background: transparent;
-  border: none;
-  color: var(--fg); font-size: var(--fs-sm);
-  padding: var(--space-0-5) 0; outline: none;
+  flex: 1;
+  min-width: 8.5em;
+  padding: var(--space-0-5) var(--space-1-5);
+  border: 1px solid var(--border-input); border-radius: var(--radius-md);
+  background: var(--surface2);
+  color: var(--fg); font: inherit;
+  outline: none;
 }
 
-.history-filter-sea-select { max-width: 14em; cursor: pointer; }
+.history-filter-date:focus { border-color: var(--ring-focus); }
 
-/* The WORKDIR field has room for a path. */
-.history-filter-workdir .history-filter-sea-select { max-width: 22em; }
-
-.history-filter-date-group {
-  display: inline-flex; align-items: center; gap: var(--space-1);
-  flex-wrap: nowrap; white-space: nowrap;
-  flex: 0 1 auto; min-width: 0;
-}
-
-.history-filter-date { width: 6.9em; }
-
+/* The page's own calendar (the button beside the box) stands in for
+   the browser's. */
 .history-filter-date::-webkit-calendar-picker-indicator {
   display: none; appearance: none;
 }
@@ -4243,25 +4965,30 @@ a.content-binary-note:hover { text-decoration: underline; }
 }
 
 .history-filter-date-btn {
-  flex: 0 0 auto;
-  display: inline-flex; align-items: center; justify-content: center;
+  flex: none;
+  display: flex; align-items: center; justify-content: center;
+  width: 26px; height: 26px; padding: 0;
+  border: none; border-radius: var(--radius-md);
   background: none;
-  border: none; border-radius: var(--radius-sm);
   color: var(--dim);
-  padding: var(--space-0-5); cursor: pointer; line-height: 1;
+  cursor: pointer;
 }
 
 .history-filter-date-btn svg {
-  width: 13px; height: 13px;
+  width: 14px; height: 14px;
 }
 
-.history-filter-date-btn:hover {
-  background: var(--hover-strong);
-  color: var(--fg);
-}
-
-.history-filter-date-btn:focus {
+.history-filter-date-btn:hover,
+.history-filter-date-btn:focus-visible {
   outline: none; background: var(--hover-strong); color: var(--fg);
+}
+
+/* A browser without popovers (one from before 2024) cannot open the
+   menu: there the button is left out, and the list shows everything
+   but the cron tasks, in the arrangement it was last given. */
+@supports not selector(:popover-open) {
+  #history-filter-btn,
+  .fg-menu { display: none; }
 }
 
 /* The date picker: a floating month grid.  The chosen day takes the
@@ -4369,23 +5096,24 @@ a.content-binary-note:hover { text-decoration: underline; }
 }
 
 /* The chat panel's header, laid out like a task panel: ONE line with
-   the chat's title (ellipsized) and, at its right end, the "…" button
-   whose menu holds the row's actions (.sidebar-item-actions).  A plain
-   row on the list's own background (a list of many chats must not
-   become a stack of bands).  No tooltip: the line is all there is.
-   Clicking the row opens the chat; only the menu's chevron folds the
-   task panels under it.
-   A three-column grid: the first column is the slot of the last
-   task's status icon (the icon's 12px and the 6px to the title),
-   reserved whether or not the chat shows one, so every title starts
-   on the same edge and stays there when an icon comes or goes; then
-   the title, then the button.
+   the chat's title (ellipsized) and, at its right end, the fold button
+   and the "…" button whose menu holds the row's other actions
+   (.sidebar-item-actions).  A plain row on the list's own background
+   (a list of many chats must not become a stack of bands).  No
+   tooltip: the line is all there is.  Clicking the row opens the chat;
+   only the fold button folds the task panels under it.
+   A four-column grid: the first column is the slot of the last
+   task's status icon (the icon's 12px and the 6px to the title), then
+   the title, then the two buttons.
    The row's fill (hover, active chat) keeps 8px from the panel's
    edges - the right margin counts the list's scrollbar gutter in, see
-   #history-list - and 2px from the next row's. */
+   #history-list - and 2px from the next row's.
+   The header of a project's panel (.history-project-header) is the
+   same row, with the Projects icon in the status icon's slot. */
+.history-project-header,
 .history-chat-header {
   display: grid;
-  grid-template-columns: calc(var(--space-3) + var(--space-1-5)) minmax(0, 1fr) auto;
+  grid-template-columns: calc(var(--space-3) + var(--space-1-5)) minmax(0, 1fr) auto auto;
   align-items: center;
   margin: 1px calc(var(--space-2) - var(--history-gutter, 0px)) 1px var(--space-2);
   background: transparent;
@@ -4402,6 +5130,7 @@ a.content-binary-note:hover { text-decoration: underline; }
   transition: background var(--dur-base);
 }
 
+.history-project-header:hover,
 .history-chat-header:hover {
   background-color: var(--hover);
 }
@@ -4431,6 +5160,7 @@ a.content-binary-note:hover { text-decoration: underline; }
   margin-right: var(--space-1-5);
 }
 
+.history-project-title,
 .history-chat-title {
   grid-column: 2;
   min-width: 0;
@@ -4453,12 +5183,6 @@ a.content-binary-note:hover { text-decoration: underline; }
   outline: none;
 }
 
-/* The menu's "Show details" chevron is turned over while the task
-   panels show. */
-.history-chat-group:not(.collapsed) > .history-chat-header .history-chat-collapse svg {
-  transform: rotate(180deg);
-}
-
 .history-chat-launched:empty { display: none; }
 
 /* The chat's task rows, indented under the header behind a hairline
@@ -4476,6 +5200,67 @@ a.content-binary-note:hover { text-decoration: underline; }
 .history-chat-group.collapsed > .history-chat-body { display: none; }
 
 .history-chat-body > .sidebar-item { margin-bottom: 0; }
+
+/* A project's panel (Group by: Project, main.js
+   makeHistoryProjectPanel): its header, then its chats, each a chat
+   panel of its own, behind a hairline guide under the header's icon,
+   as a chat's tasks are behind theirs. */
+.history-project {
+  display: flex;
+  flex-direction: column;
+}
+
+/* The Projects icon, or the spinner while a task of the project runs,
+   centred in the first column as a chat's status icon is. */
+.history-project-icon {
+  grid-column: 1;
+  justify-self: center;
+  display: flex;
+  margin-right: var(--space-1-5);
+  color: var(--dim);
+}
+
+.history-project-icon.status-spinner { display: inline-block; color: var(--brand-clay); }
+
+/* The project of the chat on screen, while its panel is folded and
+   the chat's own row is out of sight: the selected row's fill. */
+.history-project.collapsed.history-active-project > .history-project-header,
+.history-project.collapsed.history-active-project > .history-project-header:hover {
+  background-color: var(--selected);
+  color: var(--fg-strong);
+}
+
+.history-project-body {
+  display: flex;
+  flex-direction: column;
+  margin: 0 0 var(--space-1) calc(var(--space-4) + var(--space-1));
+  border-left: 1px solid var(--border);
+}
+
+.history-project.collapsed > .history-project-body { display: none; }
+
+/* What an unfolded panel says while it lists no chat ("Loading...",
+   "No chats yet"): gone once a chat is listed beside it. */
+.history-project-note {
+  padding: var(--space-1) var(--space-2-5) var(--space-1-5);
+  font-size: var(--fs-md);
+  color: var(--faint);
+}
+
+.history-project-body:has(> .history-chat-group) > .history-project-note { display: none; }
+
+/* "Show more chats", the last row of a panel whose newest page of
+   rows was a full one: a quiet text button, set as the note is. */
+.history-project-more-rows {
+  align-self: flex-start;
+  margin: 0 0 var(--space-1) var(--space-1);
+  padding: var(--space-1) var(--space-1-5);
+  background: none; border: none; border-radius: var(--radius-lg);
+  color: var(--dim); font-family: inherit; font-size: var(--fs-md);
+  cursor: pointer; transition: background var(--dur-base), color var(--dur-base);
+}
+
+.history-project-more-rows:hover { background: var(--hover); color: var(--fg); }
 
 /* Rows are flat, as in Claude Code Desktop's session list: no fill,
    no outline and no divider between them; the pointer and the active
@@ -4496,8 +5281,8 @@ a.content-binary-note:hover { text-decoration: underline; }
 
 /* Row status icons (.status-cross / .status-spinner / .status-tick
    shapes): red cross for a failed task, clay spinner while it runs
-   (the working colour), green tick once it just completed, and the
-   tab strip's pulsing "?" (.chat-tab-attention) in the spinner's
+   (the working colour), green tick once it finished successfully, and
+   the tab strip's pulsing "?" (.chat-tab-attention) in the spinner's
    place while the task waits for the user's answer. */
 .sidebar-item-failed { color: var(--status-fail); margin-right: var(--space-2); }
 
@@ -4513,19 +5298,16 @@ a.content-binary-note:hover { text-decoration: underline; }
 
 /* A task panel, as a chat panel's header: ONE line with the task's
    text (ellipsized) and the "…" button whose menu holds the row's
-   actions; the task's details (.running-item-info), when unfolded,
-   take the lines below.  The header's line height and the same padding
-   above and below the line make the row as tall as a header, with the
-   text in the middle of its fill.  The left padding is the slot of
-   the status icon, which hangs there out of the flow so every text
-   starts on the same edge: the icon's 5px from the row's edge, its
-   12px and the 6px to the text, as in a chat header. */
+   actions; nothing hangs under it.  The
+   header's line height and the same padding above and below the line
+   make the row as tall as a header, with the text in the middle of
+   its fill.  The left padding is the slot of the status icon, which
+   hangs there out of the flow so every text starts on the same edge:
+   the icon's 5px from the row's edge, its 12px and the 6px to the
+   text, as in a chat header. */
 .running-item {
   position: relative;
-  flex-wrap: wrap;
-  white-space: normal;
   align-items: center;
-  row-gap: var(--space-1);
   margin-bottom: var(--space-0-5);
   padding: var(--space-1-5) 3px;
   padding-left: 23px;
@@ -4533,12 +5315,11 @@ a.content-binary-note:hover { text-decoration: underline; }
   line-height: 1.35;
 }
 
-/* The panel may be several lines tall (its details), so the status
-   icon is centred on the first line - the task text's, which the "…"
-   button does not make taller (.sidebar-item-more) - rather than on
-   the whole panel.  The offset is the panel's own padding-top plus
-   half a line box, and the translation then centres the icon on that
-   point.  `translate`, not `transform`: the spinner's `rotate` is
+/* The status icon is centred on the panel's line - the task text's,
+   which the line's button does not make taller (.sidebar-item-more).
+   The offset is the panel's own padding-top
+   plus half a line box, and the translation then centres the icon on
+   that point.  `translate`, not `transform`: the spinner's `rotate` is
    applied after `translate` (so the ring turns in place) but before
    `transform` (which would make it orbit; see @keyframes
    status-spin). */
@@ -4572,46 +5353,20 @@ body.remote-chat .running-item.history-active-task:hover {
   font-weight: 400;
 }
 
-.running-item-info {
-  flex-basis: 100%;
-  margin-bottom: var(--space-1);
-  line-height: 1.5;
-}
-
-.running-item-metrics {
-  flex-basis: 100%;
-  font-size: var(--fs-sm);
-  font-variant-numeric: tabular-nums;
-  color: var(--dim);
-}
-
-/* The row's workspace line and, under it, its machine / max budget /
-   agent line and its ids line: the faintest text of the row. */
-.running-item-workspace,
-.running-item-settings,
-.running-item-ids {
-  flex-basis: 100%;
-  font-size: var(--fs-sm);
-  color: var(--faint);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.ids-copy-btn svg {
-  width: 10px;
-  height: 10px;
-}
-
-/* The "…" button at the right end of a chat panel's header and of a
-   task panel, as on a session of Claude Code's sidebar: out of sight
-   until the pointer is on the row, the keyboard is on the row or on
-   the button, or its menu is open; a step lighter than the row's fill
-   under the pointer and while the menu is open.  A touch screen has no
-   hover: there the button always shows.
-   The button is taller than the row's line of text and is centred on
+/* The two buttons at the right end of a project's or a chat panel's
+   header: the fold button, whose chevron points down while what
+   hangs under the row is folded away and up while it shows, and the
+   "…" button, as on a session of Claude Code's sidebar (a task panel
+   has the "…" button alone).  Both are out
+   of sight until the pointer is on the row, the keyboard is on the
+   row or on the button, or the row's menu is open; a step lighter
+   than the row's fill under the pointer and, the "…" button, while
+   its menu is open.  A touch screen has no hover: there the buttons
+   always show.
+   A button is taller than the row's line of text and is centred on
    it; its negative margins keep it from making that line taller, so a
    row is as tall as its text and padding make it. */
+.sidebar-item-collapse,
 .sidebar-item-more {
   flex: none;
   display: flex;
@@ -4630,26 +5385,56 @@ body.remote-chat .running-item.history-active-task:hover {
   transition: opacity var(--dur-base), background var(--dur-base), color var(--dur-base);
 }
 
-.history-chat-header > .sidebar-item-more { grid-column: 3; }
+.history-chat-header > .sidebar-item-collapse,
+.history-project-header > .sidebar-item-collapse { grid-column: 3; }
 
+.history-chat-header > .sidebar-item-more,
+.history-project-header > .sidebar-item-more { grid-column: 4; }
+
+.history-project-header:hover > .sidebar-item-collapse,
+.history-project-header:hover > .sidebar-item-more,
+.history-project-header:focus-visible > .sidebar-item-collapse,
+.history-project-header:focus-visible > .sidebar-item-more,
+.history-chat-header:hover > .sidebar-item-collapse,
 .history-chat-header:hover > .sidebar-item-more,
+.history-chat-header:focus-visible > .sidebar-item-collapse,
 .history-chat-header:focus-visible > .sidebar-item-more,
 .running-item:hover > .sidebar-item-more,
 .running-item:focus-visible > .sidebar-item-more,
-.sidebar-item-more:focus-visible,
-.sidebar-item-more:has(+ .sidebar-item-actions:popover-open) {
+.sidebar-item-collapse:focus-visible,
+.sidebar-item-more:focus-visible {
   opacity: 1;
 }
 
-.sidebar-item-more:hover,
-.sidebar-item-more:has(+ .sidebar-item-actions:popover-open) {
+.sidebar-item-collapse:hover,
+.sidebar-item-more:hover {
   background: var(--hover-strong);
   color: var(--fg);
 }
 
+/* While the row's menu is open: both buttons show, the "…" button as
+   under the pointer. */
+.sidebar-item-collapse:has(~ .sidebar-item-actions:popover-open) { opacity: 1; }
+
+.sidebar-item-more:has(+ .sidebar-item-actions:popover-open) {
+  opacity: 1;
+  background: var(--hover-strong);
+  color: var(--fg);
+}
+
+.sidebar-item-collapse:focus-visible,
 .sidebar-item-more:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
 
+/* The chevron is turned over while what hangs under the row shows. */
+.sidebar-item-collapse svg { transition: transform var(--dur-base) var(--ease); }
+
+.history-project:not(.collapsed) > .history-project-header > .sidebar-item-collapse svg,
+.history-chat-group:not(.collapsed) > .history-chat-header > .sidebar-item-collapse svg {
+  transform: rotate(180deg);
+}
+
 @media (hover: none) {
+  .sidebar-item-collapse,
   .sidebar-item-more { opacity: 1; }
 }
 
@@ -4693,17 +5478,18 @@ body.remote-chat .running-item.history-active-task:hover {
 .sidebar-item-actions.placing { visibility: hidden; }
 
 /* A browser without popovers (one from before 2024) cannot open a
-   row's menu: there a row is its line of text alone. */
+   row's menu: there a row is its line of text and, a header, its fold
+   button. */
 @supports not selector(:popover-open) {
   .sidebar-item-more,
   .sidebar-item-actions { display: none; }
 }
 
 /* A menu line: the button's icon in the secondary text step (or in its
-   state's colour: a lit star, a copied tick), then its name, which is
-   its aria-label.  The rules below outrank the compact icon buttons'
-   (.sidebar-item-delete and its kin, shared with the other sidebar
-   lists). */
+   state's colour: a lit star, a set pin, a copied tick), then its
+   name, which is its aria-label.  The rules below outrank the compact
+   icon buttons' (.sidebar-item-delete and its kin, shared with the
+   other sidebar lists). */
 .sidebar-item-actions > button {
   flex: none;
   gap: var(--space-2-5);
@@ -4788,22 +5574,13 @@ body.remote-chat .running-item.history-active-task:hover {
 .sidebar-item-delete,
 .sidebar-item-copy,
 .sidebar-item-edit,
-.sidebar-item-collapse,
 .sidebar-item-favorite,
-.ids-copy-btn {
+.sidebar-item-pin {
   flex-shrink: 0; border: none; cursor: pointer; padding: var(--space-0-5) 0; margin-left: var(--space-0-5);
   border-radius: var(--radius-sm); line-height: 1; display: flex; align-items: center;
   color: var(--faint);
   background: none;
   transition: background var(--dur-base), box-shadow var(--dur-base), color var(--dur-base);
-}
-
-/* The ids line's copy buttons: the same buttons, inline in the text. */
-.ids-copy-btn {
-  display: inline-flex;
-  vertical-align: middle;
-  padding: 0 var(--space-0-5);
-  margin: 0 0 0 var(--space-1);
 }
 
 /* Under the pointer the fill reaches 2px past the icon's box (a ring
@@ -4812,23 +5589,20 @@ body.remote-chat .running-item.history-active-task:hover {
 .sidebar-item-delete:hover,
 .sidebar-item-copy:hover,
 .sidebar-item-edit:hover,
-.sidebar-item-collapse:hover,
 .sidebar-item-favorite:hover,
-.ids-copy-btn:hover {
+.sidebar-item-pin:hover {
   color: var(--fg);
   background: var(--hover-strong);
   box-shadow: 0 0 0 var(--space-0-5) var(--hover-strong);
 }
 
-.sidebar-item-collapse svg { transition: transform var(--dur-base) var(--ease); }
-.running-item:not(.collapsed) .sidebar-item-collapse svg { transform: rotate(180deg); }
-.running-item.collapsed > .running-item-info { display: none; }
-
-.sidebar-item-copy.copied,
-.ids-copy-btn.copied { color: var(--status-ok); }
+.sidebar-item-copy.copied { color: var(--status-ok); }
 
 .sidebar-item-favorite.favorited,
 .sidebar-item-favorite.favorited:hover { color: var(--favorite); }
+
+/* A set pin: the filled glyph, in the text's own colour. */
+.sidebar-item-pin.pinned { color: var(--fg); }
 
 .sidebar-item-confirm {
   display: flex; align-items: center; gap: var(--space-1); flex-shrink: 0; margin-left: var(--space-1-5);
@@ -4886,6 +5660,10 @@ body.remote-chat .running-item.history-active-task:hover {
   border-radius: var(--radius-2xl); box-shadow: var(--shadow-lg);
   color: var(--dim);
 }
+
+/* A window too short for the box (the sign-in window with its paste
+   row on a phone held sideways) keeps it inside and scrolls it. */
+.auth-modal-content { max-height: calc(100% - var(--space-8)); overflow-y: auto; }
 
 .auth-modal-title,
 .server-reset-confirm-title {
@@ -5401,6 +6179,10 @@ code { font-family: var(--font-mono); }
 
     scrollbar-gutter: auto;
   }
+
+  #meta-panel { --meta-gutter: 0px; }
+
+  #meta-panel .meta-section-body { scrollbar-gutter: auto; }
 }
 
 #kiss-server-loading {
@@ -5665,6 +6447,34 @@ code { font-family: var(--font-mono); }
   min-height: 0;
 }
 
+/* Monaco's stylesheet sizes the text of its own widgets in px: Find
+   and Replace, the command palette, the hidden lines of a diff.  Here
+   they get the page's sizes, so the text size moves them like every
+   other text (the code follows through the editors' fontSize option,
+   see applyFontSize in main.js; the right-click menu, which is out of
+   this stylesheet's reach, through sizeMonacoMenus).  The id outranks
+   Monaco's rules, which load after these. */
+#content-tab-area .monaco-findInput .monaco-inputbox,
+#content-tab-area .monaco-editor .find-widget .monaco-findInput .input,
+#content-tab-area .quick-input-widget,
+#content-tab-area .monaco-editor .diff-hidden-lines,
+#content-tab-area .monaco-editor .peekview-widget .head .peekview-title {
+  font-size: var(--fs-base);
+}
+
+#content-tab-area .monaco-editor .find-widget > .find-part,
+#content-tab-area .monaco-editor .find-widget > .replace-part,
+#content-tab-area .monaco-inputbox-container .monaco-inputbox-message,
+#content-tab-area .monaco-hover .hover-row.status-bar,
+#content-tab-area .quick-input-list .quick-input-list-separator-as-item {
+  font-size: var(--fs-md);
+}
+
+#content-tab-area .monaco-keybinding > .monaco-keybinding-key,
+#content-tab-area .monaco-diff-editor .diff-hidden-lines-compact .text {
+  font-size: var(--fs-sm);
+}
+
 /* The preview surface of a .md/.html content tab: itself a flex
    column so its .content-html-frame child stretches to fill it. */
 #content-tab-area .content-preview-holder {
@@ -5796,9 +6606,11 @@ code { font-family: var(--font-mono); }
 
 #content-tab-area .content-refresh-overlay:hover { background: var(--menu-bg); }
 
-/* The Edit source / Preview toggle of a .md/.html tab: a secondary
-   button next to the primary Save. */
-#content-tab-area .content-mode-btn {
+/* The Edit source / Preview toggle of a .md/.html tab and the "Open in
+   Browser" button of an .html one: secondary buttons next to the
+   primary Save. */
+#content-tab-area .content-mode-btn,
+#content-tab-area .content-browser-btn {
   flex: 0 0 auto;
   padding: var(--space-0-5) var(--space-3);
   border: 1px solid var(--border-input);
@@ -5811,12 +6623,27 @@ code { font-family: var(--font-mono); }
   transition: background var(--dur-base), border-color var(--dur-base);
 }
 
-#content-tab-area .content-mode-btn:hover { background: var(--hover); border-color: var(--border-hover); }
+#content-tab-area .content-mode-btn:hover,
+#content-tab-area .content-browser-btn:hover { background: var(--hover); border-color: var(--border-hover); }
 
-#content-tab-area .content-mode-btn:focus-visible {
+#content-tab-area .content-mode-btn:focus-visible,
+#content-tab-area .content-browser-btn:focus-visible {
   outline: 1px solid var(--accent);
   outline-offset: 1px;
 }
+
+/* The bar of an .html tab holds one button more than a phone is wide,
+   that of a Markdown tab holds more at a large text size: there its
+   items take a second row instead of leaving the pane, which clips
+   them.  The path takes what its row leaves it and never causes the
+   wrap. */
+#content-tab-area .content-save-bar:has(.content-mode-btn, .content-browser-btn) {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  row-gap: var(--space-1);
+}
+
+#content-tab-area .content-save-bar:has(.content-mode-btn, .content-browser-btn) .content-save-path { flex-basis: 0; }
 
 /* The File / Edit / Selection / View / Go menus of a content tab's
    Monaco editor: a row of its own directly above the editor. */
@@ -5918,6 +6745,107 @@ code { font-family: var(--font-mono); }
   font-size: var(--fs-sm);
   line-height: 1;
 }
+
+/* The Projects tab's icon is a drawing, not a character. */
+.chat-tab .content-tab-icon svg { display: block; }
+
+/* The Projects page (media/projects.js), a tab of the content pane: a
+   scrolling column, a "New project" button over one settings panel
+   per project.  A panel is set as the Settings dialog is (the same
+   .config-* rows), in a card of its own with a big pin button in its
+   top right corner. */
+#content-tab-area .projects-tab-view {
+  display: block;
+  overflow-y: auto;
+  background: var(--bg);
+}
+
+.projects-page-inner {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: var(--space-4) var(--space-4) var(--space-8);
+}
+
+.projects-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin-bottom: var(--space-2);
+}
+
+.projects-title { margin: 0; font-size: var(--fs-xl); font-weight: 600; color: var(--fg); }
+
+.projects-intro,
+.projects-empty { margin: 0 0 var(--space-4); font-size: var(--fs-md); color: var(--dim); }
+
+.project-panel {
+  position: relative;
+  margin-bottom: var(--space-4);
+  padding: var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  background: var(--surface);
+}
+
+/* The pin, as on a project's page in Claude Code Desktop: a ghost icon
+   button (28px with an 8px corner, no border and no fill until the
+   pointer is over it) holding a 20px pushpin in the text's colour, an
+   outline while the project is not pinned in the sidebar and solid
+   while it is.  The fill comes within 60ms and is laid on twice while
+   the button is held down. */
+.project-pin-btn {
+  position: absolute; top: var(--space-3); right: var(--space-3);
+  display: flex; align-items: center; justify-content: center;
+  width: 28px; height: 28px; padding: 0;
+  background: transparent; border: none; border-radius: var(--radius-lg);
+  color: var(--fg); cursor: pointer;
+  transition: background-color 60ms ease-out;
+}
+
+.project-pin-btn:hover { background-color: var(--hover); }
+
+.project-pin-btn:active { background-image: linear-gradient(var(--hover), var(--hover)); }
+
+.project-pin-btn[aria-pressed="false"] .project-pin-solid,
+.project-pin-btn[aria-pressed="true"] .project-pin-outline { display: none; }
+
+/* A finger gets the 36px target of the app's other icon buttons; the
+   drawing keeps its size. */
+body.remote-mobile .project-pin-btn::after { content: ''; position: absolute; inset: -4px; }
+
+/* The first row, the project's name, leaves the corner to the pin. */
+.project-pin-btn + .config-label { margin-right: calc(28px + var(--space-3)); }
+
+/* The folder drop-down and "New folder" share a line. */
+.project-workdir-row { display: flex; align-items: center; gap: var(--space-2); margin-top: var(--space-1); }
+
+.project-workdir-row > select { flex: 1 1 auto; min-width: 0; margin-top: 0; }
+
+.project-error { margin: var(--space-2) 0; font-size: var(--fs-md); color: var(--error); }
+
+.project-confirm {
+  display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2);
+  margin: var(--space-2) 0;
+  font-size: var(--fs-md); color: var(--fg);
+}
+
+/* Delete at the left end, Cancel and Save (the primary button) at the
+   right. */
+.project-actions { display: flex; align-items: center; gap: var(--space-2); margin-top: var(--space-3); }
+
+.project-actions-gap { flex: 1 1 auto; }
+
+/* Flex boxes, which the `hidden` attribute alone would not hide. */
+.project-confirm[hidden],
+.project-delete[hidden] { display: none; }
+
+.project-delete,
+.project-delete-yes { color: var(--error); }
+
+.project-actions .project-save { border-color: transparent; background: var(--primary-bg); color: var(--primary-fg); }
+
+.project-actions .project-save:hover:not(:disabled) { border-color: transparent; background: var(--primary-hover-bg); }
 
 /* Unsaved edits: VS Code's filled dot next to the file name. */
 .chat-tab .chat-tab-dirty {

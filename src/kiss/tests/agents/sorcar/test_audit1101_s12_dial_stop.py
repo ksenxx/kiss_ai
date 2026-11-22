@@ -231,6 +231,54 @@ def test_a_stop_as_a_stream_handshake_is_counted_in_holds_no_retirement(
     assert time.monotonic() - started < 5, "the retirement waited for a handshake nobody makes"
 
 
+def _stop_once_counted_out(frame: FrameType, event: str, arg: object) -> None:
+    """Profile function: a Stop of its own thread as the link counts its stream handshake out."""
+    if event == "return" and frame.f_code is mach.MachineLink._end_dial.__code__:
+        sys.setprofile(None)
+        inject_keyboard_interrupt(threading.get_ident())
+
+
+def test_a_stop_as_a_stream_handshake_is_counted_out_hangs_the_new_socket_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Stop raised once the stream's socket is dialled, before its caller has it, closes it.
+
+    ``open_connection`` returned the socket from the ``try`` whose
+    ``finally`` counts the handshake out: a Stop raised there dropped
+    the return value, an open authenticated socket that neither the
+    link nor the caller knew of, its threads answering the daemon's
+    pings for the daemon's life (audit 2026-11-21, S7 F1).
+    """
+    monkeypatch.setenv("KISS_HOME", str(tmp_path / "local"))
+    daemon = start_remote_daemon(tmp_path / "remote", password="pw", env={"HOME": str(tmp_path)})
+    sockets: list[ClientConnection] = []
+    outcome: dict[str, Any] = {}
+    try:
+        link = mach.MachineLink(mach.add_machine("box", daemon.url, "pw"))
+
+        def note_socket(frame_locals: dict[str, Any]) -> bool:
+            sockets.append(frame_locals["ws"])
+            return False  # nothing is held: the handshake completes
+
+        worker = threading.Thread(
+            target=_open_stream, args=(link, outcome, _stop_once_counted_out), name=REQUESTER,
+            daemon=True,
+        )
+        with Pause(mach.recv_auth_reply.__code__, note_socket):
+            worker.start()
+            worker.join(BUDGET + 10)
+        assert outcome == {"error": "KeyboardInterrupt"}
+        assert not link._dialing
+        sockets[0].recv_events_thread.join(10)
+        assert not sockets[0].recv_events_thread.is_alive(), "the stream's socket stayed open"
+        assert sockets[0].state.name == "CLOSED"
+    finally:
+        for ws in sockets:
+            ws.close()  # a failing run leaves it open
+        mach.close_links()
+        daemon.stop()
+
+
 def test_stop_while_a_local_client_waits_for_auth_ok_closes_the_socket(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

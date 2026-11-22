@@ -36,10 +36,29 @@ from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.core.models.model_info import get_available_models
 from kiss.tests.server.test_run_agent_subagent_tab import DaemonLocalHarness
 
-MODELS = get_available_models() or ["parent-model-x", "other-model"]
-PARENT_MODEL = MODELS[0]
-OTHER_MODEL = MODELS[-1]
-"""Models the daemon accepts (the LLM boundary is stubbed, so none is ever called)."""
+
+def _models() -> list[str]:
+    """Models the daemon accepts now (the LLM boundary is stubbed, so none is ever called).
+
+    Asked inside the test, never at import: the autouse
+    ``no_ambient_aws_credentials`` fixture hides the developer's AWS
+    credentials from every test, so a list taken at import started with a
+    Bedrock model on a machine that exports them, and the test's own
+    daemon then refused the run (``No model available under the name
+    "bedrock/..."``).
+    """
+    return get_available_models() or ["parent-model-x", "other-model"]
+
+
+def parent_model() -> str:
+    """The model the calling agent of :func:`_parent` runs on."""
+    return _models()[0]
+
+
+def other_model() -> str:
+    """A model to name explicitly, different from :func:`parent_model` when two exist."""
+    return _models()[-1]
+
 
 SEA_SOURCE = textwrap.dedent("""
     from kiss.agents.seas.base.base_sea import BaseSea
@@ -71,8 +90,8 @@ LOCKED_SEA_SOURCE = textwrap.dedent("""
 def _parent(repo: str) -> SorcarAgent:
     """A calling agent with the live state a run leaves behind (no model endpoint needed)."""
     parent = SorcarAgent("run-config-parent")
-    parent.model_name = PARENT_MODEL
-    parent._launch_model_name = PARENT_MODEL
+    parent.model_name = parent_model()
+    parent._launch_model_name = parent_model()
     # Its task asks for sub-agents, so children on its own model family are
     # not refused (``fanout_guard.same_model_conflict``).
     parent.task_description = "PARENT run the sub-agents"
@@ -148,7 +167,7 @@ class Sea(BaseSea):
             self.repo,
             "say hi",
             agent=str(self.sea),
-            model=PARENT_MODEL,
+            model=parent_model(),
             tool_profile="review",
             timeout="45",
             parent_agent=parent,
@@ -157,7 +176,7 @@ class Sea(BaseSea):
         assert list(parsed) == ["ran", "success", "summary"], out
         assert parsed["success"] is True and parsed["summary"] == "done"
         ran = parsed["ran"]
-        assert ran.startswith(f"echo model={PARENT_MODEL} tools=review budget=$0.75 "), (
+        assert ran.startswith(f"echo model={parent_model()} tools=review budget=$0.75 "), (
             ran
         )
         assert "timeout=45s" in ran
@@ -227,7 +246,7 @@ class Sea(BaseSea):
         assert settings["tool_profile"] == "review"
         assert settings["timeout"] == 30.0
         assert settings["max_budget"] == 0.75
-        assert settings["model"] == PARENT_MODEL
+        assert settings["model"] == parent_model()
         assert "chat_id" in settings["inherited"] and "model" in settings["inherited"]
         # The explicit profile and memory flag stood; the inherited budget share did not.
         assert settings["pinned"] == {"max_budget": [1.5, 0.75]}
@@ -243,7 +262,7 @@ class Sea(BaseSea):
             "say hi",
             str(self.plain_sea),
             self.repo,
-            OTHER_MODEL,
+            other_model(),
             0.2,
             30.0,
             parent_agent=parent,
@@ -252,12 +271,12 @@ class Sea(BaseSea):
         assert not isinstance(result, str), result
         settings = result.settings
         assert settings["sea"] == "plain" and settings["pinned"] == {}, result
-        assert settings["model"] == OTHER_MODEL and settings["max_budget"] == 0.2
+        assert settings["model"] == other_model() and settings["max_budget"] == 0.2
         assert "model" not in settings["inherited"]
         assert "max_budget" not in settings["inherited"]
         assert "chat_id" in settings["inherited"]
         line = run_config_line({**settings, "timeout": 30.0})
-        assert line.startswith(f"plain model={OTHER_MODEL} tools=full budget=$0.20 ")
+        assert line.startswith(f"plain model={other_model()} tools=full budget=$0.20 ")
         assert line.endswith("pinned=none")
 
 def test_run_config_line_shortens_long_values() -> None:

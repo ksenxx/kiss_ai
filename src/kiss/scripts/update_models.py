@@ -63,6 +63,7 @@ Options:
 from __future__ import annotations
 
 import argparse
+import copy
 import datetime
 import json
 import logging
@@ -357,7 +358,8 @@ def openrouter_cache_prices(pricing: dict[str, Any]) -> dict[str, float]:
     ``openrouter/*`` models, so the catalog stores them verbatim as
     ``cache_read_price_per_1M`` / ``cache_write_price_per_1M`` /
     ``image_output_price_per_1M`` / ``audio_input_price_per_1M`` /
-    ``audio_output_price_per_1M`` and
+    ``audio_output_price_per_1M`` (but for a cache-read price above the
+    input price, see :func:`_cap_cache_reads_at_input`) and
     ``model_info._apply_cache_pricing`` leaves such entries alone.  A
     field OpenRouter omits (``None`` / ``""``) is left out of the result
     so ``calculate_cost`` falls back to the input (or text output) price
@@ -547,14 +549,59 @@ def _openrouter_price_fields(pricing: dict[str, Any]) -> dict[str, Any]:
 
     Returns:
         ``input_price_per_1M`` and ``output_price_per_1M`` (6 decimals),
-        plus the cache/image/audio prices and ``prompt_tiers`` it publishes.
+        plus the cache/image/audio prices and ``prompt_tiers`` it publishes,
+        no cache-read price above the input price it applies with (see
+        :func:`_cap_cache_reads_at_input`).
     """
-    return {
+    sheet = {
         "input_price_per_1M": round(float(pricing.get("prompt") or "0") * 1_000_000, 6),
         "output_price_per_1M": round(float(pricing.get("completion") or "0") * 1_000_000, 6),
         **openrouter_cache_prices(pricing),
         **openrouter_prompt_tiers(pricing),
     }
+    _cap_cache_reads_at_input(sheet)
+    return sheet
+
+
+def _cap_cache_reads_at_input(sheet: dict[str, Any]) -> None:
+    """Lower every cache-read price of *sheet* that exceeds the input price it applies with.
+
+    A token read from cache is never billed above a fresh input token.
+    OpenRouter's headline can still list one that is:
+    ``~deepseek/deepseek-pro-latest`` stood at $0.2066/M input and $0.21/M
+    cached input on 2026-11-20 (its cached rate has followed the input
+    price rounded to a cent: $0.2428/$0.24, $0.2542/$0.25, $0.1318/$0.13),
+    and the verbatim import made ``calculate_cost`` price a cache hit above
+    the input it replaces.  Such a rate becomes the input price, which is
+    what ``calculate_cost`` bills a cache hit at when a sheet publishes no
+    cache-read price.
+
+    The prices of a prompt are the base sheet's, replaced key by key by
+    every ``prompt_tiers`` entry the prompt is longer than, in listing
+    order (``calculate_cost``).  So the base and each tier threshold are
+    one price regime each: in every regime the cache-read price in force
+    is held to the input price in force, by lowering it where it is set
+    (the base sheet or the tier).  No key is added and no price is raised;
+    a regime that takes its cache-read price from the same place (a tier
+    without one of its own) is billed the lowered price as well.  A
+    regime whose input price is negative is left alone: OpenRouter lists
+    a router whose price varies by request (``openrouter/auto``) at "-1"
+    per token, which is no price to cap at.
+
+    Args:
+        sheet: Catalog price fields of one price sheet; updated in place.
+    """
+    tiers: list[dict[str, Any]] = sheet.get("prompt_tiers", [])
+    for threshold in [0, *sorted({tier["min_prompt_tokens"] for tier in tiers})]:
+        input_price, holder = sheet["input_price_per_1M"], sheet
+        for tier in tiers:
+            if tier["min_prompt_tokens"] > threshold:
+                continue
+            input_price = tier.get("input_price_per_1M", input_price)
+            if "cache_read_price_per_1M" in tier:
+                holder = tier
+        if input_price >= 0 and holder.get("cache_read_price_per_1M", 0.0) > input_price:
+            holder["cache_read_price_per_1M"] = input_price
 
 
 # Every catalog field :func:`_openrouter_price_fields` may set.
@@ -1489,6 +1536,32 @@ def _thinking_scale_for(model_name: str) -> tuple[str, ...]:
     return _THINKING_LEVELS
 
 
+def _base_thinking_level(scale: tuple[str, ...], max_level: str) -> str:
+    """Return the level a base entry stores when its ladder ``scale`` tops out at ``max_level``.
+
+    At most ``high``: the levels above it are reached through the generated
+    ``-xhigh`` / ``-max`` siblings (see :func:`_write_entry_with_thinking_split`),
+    so this is the effort a request to the base name carries by default.
+
+    Args:
+        scale: The model's vendor ladder (:func:`_thinking_scale_for`).
+        max_level: The highest level of ``scale`` the model accepts.
+    """
+    return "high" if scale.index(max_level) > scale.index("high") else max_level
+
+
+def _default_effort(model_name: str, thinking: str | None) -> str | None:
+    """Return the effort a request to ``model_name`` carries by default once its level is written.
+
+    Args:
+        model_name: The catalog key of a base entry.
+        thinking: The level the entry is written with (``None``: none), see
+            :func:`_write_entry_with_thinking_split`.
+    """
+    scale = _thinking_scale_for(model_name)
+    return _base_thinking_level(scale, thinking) if thinking in scale else thinking
+
+
 def detect_thinking_level(
     model_name: str, model_config: dict[str, Any] | None = None
 ) -> str | None:
@@ -1704,7 +1777,9 @@ def test_function_calling(
         return None if _is_inconclusive_probe_error(e) else False
 
 
-def test_responses_api(model_name: str, fc: bool) -> bool | None:
+def test_responses_api(
+    model_name: str, fc: bool, thinking: str | None = UNVERIFIED
+) -> bool | None:
     """Live-probe whether *model_name* works over the OpenAI v2 Responses API.
 
     Delegates to ``update_responses_api_support.probe_responses_support``
@@ -1717,6 +1792,14 @@ def test_responses_api(model_name: str, fc: bool) -> bool | None:
     Args:
         model_name: The model name (with any routing prefix).
         fc: Whether the model supports function calling.
+        thinking: The level the entry is written with: this run's
+            :func:`detect_thinking_level` verdict, or the level a mirror
+            takes from its ``claude-*`` twin (:func:`_set_mirror_thinking`).
+            The probe asks for the default effort of that entry
+            (:func:`_default_effort`; none for ``None``), so the flag is
+            verified for the configuration it is published beside.
+            :data:`UNVERIFIED` keeps the stored level: the runtime
+            catalog's default is asked for.
 
     Returns:
         True when every applicable probe passed, False when the endpoint
@@ -1724,9 +1807,13 @@ def test_responses_api(model_name: str, fc: bool) -> bool | None:
         be verified (missing or rejected vendor key, exhausted transient
         endpoint errors) — callers must not flip a stored flag on ``None``.
     """
-    from kiss.scripts.update_responses_api_support import probe_responses_support
+    from kiss.scripts.update_responses_api_support import (
+        _RUNTIME_DEFAULT,
+        probe_responses_support,
+    )
 
-    result = probe_responses_support(model_name, fc=fc)
+    effort = _RUNTIME_DEFAULT if thinking == UNVERIFIED else _default_effort(model_name, thinking)
+    result = probe_responses_support(model_name, fc=fc, thinking=effort)
     if not result.conclusive:
         return None
     return result.supported
@@ -1842,7 +1929,14 @@ def _probe_capabilities(model_name: str, decisions: bool) -> dict[str, Any]:
             # call them; an untested ``fc`` leaves the transport unverified too.
             results["use_responses_api"] = None
         else:
-            results["use_responses_api"] = test_responses_api(model_name, results["fc"])
+            # An OpenRouter Claude slug's level is its claude-* twin's, whatever
+            # its own (gated) ladder probe says: its stored level is asked for,
+            # and the sync that gives it another settles the flag again
+            # (_set_mirror_thinking).
+            mirrored = model_name.startswith(_OPENROUTER_CLAUDE_PREFIX)
+            results["use_responses_api"] = test_responses_api(
+                model_name, results["fc"], UNVERIFIED if mirrored else results["thinking"]
+            )
         time.sleep(0.5)
     elif results["gen"] is None:
         # Endpoint outage or missing key: nothing about the model was
@@ -2419,8 +2513,10 @@ def _sync_openrouter_claude_thinking(
     this run hands over its probed level, a retested twin its new level,
     any other twin the maximum recorded on disk.  A slug without a direct
     twin (``claude-opus-4.1``, the ``:thinking`` variants) keeps no level.
-    Called from :func:`compute_changes` and again from ``main`` after the
-    probes and retests, like the Bedrock sync.
+    The slug's ``use_responses_api`` flag follows the level it is given
+    (:func:`_set_mirror_thinking`): its own probe asked Responses for the
+    stored one.  Called from :func:`compute_changes` and again from
+    ``main`` after the probes and retests, like the Bedrock sync.
 
     Args:
         current: The current catalog.
@@ -2554,16 +2650,59 @@ def _set_mirror_thinking(
     a ``thinking`` update under ``source`` (joining its pending update
     record when there is one), which :func:`apply_updates_to_file` turns
     into the ``-low`` … ``-max`` siblings of the entry's ladder.
+
+    ``use_responses_api`` is a verdict at the entry's default effort
+    (:func:`test_responses_api`) and follows it.  A candidate flagged at
+    another effort is probed again at the one ``level`` brings.  An
+    existing entry whose default effort changes is written without the
+    flag: its verdict, this run's or a stored one, was made at the stored
+    level, and the next retest or Responses scan makes it at the new one.
     """
+    effort = _default_effort(name, level)
     if name in new_by_name:
-        new_by_name[name]["thinking"] = level
-    elif name in current and level != _run_thinking_level(name, current, update_by_name):
-        upd = update_by_name.get(name)
-        if upd is None:
-            upd = {"name": name, "changes": {}, "source": source}
-            updates.append(upd)
-            update_by_name[name] = upd
-        upd["changes"]["thinking"] = level
+        nm = new_by_name[name]
+        if nm.get("use_responses_api") and effort != _default_effort(name, nm.get("thinking")):
+            nm["use_responses_api"] = _passes_responses_api(name, nm["fc"], level)
+            verdict = "Y" if nm["use_responses_api"] else "N"
+            print(f"    {name}: use_responses_api={verdict} at its default effort {effort!r}")
+        nm["thinking"] = level
+        return
+    if name not in current:  # neither a candidate nor an entry: nothing to record
+        return
+    cur = current[name]
+    upd = update_by_name.get(name)
+    pending: dict[str, Any] = upd["changes"] if upd is not None else {}
+    changes: dict[str, Any] = {}
+    if level != _run_thinking_level(name, current, update_by_name):
+        changes["thinking"] = level
+    flagged = pending.get("use_responses_api", cur.get("use_responses_api"))
+    if flagged and effort != cur.get("thinking"):
+        changes["use_responses_api"] = False
+    if not changes:
+        return
+    if upd is None:
+        upd = {"name": name, "changes": {}, "source": source}
+        updates.append(upd)
+        update_by_name[name] = upd
+    upd["changes"].update(changes)
+
+
+def _passes_responses_api(model_name: str, fc: bool, thinking: str | None) -> bool:
+    """Return whether :func:`test_responses_api` passes for an entry written with ``thinking``.
+
+    Asked outside :func:`test_model_capabilities`, so bounded here by the
+    same :data:`_CAPABILITY_DEADLINE_SECONDS`.  A refusal, an inconclusive
+    probe and one still running at the deadline are all ``False``: a new
+    entry gets the flag only on a verified pass.
+    """
+    try:
+        return bool(
+            _call_with_deadline(
+                test_responses_api, (model_name, fc, thinking), _CAPABILITY_DEADLINE_SECONDS
+            )
+        )
+    except TimeoutError:
+        return False
 
 
 def _lookup_openrouter_pricing(
@@ -2686,6 +2825,26 @@ def _prompt_tier_changes(cur: dict[str, Any], fetched: dict[str, Any]) -> dict[s
     return {}
 
 
+def _capped_cache_reads(entry: dict[str, Any]) -> dict[str, Any]:
+    """Return the cache-read prices of ``entry`` that :func:`_cap_cache_reads_at_input` lowers.
+
+    A fetched price sheet meets that rule; a catalog entry updated from one
+    may not, where :func:`_price_changed`'s tolerance kept a stored input or
+    cache-read price beside a new one.
+
+    Args:
+        entry: A catalog entry under its pending changes (``None``: the
+            field is dropped), its ``prompt_tiers`` valid; left as it is.
+
+    Returns:
+        ``cache_read_price_per_1M`` and ``prompt_tiers``, each only when a
+        price in it came down; ``{}`` when none did.
+    """
+    sheet = copy.deepcopy({field: value for field, value in entry.items() if value is not None})
+    _cap_cache_reads_at_input(sheet)
+    return {field: value for field, value in sheet.items() if value != entry[field]}
+
+
 def compute_changes(
     current: dict[str, dict],
     openrouter: dict[str, dict],
@@ -2700,7 +2859,9 @@ def compute_changes(
     Returns (updates, new_models) where each is a list of dicts with model
     info.  ``bedrock`` (:func:`fetch_bedrock`'s listing) adds one
     ``bedrock/<id>`` mirror of the ``claude-*`` entry per Claude id, see
-    :func:`_add_bedrock_candidates`.
+    :func:`_add_bedrock_candidates`.  No ``openrouter/`` entry leaves with a
+    cache-read price above the input price in force with it
+    (:func:`_cap_cache_reads_at_input`).
     """
     updates: list[dict] = []
     new_models: list[dict] = []
@@ -2728,6 +2889,7 @@ def compute_changes(
                 changed["output_price_per_1M"] = fetched["output_price_per_1M"]
             changed.update(_cache_price_changes(cur, fetched))
             changed.update(_prompt_tier_changes(cur, fetched))
+            changed.update(_capped_cache_reads({**cur, **changed}))
             if changed:  # pragma: no branch
                 updates.append({"name": name, "changes": changed, "source": "openrouter"})
         else:
@@ -2828,6 +2990,11 @@ def compute_changes(
             # Subscription-billed CLI backends: pricing stays $0/0 forever,
             # even though their slugs have priced OpenRouter twins.  A
             # bedrock/ entry is repriced from its claude-* twin below.
+            continue
+        if _alias_base_name(name, cur) is not None:
+            # A generated thinking alias copies its base entry, which is
+            # repaired under its own name: OpenRouter lists no twin of the
+            # alias, and an update of its own would replace that copy.
             continue
         has_pricing = cur["input_price_per_1M"] > 0
         has_context = cur["context_length"] > 0
@@ -3065,11 +3232,9 @@ def _write_entry_with_thinking_split(
     if not remove_stale_siblings:
         max_level = _recorded_max_level(data, name, scale, stored_level)
     base = dict(entry)
-    high_rank = scale.index("high")
-    max_rank = scale.index(max_level)
-    base["thinking"] = "high" if max_rank > high_rank else max_level
+    base["thinking"] = _base_thinking_level(scale, max_level)
     data[name] = base
-    supported = scale[: max_rank + 1]
+    supported = scale[: scale.index(max_level) + 1]
     for level in supported:
         sibling_name = f"{name}-{level}"
         existing = data.get(sibling_name)
@@ -3573,7 +3738,10 @@ def _probe_new_models(new_models: list[dict], verbose: bool = False) -> list[dic
     are not probed: the subscription CLIs run on the user's plan and a
     ``bedrock/`` id runs the Claude model its entry was copied from.
     Candidates that are neither generators nor embedders nor decisions
-    models are dropped.
+    models are dropped, and so is one the user's ``MY_MODELS.json`` defines
+    too: it would be probed with the settings of that entry, as a known
+    model would in the retest of :func:`main`, so it is left for the run
+    that finds the entry gone.
 
     Args:
         new_models: Candidate dicts from :func:`compute_changes`; mutated
@@ -3583,8 +3751,16 @@ def _probe_new_models(new_models: list[dict], verbose: bool = False) -> list[dic
     Returns:
         The candidates that passed (or were exempt from) probing.
     """
+    from kiss.core.models.model_info import _read_my_models
+
+    user_defined = _read_my_models()
     for nm in new_models:
         if nm["name"].startswith(_MIRROR_PREFIXES):
+            continue
+        if nm["name"] in user_defined:
+            print(f"    {nm['name']}: defined in MY_MODELS.json, not probed, not added")
+            # Without a capability the candidate is dropped below.
+            nm["gen"] = nm["emb"] = nm["dec"] = False
             continue
         caps = test_model_capabilities(
             nm["name"], verbose=verbose, decisions=nm.get("is_decisions", False)
@@ -3861,6 +4037,16 @@ def main() -> None:
                 and not name.startswith((_OPENROUTER_CLAUDE_PREFIX, _CLAUDE_CODE_PREFIX))
             )
             responses_verdict = caps.get("use_responses_api")
+            if (
+                responses_verdict is None
+                and thinking_changed
+                and _default_effort(name, caps["thinking"]) != cur.get("thinking")
+            ):
+                # The stored flag is a verdict at the stored default effort, and
+                # this run reached none at the new one: the entry is written
+                # without the flag, as in _set_mirror_thinking, and the next
+                # retest or Responses scan decides it at the new level.
+                responses_verdict = False
             responses_changed = responses_verdict is not None and bool(
                 responses_verdict
             ) != bool(cur.get("use_responses_api"))

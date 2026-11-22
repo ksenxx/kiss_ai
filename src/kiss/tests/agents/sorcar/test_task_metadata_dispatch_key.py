@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
+from contextlib import closing
 
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.task_metadata import infer_subagent_seas
@@ -46,20 +47,24 @@ def _db_with_dispatch(task_text: str, child_text: str) -> sqlite3.Connection:
 
 def test_infer_subagent_seas_is_linear_on_a_long_slash_free_token() -> None:
     blob = "A" * 100_000
-    conn = _db_with_dispatch(f"summarize {blob} now", f"[channel preamble] summarize {blob} now")
-    started = time.monotonic()
-    assert infer_subagent_seas(conn, "p") == {"c": "write_paper_sea"}
-    assert time.monotonic() - started < 5.0
+    with closing(
+        _db_with_dispatch(f"summarize {blob} now", f"[channel preamble] summarize {blob} now")
+    ) as conn:
+        started = time.monotonic()
+        assert infer_subagent_seas(conn, "p") == {"c": "write_paper_sea"}
+        assert time.monotonic() - started < 5.0
 
 
 def test_infer_subagent_seas_ignores_path_tokens_and_extra_whitespace() -> None:
     # The parent dispatched with the repo's absolute path; the child's task
     # text names the worktree's and spaces it differently.
-    conn = _db_with_dispatch(
+    with closing(_db_with_dispatch(
         "review /home/u/repo/a.tex  and C:\\docs\\b.tex\tcarefully",
         "review /wt/repo/a.tex and D:\\wt\\b.tex carefully",
-    )
-    assert infer_subagent_seas(conn, "p") == {"c": "write_paper_sea"}
+    )) as conn:
+        assert infer_subagent_seas(conn, "p") == {"c": "write_paper_sea"}
     # A child whose text differs in a non-path word does not match.
-    conn = _db_with_dispatch("review /home/u/repo/a.tex carefully", "review /wt/a.tex quickly")
-    assert infer_subagent_seas(conn, "p") == {}
+    with closing(
+        _db_with_dispatch("review /home/u/repo/a.tex carefully", "review /wt/a.tex quickly")
+    ) as conn:
+        assert infer_subagent_seas(conn, "p") == {}

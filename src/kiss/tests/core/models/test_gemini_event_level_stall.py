@@ -42,8 +42,11 @@ import socket
 import threading
 import time
 from collections.abc import Generator
+from typing import Any
 
+import httpx
 import pytest
+from google.genai import errors
 
 from kiss.core import stop_signal
 from kiss.core.kiss_error import ContentFilterError
@@ -63,6 +66,11 @@ _STALL_TIMEOUT = 2.0
 # Comfortably above the stall timeout, and far below the time an
 # unbounded keep-alive stream would take (it never ends).
 _DEADLINE = 20.0
+_ANSWER = [chunk([text_part("Done.")], usage=_USAGE, finish_reason="STOP")]
+# An error the endpoint reports inside a response it opened with a 200.
+_OVERLOADED = [{"error": {"code": 503, "message": "overloaded", "status": "UNAVAILABLE"}}]
+# Retry delays a test does not notice.
+_QUICK = {"initial_delay": 0.01, "max_delay": 0.01, "jitter": 0.001}
 
 
 @pytest.fixture
@@ -71,13 +79,15 @@ def gemini_endpoint() -> Generator[tuple[str, GeminiScript]]:
     yield from serve()
 
 
-def _make_model(monkeypatch: pytest.MonkeyPatch, base_url: str) -> GeminiModel:
+def _make_model(
+    monkeypatch: pytest.MonkeyPatch, base_url: str, **model_config: Any
+) -> GeminiModel:
     """Build a real ``GeminiModel`` whose stream goes to the local endpoint."""
     monkeypatch.setenv("GOOGLE_GEMINI_BASE_URL", base_url)
     model = GeminiModel(
         _MODEL,
         api_key="test-key",
-        model_config={"stream_stall_timeout": _STALL_TIMEOUT},
+        model_config={"stream_stall_timeout": _STALL_TIMEOUT, **model_config},
         token_callback=lambda _t: None,
     )
     model.initialize("Explain event-level stalls.")
@@ -235,10 +245,10 @@ class TestKeepAliveOnlyStreamStallsOut:
         monkeypatch: pytest.MonkeyPatch,
         gemini_endpoint: tuple[str, GeminiScript],
     ) -> None:
-        """The watchdog must not settle on the error reply of an attempt the SDK retries.
+        """The watchdog must not settle on the error reply of an attempt that is retried.
 
-        The first attempt is refused with a 503 the SDK finishes with and
-        retries after a delay longer than the stall timeout; the retry
+        The first attempt is refused with a 503 the SDK finishes with, and
+        is retried after a delay longer than the stall timeout; the retry
         then streams keep-alives only.  A watchdog that adopted the 503
         as "this stream's response" would abort a dead reply and leave
         the retry to run for good.
@@ -267,10 +277,102 @@ class TestKeepAliveOnlyStreamStallsOut:
 
         error, elapsed = _run_bounded(model)
 
-        assert len(script.requests) == 2, "the SDK did not retry the refused attempt"
+        assert len(script.requests) == 2, "the refused attempt was not retried"
         assert isinstance(error, TimeoutError), f"got {error!r}"
         assert "stall" in str(error).lower()
         assert elapsed < _DEADLINE / 2, f"the stall took {elapsed:.1f}s to surface"
+
+    @pytest.mark.parametrize(
+        ("refusals", "retry_options", "chunks", "requests", "failure"),
+        [
+            (2, {"attempts": 3, **_QUICK}, _ANSWER, 3, None),
+            (2, {"attempts": 2, **_QUICK}, _ANSWER, 2, errors.ServerError),
+            (1, {"http_status_codes": [429], **_QUICK}, _ANSWER, 1, errors.ServerError),
+            (0, _QUICK, _OVERLOADED, 1, errors.ServerError),
+        ],
+        ids=["answered-in-time", "out-of-attempts", "another-status", "refused-in-an-open-stream"],
+    )
+    def test_a_refused_request_is_sent_again_as_the_retry_options_ask(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        gemini_endpoint: tuple[str, GeminiScript],
+        refusals: int,
+        retry_options: dict[str, Any],
+        chunks: list[dict[str, Any]],
+        requests: int,
+        failure: type[errors.APIError] | None,
+    ) -> None:
+        """The retry policy of ``http_options.retry_options`` is the SDK's, whoever applies it.
+
+        A refusal with one of the status codes is retried while attempts
+        are left; an error inside a response that opened is not.
+        """
+        base_url, script = gemini_endpoint
+        script.refusals = refusals
+        script.play(chunks)
+        model = _make_model(monkeypatch, base_url, http_options={"retry_options": retry_options})
+
+        error, _elapsed = _run_bounded(model)
+
+        assert len(script.requests) == requests
+        if failure is None:
+            assert error is None and model.conversation[-1]["content"] == "Done.", f"got {error!r}"
+        else:
+            assert isinstance(error, failure) and error.code == 503, f"got {error!r}"
+
+    def test_a_failed_connect_is_tried_again_as_a_refusal_is(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A connect error is retried like a refusal: three attempts wait two backoffs."""
+        with socket.create_server(("127.0.0.1", 0)) as listener:
+            down = f"http://127.0.0.1:{listener.getsockname()[1]}"  # refuses, once closed
+        retry_options = {"attempts": 3, "initial_delay": 0.2, "max_delay": 0.2, "jitter": 0.001}
+        model = _make_model(monkeypatch, down, http_options={"retry_options": retry_options})
+
+        error, elapsed = _run_bounded(model)
+
+        assert isinstance(error, httpx.ConnectError), f"got {error!r}"
+        assert elapsed > 0.3, "the failed connect was not tried twice more"
+
+    @pytest.mark.parametrize("cut", ["stop", "header-deadline"])
+    def test_a_retry_backoff_ends_at_a_stop_and_at_the_header_deadline(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        gemini_endpoint: tuple[str, GeminiScript],
+        cut: str,
+    ) -> None:
+        """A turn waiting to retry leaves at the Stop, and when its headers are overdue.
+
+        The SDK slept the backoff in ``time.sleep``, 30 s here, which
+        neither of them ends (audit C5/F2).
+        """
+        base_url, script = gemini_endpoint
+        script.refusals = 1
+        script.play(_ANSWER)
+        stall_timeout = _STALL_TIMEOUT if cut == "stop" else 0.2
+        model = _make_model(
+            monkeypatch,
+            base_url,
+            stream_stall_timeout=stall_timeout,
+            http_options={
+                "retry_options": {"attempts": 2, "initial_delay": 30.0, "max_delay": 30.0}
+            },
+        )
+        stop = threading.Event()
+        outcome: dict[str, BaseException] = {}
+        worker = threading.Thread(target=_generate_under, args=(stop, model, outcome), daemon=True)
+        worker.start()
+        refused_by = time.monotonic() + 10
+        while not script.requests and time.monotonic() < refused_by:
+            time.sleep(0.01)
+        time.sleep(0.3)  # the refusal has been read: the turn is in its backoff
+        if cut == "stop":
+            stop.set()
+        worker.join(_DEADLINE)  # shorter than the backoff, longer than the header budget
+        assert not worker.is_alive(), "the turn sleeps on in its backoff"
+        expected = KeyboardInterrupt if cut == "stop" else TimeoutError
+        assert isinstance(outcome.get("error"), expected), f"got {outcome!r}"
+        assert len(script.requests) == 1, "the request was sent again after the cut"
 
     def test_healthy_stream_is_unaffected(
         self,

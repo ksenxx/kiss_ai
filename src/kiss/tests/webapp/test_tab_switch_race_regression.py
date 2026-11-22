@@ -1031,12 +1031,14 @@ class TestPerTabT0(unittest.TestCase):
         # side-effect) is stubbed out.
         set_tab_running_src = _extract_function(self.js, "setTabRunning")
         # Completing the ACTIVE tab refocuses the composer unless the
-        # real composerFocusWouldSteal (and its isTextEntry and
-        # sheetOrModalOpen helpers) says another field or an open sheet
-        # owns the keyboard.
+        # real composerFocusWouldSteal (and its isTextEntry,
+        # sheetOrModalOpen and openPopoverIn helpers) says another field,
+        # an open sheet or an open menu owns the keyboard.
         focus_steal_src = _extract_function(self.js, "composerFocusWouldSteal")
         is_text_entry_src = _extract_function(self.js, "isTextEntry")
         sheet_open_src = _extract_function(self.js, "sheetOrModalOpen")
+        # No menu is open here: the page's query for one finds nothing.
+        open_popover_src = _extract_function(self.js, "openPopoverIn")
         # sheetOrModalOpen also counts the sign-in window; the page has
         # none here (signinModal is null).
         signin_open_src = _extract_function(self.js, "signinWindowOpen")
@@ -1076,6 +1078,7 @@ class TestPerTabT0(unittest.TestCase):
             var isMobileRemote = false;
             var openSheets = [];
             var serverResetConfirmModal = null;
+            var POPOVERS = true;
             document.activeElement = document.body;
             document.querySelector = function() { return null; };
             """
@@ -1083,6 +1086,7 @@ class TestPerTabT0(unittest.TestCase):
             + is_text_entry_src
             + signin_open_src
             + sheet_open_src
+            + open_popover_src
             + focus_steal_src
             + content_focus_src
             + set_ready_src

@@ -5,12 +5,12 @@
 
 'use strict';
 
-// End-to-end test of the CHATS panel's Cron chip: the daemon's `history`
-// reply marks the tasks the cron scheduler launched with `is_cron`, the
-// chip is off by default and those rows are hidden, switching it on
-// shows them alongside the others, and switching it off hides them
-// again.  The other chips keep working on cron rows (a failed cron row
-// needs both Cron and Errored on).
+// End-to-end test of the CHATS panel's Cron tasks filter (a submenu of
+// the Filter and group menu): the daemon's `history` reply marks the
+// tasks the cron scheduler launched with `is_cron`, the filter starts
+// on Hidden and those rows are hidden, Shown shows them alongside the
+// others, and Hidden hides them again.  The status filter keeps working
+// on cron rows (a failed cron row needs both Shown and Errored).
 
 const assert = require('assert');
 const {makeRemoteChatPage, ofType} = require('./simplify2_harness');
@@ -20,6 +20,10 @@ const {
   sendHistory,
   sendHistoryPage,
   finishedSession: session,
+  filterOptions,
+  tickedFilterOptions,
+  pressFilterOption,
+  filterRowValue,
 } = require('./history_helpers');
 
 const SESSIONS = [
@@ -41,11 +45,10 @@ function testChipIsOffByDefaultAndHidesCronRows() {
   const {win, posted} = makeRemoteChatPage();
   const box = win.document.getElementById('hf-cron');
   assert.ok(box && box.type === 'checkbox', 'hf-cron checkbox must exist');
-  assert.strictEqual(box.checked, false, 'the Cron chip starts off');
-  assert.ok(
-    box.closest('.history-filter-chips'),
-    'the Cron chip sits with the other status chips',
-  );
+  assert.strictEqual(box.checked, false, 'the Cron filter starts off');
+  assert.deepStrictEqual(filterOptions(win, 'cron'), ['Hidden', 'Shown']);
+  assert.deepStrictEqual(tickedFilterOptions(win, 'cron'), ['Hidden']);
+  assert.strictEqual(filterRowValue(win, 'cron'), 'Hidden');
   sendHistory(win, posted, SESSIONS);
   const seen = {};
   historyRows(win).forEach(r => {
@@ -66,7 +69,9 @@ function testChipIsOffByDefaultAndHidesCronRows() {
 function testSwitchingTheChipShowsAndHidesCronRows() {
   const {win, posted} = makeRemoteChatPage();
   sendHistory(win, posted, SESSIONS);
-  setChip(win, 'hf-cron', true);
+  pressFilterOption(win, 'cron', 'Shown');
+  assert.deepStrictEqual(tickedFilterOptions(win, 'cron'), ['Shown']);
+  assert.strictEqual(filterRowValue(win, 'cron'), 'Shown');
   assert.deepStrictEqual(visibleTitles(win), [
     'cron failed',
     'cron ok',
@@ -74,7 +79,7 @@ function testSwitchingTheChipShowsAndHidesCronRows() {
     'plain one',
     'plain two',
   ]);
-  // The status chips still apply to cron rows.
+  // The status filter still applies to cron rows.
   setChip(win, 'hf-errors', false);
   assert.deepStrictEqual(visibleTitles(win), [
     'cron ok',
@@ -83,9 +88,9 @@ function testSwitchingTheChipShowsAndHidesCronRows() {
     'plain two',
   ]);
   setChip(win, 'hf-errors', true);
-  setChip(win, 'hf-cron', false);
+  pressFilterOption(win, 'cron', 'Hidden');
   assert.deepStrictEqual(visibleTitles(win), ['legacy', 'plain one', 'plain two']);
-  // A refreshed list keeps the chip's state.
+  // A refreshed list keeps the filter's state.
   setChip(win, 'hf-cron', true);
   sendHistory(win, posted, SESSIONS);
   assert.deepStrictEqual(visibleTitles(win), [
@@ -96,7 +101,7 @@ function testSwitchingTheChipShowsAndHidesCronRows() {
     'plain two',
   ]);
   win.close();
-  console.log('  ok - the Cron chip shows and hides the cron rows');
+  console.log('  ok - the Cron tasks filter shows and hides the cron rows');
 }
 
 /**

@@ -562,18 +562,23 @@ class StalledPeer:
         self.sock.close()
 
 
+def _line_at(thread: threading.Thread | None, function: str) -> str:
+    """The source line *thread* is at in its innermost call of *function* ("" outside one)."""
+    frame = None if thread is None else sys._current_frames().get(thread.ident or 0)
+    while frame is not None and frame.f_code.co_name != function:
+        frame = frame.f_back
+    if frame is None:
+        return ""
+    return linecache.getline(frame.f_code.co_filename, frame.f_lineno)
+
+
 def _reader_at_recv(reader: threading.Thread) -> bool:
     """Whether websockets' *reader* thread waits for the socket in ``recv_events``.
 
     websockets 15 blocks in ``socket.recv`` there; 17 waits in a selector
     first, whose frames lie under that of ``recv_events``.
     """
-    frame = sys._current_frames().get(reader.ident or 0)
-    while frame is not None and frame.f_code.co_name != "recv_events":
-        frame = frame.f_back
-    if frame is None:
-        return False
-    line = linecache.getline(frame.f_code.co_filename, frame.f_lineno)
+    line = _line_at(reader, "recv_events")
     return "socket.recv(" in line or "poller.select()" in line
 
 
@@ -901,7 +906,12 @@ def test_second_process_defers_to_a_live_bridge_and_daemon_takes_over() -> None:
         # A CLI run beside the daemon: the extension stays with the daemon,
         # and the refused start binds nothing (websockets never closes a
         # Server's shutdown pipe: every refused use_my_chrome call leaked
-        # its two descriptors).
+        # its two descriptors).  The descriptors are counted from the moment
+        # the daemon's serving loop waits in its selector, a descriptor the
+        # loop opens itself after start() has returned: opened after the
+        # count, it was held against the refused starts.
+        serving = daemon._server_thread
+        assert _eventually(lambda: "poller.select()" in _line_at(serving, "serve_forever"))
         open_fds = 0 if IS_WINDOWS else len(os.listdir("/dev/fd"))
         for _ in range(3):
             cli = ChromeBridge(write_config=True)

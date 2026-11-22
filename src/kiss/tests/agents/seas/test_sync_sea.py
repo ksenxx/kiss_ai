@@ -21,6 +21,7 @@ import json
 import re
 from collections.abc import Sequence
 from pathlib import Path
+from shlex import quote
 
 import pytest
 
@@ -107,14 +108,16 @@ def _race_once(repo: Path, other: Path, branch: str, marker: Path) -> None:
     """Make *repo*'s first push race: *other* pushes a commit to *branch* from the hook.
 
     The hook plays the colleague who pushes between our fetch and our
-    push, exactly once (*marker* records that it did).
+    push, exactly once (*marker* records that it did).  The two paths are
+    quoted for the hook's shell: a temporary directory may hold a quote.
     """
+    raced, colleague = quote(str(marker)), quote(str(other))
     _hook(
         repo,
         "pre-push",
-        f"if [ ! -e '{marker}' ]; then\n"
-        f"  touch '{marker}'\n"
-        f"  cd '{other}' && echo theirs > a.txt && git add a.txt && git commit -q -m race "
+        f"if [ ! -e {raced} ]; then\n"
+        f"  touch {raced}\n"
+        f"  cd {colleague} && echo theirs > a.txt && git add a.txt && git commit -q -m race "
         f"&& git push -q origin HEAD:{branch}\n"
         "fi\nexit 0\n",
     )
@@ -509,9 +512,11 @@ def test_sync_warns_about_conflict_markers_the_remote_committed(tmp_path: Path) 
 
 def test_sync_retries_the_round_when_the_remote_moves_during_the_push(tmp_path: Path) -> None:
     """A push the remote rejects because it moved is retried from the fetch, once per round."""
-    mine, theirs = remote_and_clones(tmp_path, "mine", "theirs")
+    root = tmp_path / "o'neil's repos"  # a quote and a space in every path the hook names
+    root.mkdir()
+    mine, theirs = remote_and_clones(root, "mine", "theirs")
     _commit(mine, "b.txt", "mine\n")
-    marker = tmp_path / "raced"
+    marker = root / "raced"
     _race_once(mine, theirs, "main", marker)
     report = sync(str(mine))
     assert marker.exists()
@@ -682,14 +687,16 @@ def test_sync_merges_into_a_feature_branch_of_a_single_branch_clone(tmp_path: Pa
 
 def test_sync_merges_the_remote_copy_of_the_branch_when_its_push_races(tmp_path: Path) -> None:
     """A rejected push of ``feature`` merges ``origin/feature`` too, not only origin/main again."""
-    mine, theirs = remote_and_clones(tmp_path, "mine", "theirs")
+    root = tmp_path / "o'neil's repos"  # a quote and a space in every path the hook names
+    root.mkdir()
+    mine, theirs = remote_and_clones(root, "mine", "theirs")
     git(mine, "checkout", "-q", "-b", "feature")
     _commit(mine, "f.txt", "feature\n")
     git(mine, "push", "-q", "origin", "feature")
     _commit(mine, "g.txt", "more\n")
     git(theirs, "fetch", "-q", "origin", "feature")
     git(theirs, "checkout", "-q", "-b", "feature", "origin/feature")
-    marker = tmp_path / "raced"
+    marker = root / "raced"
     _race_once(mine, theirs, "feature", marker)
     report = sync(str(mine))
     assert marker.exists()

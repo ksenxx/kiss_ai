@@ -29,9 +29,7 @@ Shared by ``run_parallel`` / ``run_agent`` and the daemon:
 from __future__ import annotations
 
 import json
-import os
 import re
-import subprocess
 from collections.abc import Sequence
 from typing import Any
 
@@ -63,103 +61,30 @@ def is_review_task(task: str) -> bool:
     return _REVIEW_WORDS.search(task) is not None
 
 
-REVIEW_BUDGET_BASE_USD = 5.0
-"""Budget (USD) of a read-only review of an empty diff.  A review spends
-a few dollars at most while an inherited half-share would hand it many
-times that; the base alone covers most reviews."""
-REVIEW_BUDGET_PER_KLINE_USD = 5.0
-"""Budget (USD) added per 1,000 changed lines the review has to read."""
-GIT_BIG_FILE_BYTES = 512 * 1024 * 1024
-"""git's default ``core.bigFileThreshold``: a bigger file is diffed as binary."""
+REVIEW_BUDGET_FRACTION = 1 / 8
+"""The part of what its calling task has spent so far that a read-only
+review may spend.  A review costs a fraction of the work it checks,
+while an inherited half-share of the caller's remainder would hand it
+many times that."""
+
+REVIEW_BUDGET_MIN_USD = 10.0
+"""The least a read-only review's default budget is: an eighth of the
+little a task has spent when it dispatches its first review would end
+the review before it reports anything."""
 
 
-def changed_lines(work_dir: str) -> int:
-    """Return the lines added and deleted in *work_dir* against ``HEAD``, untracked files included.
+def review_budget(spent: float) -> float:
+    """Return the default budget (USD) of a read-only review whose calling task has spent *spent*.
 
-    ``0`` when *work_dir* is not a git repository or git is missing;
-    binary files count as none.  An untracked file counts as git's
-    numstat would count it once added (see :func:`_new_file_lines`), so
-    staging a file does not change the count: tracked or not, only the
-    files under *work_dir* count, also when it is a subdirectory of its
-    repository.  Before the first commit ``HEAD`` names nothing, and
-    the diff is against the empty tree: every staged file is new.
+    :data:`REVIEW_BUDGET_FRACTION` of *spent*, and
+    :data:`REVIEW_BUDGET_MIN_USD` at least: a review's budget follows
+    what the task has spent so far, not what the caller has left.
 
     Args:
-        work_dir: The directory whose diff a review is to read.
+        spent: What the calling task has spent so far in USD, its own
+            model calls and its sub-agents' combined.
     """
-    try:
-        diff = _git(work_dir, "diff", "--numstat", "HEAD", "--", ".")
-        if diff.returncode:
-            empty_tree = _git(work_dir, "hash-object", "-t", "tree", "--stdin").stdout
-            diff = _git(work_dir, "diff", "--numstat", empty_tree.decode().strip(), "--", ".")
-        untracked = _git(work_dir, "ls-files", "-z", "--others", "--exclude-standard").stdout
-    except (OSError, subprocess.SubprocessError):
-        return 0
-    lines = 0
-    for row in diff.stdout.splitlines():
-        # ``<added>\t<deleted>\t<path>``; binary files show ``-`` counts.
-        columns = row.split(b"\t", 2)
-        for count in columns[:2]:
-            lines += int(count) if count.isdigit() else 0
-    root = os.fsencode(work_dir)
-    for name in untracked.split(b"\0"):
-        if name:
-            lines += _new_file_lines(os.path.join(root, name))
-    return lines
-
-
-def _git(work_dir: str, *args: str) -> subprocess.CompletedProcess[bytes]:
-    """Run ``git`` *args* in *work_dir* with no input, whatever its exit status.
-
-    The output is bytes, not text: git prints a file name unquoted
-    (with ``-z``, or with ``core.quotePath`` off), and a name need not
-    be UTF-8.
-
-    Raises:
-        OSError: When git is missing or *work_dir* cannot be entered.
-        subprocess.SubprocessError: When git does not end in 30 seconds.
-    """
-    return subprocess.run(
-        ["git", *args], cwd=work_dir, stdin=subprocess.DEVNULL, capture_output=True,
-        timeout=30, check=False,
-    )
-
-
-def _new_file_lines(path: bytes) -> int:
-    """Return the lines ``git diff --numstat`` counts for the new file *path*.
-
-    A symlink is one line (its target, not followed); a binary file (a
-    NUL byte in its first 8,000 bytes, git's own test, or bigger than
-    :data:`GIT_BIG_FILE_BYTES`) and a file that cannot be read count
-    none.
-
-    Args:
-        path: The file's path.
-    """
-    if os.path.islink(path):
-        return 1
-    try:
-        with open(path, "rb") as handle:
-            if os.fstat(handle.fileno()).st_size > GIT_BIG_FILE_BYTES or b"\0" in handle.read(8000):
-                return 0
-            handle.seek(0)
-            return sum(1 for _ in handle)
-    except OSError:
-        return 0
-
-
-def review_budget(work_dir: str) -> float:
-    """Return the default budget (USD) of a read-only review dispatched from *work_dir*.
-
-    :data:`REVIEW_BUDGET_BASE_USD` plus :data:`REVIEW_BUDGET_PER_KLINE_USD`
-    per thousand changed lines (:func:`changed_lines`): a review's
-    cost follows the size of the diff it reads, not the caller's
-    remaining budget.
-
-    Args:
-        work_dir: The directory the review runs in.
-    """
-    return REVIEW_BUDGET_BASE_USD + REVIEW_BUDGET_PER_KLINE_USD * changed_lines(work_dir) / 1000
+    return max(REVIEW_BUDGET_MIN_USD, spent * REVIEW_BUDGET_FRACTION)
 
 
 _IMPLEMENTATION_WORDS = re.compile(
@@ -359,7 +284,7 @@ def undivided_work(tasks: Sequence[str]) -> str:
 def same_model_conflict(
     parent_model: str, child_model: str, tasks: Sequence[str], parent_task: str, review: bool,
     parent_config: dict[str, Any] | None = None, child_config: dict[str, Any] | None = None,
-    pin_config: dict[str, Any] | None = None, inheriting: str = "",
+    pin_config: dict[str, Any] | None = None,
 ) -> str:
     """Return why a sub-task on the caller's own model and effort may not start, or ``""``.
 
@@ -397,8 +322,6 @@ def same_model_conflict(
             option, the SEA's setting, or the inherited one.
         pin_config: The one of its own, which it runs any model with:
             the call's option, else the SEA's setting.
-        inheriting: The model name under which a sub-task without one
-            inherits the caller's: the model the caller was launched with.
 
     Returns:
         ``""`` when the dispatch may proceed, else the reason, ending
@@ -414,7 +337,7 @@ def same_model_conflict(
     shortfall = undivided_work(tasks)
     if not shortfall:
         return ""
-    pin = other_worker_model(parent_model, parent_config, pin_config, inheriting)
+    pin = other_worker_model(parent_model, parent_config, pin_config)
     return (
         f"a sub-agent on {child_model} is this task's own model at its own effort, "
         f"the same model with less context, and {shortfall}. "

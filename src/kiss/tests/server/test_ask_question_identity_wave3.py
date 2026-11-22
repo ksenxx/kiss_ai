@@ -33,6 +33,9 @@ CHAT_ID = "chat-question-identity"
 TASK_TAB = "task-tab-question-identity"
 VIEWER_TAB = "viewer-tab-question-identity"
 QUESTION = "Proceed?"
+OTHER_TASK_ID = "930302"
+OTHER_CHAT_ID = "chat-question-identity-other"
+OTHER_TAB = "task-tab-question-identity-other"
 
 
 def _asks_at_least(client: Client, count: int) -> bool:
@@ -60,24 +63,34 @@ class QuestionIdentityTest(TwoClientHarness):
             worker.join(timeout=5)
         super().tearDown()
 
-    def _run_asking(self, *questions: str) -> tuple[threading.Thread, threading.Event]:
-        """Start a worker thread of the task that asks *questions* one after another."""
+    def _run_asking(
+        self, *questions: str, task_id: str = TASK_ID, answers: list[str] | None = None,
+    ) -> tuple[threading.Thread, threading.Event]:
+        """Start a worker thread of task *task_id* that asks *questions* one after another.
+
+        Its answers go to *answers* (``self.answers`` when not given).
+        """
         stop = threading.Event()
-        worker = threading.Thread(target=self._ask, args=(questions, stop), daemon=True)
+        heard = self.answers if answers is None else answers
+        worker = threading.Thread(
+            target=self._ask, args=(questions, stop, task_id, heard), daemon=True,
+        )
         self.workers.append((worker, stop))
         worker.start()
         return worker, stop
 
-    def _ask(self, questions: tuple[str, ...], stop: threading.Event) -> None:
-        """Play the task's worker thread: ask each question once the last is answered."""
+    def _ask(
+        self, questions: tuple[str, ...], stop: threading.Event, task_id: str, answers: list[str],
+    ) -> None:
+        """Play the worker thread of *task_id*: ask each question once the last is answered."""
         agent = self.server._agent_server
-        agent.printer._thread_local.task_id = TASK_ID
+        agent.printer._thread_local.task_id = task_id
         agent.printer._thread_local.stop_event = stop
         try:
             for question in questions:
-                self.answers.append(agent._ask_user_question(question))
+                answers.append(agent._ask_user_question(question))
         except KeyboardInterrupt:
-            self.answers.append("<stopped>")
+            answers.append("<stopped>")
 
     @staticmethod
     def _answer(
@@ -155,6 +168,57 @@ class QuestionIdentityTest(TwoClientHarness):
         self._answer(joiner, "from the viewer", ask, tab_id=VIEWER_TAB)
         worker.join(timeout=30)
         self.assertEqual(self.answers, ["from the viewer"])
+
+    def test_a_tab_bound_to_another_chat_answers_the_question_it_shows(self) -> None:
+        """What is answered or typed in a tab is for the task the tab shows.
+
+        ``TASK_TAB`` launched the task of ``CHAT_ID``, which is asking,
+        and was then resumed onto another chat, whose task is asking
+        too.  The tab went on showing and answering the question of the
+        task it launched and no longer shows: the answer to the shown
+        question was dropped as late, and a line typed as a message or
+        as a run answered the hidden one.
+        """
+        page = self.open_client("page")
+        other = agent_state.AgentState(
+            OTHER_TASK_ID, chat_id=OTHER_CHAT_ID, tab_id=OTHER_TAB,
+            server_owned=True, is_task_active=True,
+        )
+        other.user_answer_queue = queue.Queue(maxsize=1)
+        agent_state.register(other)
+        self.server._printer.subscribe_tab(OTHER_TASK_ID, OTHER_TAB)
+        hidden, _ = self._run_asking("Hidden?")
+        launched = agent_state.get(TASK_ID)
+        assert launched is not None
+        # A ``run`` typed into a tab is a line for its task while that task's thread is installed.
+        launched.task_thread = hidden
+        shown_answers: list[str] = []
+        shown, _ = self._run_asking(
+            "One?", "Two?", "Three?", task_id=OTHER_TASK_ID, answers=shown_answers,
+        )
+        self.wait_event(page, "askUser", tabId=TASK_TAB, question="Hidden?")
+        self.wait_event(page, "askUser", tabId=OTHER_TAB, question="One?")
+
+        page.send({"type": "resumeSession", "chatId": OTHER_CHAT_ID, "tabId": TASK_TAB})
+        one = self.wait_event(page, "askUser", tabId=TASK_TAB, question="One?")
+        self._answer(page, "the modal's", one["questionId"], question="One?")
+        self.wait_event(page, "askUser", tabId=TASK_TAB, question="Two?")
+        page.send({"type": "appendUserMessage", "tabId": TASK_TAB, "prompt": "a message"})
+        self.wait_event(page, "askUser", tabId=TASK_TAB, question="Three?")
+        page.send({"type": "run", "tabId": TASK_TAB, "prompt": "a run"})
+        shown.join(timeout=30)
+        self.assertEqual(shown_answers, ["the modal's", "a message", "a run"])
+        # With no question open, a message is one for the running task shown; a
+        # run cannot start while the task the tab launched has the tab's state.
+        page.send({"type": "appendUserMessage", "tabId": TASK_TAB, "prompt": "a note"})
+        self.wait_for(lambda: other.pending_user_messages == ["a note"], what="the note queued")
+        page.send({"type": "run", "tabId": TASK_TAB, "prompt": "a new task"})
+        refusal = self.wait_event(page, "error", tabId=TASK_TAB, code="prompt_refused")
+        self.assertIn("still running in another chat", refusal["text"])
+        self.assertIs(agent_state.find_by_tab(TASK_TAB), launched)
+        self.assertEqual(launched.pending_user_messages, [])
+        self.assertEqual(self.answers, [], "the task the tab no longer shows was answered")
+        self.assertTrue(hidden.is_alive(), "the hidden task's question is still open")
 
     def test_an_ask_with_no_text_is_answered_by_its_id(self) -> None:
         page = self.open_client("page")

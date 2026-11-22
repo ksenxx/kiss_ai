@@ -192,8 +192,8 @@ async function main() {
       assert.strictEqual(polls(wv).length, 3, 'and keeps polling');
       assert.strictEqual(
         win.document.querySelector('#meta-info .sidebar-hdr span').textContent,
-        'Task update',
-        'the subpanel header must read "Task update"',
+        'Task Progress',
+        'the subpanel header must read "Task Progress"',
       );
       const poll = lastPoll(wv);
       assert.deepStrictEqual(Object.keys(poll).sort(), [

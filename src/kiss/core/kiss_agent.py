@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 
 from kiss.core import stop_signal
 from kiss.core.base import Base
-from kiss.core.config import DEFAULT_CONFIG
+from kiss.core.config import DEFAULT_CONFIG, current_run_overlay
 from kiss.core.context_compaction import (
     ARGUMENT_PREVIEW_CHARS,
     COMPACTION_MIN_STEP_GAP,
@@ -539,6 +539,21 @@ def is_content_policy_error(e: Exception) -> bool:
     return any(phrase in error_msg for phrase in _CONTENT_POLICY_PHRASES)
 
 
+def _is_stale_reasoning_error(e: Exception) -> bool:
+    """Return True when the provider rejected reasoning sent back after an earlier message changed.
+
+    A Claude model that signs its thinking over the messages before it
+    answers such a request 400 (Claude Fable 5.2): "Invalid `signature` in
+    `thinking` block. The block is bound to a different conversation.
+    Remove the block, or ...".  OpenRouter passes these words of its
+    upstream on inside its own 400 ("Provider returned error").
+
+    Args:
+        e: The exception the model call raised.
+    """
+    return "bound to a different conversation" in str(e)
+
+
 def _with_usage_footer(text: str, usage_info: str) -> str:
     """Return *text* with the turn's usage line appended as a fenced ``text`` block."""
     return text + "\n```text\n" + usage_info + "\n```\n"
@@ -688,6 +703,9 @@ class KISSAgent(Base):
         it; it may see a key twice and must record it once.  ``SorcarAgent``
         installs it (through ``RelentlessAgent`` for its sessions)."""
         self._helper_calls_filed: frozenset[str] = frozenset()
+        self._model_overlay: dict[str, Any] = {}
+        """The ``Config`` overlay (``config.run_overlay``) of the run that
+        built ``model``; see :meth:`_reset`."""
         self.reset_usage()
         self.budget_check_hook: Callable[[], None] | None = None
         self.budget_status_hook: Callable[[], tuple[float, float]] | None = None
@@ -811,10 +829,15 @@ class KISSAgent(Base):
         thinking_callback = self.printer.thinking_callback if self.printer else None
 
         existing = getattr(self, "model", None)
+        # A model keeps the API key it was built with, so it is reused
+        # only by a run that reads the same ``Config`` overlay (a
+        # project's keys and switches) as the run that built it.
+        overlay = dict(current_run_overlay() or {})
         if (  # pragma: no branch
             existing is not None
             and existing.model_name == self.model_name
             and existing.model_config == (model_config or {})
+            and overlay == self._model_overlay
         ):
             existing.reset_conversation()
             # Through the hook, not the two attributes: a transport that
@@ -828,6 +851,7 @@ class KISSAgent(Base):
                 token_callback=token_callback,
                 thinking_callback=thinking_callback,
             )
+            self._model_overlay = overlay
         # A helper the model runs on this agent's behalf (a vision bridge
         # description) checks the limits before each paid call, so a batch
         # of them stops at the cap; hand_off_conversation carries the hook
@@ -1041,16 +1065,27 @@ class KISSAgent(Base):
         self._cached_tools_schema = self.model._build_openai_tools_schema(self.function_map)
 
     def _print_result(self, result: str) -> None:
-        """Emit *result* as the run's terminal ``result`` printer event."""
+        """Emit *result* as the run's terminal ``result`` printer event.
+
+        A printer that raises is logged, not raised: the event records
+        a result the run already has (``finish`` has run, the reply is
+        billed).  Raised into the agentic loop it was taken for a failed
+        model request: the loop asked the model again with the
+        ``finish`` call unanswered and ran ``finish`` a second time, or
+        ended a run at its last step as out of steps.
+        """
         if result and self.printer:
-            self.printer.print(
-                result,
-                type="result",
-                step_count=self.step_count,
-                total_tokens=self.total_tokens_used,
-                cost=f"${self.budget_used:.4f}",
-                cost_usd=self.budget_used,
-            )
+            try:
+                self.printer.print(
+                    result,
+                    type="result",
+                    step_count=self.step_count,
+                    total_tokens=self.total_tokens_used,
+                    cost=f"${self.budget_used:.4f}",
+                    cost_usd=self.budget_used,
+                )
+            except Exception:
+                logger.warning("Printing the result event of the run raised", exc_info=True)
 
     def _run_non_agentic(self) -> str:
         """Run a single generation without tools, with billing and transcript.
@@ -1100,8 +1135,9 @@ class KISSAgent(Base):
         1. Guards against repeated swaps within a single run (only one
            fallback is allowed per :meth:`run` invocation).
         1. Rebuilds the model via :func:`kiss.core.models.model_info.model`
-           using the ``model_config`` originally passed to :meth:`run`
-           and the printer's streaming callbacks.  The fallback declared
+           using the ``model_config`` the current model was built with
+           (the one passed to :meth:`run`, or to :meth:`switch_model`
+           since) and the printer's streaming callbacks.  The fallback declared
            in the catalog keeps the caller's endpoint overrides
            (``base_url``, ``api_key``, ``extra_headers``: it lives where
            the user pointed); any other fallback is a different
@@ -1154,7 +1190,7 @@ class KISSAgent(Base):
         )
         new_model.initialize("")
         old_name = self.model_name
-        self.switch_model(new_model, new_name)
+        self.switch_model(new_model, new_name, fallback_config)
         self._fallback_used = True
         note = (
             "; no other model family is configured"
@@ -1168,7 +1204,9 @@ class KISSAgent(Base):
             )
         return new_name
 
-    def switch_model(self, new_model: Model, new_name: str) -> None:
+    def switch_model(
+        self, new_model: Model, new_name: str, model_config: dict[str, Any] | None
+    ) -> None:
         """Continue the run on the initialized *new_model*, named *new_name*.
 
         Shared by the fallback swap and Sorcar's ``set_model`` tool.  The
@@ -1185,12 +1223,21 @@ class KISSAgent(Base):
         Args:
             new_model: The initialized model that continues the conversation.
             new_name: Its model name.
+            model_config: The configuration it was built with, endpoint
+                and credentials included, which a later fallback swap
+                builds its model from (:meth:`_try_switch_to_fallback`).
         """
         self._llm_hook_conversation_index = hand_off_conversation(
             self.model, new_model, self._llm_hook_conversation_index
         )
         if getattr(self.model, "base_url", None) != getattr(new_model, "base_url", None):
-            # The hand-off converted the conversation, which drops its reasoning.
+            # The hand-off converted the conversation, which drops the
+            # reasoning items of a Responses conversation.  The thinking
+            # blocks of a Claude model stay in their messages, out of the
+            # new adapter's requests, until an edit removes them
+            # (Model.drop_stale_reasoning); a hand-off back sends those
+            # left again, uncounted, which can delay a clear, never
+            # hasten one.
             self._reasoning_tokens = self._newest_reasoning_tokens = 0
         old_signatures = getattr(self.model, "_thought_signatures", None)
         new_signatures = getattr(new_model, "_thought_signatures", None)
@@ -1198,6 +1245,7 @@ class KISSAgent(Base):
             new_signatures.update(old_signatures)
         self.model = new_model
         self.model_name = new_name
+        self._model_config = model_config
         if self.function_map:
             self._cached_tools_schema = new_model._build_openai_tools_schema(self.function_map)
 
@@ -1312,6 +1360,25 @@ class KISSAgent(Base):
                 raise
             except Exception as e:
                 logger.debug("Exception caught", exc_info=True)
+                if _is_stale_reasoning_error(e):
+                    # Some edit of an earlier message, not one of the agent's
+                    # own (those remove the reasoning they invalidate), left
+                    # reasoning in the conversation that was signed over the
+                    # message as it was.  The provider names the remedy: all
+                    # of it is removed here, where its estimate is kept, the
+                    # newest reply's too whatever the adapter took the model
+                    # for, and the next step sends the request again.  That
+                    # costs a re-write of the prompt cache; three such 400s
+                    # in a row ended the session.  When nothing is left to
+                    # remove, the error is handled like any other.
+                    blocks = self._drop_stale_reasoning(rejected=True)
+                    if blocks:
+                        logger.warning(
+                            "Removed %d reasoning blocks after %s rejected the request for stale "
+                            "reasoning; the next step sends it again: agent=%s step=%d error=%s",
+                            blocks, self.model_name, self.name, self.step_count, e,
+                        )
+                        continue
                 if is_content_policy_error(e):
                     # The provider refused the request itself (HTTP 400
                     # "content was flagged ..."): the same request gets the
@@ -2337,7 +2404,7 @@ class KISSAgent(Base):
     def _handoff_context_tokens(self) -> float | None:
         """Return the context size at which this agent hands off, or ``None`` if unknown."""
         try:
-            return CONTEXT_LIMIT_FRACTION * get_max_context_length(self.model.model_name)
+            return CONTEXT_LIMIT_FRACTION * get_max_context_length(self.model)
         except KISSError:
             return None
 
@@ -2347,7 +2414,7 @@ class KISSAgent(Base):
         if not 0.0 < fraction <= 1.0:
             return None
         try:
-            window: int | None = get_max_context_length(self.model.model_name)
+            window: int | None = get_max_context_length(self.model)
         except KISSError:
             window = None
         return compaction_target_tokens(window, DEFAULT_CONFIG.compaction_start_tokens, fraction)
@@ -2396,7 +2463,7 @@ class KISSAgent(Base):
             dropped_tokens,
             self._handoff_context_tokens(),
             target,
-            get_cache_discount(self.model.model_name),
+            get_cache_discount(self.model),
         ):
             logger.debug(
                 "Skipped compaction dropping ~%d of %d context tokens: agent=%s step=%d",
@@ -2417,15 +2484,20 @@ class KISSAgent(Base):
             self._llm_hook_conversation_index = max(
                 removal.start + 1, self._llm_hook_conversation_index - removed + 1
             )
+            # The kept turns can hold reasoning signed over the removed ones.
+            reasoning_blocks = self._drop_stale_reasoning()
             logger.info(
-                "Removed the first %d turns from the context (~%d of %d tokens): agent=%s step=%d",
-                removal.turns, dropped_tokens, self.context_tokens_used, self.name, self.step_count,
+                "Removed the first %d turns and %d reasoning blocks from the context "
+                "(~%d of %d tokens): agent=%s step=%d",
+                removal.turns, reasoning_blocks, dropped_tokens, self.context_tokens_used,
+                self.name, self.step_count,
             )
             if self.printer:
                 self.printer.print(
                     "", type="compaction", step=self.step_count,
                     context_tokens=self.context_tokens_used, dropped_tokens=dropped_tokens,
-                    results=0, arguments=0, turns=removal.turns, target_tokens=target,
+                    results=0, arguments=0, turns=removal.turns,
+                    reasoning_blocks=reasoning_blocks, target_tokens=target,
                 )
             if self.context_reset_hook is not None:
                 self.context_reset_hook()
@@ -2466,7 +2538,7 @@ class KISSAgent(Base):
         trigger, at_least = clear_thresholds(
             config.context_edit_trigger_tokens,
             config.context_edit_clear_at_least,
-            get_cache_write_ratio(self.model.model_name),
+            get_cache_write_ratio(self.model),
             self._handoff_context_tokens(),
         )
         if self.context_tokens_used < trigger:
@@ -2482,7 +2554,7 @@ class KISSAgent(Base):
             self._tokens_of(dropped_chars(plan))
             + self._reasoning_tokens - self._kept_reasoning_tokens()
         )
-        floor = payback_floor(get_cache_discount(self.model.model_name))
+        floor = payback_floor(get_cache_discount(self.model))
         if dropped_tokens < max(1, at_least, floor * self.context_tokens_used):
             logger.debug(
                 "Skipped a clear dropping ~%d of %d context tokens: agent=%s step=%d",
@@ -2505,6 +2577,26 @@ class KISSAgent(Base):
         model that needs it (:meth:`Model.keeps_newest_reasoning`)."""
         return self._newest_reasoning_tokens if self.model.keeps_newest_reasoning() else 0
 
+    def _drop_stale_reasoning(self, rejected: bool = False) -> int:
+        """Remove the reasoning an edit of earlier messages invalidated; return how many blocks.
+
+        Every edit of the stored conversation ends here, whichever adapter
+        holds it (:meth:`Model.drop_stale_reasoning`), and so does a request
+        the provider rejected for such reasoning (:meth:`_run_agentic_loop`).
+        Reasoning that is an item of the conversation (a Claude model on the
+        Responses API) belongs to a reply the ``llm_call_hook`` has seen, so
+        the hook's boundary moves back by the items removed.  The estimate
+        of the reasoning in the conversation becomes what stays in it.
+
+        Args:
+            rejected: The provider rejected a request for the reasoning.
+        """
+        items = len(self.model.conversation)
+        blocks: int = self.model.drop_stale_reasoning(rejected)
+        self._llm_hook_conversation_index -= items - len(self.model.conversation)
+        self._reasoning_tokens = self._kept_reasoning_tokens()
+        return blocks
+
     def _apply_stubs(
         self, plan: list[Replacement], dropped_tokens: int, target: int | None
     ) -> None:
@@ -2522,8 +2614,7 @@ class KISSAgent(Base):
         """
         results = sum(replacement.kind == "result" for replacement in plan)
         compacted = apply_compaction(plan)
-        reasoning_blocks = self.model.drop_stale_reasoning()
-        self._reasoning_tokens = self._kept_reasoning_tokens()
+        reasoning_blocks = self._drop_stale_reasoning()
         logger.info(
             "Compacted %d old tool outputs and %d arguments (~%d of %d context tokens), "
             "removed %d reasoning blocks: agent=%s step=%d",
@@ -2849,14 +2940,24 @@ class KISSAgent(Base):
         # provider: a secret of the key store goes there as its variable's name.
         function_response = redact_secrets(function_response)
         if printer:
-            printer.print(
-                function_response,
-                type="tool_result",
-                tool_name=function_name,
-                tool_input=function_args,
-                is_error=is_error,
-                interrupted=interrupted,
-            )
+            # The tool has returned, so a printer that raises on the event of
+            # its result is logged, not raised (as in :meth:`_print_result`):
+            # raised, it ended the step with the call unanswered, and the model
+            # read that the call may not have run and made it again, a
+            # ``finish`` that had ended the run included.
+            try:
+                printer.print(
+                    function_response,
+                    type="tool_result",
+                    tool_name=function_name,
+                    tool_input=function_args,
+                    is_error=is_error,
+                    interrupted=interrupted,
+                )
+            except Exception:
+                logger.warning(
+                    "Printing the tool_result event of %s raised", function_name, exc_info=True
+                )
         if function_name == "finish":
             self._finish_failed = is_error
 
@@ -3049,7 +3150,7 @@ class KISSAgent(Base):
             raise ContextWindowExceededError(
                 f"Agent {self.name} conversation reached "
                 f"{self.context_tokens_used:,} of "
-                f"{get_max_context_length(self.model.model_name):,} context tokens "
+                f"{get_max_context_length(self.model):,} context tokens "
                 f"(limit {CONTEXT_LIMIT_FRACTION:.0%})."
             )
 
@@ -3395,7 +3496,7 @@ class KISSAgent(Base):
         cost = float(reported) if isinstance(reported, int | float) else None
         if cost is None:
             cost = calculate_cost(
-                self.model.model_name,
+                self.model,
                 input_tokens,
                 output_tokens,
                 text_cache_read,
@@ -3498,7 +3599,7 @@ class KISSAgent(Base):
     def _get_usage_info_string(self) -> str:
         """Returns a compact single-line usage information string."""
         try:
-            max_tokens = get_max_context_length(self.model.model_name)
+            max_tokens = get_max_context_length(self.model)
             if self.budget_status_hook is not None:
                 spent, cap = self.budget_status_hook()
             else:

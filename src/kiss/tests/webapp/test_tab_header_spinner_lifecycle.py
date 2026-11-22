@@ -16,9 +16,9 @@ the chat on screen plus its sub-agent tabs
 ``renderTabBar``).  There is no row of chat tabs: a background chat is
 not drawn at all (its state lives in the ``tabs`` array, read here
 through ``window._testApi.openTabs()``), and the strip is hidden while
-the chat on screen has no sub-agent, so the tests attach a finished
-sub-agent (as the daemon replays one) to make the header visible.  The
-strip is checked twice:
+the chat on screen has no sub-agent, so the tests attach a sub-agent
+(as the daemon announces one) to make the header visible.  The strip
+is checked twice:
 
 * on the bare harness page (``main.css`` only);
 * on the remote webapp proper, the same page booted with
@@ -125,12 +125,11 @@ def _active_tab_id(page) -> str:
 
 
 def _show_strip(page, tab_id: str) -> None:
-    """Attach a finished sub-agent to *tab_id* so its group strip (the
-    chat's header) is displayed; the chat stays the active tab."""
-    _post(page, {"type": "openSubagentTab", "tab_id": tab_id + "__sub_done",
-                 "parent_tab_id": tab_id, "description": "finished child",
-                 "task_id": "task-finished-child", "isSubagentTab": True,
-                 "isDone": True})
+    """Attach a sub-agent to *tab_id* so its group strip (the chat's
+    header) is displayed; the chat stays the active tab."""
+    _post(page, {"type": "openSubagentTab", "tab_id": tab_id + "__sub_child",
+                 "parent_tab_id": tab_id, "description": "child",
+                 "task_id": "task-child", "isSubagentTab": True})
     assert _active_tab_id(page) == tab_id
     header = _header(page, tab_id)
     assert header["barDisplay"] != "none", header

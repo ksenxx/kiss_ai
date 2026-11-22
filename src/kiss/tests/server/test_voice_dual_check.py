@@ -338,6 +338,7 @@ class TestDualCheckEndToEnd(unittest.TestCase):
         pcm: bytes,
         expect_wake_prefix: bool = True,
         wake_agreed: bool = False,
+        keep_wake_word: bool = False,
     ) -> tuple[dict[str, Any], list[bytes]]:
         """Run ``transcribe_pcm`` on *pcm* with the API answering *reply_text*."""
         canned = CannedOpenAiServer(reply_text)
@@ -349,6 +350,7 @@ class TestDualCheckEndToEnd(unittest.TestCase):
                 pcm,
                 expect_wake_prefix=expect_wake_prefix,
                 wake_agreed=wake_agreed,
+                keep_wake_word=keep_wake_word,
             )
         finally:
             for key, value in saved.items():
@@ -378,6 +380,22 @@ class TestDualCheckEndToEnd(unittest.TestCase):
             expect_wake_prefix=False,
         )
         self.assertEqual(result, {"text": "please open the editor.", "language": "en"})
+
+    def test_dictation_keeps_a_first_word_that_sounds_like_the_wake_word(self) -> None:
+        # Speech typed with the composer's mic follows no wake word, so
+        # its first word is the user's even when it is an alias of the
+        # name ("soccer", "Sarkar").  It used to be cut like a wake word.
+        for spoken in ("Soccer practice is at five.", "Sarkar's proof is in section 3."):
+            result, _bodies = self._transcribe(
+                f"en\n{spoken}", _tone_pcm(1.0),
+                expect_wake_prefix=False, keep_wake_word=True,
+            )
+            self.assertEqual(result, {"text": spoken, "language": "en"})
+        # A message of an older page, which may still carry the word, loses it.
+        result, _bodies = self._transcribe(
+            "en\nSoccer practice is at five.", _tone_pcm(1.0), expect_wake_prefix=False,
+        )
+        self.assertEqual(result, {"text": "practice is at five.", "language": "en"})
 
     def test_non_english_speech_needs_both_browser_recognizers(self) -> None:
         # gpt-audio may drop the English wake word while it

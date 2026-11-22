@@ -48,7 +48,11 @@ import yaml
 from kiss.agents.sorcar.sea_apply import NO_TOOLS_PROFILE
 from kiss.agents.sorcar.sea_commands import evaluate_sea, get_command, list_commands, sea_layers
 from kiss.agents.sorcar.sea_settings import SeaError, anchored_work_dir
-from kiss.agents.sorcar.sorcar_agent import SorcarAgent, canonical_tool_profile
+from kiss.agents.sorcar.sorcar_agent import (
+    SorcarAgent,
+    canonical_tool_profile,
+    launch_model_config,
+)
 from kiss.core.base import collecting_trajectories
 from kiss.core.printer import Printer
 from kiss.core.user_config import apply_config_to_env, load_api_keys_readonly, load_config
@@ -150,8 +154,6 @@ def run_sea(
     sea_path = resolve_sea(sea)
     run = evaluate_sea(sea_layers(sea_path), task)
     settings = run.settings
-    model_name = settings.get("model") or model or None
-    model_config = settings.get("model_config")
     base_dir = work_dir or os.getcwd()
     pinned_dir = settings.get("work_dir")
     with collecting_trajectories(save=save_trajectories) as scope:
@@ -162,6 +164,13 @@ def run_sea(
             # As in the daemon, ``none`` strips the run to ``finish`` plus
             # what the SEA's ``tools()`` returns.
             append_basic_tools = tool_profile != NO_TOOLS_PROFILE
+            # One registry read configures the run ahead of its classifier,
+            # as the daemon's task runner does: the classifier is asked
+            # where the run is.
+            model_name = SorcarAgent._resolve_model_name(settings.get("model") or model or None)
+            model_config, agent._launch_owns_endpoint = launch_model_config(
+                model_name, settings.get("model_config"),
+            )
             # The SEA's ``auto_classify`` setting, as the daemon honours it:
             # the verdict is pre-seeded so the run neither classifies again
             # nor falls back to the persisted setting when the SEA fixed it.

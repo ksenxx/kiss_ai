@@ -250,7 +250,9 @@ def test_apply_merges_what_passes_and_records_what_it_leaves(
     assert prompts(requests) == []
 
 
-def test_a_merge_is_listed_and_can_be_undone(memory_root: Path, tmp_path: Path) -> None:
+def test_a_merge_is_listed_and_can_be_undone(
+    memory_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     write_pairs(memory_root, "pg", "proj/ci")
     original = (memory_root / "proj" / "ci-b.md").read_text(encoding="utf-8")
     sea = MemoryConsolidateSea()
@@ -273,6 +275,13 @@ def test_a_merge_is_listed_and_can_be_undone(memory_root: Path, tmp_path: Path) 
     assert back.frontmatter["writer"] == "agent" and back.raw != original  # a fresh `updated`
     listed, _ = run_memory_job(sea, "--list --memory proj", [], tmp_path)
     assert re.fullmatch(rf"- `{proj_id}`: ci-a, ci-b into ci-b \(restored 20\S+Z\)", listed)
+
+    # A restore that cannot take the merge lock in time says so as an error.
+    monkeypatch.setattr(consolidate, "MUTATION_LOCK_TIMEOUT", 0.5)
+    with exclusive_file_lock(Path(f"{memory_root}.merge.lock")):
+        busy, _ = run_memory_job(sea, f"--restore {general_id}", [], tmp_path)
+    assert busy.startswith("Error: "), busy
+    assert page_names(memory_root) == ["pg-b", "proj/ci-a", "proj/ci-b"]
 
     # A second restore touches nothing, and the undone merge is not made again.
     untouched = "a page of this name exists that the merge did not write"

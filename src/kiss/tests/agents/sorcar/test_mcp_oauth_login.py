@@ -99,6 +99,7 @@ from kiss.agents.sorcar.mcp_servers import (
 )
 from kiss.core.file_lock import exclusive_file_lock
 from kiss.tests.conftest import occupy_loopback_port, wait_for
+from kiss.tests.server.pause import Pause, Pauses
 
 # ---------------------------------------------------------------------------
 # A real OAuth-protected MCP server
@@ -528,10 +529,13 @@ def _stale_grant(server: _AuthMCPServer) -> FileTokenStorage:
     return storage
 
 
-def _flow(server: _AuthMCPServer) -> Any:
-    """A provider's flow for one request to *server*: no sign-in is expected."""
+def _flow(server: _AuthMCPServer, provider: Any = None) -> Any:
+    """The flow of *provider* (a new one by default) for one request to *server*.
+
+    No sign-in is expected.
+    """
     cfg = _cfg(server)
-    provider = build_provider(cfg, _no_redirect, _no_callback)
+    provider = provider or build_provider(cfg, _no_redirect, _no_callback)
     return provider.async_auth_flow(httpx.Request("POST", cfg.url))
 
 
@@ -552,9 +556,9 @@ async def _refresh(server: _AuthMCPServer, meanwhile: Any = None) -> None:
         await flow.aclose()
 
 
-async def _first_request(server: _AuthMCPServer) -> httpx.Request:
-    """The first request a provider sends for a request to *server*."""
-    flow = _flow(server)
+async def _first_request(server: _AuthMCPServer, provider: Any = None) -> httpx.Request:
+    """The first request *provider* (a new one by default) sends for a request to *server*."""
+    flow = _flow(server, provider)
     try:
         return cast(httpx.Request, await flow.__anext__())
     finally:
@@ -619,13 +623,18 @@ async def _cancel_a_refresh_at_its_token_write(
     assert refreshing.cancelled() is not scoped  # a scope ends its own cancellation
     request = await next_provider
     new = storage._read()["tokens"]
-    assert new["refresh_token"] != old["refresh_token"]
+    assert (new.get("refresh_token") != old["refresh_token"]) is server.provider.rotate
     assert request.headers["Authorization"] == f"Bearer {new['access_token']}"
+    # The grant was stored whole: its next expiry is answered by a refresh, not a sign-in.
+    storage.put("tokens", {**new, "expires_in": 0})
+    await _refresh(server)
+    assert storage._read()["tokens"]["access_token"] != new["access_token"]
 
 
+@pytest.mark.parametrize("rotate", [True, False], ids=["rotating", "not-rotating"])
 @pytest.mark.parametrize("scoped", [False, True], ids=["by-asyncio", "by-its-anyio-scope"])
 def test_a_refresh_cancelled_at_its_token_write_keeps_the_grant_to_itself(
-    server: _AuthMCPServer, home: Path, scoped: bool,
+    server: _AuthMCPServer, home: Path, scoped: bool, rotate: bool,
 ) -> None:
     """The refresh lock covers the write of the refreshed grant, cancelled or not.
 
@@ -635,7 +644,13 @@ def test_a_refresh_cancelled_at_its_token_write_keeps_the_grant_to_itself(
     the refresh lock with the store still holding the old grant, and
     the next provider presented the refresh token the server had just
     taken, which a server that rotates them answers by ending the grant.
+
+    A server that does not rotate them names none in its answer.  The
+    one in use was put back by a second write, which the cancelled
+    provider never got to: the grant was stored without it, and its
+    next expiry asked for a new sign-in.
     """
+    server.provider.rotate = rotate
     asyncio.run(_cancel_a_refresh_at_its_token_write(server, _stale_grant(server), scoped))
 
 
@@ -1275,6 +1290,96 @@ def test_login_with_preregistered_client_skips_registration(
     assert _client_info("authdemo", server.url).client_id == "kiss-prereg"
 
 
+def test_a_sign_in_as_another_preregistered_client_asks_for_a_new_grant(
+    server: _AuthMCPServer, home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stored grant is its client's: a sign-in as another client starts without it.
+
+    The environment's client replaced the stored registration and the
+    tokens stayed: the sign-in ended at once on the other client's
+    access token, and that grant's refresh, sent as the new client, was
+    refused (``invalid_grant``).  The same client again keeps its grant.
+    """
+    _login(server)  # as a dynamically registered client
+    registered = _client_info("authdemo", server.url)
+    server.provider.clients["kiss-prereg"] = registered.model_copy(
+        update={"client_id": "kiss-prereg"})
+    monkeypatch.setenv("KISS_MCP_AUTHDEMO_CLIENT_ID", "kiss-prereg")
+    session = _login(server)
+    assert parse_qs(urlsplit(session.auth_url).query)["client_id"] == ["kiss-prereg"]
+    granted = _tokens("authdemo", server.url).access_token
+    assert server.provider.access[granted].client_id == "kiss-prereg"
+    again = MCPLoginSession.start(_cfg(server))
+    assert again.wait(30)
+    assert (again.done, again.auth_url, again.error) == (True, "", "")
+    assert _tokens("authdemo", server.url).access_token == granted
+
+
+def _stores_a_registration(frame_locals: dict[str, Any]) -> bool:
+    """A :class:`Pause` matcher for a storage's ``put``: the write of a client registration."""
+    return bool(frame_locals["key"] == "client_info")
+
+
+def _replaces_a_session(frame_locals: dict[str, Any]) -> bool:
+    """A :class:`Pause` matcher for ``_replace_active``: the start that finds a sign-in running."""
+    return frame_locals["cls"]._active is not None
+
+
+def _start(cfg: MCPServerConfig, started: list[MCPLoginSession]) -> None:
+    started.append(MCPLoginSession.start(cfg))
+
+
+@pytest.mark.parametrize("registered", [False, True], ids=["registering", "at-its-consent"])
+def test_a_sign_in_overtaken_by_another_client_s_stores_nothing(
+    server: _AuthMCPServer, home: Path, monkeypatch: pytest.MonkeyPatch, registered: bool,
+) -> None:
+    """A sign-in stores its client and its grant only while the stored client is its own.
+
+    A sign-in as the environment's client stores that client, forgets
+    the grant of the one stored before, and only then ends the sign-in
+    that is running.  That one, approved in between, stored its grant
+    under the new registration: the new sign-in ended at once on the
+    other client's access token, whose refresh, sent as the new client,
+    is refused.  One still registering put its own client back over the
+    environment's.  (The grant was forgotten in a write of its own,
+    too, ahead of the one that replaced the registration: a grant
+    stored between the two stayed.)
+    """
+    cfg = _cfg(server)
+    server.provider.clients["kiss-prereg"] = OAuthClientInformationFull.model_validate({
+        **mcp_oauth.client_metadata().model_dump(mode="json", exclude_none=True),
+        "client_id": "kiss-prereg",
+    })
+    registering = Pause(mcp_oauth._GrantStorage.put.__code__, _stores_a_registration)
+    replacing = Pause(MCPLoginSession._replace_active.__code__, _replaces_a_session)
+    started: list[MCPLoginSession] = []
+    starter = threading.Thread(target=_start, args=(cfg, started), daemon=True)
+    with Pauses(replacing) if registered else Pauses(registering, replacing):
+        overtaken = MCPLoginSession.start(cfg, 30 if registered else 0)
+        assert overtaken.auth_url if registered else registering.paused.wait(10), overtaken.error
+        monkeypatch.setenv("KISS_MCP_AUTHDEMO_CLIENT_ID", "kiss-prereg")
+        starter.start()
+        # The environment's client is stored, and the first sign-in is still running.
+        assert replacing.paused.wait(10)
+        assert _client_info(cfg.name, cfg.url).client_id == "kiss-prereg"
+        if registered:
+            _approve(overtaken.auth_url)
+        else:
+            registering.release()
+        assert overtaken.wait(30)
+        assert not overtaken.done
+        assert "the stored OAuth client was replaced meanwhile" in overtaken.error
+        assert _client_info(cfg.name, cfg.url).client_id == "kiss-prereg"
+        assert _tokens(cfg.name, cfg.url) is None
+    starter.join(30)
+    session, = started
+    assert parse_qs(urlsplit(session.auth_url).query)["client_id"] == ["kiss-prereg"]
+    _approve(session.auth_url)
+    assert session.wait(30) and session.done, session.error
+    granted = _tokens(cfg.name, cfg.url).access_token
+    assert server.provider.access[granted].client_id == "kiss-prereg"
+
+
 # ---------------------------------------------------------------------------
 # Stale registrations (older KISS registered http://localhost:0/callback)
 # ---------------------------------------------------------------------------
@@ -1370,6 +1475,27 @@ def test_build_provider_seeds_stored_oauth_metadata(server: _AuthMCPServer, home
     assert auth.context.oauth_metadata is not None
     assert auth.context.oauth_metadata.token_endpoint == stored.token_endpoint
     assert str(auth.context.oauth_metadata.token_endpoint) == f"{server.base}/token"
+
+
+def test_a_refresh_goes_to_the_token_endpoint_stored_since_its_provider_was_built(
+    server: _AuthMCPServer, home: Path,
+) -> None:
+    """A provider re-reads the stored authorization server metadata with the grant it refreshes.
+
+    A connection's provider read it once, when it was built.  A sign-in
+    after that stores the token endpoint its grant is refreshed at (the
+    grant of an older release has none on record, and a server moves
+    its endpoint): the connection took the new grant from the store and
+    sent its refresh to the endpoint it knew, a 404 that left it asking
+    for a sign-in the stored grant did not need.
+    """
+    storage = _stale_grant(server)
+    provider = build_provider(_cfg(server), _no_redirect, _no_callback)
+    moved = f"{server.base}/custom-token"
+    # As the provider of a later sign-in stores it.
+    storage.put("oauth_metadata", {**storage._read()["oauth_metadata"], "token_endpoint": moved})
+    refresh = asyncio.run(_first_request(server, provider))
+    assert str(refresh.url) == moved
 
 
 # ---------------------------------------------------------------------------

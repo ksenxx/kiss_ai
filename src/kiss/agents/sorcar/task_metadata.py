@@ -518,6 +518,12 @@ def write_task_tags(
     every event of the task, so a caller about to take a write lock
     runs :func:`trajectory_has_secret` first and passes its verdict.
 
+    A row whose tags the user edited (``tags_edited``, set by
+    ``persistence._set_task_tags``) keeps them: a finished row is
+    classified again when events of its task reach the database late
+    (a journal replay) and by the orphan sweep, and neither may undo
+    the edit.
+
     Args:
         db: Connection to ``history.db``.
         task_id: The ``task_history`` row id.
@@ -529,7 +535,8 @@ def write_task_tags(
     if has_secret is None:
         has_secret = trajectory_has_secret(db, task_id, row["task"], row["result"])
     db.execute(
-        "UPDATE task_history SET tags = ? WHERE id = ?", (_task_tags(row, has_secret), task_id),
+        "UPDATE task_history SET tags = ? WHERE id = ? AND COALESCE(tags_edited, 0) = 0",
+        (_task_tags(row, has_secret), task_id),
     )
 
 
@@ -580,7 +587,10 @@ def backfill_task_metadata(db: sqlite3.Connection) -> dict[str, int]:
     for long.  A row's tags are written only while it is still
     untagged and has no event newer than its scan: a task that
     finished meanwhile wrote its own, and one still running is tagged
-    when it finishes (or by the next backfill).
+    when it finishes (or by the next backfill).  Tags the user edited
+    are never empty (``persistence._set_task_tags`` stores at least
+    one, and a ``--refresh`` does not blank them), so no such row is
+    written here.
 
     Args:
         db: Open connection to ``history.db`` with the current schema.

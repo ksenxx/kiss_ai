@@ -14,10 +14,10 @@ so any sub-agent row whose metrics contained a non-finite float
 (e.g. a NaN ``cost``) was surfaced in the history sidebar as if it
 were a regular task.
 
-Fix: serialise ``extra`` through ``_dumps_extra`` which replaces
-non-finite floats with ``None`` so the column always holds valid JSON
-and the dedicated ``parent_task_id`` column remains the single source
-of truth for sub-agent classification.
+Fix: every number is coerced to a finite one on its way in and out
+(``_safe_float`` / ``_safe_int``), so the ``extra`` built from the
+columns is always valid JSON and the dedicated ``parent_task_id``
+column remains the single source of truth for sub-agent classification.
 
 Runs against a real SQLite database redirected to a temp dir.
 No mocks, patches, fakes, or test doubles.

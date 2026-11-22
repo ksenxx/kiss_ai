@@ -113,6 +113,9 @@ def scenes(page: Page, name: str, out: TextIO) -> str:
     page.click("#more-btn")
     page.wait_for_timeout(200)
     dump(page, f"{name} more-menu", out)
+    page.keyboard.press("Escape")
+    # Settings is a button of the strip under the Chats list.
+    page.evaluate("() => document.getElementById('sidebar').classList.add('open')")
     page.click("#settings-btn")
     page.wait_for_timeout(300)
     dump(page, f"{name} settings", out)

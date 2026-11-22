@@ -61,7 +61,8 @@ a fork, else fresh ideas when the frontier allows neither (0.33 <= r < 0.66); fr
 
 Procedure:
 1. Call `discover_trajectory(task, evidence_file)`. `task` is the task id the user gave or
-   its first characters, empty for the newest run, `list` to see the runs. `evidence_file`
+   its first characters, empty for the newest run, `list` to see the runs; a task that
+   dispatched /discover runs stands for the newest of them. `evidence_file`
    is `evidence.md` in your scratch dir. Read all of that file.
 2. Write `story.json` in your scratch dir, one JSON object:
    - `task_id`: the run's full id. `title`: what the run improved, at most 80 characters.
@@ -122,6 +123,8 @@ def discover_trajectory(task: str, evidence_file: str) -> str:
         task: The run's task id, the first six or more characters of
             it, empty or ``latest`` for the newest /discover run, or
             ``list`` to list the newest runs instead of writing a file.
+            A task that is not a /discover run but dispatched some
+            stands for the newest of them.
         evidence_file: The absolute path of the Markdown file to write.
 
     Returns:
@@ -136,23 +139,31 @@ def discover_trajectory(task: str, evidence_file: str) -> str:
     found = trajectory.find_task(task)
     if isinstance(found, str):
         return found
-    text = trajectory.evidence(found)
-    if not text:
+    note = ""
+    if found.get("sea") != trajectory.DISCOVER_SEA:
         runs = [
-            trajectory.run_line(child) for child in child_tasks(found["id"])
+            child for child in child_tasks(found["id"])
             if child.get("sea") == trajectory.DISCOVER_SEA
         ]
-        hint = "\n".join(["Its /discover sub-tasks:", *runs]) if runs else trajectory.recent_runs()
+        if runs:
+            note = (
+                f"Task {found['id']} is not a /discover run; it dispatched "
+                + "\n".join(["these /discover runs:", *map(trajectory.run_line, runs)])
+                + f"\nAnimating the newest, {runs[-1]['id']}.\n"
+            )
+            found = load_task(str(runs[-1]["id"])) or found
+    text = trajectory.evidence(found)
+    if not text:
         return (
             f"Error: task {found['id']} wrote no pareto.md or explored-ideas.md, so it ran no "
-            f"discovery loop.\n{hint}"
+            f"discovery loop.\n{trajectory.recent_runs()}"
         )
     path = Path(evidence_file)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
     return (
-        f"/discover run {found['id']}: evidence written to {path}, {len(text)} characters in "
-        f"{text.count(chr(10))} lines. Read all of it before you write the story."
+        f"{note}/discover run {found['id']}: evidence written to {path}, {len(text)} characters "
+        f"in {text.count(chr(10))} lines. Read all of it before you write the story."
     )
 
 

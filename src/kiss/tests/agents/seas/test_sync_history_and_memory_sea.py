@@ -612,15 +612,22 @@ def test_a_merge_waits_for_an_agents_write_and_gives_up_after_the_timeout(
     results: list[dict[str, Any]] = []
     root_lock = Path(f"{memory.root}.lock")
     at_root_lock = threading.Event()
-    real_lock = memory_delta._lock
+    real_merge_module = memory_delta.merge_module
 
-    def noticed_lock(descriptor: int, path: Path) -> None:
-        """The merge's own lock acquisition, flagging the test when it reaches the memory's lock."""
-        if path == root_lock:
-            at_root_lock.set()
-        real_lock(descriptor, path)
+    def noticing_merge_module() -> Any:
+        """The merge rules, their lock acquisition flagging the test at the memory's lock."""
+        rules = real_merge_module()
+        real_lock = rules._lock
 
-    monkeypatch.setattr(memory_delta, "_lock", noticed_lock)
+        def noticed_lock(descriptor: int, path: Path) -> None:
+            if path == root_lock:
+                at_root_lock.set()
+            real_lock(descriptor, path)
+
+        rules._lock = noticed_lock
+        return rules
+
+    monkeypatch.setattr(memory_delta, "merge_module", noticing_merge_module)
 
     def merge() -> None:
         results.append(
@@ -660,6 +667,15 @@ def test_a_merge_waits_for_an_agents_write_and_gives_up_after_the_timeout(
     ):
         memory_delta.unpack_and_merge(io.BytesIO(stream.getvalue()), memory.root, 0.0)
     assert page_text(MemoryDir(memory.root / "dom"), "deep") == "deep\n"
+
+    # A memory reached through a symlink is the same memory, under the same lock.
+    alias = tmp_path / "alias"
+    alias.symlink_to(memory.root, target_is_directory=True)
+    with (
+        exclusive_file_lock(root_lock, timeout=5.0),
+        pytest.raises(TimeoutError, match="memories.lock still locked"),
+    ):
+        memory_delta.unpack_and_merge(io.BytesIO(stream.getvalue()), alias, 0.0)
     # The memory's own lock too (the domain locks are free): a merge that skipped
     # it would go through here, whatever the worker's schedule above was, and
     # overwrite the page once it is stamped older than the incoming one.

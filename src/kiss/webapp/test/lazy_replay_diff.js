@@ -42,13 +42,11 @@ const {
   statusMetrics,
 } = require('./simplify2_harness');
 
-// What a fan-out panel remembers beside what it shows: its number
-// among the transcript's fan-outs and when its call ran decide which
-// sub-agents are its own.
+// What a fan-out panel remembers beside what it shows: when its call
+// ran and how many sub-agents it declared, from which the share
+// export tells which sub-agents are its own.
 const FAN_OUT_FIELDS = [
-  '_rpCallIndex',
   '_rpCallTs',
-  '_rpDone',
   '_rpDoneTs',
   '_rpExpectedCount',
   '_rpOpenEnded',

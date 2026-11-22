@@ -239,18 +239,6 @@ function installVoiceStubs(win, options, mic, vosk, bootWorkers, loadTimers) {
 // test play the worker's side of the protocol.
 // ---------------------------------------------------------------------
 
-/** True when the worker was told to die: DOM terminate() or the vosk
- *  protocol's {action:'terminate'} message, which a worker whose model
- *  loaded handles by freeing the Kaldi objects and closing itself.  The
- *  "stays alive" checks rule out both; a worker whose load failed or
- *  never finished is reclaimed by terminate() alone, so the "is
- *  reclaimed" checks read `terminated`. */
-function workerReclaimed(worker) {
-  return (
-    worker.terminated || worker.posted.some(m => m && m.action === 'terminate')
-  );
-}
-
 /** The live list of 'error' listeners on the page-side Models of `win`
  *  (createModel's one-shot protocol-error listener). */
 function modelErrorListeners(win) {
@@ -534,8 +522,7 @@ async function main() {
     worker.emit({event: 'load', result: false});
     await settle();
     assert.strictEqual(rejected, 1, 'createModel must reject');
-    // Hard-terminated: the worker's own {action:'terminate'} handler
-    // deletes the model before close(), and throws on one never built.
+    // Hard-terminated: the worker has no command that ends it.
     assert.ok(
       worker.terminated,
       'the failed model must hard-terminate its worker: ' +
@@ -568,10 +555,7 @@ async function main() {
     assert.ok(model, 'createModel must resolve once its worker reports');
     loaded.cancel();
     await settle();
-    assert.ok(
-      !workerReclaimed(workers[1]),
-      'cancel after the load leaves it alone',
-    );
+    assert.ok(!workers[1].terminated, 'cancel after the load leaves it alone');
     assert.ok(model.ready, 'the loaded model stays ready');
     win.close();
   });
@@ -615,9 +599,8 @@ async function main() {
         'createModel must listen for Worker boot errors',
       );
       // The Worker constructed, then its script failed to boot: it
-      // emits `error` and never posts a load message.  It cannot
-      // process the protocol {action:'terminate'} message either, so
-      // only the real Worker.terminate() can reclaim it.
+      // emits `error` and never posts a load message.  Only the real
+      // Worker.terminate() can reclaim it.
       worker.emitError({message: 'worker boot failed'});
       await settle();
       assert.ok(rejection, 'createModel must reject on a Worker boot error');
@@ -676,7 +659,7 @@ async function main() {
       workers[0].emitError({message: 'late runtime error'});
       await settle();
       assert.ok(
-        !workerReclaimed(workers[0]),
+        !workers[0].terminated,
         'a runtime error after load must not terminate the live worker',
       );
       assert.ok(model.ready, 'the model stays ready');
@@ -699,7 +682,7 @@ async function main() {
       assert.ok(model, 'createModel must resolve with the model');
       assert.ok(model.ready, 'the resolved model must be ready');
       assert.ok(
-        !workerReclaimed(workers[0]),
+        !workers[0].terminated,
         'a healthy worker must not be terminated: ' +
           JSON.stringify(workers[0].posted),
       );
@@ -741,9 +724,8 @@ async function main() {
         String(rejection.message).includes(MODEL_URL),
         'the rejection names the model: ' + rejection.message,
       );
-      // The worker never built its Kaldi model, so the protocol
-      // {action:'terminate'} would throw in its terminate handler before
-      // close(): only Worker.terminate() reclaims it.
+      // The worker never built its Kaldi model: Worker.terminate()
+      // reclaims it.
       assert.strictEqual(
         worker.terminated,
         true,
@@ -800,10 +782,7 @@ async function main() {
       live.emit({event: 'error', error: 'Unknown message {}'});
       live.emit({event: 'error', recognizerId: 'gone', error: 'no such'});
       await settle();
-      assert.ok(
-        !workerReclaimed(live),
-        'a late error must not kill the live model',
-      );
+      assert.ok(!live.terminated, 'a late error must not kill the live model');
       assert.ok(model.ready, 'the model stays ready');
       win.close();
     },

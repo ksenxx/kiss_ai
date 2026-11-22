@@ -32,16 +32,19 @@ import http.client
 import json
 import shlex
 import socket
+import sys
 import threading
 import time
 import urllib.parse
 import uuid
 from collections.abc import Callable
+from concurrent.futures import Future
 from typing import Any
 
 from kiss.agents.sorcar.docker_manager import (
     _FETCH_SCRIPT,
     _KILL_WAIT_S,
+    CDPATH_COMMAND,
     MAX_OUTPUT_CHARS,
     STOPPED_MESSAGE,
     PendingRewrite,
@@ -52,8 +55,11 @@ from kiss.agents.sorcar.docker_manager import (
     _with_exit_code,
     fetched_bytes,
     probe_command,
+    probed_cdpath,
+    probed_sleep,
     realpath_command,
     resolved_path,
+    sleep_probe_command,
     until_refusal,
 )
 from kiss.agents.sorcar.edit_guards import shadow_command
@@ -90,6 +96,101 @@ _PING_TIMEOUT_S = 10.0
 #: keeps the idle timeout from firing.
 _REPLY_MARGIN_S = 60.0
 
+#: The name lookups in progress, by ``(host, port)``: one thread each, shared
+#: by the requests that wait for it (:func:`_addresses`).
+_LOOKUPS: dict[tuple[str, int], Future[list[Any]]] = {}
+_LOOKUPS_LOCK = threading.Lock()
+
+
+def _look_up(host: str, port: int, lookup: Future[list[Any]]) -> None:
+    """Look *host* up for the requests waiting on *lookup* (helper-thread body)."""
+    try:
+        lookup.set_result(socket.getaddrinfo(host, port, type=socket.SOCK_STREAM))
+    except Exception as error:  # an unknown name, one no resolver takes: the requests' error
+        lookup.set_exception(error)
+    finally:
+        with _LOOKUPS_LOCK:
+            # Its own entry only: a Ctrl-C (the main thread's, which nothing holds back)
+            # between this thread's start and the entry left none, and another request
+            # may have made one since.
+            if _LOOKUPS.get((host, port)) is lookup:
+                del _LOOKUPS[host, port]
+
+
+def _shared_lookup(host: str, port: int) -> Future[list[Any]]:
+    """Return the lookup of *host* in progress, started on a helper thread when there is none.
+
+    The thread's start and its entry in the table are one step for a
+    Stop: :func:`_addresses` makes this call through
+    :func:`~kiss.core.tool_interrupt.call_without_injection`.  A Stop
+    raised between the two (``Thread.start`` waits for the thread to
+    come up, where an injected exception lands) left a lookup that no
+    later request found: one more resolver thread for each request
+    stopped there.
+
+    Raises:
+        RuntimeError: No thread could be started; nothing is entered.
+    """
+    with _LOOKUPS_LOCK:
+        lookup = _LOOKUPS.get((host, port))
+        if lookup is None:
+            lookup = Future()
+            threading.Thread(
+                target=_look_up, args=(host, port, lookup),
+                name="exec-bridge-lookup", daemon=True,
+            ).start()
+            _LOOKUPS[host, port] = lookup
+        return lookup
+
+
+def _dialled(sockaddr: Any) -> tuple[str, int]:
+    """Return the host and port of *sockaddr*, one of ``getaddrinfo``'s, as a connect takes them.
+
+    A link-local IPv6 address keeps the interface it is on
+    (``fe80::1%2``), the last item of its *sockaddr*: without it, it is
+    no address.
+    """
+    host, port, *scope = sockaddr
+    return (f"{host}%{scope[1]}" if scope and scope[1] else host), port
+
+
+def _addresses(host: str, port: int, deadline: float) -> list[tuple[str, int]]:
+    """Return the addresses *host* names, each with *port*, found before *deadline*.
+
+    An address is its own.  A name is looked up on a helper thread,
+    since nothing bounds or cancels the resolver: the request waits for
+    it only the time it has left, and the requests for one name share
+    the lookup in progress, so a resolver that hangs holds one thread
+    rather than one for each request.  The wait is
+    :func:`~kiss.core.tool_interrupt.result_interruptible`'s, in slices
+    a Stop is held for: one raised as a plain ``Future.result`` takes
+    the lookup's condition left it held, and every later request for
+    the name hung on it.
+
+    Args:
+        host: An IP address or a host name.
+        port: The port to dial.
+        deadline: The ``time.monotonic()`` at which the request ends.
+
+    Raises:
+        OSError: The name is unknown, or its lookup outlived *deadline*
+            (``TimeoutError``).
+        RuntimeError: No thread could be started for the lookup.
+        ToolCallInterrupted: The calling thread's tool call was
+            interrupted during the wait.
+    """
+    try:
+        found = socket.getaddrinfo(
+            host, port, type=socket.SOCK_STREAM, flags=socket.AI_NUMERICHOST)
+    except socket.gaierror:  # a name
+        lookup = tool_interrupt.call_without_injection(_shared_lookup, host, port)
+        try:
+            found = tool_interrupt.result_interruptible(
+                lookup, max(0.0, deadline - time.monotonic()))
+        except TimeoutError:
+            raise TimeoutError("timed out") from None
+    return [_dialled(info[4]) for info in found]
+
 
 class _Connection(http.client.HTTPConnection):
     """An HTTP connection that keeps its socket where its deadline's timer finds it.
@@ -103,10 +204,35 @@ class _Connection(http.client.HTTPConnection):
 
     watched: socket.socket | None = None
 
+    def __init__(self, host: str, port: int, timeout: float) -> None:
+        """Name the endpoint; the request, its connect included, ends *timeout* seconds on."""
+        super().__init__(host, port, timeout=timeout)
+        self.deadline = time.monotonic() + timeout
+
     def connect(self) -> None:
-        """Connect, then remember the socket for :func:`_shut_down`."""
-        super().connect()
-        self.watched = self.sock
+        """Connect before the deadline, then remember the socket for :func:`_shut_down`.
+
+        ``socket.create_connection`` bounds neither the lookup of a
+        name nor the connects to its addresses as a whole (each would
+        get the full timeout): the lookup is :func:`_addresses`', and
+        each address gets the time left.
+        """
+        sys.audit("http.client.connect", self, self.host, self.port)  # as ``http.client`` does
+        error: OSError = TimeoutError("timed out")
+        for address in _addresses(self.host, self.port, self.deadline):
+            left = self.deadline - time.monotonic()
+            if left <= 0:
+                break
+            try:
+                self.sock = self.watched = socket.create_connection(address, left)
+            except OSError as failure:
+                error = failure
+                continue
+            self.sock.settimeout(self.timeout)  # an idle read's, as ``http.client`` sets it
+            with contextlib.suppress(OSError):  # an OS without it: ``http.client`` goes on too
+                self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            return
+        raise error
 
 
 def _shut_down(connection: _Connection, expired: threading.Event) -> None:
@@ -116,8 +242,8 @@ def _shut_down(connection: _Connection, expired: threading.Event) -> None:
     at once, wherever the request is (the status line, the headers, a
     chunk's size line, the body); a ``close`` would not wake it.  The
     socket is not there yet while the connect is in progress: that one
-    is bounded by the socket's own timeout, and :func:`_request` checks
-    the flag once the request is sent.
+    ends at the same deadline (:meth:`_Connection.connect`), and
+    :func:`_request` checks the flag once the request is sent.
     """
     expired.set()
     sock = connection.watched
@@ -129,12 +255,13 @@ def _shut_down(connection: _Connection, expired: threading.Event) -> None:
 def _request(url: str, path: str, body: dict[str, Any] | None, timeout: float) -> dict[str, Any]:
     """Request *url* + *path* (POST *body* as JSON, GET without) and return the reply dict.
 
-    *timeout* bounds the request as a whole.  The socket's timeout
-    bounds the connect and one idle read, which a peer that trickles a
-    byte at a time never lets fire, so a timer shuts the socket down at
-    the deadline (:func:`_shut_down`) wherever the request is then, and
-    the failure past the deadline is that timeout.  The connection is
-    closed before this returns, whatever happened.
+    *timeout* bounds the request as a whole: the lookup of the host's
+    name and the connect end at the deadline (:meth:`_Connection.connect`),
+    and the socket's timeout bounds one idle read, which a peer that
+    trickles a byte at a time never lets fire, so a timer shuts the
+    socket down at the deadline (:func:`_shut_down`) wherever the
+    request is then, and the failure past the deadline is that timeout.
+    The connection is closed before this returns, whatever happened.
 
     Raises:
         KISSError: When the bridge cannot be reached (also for want of
@@ -146,14 +273,16 @@ def _request(url: str, path: str, body: dict[str, Any] | None, timeout: float) -
         # The port is always passed: given none, ``http.client`` looks for one
         # after the host's last colon, which an IPv6 address has too.
         port = http.client.HTTP_PORT if target.port is None else target.port
-        connection = _Connection(target.hostname or "", port, timeout=timeout)
+        connection = _Connection(target.hostname or "", port, timeout)
     except _BRIDGE_ERRORS as error:  # a port that is no number, an unclosed IPv6 bracket
         raise KISSError(f"Exec bridge {url} unreachable: {error}") from error
     expired = threading.Event()
     watchdog = threading.Timer(timeout, _shut_down, (connection, expired))
     watchdog.daemon = True
     try:
-        watchdog.start()
+        # On the task thread for some requests: a Stop raised as the start
+        # takes the lock of the thread's event leaves the timer never run.
+        tool_interrupt.call_without_injection(watchdog.start)
         connection.request(
             "GET" if body is None else "POST", target.path or "/",
             body=None if body is None else json.dumps(body).encode(),
@@ -201,7 +330,7 @@ def _kill_bounded(url: str, token: str) -> None:
         name=f"exec-bridge-kill-{token[:8]}", daemon=True,
     )
     try:
-        killer.start()
+        tool_interrupt.call_without_injection(killer.start)
     except RuntimeError:
         return
     killer.join(_KILL_WAIT_S)
@@ -268,7 +397,7 @@ def bridge_exec(
     deadline = time.monotonic() + timeout + _REPLY_MARGIN_S
     try:
         try:
-            worker.start()
+            tool_interrupt.call_without_injection(worker.start)
         except RuntimeError as error:  # out of threads
             raise KISSError(f"Exec bridge {url} unreachable: {error}") from error
         # ``while True``: on CPython 3.13 the back edge of
@@ -412,8 +541,8 @@ class ExecBridge:
         probe = functools.partial(self._path_test, *asked)
         guard, deadline = _refuse_or_lift(
             command, self.workdir, timeout_seconds, probe, functools.partial(probe, test="-d"),
-            functools.partial(self._realpath, *asked), self.read_bytes,
-            description, max_output_chars,
+            functools.partial(self._realpath, *asked), functools.partial(self._cdpath, *asked),
+            self.read_bytes, description, max_output_chars,
             functools.partial(setattr, self, "pending_append"),
             functools.partial(probe, test="link"),
             functools.partial(self._shadows, *asked),
@@ -481,6 +610,7 @@ class ExecBridge:
                 command, self.workdir, timeout_seconds, exists,
                 functools.partial(exists, test="-d"),
                 functools.partial(self._realpath, timeout_seconds, cancel),
+                functools.partial(self._cdpath, timeout_seconds, cancel),
             )
             if guard is not None:
                 return -1, guard, 0.0
@@ -526,6 +656,18 @@ class ExecBridge:
         exit_code, output = bridge_exec(self.url, realpath_command(path), timeout_seconds, cancel)
         return resolved_path(path, exit_code, output)
 
+    def _cdpath(self, timeout_seconds: float, cancel: threading.Event | None) -> str:
+        """Return the ``CDPATH`` a command's shell inherits on the environment (``""`` for none).
+
+        The destructive and here-document guards' oracle, as the Docker
+        manager's (:data:`CDPATH_COMMAND`).
+
+        Raises:
+            KISSError: When the environment gave no answer.
+        """
+        exit_code, output = bridge_exec(self.url, CDPATH_COMMAND, timeout_seconds, cancel)
+        return probed_cdpath(exit_code, output)
+
     def _shadows(
         self, timeout_seconds: float, cancel: threading.Event | None,
         program: str, path: str, modules: set[str],
@@ -541,6 +683,34 @@ class ExecBridge:
         asked = shadow_command(program, path, modules)
         exit_code, _ = bridge_exec(self.url, asked, timeout_seconds, cancel)
         return exit_code != 1
+
+    def sleep_probe(self, word: str) -> str:
+        """Return what a command's shell prints for ``SLEEP_PROBE`` and *word* on the environment.
+
+        The ``probe`` of
+        :func:`~kiss.agents.sorcar.useful_tools.wait_instead_of_sleep`,
+        as the Docker manager's: :func:`sleep_probe_command` run like
+        any command, so with a command's shell and environment.  This
+        client cannot see what that shell is started with, so text of
+        the environment that bash runs first (a startup file) is not
+        ruled out as it is for a container: a shell which such text
+        makes answer one way and run the command another is taken at
+        its word.
+
+        Args:
+            word: The command word asked about (``sleep``, ``/bin/sleep``).
+
+        Returns:
+            The shell's answer, the first line of the output, or ``""``
+            when no answer came (a failure, a timeout, a Stop, a bridge
+            that cannot be reached), so that the sleep runs as written.
+        """
+        asked = sleep_probe_command(word)
+        try:
+            exit_code, output = bridge_exec(self.url, asked, 10, self.stop_event)
+        except KISSError:
+            return ""
+        return probed_sleep(exit_code, output)
 
     def read_bytes(
         self,

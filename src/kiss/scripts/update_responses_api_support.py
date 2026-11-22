@@ -303,7 +303,8 @@ def probe_responses_support(
         thinking: The default reasoning effort of the catalog row being
             probed (``None``: the row has none); every probe request asks
             for exactly that.  Left out, the runtime catalog's default
-            applies (``update_models.py`` probes the catalog it runs on).
+            applies (``update_models.py`` leaves it out only where its run
+            left the model's level unverified).
 
     Returns:
         The probe outcome; ``supported`` is False when the model has no

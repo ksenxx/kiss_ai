@@ -60,8 +60,9 @@ import queue
 import tempfile
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from functools import partial
 from typing import Any
 from unittest import TestCase
 
@@ -71,6 +72,7 @@ from kiss.tests.agents.sorcar.test_shutdown_persists_uninterruptible_worker impo
     _insert_sentinel_row,
     _row_result,
 )
+from kiss.tests.conftest import nproc_limit_lowered_to_one, thread_start_can_be_starved
 
 
 def _make_remote_server() -> Any:
@@ -103,9 +105,31 @@ def _swallow_interrupts_until(cleanup: threading.Event) -> None:
             pass
 
 
+def _end_on_interrupt(cleanup: threading.Event) -> None:
+    """Worker body: deaf to its stop event, ended by ``KeyboardInterrupt`` (or *cleanup*)."""
+    try:
+        while not cleanup.wait(0.02):
+            pass
+    except KeyboardInterrupt:
+        pass
+
+
+def _starve_thread_starts_while_alive(starving: threading.Event, cleanup: threading.Event) -> None:
+    """Worker body: :func:`_end_on_interrupt` in a process that can start no thread until it ends.
+
+    The limit is the worker's for its whole life, as the thread it occupies
+    is in a process at its thread limit; *starving* is set once it holds.
+    """
+    with nproc_limit_lowered_to_one():
+        starving.set()
+        _end_on_interrupt(cleanup)
+
+
 @contextmanager
-def _wedged_task() -> Iterator[tuple[Any, str]]:
-    """A real server and one registered task whose worker cannot be interrupted.
+def _wedged_task(
+    body: Callable[[threading.Event], None] = _swallow_interrupts_until,
+) -> Iterator[tuple[Any, str]]:
+    """A real server and one registered task whose worker, running *body*, ignores its stop event.
 
     Yields the server and the id of the task's history row, still at
     the creation sentinel; checks on exit that the sweep flagged the task.
@@ -126,7 +150,7 @@ def _wedged_task() -> Iterator[tuple[Any, str]]:
         is_task_active=True,
     )
     state.user_answer_queue = queue.Queue()
-    worker = threading.Thread(target=_swallow_interrupts_until, args=(cleanup,), daemon=True)
+    worker = threading.Thread(target=body, args=(cleanup,), daemon=True)
     state.task_thread = worker
     agent_state.register(state)
     worker.start()
@@ -205,3 +229,59 @@ class TestShutdownPersistsUninterruptibleWorker(TestCase):
             ):
                 time.sleep(0.02)
             assert _row_result(task_id) == "Task interrupted by server restart/shutdown"
+
+    def test_a_sweep_that_cannot_start_its_persist_thread_still_stops_and_persists(self) -> None:
+        """V15-F3 (audit 2026-11-21): thread exhaustion costs the sweep its helper thread only.
+
+        The failed start of the persistence thread raised out of the sweep with
+        every task already flagged as swept: no worker was interrupted or
+        joined, no row rewritten, and the sweep ``start()`` makes afterwards
+        skipped the flagged tasks.  The workers are now stopped all the same,
+        and the rewrite gets its thread once a worker that ended has given
+        one back.
+        """
+        if not thread_start_can_be_starved():
+            self.skipTest("RLIMIT_NPROC cannot starve Thread.start on this host")
+        starving = threading.Event()
+        body = partial(_starve_thread_starts_while_alive, starving)
+        with _wedged_task(body) as (remote, task_id):
+            assert starving.wait(5), "the worker never lowered the thread limit"
+            worker = agent_state.agent_states[str(task_id)].task_thread
+            assert worker is not None
+            remote._stop_active_agent_tasks(timeout=5.0)
+            assert not worker.is_alive(), "the worker was never interrupted"
+            assert _row_result(task_id) == "Task interrupted by server restart/shutdown"
+
+    def test_a_sweep_that_can_start_no_thread_does_not_wait_for_a_stuck_history_writer(
+        self,
+    ) -> None:
+        """V15-F3 review: the sweep never makes the rewrite itself.
+
+        Where its persistence thread could not start, the sweep made the
+        rewrite inline once it had joined the workers, and waited there for
+        the history write lock, which nothing bounds: behind a stuck writer
+        the shutdown hung.  A sweep that gets no thread at all leaves the
+        rewrite out, and the workers are stopped all the same.
+        """
+        if not thread_start_can_be_starved():
+            self.skipTest("RLIMIT_NPROC cannot starve Thread.start on this host")
+        held, release = threading.Event(), threading.Event()
+        writer = threading.Thread(
+            target=_hold_history_write_lock, args=(held, release), daemon=True,
+        )
+        with _wedged_task(_end_on_interrupt) as (remote, task_id):
+            worker = agent_state.agent_states[str(task_id)].task_thread
+            assert worker is not None
+            writer.start()
+            try:
+                assert held.wait(5)
+                start = time.monotonic()
+                with nproc_limit_lowered_to_one():
+                    remote._stop_active_agent_tasks(timeout=0.3)
+                elapsed = time.monotonic() - start
+            finally:
+                release.set()
+                writer.join(10)
+            assert elapsed < 3.0, f"sweep waited for the history writer: {elapsed:.2f}s"
+            worker.join(10)
+            assert not worker.is_alive(), "the worker was never interrupted"

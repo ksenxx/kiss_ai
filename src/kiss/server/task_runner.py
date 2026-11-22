@@ -15,9 +15,9 @@ Split out of ``server.py`` for organisation.
 from __future__ import annotations
 
 import base64
+import hashlib
 import logging
 import math
-import operator
 import queue
 import threading
 import time
@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeGuard, cast
 
 from kiss.agents.seas.base.base_sea import BaseSea
+from kiss.agents.sorcar import chrome_bridge, projects
 from kiss.agents.sorcar.channel_workspace import (
     WORKSPACE_WAIT_TIMEOUT_SECONDS,
     enter_workspace,
@@ -43,9 +44,12 @@ from kiss.agents.sorcar.persistence import (
     TASK_USAGE_LOCK,
     _add_task,
     _append_chat_event,
+    _chat_project,
+    _close_thread_db,
     _load_last_model,
     _save_task_extra,
     _save_task_result,
+    _set_chat_project,
 )
 from kiss.agents.sorcar.run_config import inherited_keys
 from kiss.agents.sorcar.sea_apply import (
@@ -71,9 +75,11 @@ from kiss.agents.sorcar.sorcar_agent import (
     _notify_subagent_done,
     canonical_tool_profile,
     classification_chooses_prompt,
+    endpoint_is_own,
     resolve_tool_profile,
 )
 from kiss.agents.sorcar.task_classifier import classification_enabled
+from kiss.core import config as config_module
 from kiss.core import tool_interrupt
 from kiss.core.llm_reply import LLMReply
 from kiss.core.locked import _race_delay, locked_call
@@ -321,25 +327,16 @@ def _subtask_row(agent: object, row_before_run: str | None) -> str | None:
     return row_after_run if row_after_run != row_before_run else None
 
 
-def _drain_queued_followups(
-    state: AgentState,
-    close_if_empty: bool,
-) -> tuple[list[str], list[list[Attachment]]]:
+def _drain_queued_followups(state: AgentState) -> tuple[list[str], list[list[Attachment]]]:
     """Under ``STATE_LOCK``: take the queued ``<task>`` follow-ups of *state* and their files.
 
-    With *close_if_empty* (the last drain of the subtask loop) an empty
-    queue is closed in the same critical section, so a ``<task>``
-    message racing the drain either landed above and runs, or arrives
-    after closure and takes the plain steering path — never
-    accepted-and-then-dropped (see ``_route_prompt_to_owner``, the
-    one writer, which keeps the two lists index-aligned).
+    The two lists are index-aligned by their one writer,
+    ``_route_prompt_to_owner``.
     """
     queued = list(state.queued_followup_tasks)
     state.queued_followup_tasks.clear()
     files = list(state.queued_followup_files)
     state.queued_followup_files.clear()
-    if not queued and close_if_empty:
-        state.followup_queue_closed = True
     return queued, files
 
 
@@ -386,8 +383,7 @@ def _drain_followup_subtasks(
     leftover messages and the queue is closed: ``_release_run_state``
     re-submits them in order as the tab's next runs, and a ``<task>``
     message typed meanwhile follows them there
-    (:func:`_pending_message_reruns`).  Otherwise as
-    :func:`_drain_queued_followups` with *close_if_empty* = *last*.
+    (:func:`_pending_message_reruns`).
     """
     tasks = state.queued_followup_tasks
     taken, files = tasks[:cut], state.queued_followup_files[:cut]
@@ -633,6 +629,86 @@ def _client_task_id_of(cmd: dict[str, Any]) -> str:
     """
     raw = cmd.get("taskId", "")
     return raw if isinstance(raw, str) else ""
+
+
+def _run_key(run_token: str) -> str:
+    """Return the key of the run *run_token* names: the last 16 digits of its row ids."""
+    return hashlib.sha256(run_token.encode("utf-8", "surrogatepass")).hexdigest()[:16]
+
+
+def _run_row_id(run_token: str, block: int) -> str:
+    """Return a new ``task_history`` row id for ``<task>`` block *block* of a run.
+
+    The blocks of a prompt run one after the other, each under a row of
+    its own, and no column of a row names the run.  Its id does: 12
+    random digits, the block's index (4 digits), the run's key
+    (:func:`_run_key`).  A client that lost its connection is answered
+    from the rows found that way (:func:`_rows_of_run`), whatever the
+    daemon still remembers of the run.  The random digits come first:
+    ids are abbreviated to their head, and a token used twice still
+    gets distinct ids.
+
+    Args:
+        run_token: The client's token of the run (the ``taskId`` of its
+            ``run``); ``""`` for a run no client can name, whose rows
+            get plain random ids.
+        block: The block's index in the run, from 0.
+    """
+    row_id = uuid.uuid4().hex
+    if not run_token:
+        return row_id
+    return f"{row_id[:12]}{min(block, 0xFFFF):04x}{_run_key(run_token)}"
+
+
+def _block_digits(row_id: str) -> str:
+    """Return the block-index digits of a row id made by :func:`_run_row_id`."""
+    return row_id[12:16]
+
+
+_END_EVENT_TYPES = frozenset({"task_done", "task_error", "task_stopped", "task_interrupted"})
+"""The types of the event that ends a block's transcript (``_persist_subtask_row``)."""
+
+
+def _run_goes_on(events: list[dict[str, Any]]) -> bool:
+    """Return whether a row's transcript *events* does not say its run ended with that block.
+
+    A run that is over returned what its last block did.  A daemon that
+    died before then leaves a block that returned as the newest row of
+    a run that never finished, and what that block returned must not
+    pass for the run's result.  The block's end event tells them apart.
+    It is written once the run knows what comes after the block (a
+    ``<task>`` follow-up queued while the block ran is taken first),
+    and says so when the run goes on (``run_continues``; a block that
+    fails or is stopped ends the run).  A block without one did not get
+    that far: the daemon died in it, or it is still running.
+
+    Args:
+        events: The row's transcript.
+    """
+    ends = [event for event in events if event.get("type") in _END_EVENT_TYPES]
+    return not ends or any(event.get("run_continues") for event in ends)
+
+
+def _run_keys(named: str) -> tuple[str, str]:
+    """Return the keys of the runs *named* can name: as a row of the run, and as its token.
+
+    A client back from a lost connection names its run by the last row
+    it saw of it, or by its token while it saw none.  The two look
+    alike (a client mints its token as a row id is minted), so *named*
+    is read as both.
+    """
+    return named[16:], _run_key(named)
+
+
+def _rows_of_run(rows: list[str], named: str) -> list[str]:
+    """Return the ids among *rows* of the run *named* names, in block order.
+
+    Args:
+        rows: ``task_history`` row ids (those of the run's chat).
+        named: A row of the run, or the run's token (:func:`_run_keys`).
+    """
+    keys = _run_keys(named)
+    return sorted((row for row in rows if row[16:] in keys), key=_block_digits)
 
 
 def _prompt_of(cmd: dict[str, Any]) -> Any:
@@ -1166,6 +1242,7 @@ class _TaskRunnerMixin:
         def _cmd_run(self, cmd: dict[str, Any]) -> None: ...
         def _broadcast_run_notice(self, cmd: dict[str, Any], tab_id: str) -> None: ...
         def _refuse_unanswered_prompts(self, tab_id: str, prompts: list[str]) -> None: ...
+        def _shown_own_state_locked(self, tab_id: str) -> AgentState | None: ...
         def _present_pending_worktree(
             self,
             tab_id: str,
@@ -1421,7 +1498,13 @@ class _TaskRunnerMixin:
                 str(cmd.get("prompt", "")) + str(cmd.get("appendToPrompt") or "")
             )
             cmd["cronJob"] = bool(cmd.get("cronJob")) or cmd["_unattended"]
+            _sent_model, _sent_config = cmd.get("model"), cmd.get("modelConfig")
             overridden_fields = self._apply_sea(cmd)
+            if cmd.get("model") != _sent_model or cmd.get("modelConfig") is not _sent_config:
+                # A caller's word on whose endpoint its configuration names
+                # (``modelOwnsEndpoint``) is about the model and the
+                # configuration it sent, not what a SEA put in their place.
+                cmd.pop("modelOwnsEndpoint", None)
             # Capture the state OBJECT up front: the printer bridge re-keys
             # it to the persisted task id mid-run, so a key lookup in the
             # finally below would miss and skip the end-of-run cleanup.
@@ -1440,11 +1523,10 @@ class _TaskRunnerMixin:
                     # (``resolve_settings`` drops ``""``): it names the
                     # chat to resume.
                     override_chat_id = str(cmd["chatId"])
-                    state.chat_id = override_chat_id
                     locked_call(
                         self._state_lock,
-                        operator.setitem,
-                        self._tab_chat_views,
+                        self._put_run_on_chat_locked,
+                        state,
                         tab_id,
                         override_chat_id,
                     )
@@ -1480,16 +1562,19 @@ class _TaskRunnerMixin:
                             prompt,
                         )
                     )
-                    self.printer.broadcast(
-                        name_prompts(
-                            {"type": "clear", "chat_id": override_chat_id, "tabId": tab_id},
-                            prompt,
-                        )
-                    )
+                    restart = {
+                        "type": "clear", "chat_id": override_chat_id, "tabId": tab_id,
+                        # The folder the script left the run in.
+                        "workDir": str(cmd.get("workDir") or self.work_dir),
+                    }
+                    self.printer.broadcast(name_prompts(restart, prompt))
                     # That ``clear`` wipes the transcript again, so the
                     # run's notice (dropped attachments) must follow it.
                     self._broadcast_run_notice(cmd, tab_id)
-            self._run_task_inner(cmd)
+            # The run reads the API keys and switches of its chat's
+            # project instead of the daemon's (``_enter_project``).
+            with config_module.run_overlay():
+                self._run_task_inner(cmd)
         except BaseException as exc:
             if state is None:
                 # The raise landed before the state resolution in the
@@ -1566,7 +1651,8 @@ class _TaskRunnerMixin:
             # the state as live before this point re-checks it after
             # subscribing the tab and sends the signal itself
             # (``_open_persisted_subagent_tabs``); one that reads it
-            # from here on announces the tab as done (C3-F1).
+            # from here on sends the signal in place of the
+            # announcement (C3-F1).
             subagent_done = cmd.pop("_subagent_done", None)
             if subagent_done is not None:
                 last_row_id, model, parent_tab_id = subagent_done
@@ -1627,6 +1713,11 @@ class _TaskRunnerMixin:
         a task its sender had loaded as the continuation of that one
         (its own ``continueTaskId``, :func:`continued_task_of`).
 
+        The tab is free from the run's release on, so it can be closed
+        before a re-run is admitted.  Each re-run says what it is
+        (``_leftover``): ``_cmd_run`` starts no task with one in a tab
+        closed since, and hands the message back instead.
+
         Args:
             cmd: The finished run's ``run`` command as submitted
                 (``_run_task``'s pre-SEA snapshot).
@@ -1639,6 +1730,7 @@ class _TaskRunnerMixin:
             followup = dict(base)
             followup["prompt"] = str(prompt)
             followup["promptIds"] = prompt_ids_of(prompt)
+            followup["_leftover"] = True
             continued = continued_task_of(prompt)
             if continued:
                 followup["continueTaskId"] = continued
@@ -1698,7 +1790,7 @@ class _TaskRunnerMixin:
         task_id_for_end: str | None = None
         if state is not None:
             reruns.extend(_pending_message_reruns(state))
-            queued, files = _drain_queued_followups(state, close_if_empty=False)
+            queued, files = _drain_queued_followups(state)
             reruns.extend(
                 (_retagged(task), attachments)
                 for task, attachments in zip(queued, files, strict=True)
@@ -2092,6 +2184,7 @@ class _TaskRunnerMixin:
         client_task_id: str = "",
         is_subagent: bool = False,
         previous_task_id: str | None = None,
+        work_dir: str = "",
     ) -> None:
         """Wire a freshly allocated task id to its launching UI tab.
 
@@ -2119,6 +2212,7 @@ class _TaskRunnerMixin:
             is_subagent: Whether the run was submitted with a
                 ``parentTaskId`` (a ``run_agent`` child).
             previous_task_id: See :meth:`_subscribe_chat_viewers`.
+            work_dir: See :meth:`_subscribe_chat_viewers`.
         """
         locked_call(
             self._state_lock,
@@ -2136,6 +2230,7 @@ class _TaskRunnerMixin:
             start_ms=start_ms,
             client_task_id=client_task_id,
             previous_task_id=previous_task_id,
+            work_dir=work_dir,
         )
 
     def _take_opened_task_pin_locked(self, tab_id: str, chat_id: str) -> str:
@@ -2159,6 +2254,139 @@ class _TaskRunnerMixin:
         if chat_id and self._tab_chat_views.get(tab_id, chat_id) != chat_id:
             return ""
         return self._tab_opened_task_ids.pop(tab_id, "")
+
+    def _put_run_on_chat_locked(self, state: AgentState, tab_id: str, chat_id: str) -> None:
+        """Under ``_state_lock``: put the run of *state* and the view of its *tab_id* on *chat_id*.
+
+        In one hold: a tab whose view names another chat than its
+        state's is one a replay bound elsewhere
+        (``_shown_own_state_locked``), and a Stop landing between the
+        two writes would find no task in the tab.
+        """
+        state.chat_id = chat_id
+        self._tab_chat_views[tab_id] = chat_id
+
+    def _enter_project(self, cmd: dict[str, Any], chat_id: str) -> dict[str, Any]:
+        """Put the run's chat in the project *cmd* names; return its project's settings.
+
+        A string ``projectId`` on the command is the project the page
+        lists the chat in (``""``: none): the chat is moved there and
+        every page told (:meth:`_move_chat_to_project`).  The settings
+        returned are those of the project the chat is in afterwards.  The calling
+        context's ``Config`` overlay (:func:`kiss.core.config.run_overlay`,
+        opened by :meth:`_run_task`) gets that project's API keys and
+        switches, and a project that drives the user's Chrome has the
+        bridge started for its task.
+
+        Args:
+            cmd: The ``run`` command.
+            chat_id: The run's chat; ``""`` when it has none yet (the
+                run is then in no project).
+
+        Returns:
+            What the chat's project overrides
+            (:func:`~kiss.agents.sorcar.projects.chat_settings`).
+        """
+        named = cmd.get("projectId")
+        if isinstance(named, str):
+            self._move_chat_to_project(chat_id, named)
+        settings = projects.chat_settings(chat_id)
+        overlay = config_module.current_run_overlay()
+        if overlay is not None:
+            overlay.update(projects.overlay_fields(settings))
+        if settings.get("chrome_bridge"):
+            chrome_bridge.start_if_enabled(True)
+        return settings
+
+    def _move_chat_to_project(self, chat_id: str, project_id: str) -> None:
+        """Put *chat_id* in *project_id* (``""``: none) and tell every page (``chatProject``).
+
+        A project that is gone leaves the chat where it is.  The move
+        and its event are one hold of the projects' publication lock,
+        as a ``setChatProject`` command's are: a ``getProjects`` reply
+        read before the move is sent before the move's event, so what a
+        page is sent last is what the database holds.
+
+        A Stop is injected into this thread.  It lands while a lock is
+        waited for, the publication lock (``locked_call`` takes it in
+        slices and cannot leak it) or the history database's, and is
+        held back for two short steps alone: the start of the thread
+        below and the event's hand-over to the event loop.  Raised once
+        the row is written and before that hand-over, it left the chat
+        in the project and every page showing it in none: a thread no
+        Stop reaches, started before the store, sends the event then
+        (:meth:`_tell_cut_chat_move`).
+
+        Lock order: the publication lock is taken with no lock held (the
+        run's thread holds none here, and no holder of ``_state_lock``
+        takes it), and under it come the history database's lock and
+        then the printer's delivery lock.  The broadcast hands the event
+        to the event loop: no socket is written under the lock.
+
+        Args:
+            chat_id: The run's chat; ``""`` when it has none yet.
+            project_id: The project the run's command names.
+        """
+        # Imported here, not at the top: ``commands`` imports this module.
+        from kiss.server.commands import _PROJECTS_PUBLISH_LOCK
+
+        locked_call(_PROJECTS_PUBLISH_LOCK, self._publish_chat_move, chat_id, project_id)
+
+    def _publish_chat_move(self, chat_id: str, project_id: str) -> None:
+        """Under the projects' publication lock: store the move, hand its event to the printer.
+
+        A chat already in *project_id* has nothing to store.  The store
+        of any other waits for the history database with no Stop held
+        back, so it can be cut once its row is written:
+        :meth:`_tell_cut_chat_move`, started first, waits for this
+        thread's hold of the publication lock to end and sends the
+        event this thread did not.
+        """
+        if _chat_project(chat_id) == project_id:
+            return
+        told: list[bool] = []  # filled inside the hand-over, which no Stop cuts
+        teller = threading.Thread(
+            target=self._tell_cut_chat_move, args=(chat_id, project_id, told),
+            name="kiss-chat-move", daemon=True,
+        )
+        tool_interrupt.call_without_injection(teller.start)
+        try:
+            moved = _set_chat_project(chat_id, project_id)
+        except LookupError:
+            moved = False
+        if moved:
+            tool_interrupt.call_without_injection(
+                self._tell_chat_project, chat_id, project_id, told,
+            )
+
+    def _tell_chat_project(self, chat_id: str, project_id: str, told: list[bool]) -> None:
+        """Hand the ``chatProject`` of a stored move to the printer and note it in *told*."""
+        # The empty stamp makes it a global event: sent from the
+        # run's thread without one, it would be a copy of the
+        # run's task and reach only the tabs that show it.
+        self.printer.broadcast({
+            "type": "chatProject", "chatId": chat_id, "projectId": project_id,
+            "tabId": "",
+        })
+        told.append(True)
+
+    def _tell_cut_chat_move(self, chat_id: str, project_id: str, told: list[bool]) -> None:
+        """Thread body: send the event of a move whose run was cut before it sent it.
+
+        The publication lock is the run's until its move has ended or
+        was cut.  A move not in *told* by then is read under the lock:
+        the event is sent when the database holds it, and nothing is
+        when the store wrote no row.
+        """
+        # Imported here, not at the top: ``commands`` imports this module.
+        from kiss.server.commands import _PROJECTS_PUBLISH_LOCK
+
+        try:
+            with _PROJECTS_PUBLISH_LOCK:
+                if not told and _chat_project(chat_id) == project_id:
+                    self._tell_chat_project(chat_id, project_id, told)
+        finally:
+            _close_thread_db()
 
     def _take_continued_task(self, cmd: dict[str, Any], tab_id: str, chat_id: str) -> str:
         """Take the task the run of *cmd* continues: the one the user loaded in *tab_id*.
@@ -2309,9 +2537,8 @@ class _TaskRunnerMixin:
                 "reviewer": bool(cmd.get("parentReviewer"))
                 or _is_review_task(str(cmd.get("prompt", "") or "")),
                 # A side channel (the /ask answerer) reports into the
-                # parent's transcript; its nested tab is closed when
-                # the run ends and replays keep it closed.  Persisted
-                # with the child's row (see persistence._add_task).
+                # parent's transcript.  Persisted with the child's row
+                # (see persistence._add_task).
                 "side_channel": bool(cmd.get("sideChannel")),
             }
             if parent_task_id
@@ -2327,6 +2554,7 @@ class _TaskRunnerMixin:
         if state.chat_id:
             agent._chat_id = state.chat_id
         state.chat_id = getattr(agent, "chat_id", "") or state.chat_id
+        project_settings = self._enter_project(cmd, state.chat_id)
 
         # ``/xxx help`` never runs the SEA (and needs no model): the
         # task's result is the SEA's ``description()`` text, or the
@@ -2374,9 +2602,10 @@ class _TaskRunnerMixin:
         # to the default provider fails or stalls there.  A sent
         # configuration of framework flags alone (a SEA's ``plain_io:
         # true``) keeps that endpoint (``framework_flags_over``).
-        _vcfg = load_config()
+        _vcfg = projects.config_with(load_config(), project_settings)
         _raw_model_config = cmd.get("modelConfig")
-        _model_config = custom_model_config(model) or build_model_config(_vcfg)
+        _own_config = custom_model_config(model)
+        _model_config = _own_config or build_model_config(_vcfg)
         _agent_model_config = (
             framework_flags_over(_raw_model_config, _model_config)
             if isinstance(_raw_model_config, dict)
@@ -2390,6 +2619,22 @@ class _TaskRunnerMixin:
         # ``MY_MODELS.json`` can price.
         _effective_config = (
             _agent_model_config if _agent_model_config is not None else _model_config
+        )
+        # Whose endpoint the run has (its model's own registry one, or a
+        # gateway it was sent to) is said from this read: the registry may
+        # lose or gain the model's entry before the agent starts (the
+        # classifier's round trip is in between), and ``set_model`` hands
+        # a model's own endpoint to no other model.  A sub-task that runs
+        # on the configuration its caller sent has the caller's word for
+        # it (``modelOwnsEndpoint``), from the read that configured the
+        # caller: this one is later still.
+        _stated = cmd.get("modelOwnsEndpoint")
+        _owns_endpoint = (
+            _stated
+            if isinstance(_stated, bool)
+            and isinstance(_raw_model_config, dict)
+            and _effective_config is _raw_model_config
+            else endpoint_is_own(_own_config, _effective_config)
         )
         _endpoint_run = bool(
             _effective_config and _effective_config.get("base_url") and is_known_model(model)
@@ -2557,9 +2802,13 @@ class _TaskRunnerMixin:
             # agent then resolves the KISS_USE_MEMORY environment
             # variable / persisted ``use_memory`` setting itself
             # (``sorcar_agent._memory_settings``), so unlike
-            # ``useWebTools`` no config fallback is read here.
+            # ``useWebTools`` no config fallback is read here: only
+            # the setting of the chat's project, when it has one.
             _raw_memory = cmd.get("useMemory")
-            _agent_memory = _raw_memory if isinstance(_raw_memory, bool) else None
+            _agent_memory = (
+                _raw_memory if isinstance(_raw_memory, bool)
+                else project_settings.get("use_memory")
+            )
             # Per-run context compaction: the ``compaction`` wire field
             # (``compaction`` on ``kiss.server.sorcar.run``, a SEA's
             # ``compaction`` setting, a ``run_agent`` option).  Only an
@@ -2615,6 +2864,7 @@ class _TaskRunnerMixin:
                 start_ms=start_ms,
                 client_task_id=_client_task_id_of(cmd),
                 is_subagent=bool(parent_task_id),
+                work_dir=str(work_dir or ""),
             )
 
             # The SEA's ``system_prompt`` and ``tools`` methods, staged
@@ -2673,6 +2923,8 @@ class _TaskRunnerMixin:
                 subtask_failed = False
                 subtask_exc: BaseException | None = None
                 try:
+                    # Every block runs on the one configuration.
+                    agent._launch_owns_endpoint = _owns_endpoint
                     agent_returned = agent.run(
                         prompt_template=task_prompt,
                         model_name=model,
@@ -2727,6 +2979,10 @@ class _TaskRunnerMixin:
                         # row the agent creates must not date the run
                         # by its own, later, allocation time.
                         _start_ms=sub_start_ms,
+                        # The row's id names the run and this block, so
+                        # a client back from a lost connection is
+                        # answered from the history alone.
+                        _task_id=_run_row_id(_client_task_id_of(cmd), subtask_index),
                     )
                     _run_parsed = parse_result_yaml(agent_returned) if agent_returned else None
                     if _run_parsed and _run_parsed.get("summary"):
@@ -2888,7 +3144,10 @@ class _TaskRunnerMixin:
                         model=model,
                         work_dir=work_dir,
                         sub_start_ms=sub_start_ms,
-                        end_event=task_end_event,
+                        # The run goes on from this block: said where a
+                        # client the daemon died on finds it
+                        # (``_run_goes_on``).
+                        end_event={**task_end_event, "run_continues": True},
                     )
                     if task_history_id is not None and parent_task_id:
                         # A multi-``<task>`` dispatch allocates one
@@ -3020,15 +3279,19 @@ class _TaskRunnerMixin:
                 # (its synthetic ``api-…`` tab reaches every remote
                 # page) from the user's own task finishing: only the
                 # latter plays the victory sound, and ``cron`` keeps a
-                # scheduled run's end silent too.  Kept on the command
-                # for the tabs viewing the run, which ``_run_task``
-                # tells once the run's slot is free.
+                # scheduled run's end silent too.  ``chatId`` is the
+                # run's chat: a page that does not have the launching
+                # tab finds the chat's project with it, whose sound
+                # setting has a say.  Kept on the command for the tabs
+                # viewing the run, which ``_run_task`` tells once the
+                # run's slot is free.
                 cmd["_end_event"] = {
                     **task_end_event,
                     "startTs": start_ms,
                     "endTs": end_ms,
                     "subagent": state.is_subagent,
                     "cron": bool(cmd.get("cronJob")),
+                    "chatId": state.chat_id,
                 }
                 self.printer.broadcast({**cmd["_end_event"], "tabId": tab_id})
                 end_event_broadcast = True
@@ -3077,6 +3340,7 @@ class _TaskRunnerMixin:
                             "endTs": int(time.time() * 1000),
                             "subagent": state.is_subagent,
                             "cron": bool(cmd.get("cronJob")),
+                            "chatId": state.chat_id,
                         }
                         self.printer.broadcast({**cmd["_end_event"], "tabId": tab_id})
                     except BaseException:
@@ -3184,7 +3448,9 @@ class _TaskRunnerMixin:
         try:
             cleanup_timer = threading.Timer(300.0, self.printer.cleanup_task, args=(task_id,))
             cleanup_timer.daemon = True
-            cleanup_timer.start()
+            # On the run's thread: a Stop raised as the start takes the lock
+            # of the thread's event would leave the timer never run.
+            tool_interrupt.call_without_injection(cleanup_timer.start)
         except RuntimeError:
             # Thread exhaustion ("can't start new thread") — the same
             # regime ``_stop_task``'s inline fallback and ``_cmd_run``'s
@@ -3400,7 +3666,12 @@ class _TaskRunnerMixin:
         if sub_info:
             extra["subagent"] = sub_info
         extra["chat_parent_id"] = continued_task_id
-        task_id, state.chat_id = _add_task(prompt, chat_id=state.chat_id, extra=extra)
+        task_id, state.chat_id = _add_task(
+            prompt, chat_id=state.chat_id, extra=extra,
+            # The run's only row, found as an agent's are by a client
+            # that was away when the answer came.
+            task_id=_run_row_id(state.client_run_token, 0),
+        )
         if agent is not None:
             agent._chat_id = state.chat_id
         _append_chat_event({"type": "prompt", "text": prompt}, task_id=task_id)
@@ -3546,6 +3817,7 @@ class _TaskRunnerMixin:
         start_ms: int,
         client_task_id: str = "",
         previous_task_id: str | None = None,
+        work_dir: str = "",
     ) -> None:
         """Subscribe every tab that has *chat_id* open to a new task's stream.
 
@@ -3582,6 +3854,10 @@ class _TaskRunnerMixin:
                 multi-``<task>`` run, the key the run's viewers are
                 subscribed under so far; ``None`` for a run's first
                 row.
+            work_dir: The folder the run started in, named in each
+                viewer's ``clear`` as in the launcher's (see
+                ``commands._announce_run_locked``); ``""`` leaves the
+                field out.
         """
         if not chat_id:
             return
@@ -3616,6 +3892,7 @@ class _TaskRunnerMixin:
                 viewer_tab_id,
                 viewer_status,
                 previous_task_id,
+                work_dir,
             )
 
     def _chat_viewer_tabs_locked(self, chat_id: str, source_tab_id: str) -> list[str]:
@@ -3633,6 +3910,7 @@ class _TaskRunnerMixin:
         viewer_tab_id: str,
         viewer_status: dict[str, Any],
         previous_task_id: str | None,
+        work_dir: str,
     ) -> None:
         """Under ``_state_lock``: subscribe an idle *viewer_tab_id* to *task_id*'s stream.
 
@@ -3660,9 +3938,10 @@ class _TaskRunnerMixin:
         self.printer.subscribe_tab(task_id, viewer_tab_id)
         if watching_run:
             return
-        self.printer.broadcast(
-            {"type": "clear", "chat_id": chat_id, "tabId": viewer_tab_id},
-        )
+        start: dict[str, Any] = {"type": "clear", "chat_id": chat_id, "tabId": viewer_tab_id}
+        if work_dir:
+            start["workDir"] = work_dir
+        self.printer.broadcast(start)
         self.printer.broadcast({**viewer_status, "tabId": viewer_tab_id})
 
     def _resolve_running_state(
@@ -3681,6 +3960,13 @@ class _TaskRunnerMixin:
         window, a history click on a running chat) is resolved through
         the printer's per-task subscriber map instead.
 
+        So is a tab that a replay bound to another chat than its own
+        run's (``_shown_own_state_locked``, the rule its answers and
+        typed lines follow): the Stop is for the task the tab shows,
+        and when that chat runs nothing it finds no task, never the
+        run its user cannot see.  A command naming a run by its token
+        is for that run whatever the tab shows.
+
         Args:
             tab_id: The tab the command names.
             run_token: When non-empty, only a state created by the
@@ -3691,7 +3977,9 @@ class _TaskRunnerMixin:
             The owning state, or ``None`` when no running task is
             reachable from *tab_id*.
         """
-        owner_state = agent_state.find_by_tab(tab_id)
+        owner_state = (
+            agent_state.find_by_tab(tab_id) if run_token else self._shown_own_state_locked(tab_id)
+        )
         if owner_state is not None and owner_state.stop_event is None:
             owner_state = None
         if owner_state is not None and run_token and (owner_state.client_run_token != run_token):

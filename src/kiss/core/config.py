@@ -5,6 +5,7 @@
 
 """Configuration Pydantic models for KISS agent settings."""
 
+import contextvars
 import json
 import math
 import os
@@ -12,7 +13,8 @@ import random
 import sqlite3
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -442,7 +444,64 @@ def _init_artifact_dir() -> None:
         _artifact_dir = _generate_artifact_dir()
 
 
+_run_overlay: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar(
+    "kiss_config_run_overlay", default=None,
+)
+"""The :class:`Config` fields the calling run reads with values of its own."""
+
+
+@contextmanager
+def run_overlay() -> Iterator[dict[str, Any]]:
+    """Give the calling context an overlay of :class:`Config` fields for one run.
+
+    Inside the block a field the yielded dict names is read with the
+    dict's value from every ``Config`` object (``DEFAULT_CONFIG``
+    included), in this context and in the copies made of it (the helper
+    threads an agent calls its tools on); every other thread keeps
+    reading the real values.  A task of a project runs under it with the
+    project's API keys and switches (``task_runner._run_task``), so two
+    tasks of different projects use different keys at the same time.
+    The dict starts empty: the run fills it once it knows its project.
+
+    Yields:
+        The overlay: field name to the value the run reads.
+    """
+    overlay: dict[str, Any] = {}
+    token = _run_overlay.set(overlay)
+    try:
+        yield overlay
+    finally:
+        _run_overlay.reset(token)
+
+
+def current_run_overlay() -> dict[str, Any] | None:
+    """Return the overlay of the calling context, ``None`` outside :func:`run_overlay`."""
+    return _run_overlay.get()
+
+
+def run_overlay_env() -> dict[str, str]:
+    """Return the environment variables the calling run's overlay stands for.
+
+    The upper-case fields of :class:`Config` are the ones read from the
+    environment variable of the same name (the API keys), so the
+    overlay's value of such a field is what a child process of the run
+    must find in that variable instead of the daemon's.
+
+    Returns:
+        Variable name to value; empty outside :func:`run_overlay`.
+    """
+    overlay = _run_overlay.get() or {}
+    return {name: str(value) for name, value in overlay.items() if name.isupper()}
+
+
 class Config(BaseModel):
+    def __getattribute__(self, name: str) -> Any:
+        """Read attribute *name*, from the calling run's overlay when it names it."""
+        overlay = _run_overlay.get()
+        if overlay and name in overlay:
+            return overlay[name]
+        return super().__getattribute__(name)
+
     GEMINI_API_KEY: str = Field(
         default_factory=lambda: os.getenv("GEMINI_API_KEY", ""),
         description="Gemini API key (can also be set via GEMINI_API_KEY env var)",

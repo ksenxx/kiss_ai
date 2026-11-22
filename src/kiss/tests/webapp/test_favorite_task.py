@@ -4,16 +4,19 @@
 # add your name here
 """Frontend wiring of the favourite (star) button on the history panel.
 
-Static checks on ``media/main.js`` / ``media/api.js`` / ``media/main.css``:
-a star button is rendered for each history row, reads ``s.is_favorite``
-and posts ``setFavorite`` on click.  The backend (``_get_history``
-populating ``is_favorite``, the ``setFavorite`` command persisting it)
-is covered by ``kiss/tests/server/test_favorite_task.py``.
+Static checks on ``media/main.js`` / ``media/main.css``: the star
+button's class is in the script and styled in the stylesheet.  What a
+press does (the lit star, its name, the ``setFavorite`` command and the
+machine it is sent to) is tested on the real page in
+``webapp/test/historyTaskActionsRow.test.js`` and
+``webapp/test/historyMachineFilter.test.js``.  The backend
+(``_get_history`` populating ``is_favorite``, the ``setFavorite``
+command persisting it) is covered by
+``kiss/tests/server/test_favorite_task.py``.
 """
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 MAIN_JS = (
@@ -46,26 +49,6 @@ class TestMainJsFavoriteButton:
         src = self._js()
         assert "sidebar-item-favorite" in src, (
             "main.js must create a button with class sidebar-item-favorite"
-        )
-
-    def test_favorite_click_posts_set_favorite_message(self) -> None:
-        src = self._js()
-        # The click posts `api.setFavorite(historyWrite({taskId, isFavorite},
-        # machine))`: the payload goes through historyWrite so a row of a
-        # remote machine is written on that machine (f2be976174).
-        assert re.search(
-            r"api\.setFavorite\(\s*historyWrite\(\s*\{",
-            src,
-        ), "main.js must call api.setFavorite(historyWrite({...}, machine)) on click"
-        api_src = MAIN_JS.with_name("api.js").read_text()
-        assert "'setFavorite'" in api_src, (
-            "api.js must catalog the setFavorite wire command"
-        )
-
-    def test_favorite_button_reads_s_is_favorite(self) -> None:
-        src = self._js()
-        assert "s.is_favorite" in src, (
-            "main.js must read s.is_favorite to decide the icon state"
         )
 
     def test_favorite_css_defines_favorited_class(self) -> None:

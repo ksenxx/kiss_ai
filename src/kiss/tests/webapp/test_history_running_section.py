@@ -32,7 +32,6 @@ from playwright.sync_api import expect, sync_playwright
 
 from kiss.agents.sorcar import persistence
 from kiss.agents.sorcar.daemon_client import run
-from kiss.tests.conftest import click_row_menu_item
 from kiss.tests.server.parallel_agent_harness import (
     STANDIN_MODEL,
     StandInModelServer,
@@ -41,6 +40,7 @@ from kiss.tests.server.parallel_agent_harness import (
 )
 from kiss.tests.server.test_content_tab_file_links import _ServerHarness
 from kiss.tests.webapp.test_content_tab_file_links import _open_page
+from kiss.tests.webapp.test_history_filter_menu import open_filter_options, pick_filter_option
 
 
 def _seed(harness: _ServerHarness, title: str, chat: str, timestamp: float) -> str:
@@ -201,7 +201,7 @@ def test_running_history_section_lifecycle(flat: bool) -> None:
                 # (applyHistoryFilterVisibility -> loadMoreHistory).
                 expect(page.locator("#history-list .sidebar-item")).to_have_count(56)
                 if flat:
-                    page.click("#history-view-toggle")
+                    pick_filter_option(page, "group", "None")
                 # A task that died at start (its model import, say) is
                 # dated history, not "Running": name the real cause.
                 _assert_live(task)
@@ -215,15 +215,12 @@ def test_running_history_section_lifecycle(flat: bool) -> None:
                 # Expand the completed chat so grouped mode has enough visible
                 # rows to scroll and request its next real page.
                 if not flat:
-                    click_row_menu_item(
-                        page.locator('[data-chat-id="other-chat"] > .history-chat-header'),
-                        ".history-chat-collapse",
-                    )
+                    page.click('[data-chat-id="other-chat"] .history-chat-collapse')
                 _load_more(page, 56)
-                ids = page.locator("#history-list .ids-copy-task").evaluate_all(
-                    "els => els.map(el => el.parentElement.textContent)",
-                )
-                assert len(ids) == len(set(ids)) == 56
+                # Every task has a text of its own: a text listed twice
+                # is a task listed twice.
+                texts = page.locator("#history-list .sidebar-item-text").all_text_contents()
+                assert len(texts) == len(set(texts)) == 56
                 assert _shape(page)[0] == "Running"
                 # Visibility/midnight relabeling must not turn Running into a date.
                 page.evaluate("document.dispatchEvent(new Event('visibilitychange'))")
@@ -231,9 +228,9 @@ def test_running_history_section_lifecycle(flat: bool) -> None:
 
                 # Every layout switch keeps the pinned section and date boundary.
                 _assert_live(task)
-                page.click("#history-view-toggle")
+                pick_filter_option(page, "group", "Chat" if flat else "None")
                 assert _shape(page)[0] == "Running"
-                page.click("#history-view-toggle")
+                pick_filter_option(page, "group", "None" if flat else "Chat")
                 assert _shape(page)[0] == "Running"
 
                 # Search/tag predicates must apply before running-first paging.
@@ -245,8 +242,7 @@ def test_running_history_section_lifecycle(flat: bool) -> None:
                 page.fill("#history-search", "e")
                 expect(page.locator("#history-list .sidebar-item")).to_have_count(50)
                 expect(live).to_have_count(1)
-                page.click("#history-filters-toggle")
-                page.select_option("#hf-tag", "testing")
+                pick_filter_option(page, "tag", "testing")
                 expect(page.locator("#history-list > .history-day-sep").first).to_have_text(
                     "Running"
                 )
@@ -255,12 +251,9 @@ def test_running_history_section_lifecycle(flat: bool) -> None:
                 expect(
                     page.locator("#history-list .sidebar-item").filter(has_text="older completed")
                 ).to_have_count(0)
-                ids = page.locator("#history-list .ids-copy-task").evaluate_all(
-                    "els => els.map(el => el.parentElement.textContent)",
-                )
-                assert len(ids) == len(set(ids)) == 55
-                page.select_option("#hf-tag", "")
-                page.click("#history-filters-toggle")
+                texts = page.locator("#history-list .sidebar-item-text").all_text_contents()
+                assert len(texts) == len(set(texts)) == 55
+                pick_filter_option(page, "tag", "All")
 
                 # The newer companion shares the running chat: its date and row
                 # order must remain correct when the prioritized row arrived first.
@@ -278,16 +271,20 @@ def test_running_history_section_lifecycle(flat: bool) -> None:
                     assert titles == ["section-live companion", prompt]
 
                 # Empty filters hide the Running label as well as dated sections.
-                page.locator("#history-filters-toggle").click()
-                for selector in ("#hf-running", "#hf-completed", "#hf-errors"):
-                    page.locator(f"label:has({selector})").click()
-                    expect(page.locator(selector)).not_to_be_checked()
+                # The Status options are unticked in one visit to the menu,
+                # which stays open until its button is clicked again.
+                statuses = open_filter_options(page, "status")
+                expect(statuses).to_have_text(["Running", "Errored", "Succeeded"])
+                for status in statuses.all():
+                    status.click()
+                    expect(status).to_have_attribute("aria-checked", "false")
                 expect(page.locator("#history-list .sidebar-empty-filter")).to_be_visible()
                 expect(page.locator("#history-list > .history-day-sep:visible")).to_have_count(0)
-                for selector in ("#hf-running", "#hf-completed", "#hf-errors"):
-                    page.locator(f"label:has({selector})").click()
-                    expect(page.locator(selector)).to_be_checked()
-                # The list re-renders after the checkbox state changes, so
+                for status in statuses.all():
+                    status.click()
+                    expect(status).to_have_attribute("aria-checked", "true")
+                page.click("#history-filter-btn")
+                # The list re-renders after the Status options change, so
                 # wait for the Running label instead of snapshotting at once.
                 _assert_live(task)
                 expect(page.locator("#history-list > :visible").first).to_have_text("Running")

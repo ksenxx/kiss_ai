@@ -4,17 +4,19 @@
 # add your name here
 """End-to-end tests of the ``/install`` SEA.
 
-The machines are sandbox homes reached through a stand-in ``ssh`` on
-PATH that runs the remote command in bash with ``HOME`` pointing at the
-host's directory, so the checkout search and the ``install.sh`` run are
-the real shell commands; only the network is missing.  Each home's
-``install.sh`` is a script that records how it was started.
+The machines are sandbox homes, each behind a private ``sshd`` of its
+own (:mod:`kiss.tests.ssh_server`) whose logins have the home as
+``HOME``: the SEA's own ``ssh`` logs in, and the checkout search and the
+``install.sh`` run are the real remote commands; only the hosts are
+local.  Each home's ``install.sh`` is a script that records how it was
+started.
 """
 
 from __future__ import annotations
 
-import os
+import socket
 import stat
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -27,7 +29,7 @@ from kiss.agents.seas.install.install_sea import (
     install_on_machines,
 )
 from kiss.agents.sorcar import sea_commands
-from kiss.agents.sorcar.machines import Machine, save_machines
+from kiss.agents.sorcar.machines import SSH_CONFIG_ENV, Machine, save_machines
 from kiss.tests.agents.seas.conftest import git, run_sea
 from kiss.tests.agents.seas.sea_contract import (
     assert_worker_contract,
@@ -37,27 +39,9 @@ from kiss.tests.agents.seas.sea_contract import (
 )
 from kiss.tests.agents.sorcar.local_model_server import finish_body, tool_call_body
 from kiss.tests.conftest import posix_only
+from kiss.tests.ssh_server import SSHD, SshServer, start_sshd
 
-pytestmark = posix_only("drives the SEA through a bash ssh stand-in")
-
-# Options are dropped; the destination picks the host's HOME under
-# $REMOTE_ROOT; ``dead`` refuses the connection like a real client (255)
-# and ``hang`` never answers.
-FAKE_SSH = """#!/bin/bash
-while [ $# -gt 0 ]; do
-    case "$1" in
-        -o|-p|-F) shift 2 ;;
-        -*) shift ;;
-        *) break ;;
-    esac
-done
-host="${1#*@}"
-shift
-[ "$host" = dead ] && { echo "ssh: connect to host dead: Connection refused" >&2; exit 255; }
-[ "$host" = hang ] && exec sleep 5
-export HOME="$REMOTE_ROOT/$host"
-exec bash -c "$*"
-"""
+pytestmark = posix_only("the machines are logins of a local sshd into a POSIX shell")
 
 # Twenty numbered lines, a coloured one, the password box, then the exit
 # code in the home's ``exit_code`` file (0 when absent).
@@ -83,19 +67,41 @@ def make_checkout(home: Path, name: str, origin: str) -> Path:
     return checkout
 
 
+class Remotes:
+    """The machines of a test: their homes under :attr:`root`, an ``sshd`` in front of each."""
+
+    def __init__(self, root: Path, env: pytest.MonkeyPatch) -> None:
+        self.root = root
+        self.env = env
+        self.servers: list[SshServer] = []
+
+    def machine(self, name: str) -> Machine:
+        """Start the ``sshd`` whose logins have ``root/<name>`` as HOME; return the machine at it.
+
+        The servers share their keys, so one client config (``$KISS_SSH_CONFIG``) logs in to all.
+        """
+        server = start_sshd(self.root.with_name("sshd"), None, home=self.root / name)
+        self.servers.append(server)
+        self.env.setenv(SSH_CONFIG_ENV, str(server.config))
+        return Machine(name, ssh=server.login)
+
+
 @pytest.fixture
-def remotes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Put the stand-in ssh on PATH, isolate KISS_HOME and return the root of the host homes."""
-    bindir = tmp_path / "bin"
-    bindir.mkdir()
-    fake = bindir / "ssh"
-    fake.write_text(FAKE_SSH)
-    fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
-    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ['PATH']}")
-    monkeypatch.setenv("REMOTE_ROOT", str(tmp_path / "remotes"))
+def remotes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Remotes]:
+    """Isolate KISS_HOME and return the test's machines; their servers are stopped at the end.
+
+    The homes and the servers' keys are under a directory named with a space, both quotes, a
+    ``#`` and a ``%``: every path of a login has to survive them, in the servers' and the
+    client's configuration as in the commands the SEA sends, whatever the runner's temp root is.
+    """
+    if not SSHD:
+        pytest.skip("no sshd on this host")
     monkeypatch.setenv("KISS_HOME", str(tmp_path / "local" / ".kiss"))
     (tmp_path / "local" / ".kiss").mkdir(parents=True)
-    return tmp_path / "remotes"
+    machines = Remotes(tmp_path / "o'neil's \"lab\" #1 100%" / "remotes", monkeypatch)
+    yield machines
+    for server in machines.servers:
+        server.stop()
 
 
 def test_sea_methods_follow_the_user_contract() -> None:
@@ -136,37 +142,40 @@ def test_find_checkout_matches_the_private_repo_in_any_url_form() -> None:
     assert find_checkout("") == ""
 
 
-def test_every_machine_is_installed_and_failures_are_reported(remotes: Path) -> None:
+def test_every_machine_is_installed_and_failures_are_reported(remotes: Remotes) -> None:
     """Each ssh machine runs install.sh in its private checkout; the rest say why they failed."""
-    ok = make_checkout(remotes / "alpha", "kiss", "https://github.com/ksenxx/kiss.git")
-    make_checkout(remotes / "alpha", "s10s", "https://github.com/SeamlessLabs/s10s.git")
-    elsewhere = make_checkout(remotes / "beta", "code", "git@github.com:ksenxx/kiss.git")
-    (remotes / "beta" / "exit_code").write_text("3")
-    make_checkout(remotes / "gamma", "fork", "https://github.com/someone/kiss.git")
-    save_machines(
-        [
-            Machine("alpha", ssh="me@alpha"),
-            Machine("beta", ssh="me@beta"),
-            Machine("gamma", ssh="me@gamma"),
-            Machine("dead", ssh="me@dead"),
-            Machine("web", url="https://web:8787", password="pw"),
-        ]
-    )
+    ok = make_checkout(remotes.root / "alpha", "kiss", "https://github.com/ksenxx/kiss.git")
+    make_checkout(remotes.root / "alpha", "s10s", "https://github.com/SeamlessLabs/s10s.git")
+    elsewhere = make_checkout(remotes.root / "beta", "code", "git@github.com:ksenxx/kiss.git")
+    (remotes.root / "beta" / "exit_code").write_text("3")
+    make_checkout(remotes.root / "gamma", "fork", "https://github.com/someone/kiss.git")
+    alpha, beta, gamma = (remotes.machine(name) for name in ("alpha", "beta", "gamma"))
+    # The local port of an open connection: taken, and with no listener, so every system
+    # refuses a connection to it (macOS drops the ones to a socket that is only bound).
+    with socket.create_server(("127.0.0.1", 0)) as anchor, socket.socket() as holder:
+        holder.connect(anchor.getsockname())
+        port = holder.getsockname()[1]
+        dead = Machine("dead", ssh=f"me@127.0.0.1:{port}")
+        web = Machine("web", url="https://web:8787", password="pw")
+        save_machines([alpha, beta, gamma, dead, web])
 
-    report = install_on_machines()
+        report = install_on_machines()
 
     assert report.startswith("Installed 1 of 5 machine(s).")
-    assert (remotes / "alpha" / "ran").read_text() == f"{ok} --non-interactive\n"
-    assert (remotes / "beta" / "ran").read_text() == f"{elsewhere} --non-interactive\n"
-    assert not (remotes / "gamma" / "ran").exists()
-    assert f"alpha (me@alpha): ok in {ok}\n" in report
-    assert f"beta (me@beta): FAILED: install.sh exited 3 in {elsewhere}" in report
-    assert "gamma (me@gamma): FAILED: no clone of https://github.com/ksenxx/kiss.git" in report
-    assert "dead (me@dead): FAILED: cannot connect: ssh: connect to host dead" in report
+    assert (remotes.root / "alpha" / "ran").read_text() == f"{ok} --non-interactive\n"
+    assert (remotes.root / "beta" / "ran").read_text() == f"{elsewhere} --non-interactive\n"
+    assert not (remotes.root / "gamma" / "ran").exists()
+    assert f"alpha ({alpha.ssh}): ok in {ok}\n" in report
+    assert f"beta ({beta.ssh}): FAILED: install.sh exited 3 in {elsewhere}" in report
+    assert f"gamma ({gamma.ssh}): FAILED: no clone of https://github.com/ksenxx/kiss.git" in report
+    assert (
+        f"dead ({dead.ssh}): FAILED: cannot connect: "
+        f"ssh: connect to host 127.0.0.1 port {port}: Connection refused\n"
+    ) in report
     assert "web (no ssh): FAILED: registered by URL" in report
-    alpha = report.split("\n\n")[1].splitlines()
-    assert len(alpha) == 1 + sea_module.TAIL_LINES
-    assert alpha[-3:] == [
+    block = report.split("\n\n")[1].splitlines()  # alpha's
+    assert len(block) == 1 + sea_module.TAIL_LINES
+    assert block[-3:] == [
         "done",
         "*  Remote access password:  [redacted]",
         "warning on stderr",
@@ -175,38 +184,51 @@ def test_every_machine_is_installed_and_failures_are_reported(remotes: Path) -> 
     assert "\x1b" not in report and "line 7\n" not in report
 
 
-def test_named_machines_only_and_the_registry_checks(remotes: Path) -> None:
+def test_named_machines_only_and_the_registry_checks(remotes: Remotes) -> None:
     """A subset installs only those machines; unknown names and an empty registry stop early."""
     assert install_on_machines() == (
         "No machine is registered (`/machine add user@host`); nothing to install."
     )
-    make_checkout(remotes / "alpha", "kiss", "https://github.com/ksenxx/kiss.git")
-    make_checkout(remotes / "beta", "kiss", "https://github.com/ksenxx/kiss.git")
-    save_machines([Machine("alpha", ssh="me@alpha"), Machine("beta", ssh="me@beta")])
+    make_checkout(remotes.root / "alpha", "kiss", "https://github.com/ksenxx/kiss.git")
+    make_checkout(remotes.root / "beta", "kiss", "https://github.com/ksenxx/kiss.git")
+    save_machines([remotes.machine("alpha"), remotes.machine("beta")])
 
     assert install_on_machines("alpha, nope,zed") == (
         "Not registered: nope, zed (see `/machine list`)."
     )
     assert install_on_machines(" beta ").startswith("Installed 1 of 1 machine(s).")
-    assert (remotes / "beta" / "ran").exists() and not (remotes / "alpha" / "ran").exists()
+    assert (remotes.root / "beta" / "ran").exists()
+    assert not (remotes.root / "alpha" / "ran").exists()
 
 
-def test_timeouts_are_reported(remotes: Path) -> None:
-    """A search or an install that outlives its limit is a failure naming the limit."""
-    checkout = make_checkout(remotes / "slow", "kiss", "https://github.com/ksenxx/kiss.git")
-    (checkout / "install.sh").write_text("#!/bin/bash\nsleep 5\n")
-    assert install_machine(Machine("slow", ssh="me@slow"), timeout=1) == (
-        f"slow (me@slow): FAILED: install.sh in {checkout} ran over 1 s."
+def test_timeouts_are_reported(remotes: Remotes) -> None:
+    """A search or an install that outlives its limit is a failure naming the limit.
+
+    The install prints for a minute, and ends once nobody reads it.  Its limit
+    is 5 s because the limit bounds the search before it as well, and that is
+    a whole ssh login.  The search with no answer is of a port that accepts
+    the connection and never says a word.
+    """
+    checkout = make_checkout(remotes.root / "slow", "kiss", "https://github.com/ksenxx/kiss.git")
+    (checkout / "install.sh").write_text(
+        "#!/bin/bash\nfor i in $(seq 600); do echo installing || exit; sleep 0.1; done\n"
     )
-    assert install_machine(Machine("hang", ssh="me@hang"), timeout=1) == (
-        "hang (me@hang): FAILED: no answer to the checkout search within 1 s."
+    slow = remotes.machine("slow")
+    assert install_machine(slow, timeout=5) == (
+        f"slow ({slow.ssh}): FAILED: install.sh in {checkout} ran over 5 s."
     )
+    with socket.create_server(("127.0.0.1", 0)) as silent:
+        hang = Machine("hang", ssh=f"me@127.0.0.1:{silent.getsockname()[1]}")
+        assert install_machine(hang, timeout=1) == (
+            f"hang ({hang.ssh}): FAILED: no answer to the checkout search within 1 s."
+        )
 
 
-def test_agent_run_calls_the_tool_once_and_reports(tmp_path: Path, remotes: Path) -> None:
+def test_agent_run_calls_the_tool_once_and_reports(tmp_path: Path, remotes: Remotes) -> None:
     """Under the SEA's configuration the model sees only the install tool and finish."""
-    make_checkout(remotes / "alpha", "kiss", "https://github.com/ksenxx/kiss.git")
-    save_machines([Machine("alpha", ssh="me@alpha")])
+    make_checkout(remotes.root / "alpha", "kiss", "https://github.com/ksenxx/kiss.git")
+    alpha = remotes.machine("alpha")
+    save_machines([alpha])
     script = [
         tool_call_body("install_on_machines", {"machines": ""}, prompt_tokens=500),
         finish_body("<p>alpha: ok.</p>", prompt_tokens=600),
@@ -217,10 +239,10 @@ def test_agent_run_calls_the_tool_once_and_reports(tmp_path: Path, remotes: Path
     parsed, agentic = run_sea(run, script, tmp_path, max_steps=4)
 
     assert parsed["success"] is True and "alpha" in parsed["summary"]
-    assert (remotes / "alpha" / "ran").exists()
+    assert (remotes.root / "alpha" / "ran").exists()
     assert len(agentic) == 2, [list(r) for r in agentic]
     for request in agentic:
         assert tool_names(request) == {"install_on_machines", "finish"}, tool_names(request)
         assert system_message(request).startswith(sea_module.SYSTEM_PROMPT)
     [result] = tool_results(agentic[1])
-    assert "Installed 1 of 1 machine(s)." in result and "alpha (me@alpha): ok in" in result
+    assert "Installed 1 of 1 machine(s)." in result and f"alpha ({alpha.ssh}): ok in" in result

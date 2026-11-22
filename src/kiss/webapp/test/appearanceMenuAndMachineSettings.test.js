@@ -8,15 +8,15 @@
 //
 // * the Bedrock settings subpanel (after Custom Models, collapsed on
 //   every open, holding the five AWS inputs that left API Keys);
-// * the "..." menu's appearance items: "Dark mode" / "Light mode",
+// * the appearance buttons of the strip under the Chats list, each
+//   named for what a press does: "Dark mode" / "Light mode",
 //   "High contrast" / "Low contrast" (low by default) and "Auto mode"
 //   (dark from 7 pm to 7 am on this device's clock, re-checked every
 //   minute), all persisted in localStorage;
 // * the settings sheet opening for the machine the chat header shows:
 //   its loads and saves carry `machine`, only that machine's forwarded
 //   replies fill the form, and closing the sheet repaints this
-//   daemon's values;
-// * the CHATS row details line with the machine, max budget and agent.
+//   daemon's values.
 
 'use strict';
 
@@ -31,8 +31,9 @@ const {
 } = require('./simplify2_harness');
 const {openSettings, typeInto, MACHINES} = require('./settings_helpers');
 
+/** What the icon button `id` says a press does (its tooltip). */
 function label(win, id) {
-  return byId(win, id).querySelector('.more-item-label').textContent;
+  return byId(win, id).dataset.tooltip;
 }
 
 /** A page whose chat header lists `laptop` (this daemon) and `gpu-box`. */
@@ -156,7 +157,7 @@ function testThemeAndContrastItems() {
     'low contrast by default',
   );
   assert.strictEqual(
-    byId(win, 'theme-auto-btn').getAttribute('aria-checked'),
+    byId(win, 'theme-auto-btn').getAttribute('aria-pressed'),
     'false',
   );
 
@@ -214,7 +215,7 @@ function testAutoMode() {
   click(win, byId(win, 'theme-auto-btn'));
   assert.strictEqual(win.localStorage.getItem('kissRemoteTheme'), 'auto');
   assert.strictEqual(
-    byId(win, 'theme-auto-btn').getAttribute('aria-checked'),
+    byId(win, 'theme-auto-btn').getAttribute('aria-pressed'),
     'true',
   );
   assert.ok(!body.classList.contains('light-theme'), 'dark at 8 pm');
@@ -233,7 +234,7 @@ function testAutoMode() {
   check.fn();
   assert.ok(!body.classList.contains('light-theme'), 'dark from 7 pm');
   assert.strictEqual(
-    byId(win, 'theme-auto-btn').getAttribute('aria-checked'),
+    byId(win, 'theme-auto-btn').getAttribute('aria-pressed'),
     'true',
     'auto stays on across the flips',
   );
@@ -243,7 +244,7 @@ function testAutoMode() {
   assert.ok(body.classList.contains('light-theme'), 'Light mode pins light');
   assert.strictEqual(win.localStorage.getItem('kissRemoteTheme'), 'light');
   assert.strictEqual(
-    byId(win, 'theme-auto-btn').getAttribute('aria-checked'),
+    byId(win, 'theme-auto-btn').getAttribute('aria-pressed'),
     'false',
   );
   hour.value = 23;
@@ -271,7 +272,7 @@ function testAutoMode() {
     'dark at 2 am',
   );
   assert.strictEqual(
-    byId(reload.win, 'theme-auto-btn').getAttribute('aria-checked'),
+    byId(reload.win, 'theme-auto-btn').getAttribute('aria-pressed'),
     'true',
   );
   reload.win.close();
@@ -555,7 +556,7 @@ function testAppearanceSurvivesRefusedStorage() {
   assert.strictEqual(label(win, 'contrast-btn'), 'Low contrast');
   click(win, byId(win, 'theme-auto-btn'));
   assert.strictEqual(
-    byId(win, 'theme-auto-btn').getAttribute('aria-checked'),
+    byId(win, 'theme-auto-btn').getAttribute('aria-pressed'),
     'true',
     'auto mode switches on without storage',
   );
@@ -569,81 +570,14 @@ function testAppearanceSurvivesRefusedStorage() {
   );
 }
 
-// ---- CHATS row details: machine, max budget, agent ----
-
-function testHistoryRowSettingsLine() {
-  const {win, posted} = pageWithMachines();
-  win.document.getElementById('sidebar').classList.add('open');
-  const req = lastMsg(posted, 'getHistory');
-  const row = overrides =>
-    Object.assign(
-      {
-        id: 'chat-' + overrides.task_id,
-        task_id: overrides.task_id,
-        title: 'task ' + overrides.task_id,
-        timestamp: 1_700_000_000,
-        preview: 'task ' + overrides.task_id,
-        has_events: false,
-        failed: false,
-        is_running: false,
-        awaiting_answer: false,
-        tokens: 1,
-        cost: 0,
-        steps: 1,
-        is_favorite: false,
-        work_dir: '',
-        startTs: 1_700_000_000_000,
-        endTs: 0,
-      },
-      overrides,
-    );
-  send(win, {
-    type: 'history',
-    offset: 0,
-    generation: req ? req.generation : undefined,
-    sessions: [
-      row({
-        task_id: 1,
-        machine: 'gpu-box',
-        max_budget: 12.5,
-        sea: 'write_paper',
-        tool_profile: 'review',
-        timeout: 60,
-      }),
-      row({task_id: 2, max_budget: 0}),
-    ],
-  });
-  const lines = {};
-  win.document.querySelectorAll('#history-list .sidebar-item').forEach(item => {
-    const text = item.querySelector('.sidebar-item-text').textContent.trim();
-    const settings = item.querySelector('.running-item-settings');
-    lines[text] = settings ? settings.textContent : null;
-    if (settings) assert.strictEqual(settings.title, settings.textContent);
-  });
-  assert.strictEqual(
-    lines['task 1'],
-    'machine gpu-box • max budget $12.50 • agent write_paper • tools review • timeout 60s',
-  );
-  assert.strictEqual(
-    lines['task 2'],
-    'machine laptop',
-    'a local row without a budget or agent names this daemon only',
-  );
-  win.close();
-  console.log(
-    '  ok - CHATS row details list the machine, max budget and agent',
-  );
-}
-
 try {
   testBedrockSubpanel();
   testThemeAndContrastItems();
   testAutoMode();
   testSettingsOpenForTheSelectedMachine();
-  testHistoryRowSettingsLine();
   testRemoteSheetKeepsThisDaemonsStateApart();
   testAppearanceSurvivesRefusedStorage();
-  console.log('\n7 passed, 0 failed');
+  console.log('\n6 passed, 0 failed');
   process.exit(0);
 } catch (err) {
   console.error('FAIL:', err && err.stack ? err.stack : err);

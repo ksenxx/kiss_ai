@@ -31,15 +31,18 @@ the same touch events and native scrolling a finger would.
 
 from __future__ import annotations
 
+import base64
 import http.server
 import os
 import threading
+import time
 from pathlib import Path
 
 import pytest
 
 from kiss.agents.sorcar import machines as mach
 from kiss.agents.sorcar import persistence, web_stealth
+from kiss.server.browser_tab import _mouse_params
 from kiss.tests.remote_daemon import start_remote_daemon
 from kiss.tests.server.test_explorer_scm_commands import (
     harness,  # noqa: F401  (module fixture used by param name)
@@ -133,11 +136,11 @@ _LIFTED_JS = """new Promise(resolve => {
 
 
 def _quick_drag(cdp, start: tuple[float, float], end: tuple[float, float],
-                steps: int = 6) -> None:
+                steps: int = 6, between=None) -> None:
     """:func:`_drag`, again when the detector may have ignored the
     finger as too slow: every touch event is a CDP round trip, and on a
     loaded machine the whole finger can take longer than a swipe may,
-    which the detector rightly ignores.
+    which the detector rightly ignores.  *between* is :func:`_drag`'s.
 
     The page clock never reads less than the detector's, so a time
     under the limit is one the detector accepted.  At the limit or over
@@ -156,7 +159,7 @@ def _quick_drag(cdp, start: tuple[float, float], end: tuple[float, float],
     down = 0
     for _ in range(5):
         cdp.send("Runtime.evaluate", {"expression": "window.__fingerDownMs = null"})
-        _drag(cdp, start, end, steps)
+        _drag(cdp, start, end, steps, between)
         down, screen = cdp.send("Runtime.evaluate", {
             "expression": _LIFTED_JS % _SCREEN_JS,
             "awaitPromise": True, "returnByValue": True,
@@ -166,14 +169,29 @@ def _quick_drag(cdp, start: tuple[float, float], end: tuple[float, float],
     raise AssertionError(f"the finger took {down} ms, never a swipe's time")
 
 
-def _swipe_left(cdp, y: float = _Y) -> None:
-    """The finger moves right to left: the next screen."""
-    _quick_drag(cdp, (_RIGHT_X, y), (_LEFT_X, y))
+def _rest() -> None:
+    """Hold the finger still before it lifts, so that it lifts without
+    speed and the browser starts no fling.
+
+    A finger that lifts at speed starts one even where nothing scrolls.
+    Chromium on macOS and Linux ends it at once; its headless Windows
+    build never does, and takes the next touch for the one that stops
+    the fling: that touch's tap is no click.  No phone runs that build
+    (the phone layout is for a phone's user agent), so a swipe that a
+    tap follows rests; to the page's detector it is the same swipe."""
+    time.sleep(0.2)
 
 
-def _swipe_right(cdp, y: float = _Y) -> None:
-    """The finger moves left to right: the previous screen."""
-    _quick_drag(cdp, (_LEFT_X, y), (_RIGHT_X, y))
+def _swipe_left(cdp, y: float = _Y, rest: bool = False) -> None:
+    """The finger moves right to left: the next screen.  *rest*: it
+    stops before it lifts (:func:`_rest`), for a tap to follow."""
+    _quick_drag(cdp, (_RIGHT_X, y), (_LEFT_X, y), between=_rest if rest else None)
+
+
+def _swipe_right(cdp, y: float = _Y, rest: bool = False) -> None:
+    """The finger moves left to right: the previous screen.  *rest*: it
+    stops before it lifts (:func:`_rest`), for a tap to follow."""
+    _quick_drag(cdp, (_LEFT_X, y), (_RIGHT_X, y), between=_rest if rest else None)
 
 
 def _wait_screen(page, screen: str) -> None:
@@ -190,6 +208,15 @@ def _settled_screen(page) -> str:
 
 
 _VIEW = "#content-tab-area .content-tab-view:not([style*='display: none']) "
+
+
+def _press_info_strip(page, button_id: str) -> None:
+    """Press a button of the strip under the task-info drawer, opening
+    the drawer first."""
+    if _screen(page) != "info":
+        page.click("#meta-drawer-btn")
+        _wait_screen(page, "info")
+    page.click(f"#{button_id}")
 
 
 def _open_file_from_drawer(page, name: str) -> None:
@@ -458,11 +485,13 @@ def test_drags_that_are_not_swipes_keep_the_screen(browser, harness):
         _wait_screen(page, "info")
         _swipe_right(cdp)
         _wait_screen(page, "chat")
-        # A settings sheet over the page keeps the gesture.
-        page.click("#more-btn")
+        # A settings sheet over the page keeps the gesture.  Settings is
+        # on the Chats screen's strip and leaves that screen for its sheet.
+        _swipe_right(cdp)
+        _wait_screen(page, "chats")
         page.click("#settings-btn")
         page.wait_for_selector("#settings-panel.open", timeout=10000)
-        page.wait_for_timeout(400)
+        _wait_screen(page, "chat")
         _swipe_right(cdp, y=300)
         assert _settled_screen(page) == "chat"
         assert page.locator("#settings-panel.open").count() == 1
@@ -780,8 +809,7 @@ def test_a_lone_file_or_terminal_has_its_bar_and_swipes_back_to_the_chat_left(
         local = _chat_on_screen(page)[0]
         _open_file_from_drawer(page, "feature.txt")
         assert _bar(page) == ["feature.txt"]
-        page.click("#more-btn")
-        page.click("#terminal-btn")
+        _press_info_strip(page, "terminal-btn")
         page.wait_for_selector(_VIEW + ".terminal-view", timeout=30000)
         assert _bar(page) == ["feature.txt", "Terminal"]
         page.click("#tab-list .chat-tab:not(.active) .chat-tab-close")
@@ -828,8 +856,7 @@ def test_a_lone_browser_tab_has_its_bar_and_swipes_back_from_its_page(
         _pick_chat(page, cdp, "alpha-chat", "Alpha task")
         page.fill("#task-input", "a draft keeps this chat open")
         _pick_chat(page, cdp, "beta-chat", "Beta task")
-        page.click("#more-btn")
-        page.click("#browser-btn")
+        _press_info_strip(page, "browser-btn")
         _wait_screen(page, "file")
         _wait_band(page, _DOCUMENT_DOWN, "red")
         bar = _bar(page)
@@ -957,3 +984,103 @@ def test_a_swipe_that_begins_on_a_row_menu_closes_it_with_the_drawer(browser, ha
         assert not menu.evaluate("menu => menu.matches(':popover-open')")
     finally:
         context.close()
+
+
+# ---- A press on the streamed page while its picture changes size -------
+
+_MEDIA = Path(__file__).resolve().parents[2] / "webapp" / "media"
+
+# The page the daemon's browser shows: one button, which stays where it
+# is when the page is resized, and counts its clicks.
+_BUTTON_PAGE = (
+    "<body style='margin:0'><button style='position:fixed;left:310px;top:20px;"
+    "width:20px;height:20px;padding:0' onclick='window.hits++'></button>"
+    "<script>window.hits = 0</script></body>"
+)
+
+# The browser tab's view (browserTab.js) where the page mounts it, under
+# the page's stylesheet, with a screen of 640x480: `sent` is what the
+# view sends to the daemon.
+_VIEWER_PAGE = (
+    "<body style='margin:0'><div id='content-tab-area' style='width:640px'>"
+    "<div class='content-tab-view browser-tab-view'></div></div></body>"
+)
+_MOUNT_VIEW_JS = """() => {
+  window.sent = [];
+  window.view = BrowserTabView.create('browser__1', {send: msg => window.sent.push(msg)});
+  document.querySelector('.browser-tab-view').appendChild(window.view.el);
+  const bar = window.view.el.querySelector('.browser-toolbar');
+  document.getElementById('content-tab-area').style.height = 480 + bar.offsetHeight + 'px';
+}"""
+
+# *frames* arrive and, before the image has loaded any of them, the
+# mouse is pressed and released at (*x*, *y*) of the screen: the mouse
+# events the view forwards to the daemon.
+_FRAMES_THEN_PRESS_JS = """([frames, x, y]) => {
+  const screen = document.querySelector('.browser-screen');
+  const box = screen.getBoundingClientRect();
+  window.sent.length = 0;
+  for (const frame of frames) window.view.frame(frame);
+  for (const [type, buttons] of [['pointerdown', 1], ['pointerup', 0]]) {
+    screen.dispatchEvent(new PointerEvent(type, {
+      pointerType: 'mouse', clientX: box.left + x, clientY: box.top + y,
+      button: 0, buttons, bubbles: true, cancelable: true,
+    }));
+  }
+  return window.sent.filter(msg => msg.type === 'browserInput').map(msg => msg.event);
+}"""
+
+
+def _wait_picture(page, width: int) -> None:
+    """Wait until the streamed picture is that of the frame *width* pixels wide."""
+    page.wait_for_function(
+        "width => { const img = document.querySelector('.browser-screen img.browser-frame');"
+        " return img.complete && img.naturalWidth === width; }",
+        arg=width, timeout=30000,
+    )
+
+
+def test_a_press_while_resized_frames_load_lands_where_the_picture_shows_it(browser):
+    """The streamed picture is the last frame the image has loaded, and a
+    pointer is mapped to the page through that frame: its picture's size
+    and its page's size.  A press that comes while the image is still
+    loading frames of the resized page lands on what the picture on
+    screen shows under it, not where that point of a frame not shown yet
+    would be; once the image shows the last frame, a press is mapped
+    through that one.  The forwarded events are replayed on the page the
+    frames are pictures of, the way the daemon replays them."""
+    remote = browser.new_page(viewport={"width": 640, "height": 480})
+    viewer = browser.new_page()
+    try:
+        remote.set_content(_BUTTON_PAGE)
+        frames = []
+        for width, height in ((640, 480), (1280, 960), (960, 720)):
+            remote.set_viewport_size({"width": width, "height": height})
+            data = base64.b64encode(remote.screenshot(type="jpeg")).decode()
+            frames.append({"data": data, "width": width, "height": height})
+        cdp = remote.context.new_cdp_session(remote)
+        viewer.set_content(_VIEWER_PAGE)
+        viewer.add_style_tag(path=str(_MEDIA / "main.css"))
+        viewer.add_script_tag(path=str(_MEDIA / "browserTab.js"))
+        viewer.evaluate(_MOUNT_VIEW_JS)
+        box = viewer.locator(".browser-screen").bounding_box()
+        assert box is not None and (box["width"], box["height"]) == (640, 480)
+        viewer.evaluate("frame => window.view.frame(frame)", frames[0])
+        _wait_picture(viewer, 640)
+        # The page was resized twice and a frame of each size arrives.
+        # The picture is still the first frame's, the page at its first
+        # size: the button is at (320, 30) of the screen.
+        events = viewer.evaluate(_FRAMES_THEN_PRESS_JS, [frames[1:], 320, 30])
+        for event in events:
+            cdp.send("Input.dispatchMouseEvent", _mouse_params(event))
+        assert remote.evaluate("window.hits") == 1, events
+        # The picture of the last frame: 960 page pixels across the 640
+        # of the screen, the button at two thirds of (320, 30).
+        _wait_picture(viewer, 960)
+        events = viewer.evaluate(_FRAMES_THEN_PRESS_JS, [[], 320 * 2 / 3, 20])
+        for event in events:
+            cdp.send("Input.dispatchMouseEvent", _mouse_params(event))
+        assert remote.evaluate("window.hits") == 2, events
+    finally:
+        viewer.close()
+        remote.close()

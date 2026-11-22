@@ -27,6 +27,7 @@ import json
 import os
 import shutil
 import subprocess
+import threading
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
@@ -1370,6 +1371,47 @@ class TestReviewRegressions:
             if os.path.lexists(portal):
                 portal.unlink()
             shutil.rmtree(outside)
+
+    def test_a_folder_swapped_for_a_link_after_the_check_is_not_followed(self, harness) -> None:
+        """V15-F1 (audit 2026-11-21): the action is told the workspace it must stay in.
+
+        The daemon checks a request's paths and then runs the action.  An
+        external writer that put a link out of the workspace in place of the
+        entry's folder in between had the entry of that name outside deleted:
+        the action resolved the folder again, with no workspace to hold it to.
+        A profile hook on the daemon's threads makes the swap as the check
+        returns, so the interleaving is the same on every run.
+        """
+        root = harness.plain_dir
+        outside = Path(harness.tmpdir) / "outside-swap"
+        (root / "dir").mkdir()
+        outside.mkdir()
+        (root / "dir" / "item").write_text("inside\n")
+        (outside / "item").write_text("outside\n")
+        confined = type(harness.server)._confined.__func__.__code__
+        swapped = False
+
+        def writer(frame, event, arg) -> None:
+            nonlocal swapped
+            if event == "return" and frame.f_code is confined and arg and not swapped:
+                swapped = True
+                (root / "dir").rename(root / "moved")
+                (root / "dir").symlink_to(outside, target_is_directory=True)
+
+        threading.setprofile_all_threads(writer)
+        try:
+            reply = _fs(
+                harness, action="delete", path=str(root / "dir" / "item"), workDir=str(root),
+            )
+            kept = (outside / "item").exists() and (root / "moved" / "item").exists()
+        finally:
+            threading.setprofile_all_threads(None)
+            if (root / "dir").is_symlink():
+                (root / "dir").unlink()
+            for folder in (root / "dir", root / "moved", outside):
+                shutil.rmtree(folder, ignore_errors=True)
+        assert swapped and kept, reply
+        assert reply.get("error", "").startswith("delete failed: Not inside the workspace")
 
     def test_sha256_repository_unborn_worktree(self, harness) -> None:
         from kiss.server.explorer import git_log

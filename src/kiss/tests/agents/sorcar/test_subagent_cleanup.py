@@ -82,6 +82,7 @@ from kiss.tests.agents.sorcar.local_model_server import (
 )
 from kiss.tests.agents.sorcar.test_chrome_bridge import _TINY_PNG_B64, ExtensionPeer
 from kiss.tests.conftest import posix_only
+from kiss.tests.core.test_signal_unreaped_child import pidfds_left_by_a_stop
 
 pytestmark = posix_only("process groups, bash and /proc or ps")
 
@@ -456,6 +457,88 @@ def test_a_stop_repeated_during_the_clean_up_does_not_cut_it_short(tmp_path: Pat
         for process in slow:
             process.kill()
             process.wait(timeout=10)
+
+
+class _TakesTheName:
+    """Profile hook around the call that makes a sub-agent's private folder.
+
+    The first name *agent* publishes is taken before that call runs, as by another
+    task that drew the same name.  *stop* says where a Stop is raised: ``"before"``
+    the call, as it has ``"failed"`` on the taken name, or as the call that ``"made"``
+    the folder under the next name returns, before the run could store a path returned
+    to it.  With ``"unsearchable"`` there is no Stop: the temp dir cannot be searched
+    while the first call runs, which then fails, and not with "exists".
+    """
+
+    def __init__(self, agent: SorcarAgent, stop: str) -> None:
+        self.agent = agent
+        self.stop = stop
+        self.root = kiss_tmp_dir()
+        self.taken: Path | None = None
+        self.made: Path | None = None
+
+    def __call__(self, frame: FrameType, event: str, arg: Any) -> None:
+        path = self.agent._private_dir
+        if frame.f_code is not SorcarAgent._make_private_dir.__code__ or not path:
+            return
+        if event == "c_call" and self.taken is None:
+            self.taken = Path(path)
+            (self.taken / "theirs").mkdir(parents=True)
+            if self.stop == "unsearchable":
+                os.chmod(self.root, 0)
+            if self.stop == "before":
+                raise KeyboardInterrupt
+        elif event == "c_exception":
+            os.chmod(self.root, 0o700)
+            if self.stop == "failed":
+                raise KeyboardInterrupt
+        elif event == "c_return" and Path(path) != self.taken and os.path.isdir(path):
+            self.made = Path(path)
+            raise KeyboardInterrupt
+
+
+@pytest.mark.parametrize(
+    "stops", [("before",), ("failed",), ("made",), ("unsearchable",), ("made", "before")],
+    ids="-".join,
+)
+def test_a_stop_as_the_folder_is_made_leaves_no_folder_and_a_taken_name_is_left_alone(
+    tmp_path: Path, stops: tuple[str, ...],
+) -> None:
+    """The clean-up deletes the folder this run made, and no folder it did not make.
+
+    A Stop raised as the ``mkdir`` returned found a folder nobody had the path of
+    (``tempfile.mkdtemp`` had not returned it yet): it stayed for good.  A name that
+    is taken is another task's folder: the run draws the next name, and its clean-up
+    deletes its own folder only.  So it does when the ``mkdir`` fails otherwise than
+    with "exists" (the temp dir cannot be searched), which fails the run, and when a
+    Stop is raised before the ``mkdir`` of the taken name or as it failed (audit
+    2026-11-21 S14-F3: the published name counted as the run's own, and the clean-up
+    deleted the other task's folder with what was in it), in a later run of an agent
+    that made a folder too.
+    """
+    if "unsearchable" in stops and os.geteuid() == 0:
+        pytest.skip("root searches every directory")
+    agent = _sub_agent("sub-stopped-at-mkdir")
+    for stop in stops:
+        hook = _TakesTheName(agent, stop)
+        raised: list[BaseException] = []
+        sys.setprofile(hook)
+        try:
+            _run_recording(agent, tmp_path, [], raised)
+        finally:
+            sys.setprofile(None)
+            os.chmod(hook.root, 0o700)
+        try:
+            stopped = [] if stop == "unsearchable" else [KeyboardInterrupt]
+            assert [type(exc) for exc in raised] == stopped
+            assert agent._private_dir is None
+            assert hook.taken is not None and (hook.taken / "theirs").is_dir()
+            assert (stop == "made") == (hook.made is not None)
+            assert hook.made is None or not hook.made.exists()
+        finally:
+            for folder in (hook.taken, hook.made):
+                if folder is not None:
+                    shutil.rmtree(folder, ignore_errors=True)
 
 
 def test_a_folder_that_cannot_be_deleted_does_not_fail_the_run(
@@ -919,3 +1002,15 @@ def test_sweep_spares_a_stranger_that_took_a_marked_pid(pidfd: bool) -> None:
     )
     assert done.returncode == 0, done.stderr
     assert json.loads(done.stdout) == {"pidfd": pidfd, "reused": True, "stranger": None}
+
+
+@pytest.mark.skipif(not hasattr(os, "pidfd_open"), reason="pidfds are Linux-only")
+def test_a_stop_raised_as_the_sweep_opens_a_process_leaves_no_pidfd_open(tmp_path: Path) -> None:
+    """A Stop that lands as the sweep opens a process is raised with that pidfd closed.
+
+    The clean-up of a stopped sub-agent repeats the sweep after each Stop
+    that cuts it short; every one raised as ``os.pidfd_open`` returned
+    left a descriptor open in the daemon.
+    """
+    mark = f"KISS_SUBAGENT_DIR={tmp_path}/kiss-sub-a"
+    assert pidfds_left_by_a_stop(kill_env_marked, mark) == set()

@@ -29,7 +29,8 @@
   // `var(--token,fallback)` with the dark palette's value as the
   // fallback, so the menu follows the page's theme; the sandboxed
   // preview gets the values instead (see literalMenuCss).  Sizes are in
-  // px: the preview's root font size is not the page's.
+  // px, the text's being the page's (--theme-font-size): the preview's
+  // root font size is not the page's.
   const MENU_CSS =
     '#' +
     MENU_ID +
@@ -39,7 +40,8 @@
     'border:1px solid var(--border,#ffffff1a);' +
     'border-radius:var(--radius-lg,8px);' +
     'box-shadow:var(--shadow-lg,0 12px 40px #00000073);' +
-    'font:13px var(--font-ui,system-ui,-apple-system,"Segoe UI",Roboto,' +
+    'font:var(--theme-font-size,13px) var(--font-ui,system-ui,' +
+    '-apple-system,"Segoe UI",Roboto,' +
     'Helvetica,Arial,sans-serif);user-select:none;' +
     '-webkit-user-select:none}' +
     '#' +
@@ -60,7 +62,7 @@
     'pointer-events:none}' +
     '#' +
     MENU_ID +
-    ' .sorcar-ctx-key{color:var(--faint,#898781);font-size:11px}';
+    ' .sorcar-ctx-key{color:var(--faint,#898781);font-size:.85em}';
 
   /** True when *el* is an `<input>`/`<textarea>` with a text cursor. */
   function isTextField(el) {
@@ -156,6 +158,28 @@
     if (!win || !parent || parent.nodeType !== 1) return false;
     const visibility = win.getComputedStyle(parent).visibility;
     return visibility === 'hidden' || visibility === 'collapse';
+  }
+
+  /**
+   * True when the page shows text of the text node *node*: a character
+   * other than the white space CSS collapses (spaces, tabs, line feeds
+   * and carriage returns, as between two elements), or white space
+   * where the `white-space` of its parent keeps it: all of it under
+   * `pre`, `pre-wrap` and `break-spaces` (a code line's indentation in
+   * a text node of its own), the line feeds under `pre-line`.  The
+   * computed value names how white space collapses first, by the
+   * keyword of `white-space` or, where there is none, by that of
+   * `white-space-collapse`.
+   */
+  function showsText(node, win) {
+    if (/[^ \t\n\r]/.test(node.data)) return true;
+    const kept = win.getComputedStyle(node.parentNode).whiteSpace;
+    if (/^(pre|pre-wrap|break-spaces|preserve-spaces)( |$)/.test(kept)) {
+      return node.data !== '';
+    }
+    return (
+      /^(pre-line|preserve-breaks)( |$)/.test(kept) && node.data.includes('\n')
+    );
   }
 
   /** The element focused in *doc*, one inside an open shadow root included. */
@@ -275,12 +299,12 @@
    * (the document Selection's text), leaving out the `<script>`/`<style>`
    * text, the menu's own markup and the elements the page does not
    * render, as the user never sees them.  It starts and ends at visible
-   * text: a Range beginning in the whitespace before an inline `<script>`
-   * would select nothing rendered at its edge.  An end inside an editing
-   * host the scope is not part of goes before / after the host instead:
-   * Chromium cuts a selection with one end in a host and the other
-   * outside at the host, as the native Select All of the page takes the
-   * host in whole.
+   * text (showsText): a Range beginning in the whitespace before an
+   * inline `<script>` would select nothing rendered at its edge.  An end
+   * inside an editing host the scope is not part of goes before / after
+   * the host instead: Chromium cuts a selection with one end in a host
+   * and the other outside at the host, as the native Select All of the
+   * page takes the host in whole.
    */
   function selectAll(doc, scope) {
     const win = doc.defaultView;
@@ -294,7 +318,7 @@
     let last = null;
     let node = walker.nextNode();
     while (node) {
-      if (node.data.trim() && !inHiddenSource(node, body)) {
+      if (showsText(node, win) && !inHiddenSource(node, body)) {
         if (!first) first = node;
         last = node;
       }
@@ -937,6 +961,7 @@
       isHiddenSource.toString() +
       inHiddenSource.toString() +
       invisible.toString() +
+      showsText.toString() +
       selectAll.toString() +
       closestTag.toString() +
       editableTarget.toString() +
@@ -956,10 +981,6 @@
       '})();'
     );
   }
-
-  // The source text with the page's own stylesheet: the menu of a
-  // document without the tokens takes the dark palette's fallbacks.
-  installContentContextMenu.SOURCE = menuSource(MENU_CSS);
 
   const api = {
     installContentContextMenu: installContentContextMenu,

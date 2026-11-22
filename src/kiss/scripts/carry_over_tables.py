@@ -20,7 +20,9 @@ menus offer what you actually use:
 and two more that record what the user deleted (``deleted_tasks`` and
 ``deleted_chats``, see ``sync_db.py``), which a sync moves but a
 replacement that skipped the sync -- the old database could not be
-merged from -- would lose.
+merged from -- would lose.  The projects of the Projects page
+(``projects``: name, description, settings, pin) are the machine's own
+too and are carried the same way.
 
 When a deploy has to replace a database wholesale instead of merging
 into it, those tables would be replaced along with it -- the
@@ -28,11 +30,12 @@ deployment's own tallies and deletions gone, in a step that is supposed
 to lose nothing.  This script puts them back from the file the
 replacement kept: rows only the old database had are inserted, and
 where both have the same row every numeric column is raised to the
-larger of the two values.  The titles the user typed over chats there
-and the stars given to them (``chat_summaries.user_summary`` and
-``is_favorite``, which no sync moves either) go back over the same
-chats, in place of what came with the replacement.  The deletions
-carried over are then carried out on the new database, as a sync
+larger of the two values.  The titles the user typed over chats there,
+the stars given to them, their pins and the projects they are in
+(``chat_summaries.user_summary``, ``is_favorite``, ``is_pinned`` and
+``project_id``, which no sync moves either) go back
+over the same chats, in place of what came with the replacement.  The
+deletions carried over are then carried out on the new database, as a sync
 would: a task the old database had deleted does not come back in the
 new one, nor does what the web app deletes with it -- the tasks of a
 deleted chat, the sub-tasks of a deleted task.  Nothing else is ever
@@ -67,10 +70,17 @@ CARRIED_TABLES = {
     "steer_inputs": "text",
     "deleted_tasks": "id",
     "deleted_chats": "chat_id",
+    "projects": "id",
 }
 # The columns of ``chat_summaries`` that hold what the user set on a chat
-# (its title, its favourite star), each with the SQL literal of "not set".
-CARRIED_CHAT_COLUMNS = {"user_summary": "''", "is_favorite": "0"}
+# (its title, its favourite star, its pin, its project), each with the SQL
+# literal of "not set".
+CARRIED_CHAT_COLUMNS = {
+    "user_summary": "''",
+    "is_favorite": "0",
+    "is_pinned": "0",
+    "project_id": "''",
+}
 # The deletion records, created in a new database from before they existed
 # (``persistence._init_tables`` declares them the same way).
 DELETED_DDL = (
@@ -78,6 +88,17 @@ DELETED_DDL = (
     ' ("id" TEXT PRIMARY KEY, "deleted_ts" REAL NOT NULL)',
     'CREATE TABLE IF NOT EXISTS main."deleted_chats"'
     ' ("chat_id" TEXT PRIMARY KEY, "deleted_ts" REAL NOT NULL)',
+)
+# The projects, created in a new database from before they existed
+# (``persistence._init_tables`` declares the table the same way).
+PROJECTS_DDL = (
+    'CREATE TABLE IF NOT EXISTS main."projects"'
+    ' ("id" TEXT PRIMARY KEY, "name" TEXT NOT NULL DEFAULT \'\','
+    ' "description" TEXT NOT NULL DEFAULT \'\','
+    ' "settings" TEXT NOT NULL DEFAULT \'{}\','
+    ' "is_pinned" INTEGER NOT NULL DEFAULT 0,'
+    ' "created_at" REAL NOT NULL DEFAULT 0,'
+    ' "updated_at" REAL NOT NULL DEFAULT 0)'
 )
 NUMERIC_TYPES = ("INT", "REAL", "FLOA", "DOUB", "NUM", "DEC")
 # How long after it began a sub-task younger than its parent's deletion is
@@ -191,17 +212,20 @@ def carry_over_table(con: sqlite3.Connection, table: str, key: str) -> tuple[int
 
 
 def carry_over_chat_column(con: sqlite3.Connection, column: str, unset: str) -> int:
-    """Put what the user set on the old database's chats back: a title, a star.
+    """Put what the user set on the old database's chats back: a title, a star, a pin, a project.
 
-    ``chat_summaries.user_summary`` (the title typed over a chat) and
-    ``is_favorite`` (the star given to it) are the columns of that table
-    nothing can recompute.  A value the old database holds replaces the
-    one in the new database's row for the chat, whose other columns
-    stay as they are; a chat the new database has a task of but no row
-    for yet (a row is written when a task finishes) gets a row holding
-    the value alone, as setting it there would have made.  A chat the new
-    database has neither a row nor a task of gets nothing, so a deleted
-    chat does not come back.
+    ``chat_summaries.user_summary`` (the title typed over a chat),
+    ``is_favorite`` (the star given to it), ``is_pinned`` (its pin) and
+    ``project_id`` (the project it is in)
+    are the columns of that table nothing can recompute.  A value the old
+    database holds replaces the one in the new database's row for the
+    chat, whose other columns stay as they are; a chat the new database
+    has a task of but no row for yet (a row is written when a task
+    finishes) gets a row holding the value alone, as setting it there
+    would have made.  A chat the new database has neither a row nor a
+    task of gets nothing, so a deleted chat does not come back.  A new
+    database from a release before the column gets the column first, as
+    the web app adds it when it opens such a database.
 
     Args:
         con: Connection to the new database with the old one attached as
@@ -214,14 +238,20 @@ def carry_over_chat_column(con: sqlite3.Connection, column: str, unset: str) -> 
     """
     # A database from before the column has no values to give, or no
     # chats to put them on.
-    needed = {"chat_id", column}
+    old_types = {c[0]: c[1] for c in _columns(con, "old", "chat_summaries")}
+    new_columns = {c[0] for c in _columns(con, "main", "chat_summaries")}
     if not (
-        needed <= {c[0] for c in _columns(con, "old", "chat_summaries")}
-        and needed <= {c[0] for c in _columns(con, "main", "chat_summaries")}
+        {"chat_id", column} <= old_types.keys()
+        and "chat_id" in new_columns
         and "chat_id" in {c[0] for c in _columns(con, "main", "task_history")}
     ):
         return 0
     name = quote(column)
+    if column not in new_columns:
+        con.execute(
+            f'ALTER TABLE main."chat_summaries" ADD COLUMN {name} {old_types[column]}'
+            f" DEFAULT {unset}"
+        )
     value = (
         f'(SELECT o.{name} FROM old."chat_summaries" o'
         f' WHERE o."chat_id" = main."chat_summaries"."chat_id" AND o.{name} != {unset})'
@@ -423,6 +453,32 @@ def apply_deletions(con: sqlite3.Connection) -> int:
     return max(deleted, 0)
 
 
+def make_private_for_keys(con: sqlite3.Connection, database: str) -> None:
+    """Make the new database its owner's alone when API keys are about to be written into it.
+
+    A project's settings may hold API keys of its own, which must be no
+    more readable than the key store (``api_keys.env``, mode 0600); the
+    web app makes its database private before it stores such a project
+    (``persistence._save_project``), and a replacement that gets one
+    carried over is treated the same.  SQLite gives a ``-wal`` or
+    ``-shm`` file it creates later the mode of the database file.
+
+    Args:
+        con: Connection to the new database with the old one attached as
+            ``old``.
+        database: Path of the new database.
+    """
+    if "settings" not in {c[0] for c in _columns(con, "old", "projects")}:
+        return
+    if con.execute(
+        'SELECT 1 FROM old."projects" WHERE "settings" LIKE \'%"api_keys"%\' LIMIT 1'
+    ).fetchone() is None:
+        return
+    for suffix in ("", "-wal", "-shm"):
+        with contextlib.suppress(OSError):  # no such sidecar
+            os.chmod(database + suffix, 0o600)
+
+
 def _open(database: str) -> sqlite3.Connection:
     """Open a database that is already there, to update it in place.
 
@@ -450,11 +506,32 @@ def _open(database: str) -> sqlite3.Connection:
     return con
 
 
+def _remove_sidecars(database: str) -> None:
+    """Have SQLite remove the ``-wal`` and ``-shm`` files a read left beside a database.
+
+    A read-write connection is opened and closed: closing the last
+    connection to a database is where SQLite folds the log into it and
+    deletes both files, and it does neither while another connection, of
+    this process or any other, has the database open.  Unlinking them from
+    here cannot know that: a connection still open goes on using the index
+    it has mapped, the next process to open the database makes a new one,
+    and the two no longer see each other's locks -- nor is a log that was
+    empty when it was measured still empty when it is unlinked.
+
+    Args:
+        database: Path of a database that had neither file before it was
+            read, so that a log found beside it now is its own.
+    """
+    if os.path.exists(database + "-shm") or os.path.exists(database + "-wal"):
+        with contextlib.suppress(sqlite3.Error):
+            _open(database).close()
+
+
 def carry_over(old_database: str, new_database: str) -> tuple[int, int, int]:
     """Carry every unsynced table of one database into another.
 
     Args:
-        old_database: Database that was replaced; only read.
+        old_database: Database that was replaced; its rows are only read.
         new_database: Database that replaced it; updated in place.
 
     Returns:
@@ -474,12 +551,12 @@ def carry_over(old_database: str, new_database: str) -> tuple[int, int, int]:
         return 0, 0, 0
     # Reading a database that was left in WAL mode makes SQLite create the
     # shared-memory index and an empty write-ahead log beside it, even
-    # read-only.  The index is machine-local and regenerated on demand, the
-    # log holds nothing, and the file they appear beside is a backup nobody
-    # is meant to open again, so both are cleaned up below rather than left
-    # as debris in ~/.kiss.
-    had_shm = os.path.exists(old_path + "-shm")
-    had_wal = os.path.exists(old_path + "-wal")
+    # read-only, and a read-only connection leaves them there.  The file
+    # they appear beside is a backup nobody is meant to open again, so a
+    # database that came without them has them removed below rather than
+    # left as debris in ~/.kiss.  One that came with either is left as it
+    # was found: a log somebody kept beside it is read from, not folded in.
+    had_sidecars = os.path.exists(old_path + "-shm") or os.path.exists(old_path + "-wal")
     con = _open(new_database)
     inserted = raised = deleted = 0
     try:
@@ -492,8 +569,9 @@ def carry_over(old_database: str, new_database: str) -> tuple[int, int, int]:
             print(f"carry_over_tables: {old_database}: {exc}", file=sys.stderr)
             return 0, 0, 0
         try:
+            make_private_for_keys(con, os.path.expanduser(new_database))
             with con:
-                for ddl in DELETED_DDL:
+                for ddl in (*DELETED_DDL, PROJECTS_DDL):
                     con.execute(ddl)
                 for table, key in CARRIED_TABLES.items():
                     added, lifted = carry_over_table(con, table, key)
@@ -506,14 +584,8 @@ def carry_over(old_database: str, new_database: str) -> tuple[int, int, int]:
             con.execute("DETACH DATABASE old")
     finally:
         con.close()
-        if not had_shm:
-            with contextlib.suppress(OSError):
-                os.unlink(old_path + "-shm")
-        if not had_wal:
-            # Only while it is empty: frames in it would be rows of the backup.
-            with contextlib.suppress(OSError):
-                if not os.path.getsize(old_path + "-wal"):
-                    os.unlink(old_path + "-wal")
+        if not had_sidecars:
+            _remove_sidecars(old_path)
     return inserted, raised, deleted
 
 

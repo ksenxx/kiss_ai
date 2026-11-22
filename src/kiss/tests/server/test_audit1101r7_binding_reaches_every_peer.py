@@ -4,17 +4,17 @@
 # add your name here
 """Audit 2026-11-01 round 7: a tab's machine binding reaches every peer, before the tab's frames.
 
-``test_sub_agents_of_a_chat_shown_from_a_machine_are_fetched`` failed
-under a 98-way parallel run with ``KeyError: 'tabMachine'``: the
-sub-agent tab's transcript reached the client before the tab's
-binding.  Two windows in :mod:`kiss.server.remote_tabs` allowed it:
+Under a 98-way parallel run a sub-agent tab's frames reached a client
+before the tab's binding (``KeyError: 'tabMachine'`` in a test that
+read both).  Two windows in :mod:`kiss.server.remote_tabs` allowed it:
 
 * ``_resume`` made the sub-agent tab one of its parent's stream
   (``tab_ids.add``) and announced the binding only after releasing the
-  locks; a frame of the tab already on the stream (the machine replays
-  a finished sub-agent's transcript to every window right after the
-  parent's) was relayed in between.  The binding is now delivered
-  under the stream's lock, with the join.
+  locks; a frame of the tab already on the stream (the
+  ``replay_deferred`` offer of a sub-agent, which a history click's
+  replay sends to every window after the parent's) was relayed in
+  between.  The binding is now delivered under the stream's lock,
+  with the join.
 * ``tabMachine`` was a tab-stamped copy, withheld from a local peer
   that had addressed only other tabs (``_local_clients_for_tab``): a
   sub-agent tab adopted by the parent's replay announced its binding
@@ -36,7 +36,7 @@ from typing import Any
 
 from kiss.tests.local_ws import open_local_connection
 from kiss.tests.server.remote_tabs_probe import machine_of
-from kiss.tests.server.test_remote_tabs import RemoteTabsHarness, _FinishingModel
+from kiss.tests.server.test_remote_tabs import RemoteTabsHarness
 
 
 class TestBindingReachesEveryPeer(RemoteTabsHarness):
@@ -75,22 +75,13 @@ class TestBindingReachesEveryPeer(RemoteTabsHarness):
     async def test_a_sub_agent_tab_adopted_by_the_parents_replay_is_bound_before_its_frames(
         self,
     ) -> None:
-        """A history click's replay announces a finished sub-agent's tab; its binding comes first.
+        """A history click's replay announces a running sub-agent's tab; its binding comes first.
 
         The clicking peer never addressed the sub-agent tab: the binding
         must reach it all the same, ahead of the ``openSubagentTab``
         that adopts the tab onto the parent's stream.
         """
-        _FinishingModel.parallel_on_first_call = True
-        await self._submit("tab-p", "Fan out to a sub-agent", "box")
-        child_task = ""
-        for _ in range(500):
-            msg = await self._next()
-            if msg.get("type") == "new_tab" and msg.get("parent_tab_id") == "tab-p":
-                child_task = str(msg["task_id"])
-            if msg.get("type") == "status" and msg.get("tabId") == "tab-p" and not msg["running"]:
-                break
-        self.assertTrue(child_task, "the run fanned out")
+        child_task = (await self._fan_out("tab-p"))["task_id"]
         await self._send({"type": "closeTab", "tabId": "tab-p"})
         await self._until("tabs_state")
         tab = "tab-click"

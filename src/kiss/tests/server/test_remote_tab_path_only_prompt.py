@@ -26,8 +26,8 @@ import json
 from pathlib import Path
 from types import CodeType
 
-from kiss.server.machine_stream import MachineStream
-from kiss.server.remote_tabs import RemoteTabs
+from kiss.agents.sorcar.persistence import _record_steer_input
+from kiss.server.remote_tabs import RemoteTab, RemoteTabs
 from kiss.tests.local_ws import open_local_connection
 from kiss.tests.server.pause import Pause, Pauses
 from kiss.tests.server.remote_tabs_probe import machine_of
@@ -38,6 +38,16 @@ from kiss.tests.server.test_remote_tabs import RemoteTabsHarness
 _TITLE_SCAN = next(
     c for c in RemoteTabs._registry_title.__code__.co_consts if isinstance(c, CodeType)
 )
+
+
+def _held_before_its_send(prompt: str) -> Pause:
+    """Holds the submit of *prompt* once it is published, before the step that sends it.
+
+    Where its typed text is recorded: a submit drops the tab's pin and
+    is sent as one step, which a submit held at the send itself would
+    keep every other submit of the tab out of.
+    """
+    return Pause(_record_steer_input.__code__, lambda local: local["text"] == prompt)
 
 
 class TestRemoteTabPathOnlyPrompt(RemoteTabsHarness):
@@ -116,6 +126,9 @@ class TestRemoteTabPathOnlyPrompt(RemoteTabsHarness):
         await asyncio.to_thread(stream._relay_frame, late, json.dumps(late))
         self.assertEqual(await self._title_of(tab), "Renamed")
         self.assertNotIn(tab, stream.displaced_titles)
+        # Nothing is pending any more: the answer repeated changes nothing.
+        await asyncio.to_thread(stream._relay_frame, late, json.dumps(late))
+        self.assertEqual(await self._title_of(tab), "Renamed")
 
     async def test_a_file_prompt_gives_back_the_title_it_replaced(self) -> None:
         # Two surfaces submit to the tab at once: the file prompt of one
@@ -134,10 +147,7 @@ class TestRemoteTabPathOnlyPrompt(RemoteTabsHarness):
         self.addCleanup(other.close)
         registry = self.server._agent_server.tab_registry
         title_read = Pause(_TITLE_SCAN, lambda local: True)
-        task_sent = Pause(
-            MachineStream.send.__code__,
-            lambda local: local["cmd"].get("prompt") == "Second task",
-        )
+        task_sent = _held_before_its_send("Second task")
         with Pauses(title_read, task_sent):
             await self._submit(tab, str(target), "box")
             self.assertTrue(await asyncio.to_thread(title_read.paused.wait, 30))
@@ -156,6 +166,130 @@ class TestRemoteTabPathOnlyPrompt(RemoteTabsHarness):
             task_sent.release()
         await self._until("task_done", tab)
         self.assertEqual(await self._title_of(tab), "Second task")
+
+    async def _two_files(self, tab: str) -> tuple[Path, Path]:
+        """Run a task in *tab* on the machine, which titles it, and write two files there."""
+        await self._submit(tab, "Say hello", "box")
+        await self._run_until_idle(tab)
+        files = (Path(self.remote.home) / "first.md", Path(self.remote.home) / "second.md")
+        for target in files:
+            target.write_text("draft\n", encoding="utf-8", newline="")
+        return files
+
+    async def _published(self, tab: str, title: str) -> None:
+        """Wait until the registry shows *tab* under *title*."""
+        registry = self.server._agent_server.tab_registry
+        for _ in range(600):
+            if any(e["tabId"] == tab and e["title"] == title for e in registry.snapshot()):
+                return
+            await asyncio.sleep(0.05)
+        raise AssertionError(f"{title} was not published")
+
+    def _answer_held(self, tab: str) -> Pause:
+        """Holds the relay of the first ``promptOpened`` the machine sends for *tab*."""
+        stream = self.server._server_api.remote_tabs._tabs[tab]
+        return Pause(
+            RemoteTab._relay_frame.__code__,
+            lambda local: local["self"] is stream and local["msg"].get("type") == "promptOpened",
+        )
+
+    async def test_two_file_prompts_in_a_row_give_back_the_title_before_both(self) -> None:
+        # The second file prompt is published before the answer to the
+        # first is relayed: the title it replaced is the first one's
+        # path, which no task earned.  Each answer undoes its own
+        # prompt, so the tab ends on the title it had before both.
+        tab = "tab-two-files"
+        first, second = await self._two_files(tab)
+        with self._answer_held(tab) as answered:
+            await self._submit(tab, str(first), "box")
+            self.assertTrue(await asyncio.to_thread(answered.paused.wait, 30))
+            await self._submit(tab, str(second), "box")
+            await self._published(tab, str(second))
+            answered.release()
+            await self._until("promptOpened", tab)
+            await self._until("promptOpened", tab)
+        self.assertEqual(await self._title_of(tab), "Say hello")
+
+    async def test_ten_file_prompts_in_a_row_give_back_the_title_before_them_all(self) -> None:
+        # However many file prompts wait for their answers, none is
+        # forgotten: forgotten, the first one handed its title to none,
+        # and its path was the title the last one gave back.
+        tab = "tab-ten-files"
+        await self._submit(tab, "Say hello", "box")
+        await self._run_until_idle(tab)
+        files = [Path(self.remote.home) / f"note{n}.md" for n in range(10)]
+        with self._answer_held(tab) as answered:
+            for target in files:
+                target.write_text("draft\n", encoding="utf-8", newline="")
+                await self._submit(tab, str(target), "box")
+                await self._published(tab, str(target))
+            self.assertTrue(await asyncio.to_thread(answered.paused.wait, 30))
+            answered.release()
+            for _ in files:
+                await self._until("promptOpened", tab)
+        self.assertEqual(await self._title_of(tab), "Say hello")
+
+    async def test_a_submit_that_is_no_file_prompt_keeps_no_earlier_one(self) -> None:
+        # A submit is remembered beneath the next one until the machine
+        # tells what it was.  The answers to a task name its prompt, by
+        # an id of this daemon's when the surface's is too long for the
+        # machine to echo: its title stands, and the submits before it
+        # are forgotten.  A prompt that is no text is named in no
+        # answer, and opens no file: nothing is kept beneath it.
+        tab = "tab-no-file"
+        await self._submit(tab, "Say hello", "box")
+        await self._run_until_idle(tab)
+        stream = self.server._server_api.remote_tabs._tabs[tab]
+        await self._submit(tab, "Second task", "box", prompt_id="p" * 65)
+        frames = await self._run_until_idle(tab)
+        self.assertIn([stream.displaced_titles[tab][0]], [f.get("promptIds") for f in frames])
+        self.assertEqual(stream.earlier_titles[tab], [])
+        await self._send({
+            "type": "submit", "prompt": 5, "tabId": tab, "machine": "box",
+            "model": self.model, "workDir": self.tmpdir,
+        })
+        await self._run_until_idle(tab)
+        self.assertNotIn(tab, stream.earlier_titles)
+
+    async def test_file_prompts_answered_in_the_other_order_give_it_back_too(self) -> None:
+        # Two surfaces: the first file prompt is published and held
+        # before its send, the second is published on top of it, sent
+        # and answered first.  Its answer puts back the first prompt's
+        # path, which the first prompt's own answer then undoes.
+        tab = "tab-crossed-files"
+        first, second = await self._two_files(tab)
+        _, other = await open_local_connection(self.server)
+        self.addCleanup(other.close)
+        first_sent = _held_before_its_send(str(first))
+        with first_sent:
+            await self._submit(tab, str(first), "box")
+            self.assertTrue(await asyncio.to_thread(first_sent.paused.wait, 30))
+            other.write(json.dumps({
+                "type": "submit", "prompt": str(second), "tabId": tab, "machine": "box",
+                "model": self.model, "workDir": self.tmpdir,
+            }).encode("utf-8") + b"\n")
+            await other.drain()
+            await self._until("promptOpened", tab)
+            first_sent.release()
+            await self._until("promptOpened", tab)
+        self.assertEqual(await self._title_of(tab), "Say hello")
+
+    async def test_a_file_prompt_after_a_rename_does_not_inherit_an_older_title(self) -> None:
+        # The tab is renamed between two file prompts, the first still
+        # unanswered: the second replaced the new name, and the first
+        # one's late answer hands it nothing older.
+        tab = "tab-renamed-between"
+        first, second = await self._two_files(tab)
+        with self._answer_held(tab) as answered:
+            await self._submit(tab, str(first), "box")
+            self.assertTrue(await asyncio.to_thread(answered.paused.wait, 30))
+            self.server._agent_server._registry_update_tab(tab, title="Renamed")
+            await self._submit(tab, str(second), "box")
+            await self._published(tab, str(second))
+            answered.release()
+            await self._until("promptOpened", tab)
+            await self._until("promptOpened", tab)
+        self.assertEqual(await self._title_of(tab), "Renamed")
 
     async def _title_of(self, tab: str) -> str:
         tabs = await self._ask({"type": "ready", "tabId": tab}, "tabs_state")

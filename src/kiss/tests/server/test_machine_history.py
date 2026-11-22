@@ -28,6 +28,7 @@ from unittest import IsolatedAsyncioTestCase
 
 from kiss.agents.sorcar import machines as mach
 from kiss.agents.sorcar import persistence as th
+from kiss.server import sidebar_panels
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.conftest import find_free_port
 from kiss.tests.local_ws import _generate_self_signed_cert, open_local_connection
@@ -354,6 +355,62 @@ class TestMachineHistory(IsolatedAsyncioTestCase):
             ["local only", "shared task (local copy)"],
         )
 
+    async def _listed(self) -> tuple[list[str], dict[str, dict[str, Any]]]:
+        """The merged list's titles in order, and its rows by title."""
+        sessions = (await self._history())["sessions"]
+        return [s["title"] for s in sessions], {s["title"]: s for s in sessions}
+
+    async def test_a_pin_is_written_where_its_row_lives_and_lists_it_first(self) -> None:
+        """``setPinned`` / ``setChatPinned`` pin a row here or on its machine; pinned rows lead."""
+        order, rows = await self._listed()
+        self.assertEqual(order, ["shared task (local copy)", "remote alpha", "local only"])
+        self.assertFalse([r for r in rows.values() if r["is_pinned"] or r["chat_is_pinned"]])
+        alpha = rows["remote alpha"]["task_id"]
+
+        # A task of this daemon: its oldest row moves over the two newer ones.
+        await self._write({"type": "setPinned", "taskId": self.local_task, "isPinned": True})
+        order, rows = await self._listed()
+        self.assertEqual(order, ["local only", "shared task (local copy)", "remote alpha"])
+        self.assertEqual(
+            (rows["local only"]["is_pinned"], rows["local only"]["chat_is_pinned"]), (True, False),
+        )
+
+        # A chat of the machine is pinned in the machine's database, not
+        # here; the pinned rows of both machines are listed newest first.
+        await self._write(
+            {"type": "setChatPinned", "chatId": "chat-r", "isPinned": True, "machine": "box"},
+        )
+        order, rows = await self._listed()
+        self.assertEqual(order, ["remote alpha", "local only", "shared task (local copy)"])
+        self.assertEqual(
+            (rows["remote alpha"]["is_pinned"], rows["remote alpha"]["chat_is_pinned"]),
+            (False, True),
+        )
+        self.assertEqual(th._chat_summaries(["chat-r"]), {})
+
+        # Unpinned, a row is listed by its time again.
+        await self._write({"type": "setPinned", "taskId": self.local_task, "isPinned": False})
+        order, _rows = await self._listed()
+        self.assertEqual(order, ["remote alpha", "shared task (local copy)", "local only"])
+
+        # The machine's task keeps its own pin when its chat loses the chat's.
+        await self._write(
+            {"type": "setPinned", "taskId": alpha, "isPinned": True, "machine": "box"},
+        )
+        await self._write(
+            {"type": "setChatPinned", "chatId": "chat-r", "isPinned": False, "machine": "box"},
+        )
+        await self._write({"type": "setChatPinned", "chatId": "chat-local", "isPinned": True})
+        order, rows = await self._listed()
+        self.assertEqual(order, ["remote alpha", "local only", "shared task (local copy)"])
+        self.assertEqual(
+            (rows["remote alpha"]["is_pinned"], rows["remote alpha"]["chat_is_pinned"]),
+            (True, False),
+        )
+        self.assertEqual(
+            (rows["local only"]["is_pinned"], rows["local only"]["chat_is_pinned"]), (False, True),
+        )
+
     async def test_a_machine_whose_history_fails_answers_with_the_failure(self) -> None:
         """A machine that cannot open its ``history.db`` still answers the spend sync and a delete.
 
@@ -403,6 +460,61 @@ class TestMachineHistory(IsolatedAsyncioTestCase):
         )
         self.assertEqual(notice["tabId"], "tab-9")
         self.assertIn("nobody", notice["text"])
+
+    async def test_the_tags_of_a_machine_task_are_read_and_edited_on_that_machine(self) -> None:
+        """``getTaskTags`` / ``setTaskTags`` stamped ``machine`` reach that machine's row.
+
+        The Task Info panel's Tags row of a tab bound to a machine.  No
+        answer may reach the page as a ``notice`` (:meth:`_next`).
+        """
+        remote_db = sqlite3.connect(self.remote.home / "history.db")
+        self.addCleanup(remote_db.close)
+        remote_db.execute("UPDATE task_history SET tags = 'work,coding' WHERE id = ?", (ID_SHARED,))
+        remote_db.commit()
+        get = {"type": "getTaskTags", "taskId": ID_SHARED, "machine": "box"}
+        # The machine's daemon added the row and has not ended it: its task still runs there.
+        reply = await self._write(get, "taskTags")
+        self.assertEqual((reply["tags"], reply["editable"]), (["work", "coding"], False))
+        remote_db.execute("UPDATE task_history SET end_ts = 1000 WHERE id = ?", (ID_SHARED,))
+        remote_db.commit()
+        reply = await self._write(get, "taskTags")
+        self.assertEqual(
+            (reply["tags"], reply["editable"], reply["machine"]), (["work", "coding"], True, "box"),
+        )
+        self.assertNotIn("generation", reply, "the link's generation is not the page's")
+
+        edit = {**get, "type": "setTaskTags", "tags": ["testing", "work"]}
+        reply = await self._write(edit, "taskTags")
+        self.assertEqual((reply["tags"], reply["machine"]), (["work", "testing"], "box"))
+        await self._next("tasks_updated")  # every page refetches the merged history
+        stored = remote_db.execute("SELECT tags FROM task_history WHERE id = ?", (ID_SHARED,))
+        self.assertEqual(stored.fetchone()[0], "work,testing")
+        self.assertEqual(
+            th._load_task_tags(ID_SHARED, set())[0], [], "this daemon's copy is not the row",
+        )
+
+        # The machine's refusal is the answer, and so is its ``error`` frame
+        # (what a daemon from before the Tags row sends): the machine is
+        # not counted as down for it, the next command is answered.
+        reply = await self._write({**edit, "tags": ["urgent"]}, "taskTags")
+        self.assertEqual(
+            (reply["tags"], reply["error"]), (["work", "testing"], "There is no tag named urgent."),
+        )
+        await self._next("tasks_updated")
+        refused = await asyncio.to_thread(
+            sidebar_panels.machine_task_tags_reply, "box", {"type": "setTaskTags", "taskId": "t"},
+        )
+        self.assertEqual(
+            {**refused, "error": ""},
+            {"type": "taskTags", "taskId": "t", "machine": "box", "error": ""},
+        )
+        self.assertIn("tags", refused["error"])
+        self.assertEqual((await self._write(get, "taskTags"))["tags"], ["work", "testing"])
+
+        reply = await self._write({**get, "machine": "nobody"}, "taskTags")
+        self.assertEqual((reply["taskId"], reply["machine"]), (ID_SHARED, "nobody"))
+        self.assertIn("nobody", reply["error"])
+        self.assertNotIn("tags", reply, "the page keeps its row for an answer without tags")
 
     async def test_a_dead_machine_hides_nothing_local(self) -> None:
         """A machine down before it ever answered lists nothing; the local rows stay."""

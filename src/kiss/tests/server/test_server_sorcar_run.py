@@ -205,6 +205,20 @@ class SorcarRunApiTest(unittest.TestCase):
         assert result.chat_id
         assert _task_chat_id(result.task_id) == result.chat_id
 
+        # The ``<task>`` blocks of a prompt run one after the other, each
+        # with its own counters and row: the run spent what every block
+        # did, not what the last one did.
+        both = sorcar.run(
+            "<task>say hi</task><task>say bye</task>",
+            work_dir=self.repo,
+            endpoint_file=self.endpoint_file,
+            timeout=60,
+        )
+        assert (both.success, both.text) == (True, "API test done")
+        assert (both.tokens, both.steps) == (2 * 1234, 2 * 7)
+        assert abs(both.cost - 2 * 0.4567) < 1e-9
+        assert both.task_id not in ("", result.task_id)
+
     def test_failure_returns_not_success_with_metrics(self) -> None:
         """A failing agent yields ``success=False`` plus its usage.
 

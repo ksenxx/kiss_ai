@@ -26,6 +26,7 @@ const PAGE_SCRIPTS = [
   'browserTab.js',
   'terminalTab.js',
   'pdfView.js',
+  'projects.js',
   'mobileSwipe.js',
   'appWindow.js',
   'main.js',
@@ -270,9 +271,11 @@ function byId(win, id) {
  * CDN build jsdom never fetches, so `ensureMonaco()` resolves at once.
  * Each `editor.create` is recorded as `{holder, editor, value, language,
  * opts, revealed}` (`revealed` lists the line numbers `setPosition` was
- * asked for); `editor._type(text)` edits the model and fires its content
- * listeners, and `editor._undo()` takes the last edit back: the text and,
- * as in Monaco, the model's alternative version id are the earlier ones.
+ * asked for; `opts` takes what `editor.updateOptions` is given, as the
+ * options of a Monaco editor do); `editor._type(text)` edits the model
+ * and fires its content listeners, and `editor._undo()` takes the last
+ * edit back: the text and, as in Monaco, the model's alternative version
+ * id are the earlier ones.
  *
  * @param {boolean} [install=true] `false` builds the stub without
  *   setting `win.monaco` (the CDN loader path runs); the returned array's
@@ -287,6 +290,8 @@ function stubMonaco(win, install = true) {
       // before every create(); real Monaco always exposes both calls.
       defineTheme: () => {},
       setTheme: () => {},
+      // Monaco's default font size off a Mac.
+      EditorOptions: {fontSize: {defaultValue: 14}},
       create: (holder, opts) => {
         let value = String(opts.value === undefined ? '' : opts.value);
         let version = 1;
@@ -308,6 +313,7 @@ function stubMonaco(win, install = true) {
           dispose: () => {},
           layout: () => {},
           focus: () => {},
+          updateOptions: changed => Object.assign(opts, changed),
           _type: text => {
             undone.push({value, version});
             value = String(text);
@@ -1118,10 +1124,11 @@ function sendTabsState(win, entries) {
 
 /**
  * Give `win` the xterm.js stand-ins terminalTab.js drives (jsdom has
- * neither xterm nor ResizeObserver): a `Terminal` that keeps what it is
- * written, its focus count, its key / data / resize callbacks and its
- * disposal; a `FitAddon` that counts its fits; a `ResizeObserver` that
- * keeps its callback and its disconnection.
+ * neither xterm nor ResizeObserver): a `Terminal` that keeps the options
+ * it was made with, what it is written, its focus count, its key / data
+ * / resize callbacks and its disposal; a `FitAddon` that counts its
+ * fits; a `ResizeObserver` that keeps its callback and its
+ * disconnection.
  *
  * @returns {{terminals: Array<object>, fits: Array<number>,
  *   observers: Array<object>}} every terminal, fit and observer made.
@@ -1131,10 +1138,10 @@ function installXtermStub(win) {
   const fits = [];
   const observers = [];
   win.Terminal = class {
-    constructor() {
+    constructor(options) {
       this.cols = 80;
       this.rows = 24;
-      this.options = {};
+      this.options = Object.assign({}, options);
       this.written = '';
       this.focused = 0;
       this.disposed = false;

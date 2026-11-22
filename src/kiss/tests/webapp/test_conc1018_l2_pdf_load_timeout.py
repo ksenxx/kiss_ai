@@ -21,11 +21,17 @@ other download would change the request count under test);
 everything else is a REAL headless Chromium
 against a REAL :class:`RemoteAccessServer` — no mocks, and the
 recovery after the stall downloads the real pdf.js.
+
+A load that pdf.js itself refuses (the file is no PDF) fails with the
+viewer's worker already running: the last test opens such a file with
+nothing routed and watches the worker through Chromium's own worker
+events.
 """
 
 from __future__ import annotations
 
 import time
+from functools import partial
 
 from kiss.tests.server.test_scm_worktrees_and_actions import (
     harness,  # noqa: F401  (module fixture used by param name)
@@ -35,6 +41,7 @@ from kiss.tests.webapp.test_sidebar_menus import (
     _PDF_VIEWER,
     _PDFJS_BUILD_GLOB,
     _explorer_row,
+    _inject_file_link,
     _open_page,
     _open_report_pdf,
     _panel_click,
@@ -174,5 +181,49 @@ def test_pdf_viewer_timed_out_import_that_later_succeeds_allocates_no_worker_url
         _wait_pdf_rendered(page)
         urls = page.evaluate("window.__objectUrls")
         assert urls.count("text/javascript") == 1, urls
+    finally:
+        context.close()
+
+
+def test_pdf_viewer_stops_its_worker_when_the_file_is_no_pdf(browser, harness, worktree):
+    """pdf.js refuses a file that is no PDF after the viewer started its
+    worker.  Nothing of that file will be drawn, so the worker ends with
+    the load, under the note of the tab that stays open: it used to run
+    until the tab was closed, one more for every such file opened.
+    Closing the tab afterwards, which stops the worker once more, raises
+    nothing."""
+    broken = harness.work_dir / "broken.pdf"
+    broken.write_bytes(b"not a pdf " * 40)
+    context, page, _frames = _open_page(browser, harness)
+    started: list = []
+    closed: list = []
+    errors: list = []
+
+    def on_worker(worker) -> None:
+        started.append(worker)
+        worker.on("close", partial(closed.append))
+
+    page.on("worker", on_worker)
+    page.on("pageerror", partial(errors.append))
+    try:
+        _inject_file_link(page, str(broken), "lnk-broken")
+        page.click("#lnk-broken")
+        note = page.locator(_PDF_VIEWER + " div.content-binary-note")
+        note.wait_for(timeout=_MAX_WAIT_S * 1000)
+        if "InvalidPDFException" not in _pdf_note(page):
+            # pdf.js itself did not arrive: skips when the CDN is
+            # unreachable from this browser, fails otherwise.
+            _wait_pdf_rendered(page)
+        assert _pdf_note(page).startswith("Cannot display broken.pdf: InvalidPDFException")
+        for _ in range(150):
+            if closed:
+                break
+            page.wait_for_timeout(100)
+        assert len(started) == 1, started
+        assert closed == started, "the worker of the refused file is still running"
+        assert note.count() == 1, "the tab still shows why"
+        page.locator("#content-tab-list .chat-tab.active .chat-tab-close").click()
+        page.locator(_PDF_VIEWER).wait_for(state="detached", timeout=15000)
+        assert not errors
     finally:
         context.close()

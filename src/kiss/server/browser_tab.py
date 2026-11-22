@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import functools
 import ipaddress
 import json
 import logging
@@ -72,6 +73,7 @@ from kiss.agents.sorcar.web_stealth import (
 from kiss.core.browser_handoff import is_headless_environment
 from kiss.core.default_browser import ResolvedBrowser, resolve_browser
 from kiss.core.locked import locked_call
+from kiss.core.tool_interrupt import call_without_injection
 from kiss.server.frame_flow import FrameFlow
 
 if TYPE_CHECKING:
@@ -119,14 +121,25 @@ _KEY_TEXT = {"Enter": "\r"}
 # and stands more than a pixel (sizes are rounded) from its left end:
 # the element at the point, one of its ancestors (through open shadow
 # roots and slots) or the window.  As the browser has it:
-# - an element scrolls when its overflow-x is auto or scroll, and a
-#   text field always;
+# - an element scrolls when its overflow-x is auto or scroll, unless it
+#   is a row or a column of a table (or a group of them), and a text
+#   field always;
 # - the window scrolls unless the overflow-x of the root element says
 #   otherwise, or the body's while the root's overflow is visible; the
-#   element that speaks for the window is no scroller of its own;
+#   element that speaks for the window is no scroller of its own, nor
+#   is the one whose offsets and sizes are the window's (the root, or
+#   the body of a page without a doctype);
 # - offsets start at the right end, and are then 0 or less, where the
 #   text runs from right to left or the lines do: for the window, where
-#   the body's do.
+#   the body's do;
+# - the body is not heard, on either count, when it has no box or
+#   containment is in effect on it or on the root: the root alone then
+#   speaks for the window, and the body scrolls like any element.
+#   Style containment always is in effect (contain, a size
+#   container-type and content-visibility bring it); size containment
+#   is not on a table or a part of one other than its caption, layout
+#   and paint containment are not on a table's rows and columns, and
+#   none of the three is on an inline box.
 # The frame element when the point is on an embedded page, whose own
 # answer then decides.  True as well on what a plugin draws (a PDF, an
 # <object>): nothing here can look into it, and a drag nobody can vouch
@@ -147,18 +160,30 @@ _SCROLLS_LEFT_JS = """([x, y]) => {
   const root = document.documentElement;
   const body = document.body;
   const rootStyle = getComputedStyle(root);
+  const bodyStyle = body && getComputedStyle(body);
+  const tablePart = /^table-(row|column|header|footer)/;
+  const contained = ({contain, containerType, contentVisibility, display}) => {
+    if (/style|content|strict/.test(contain) || /size/.test(containerType)
+        || /auto|hidden/.test(contentVisibility)) return true;
+    if (/^(none|contents|inline)$/.test(display)) return false;
+    return /size/.test(contain) && !/^(inline-)?table(?!-caption)/.test(display)
+      || /layout|paint/.test(contain) && !tablePart.test(display);
+  };
+  const heard = body && !/^(none|contents)$/.test(bodyStyle.display)
+    && !contained(rootStyle) && !contained(bodyStyle);
   const rootIsSilent = rootStyle.overflowX === 'visible' && rootStyle.overflowY === 'visible';
-  const speaker = body && rootIsSilent ? body : root;
+  const speaker = heard && rootIsSilent ? body : root;
+  const scroller = document.scrollingElement;
   for (let node = el; node; node = node.assignedSlot || node.parentNode || node.host) {
-    if (node.nodeType !== 1 || node === speaker) continue;
+    if (node.nodeType !== 1 || node === speaker || node === scroller) continue;
     const style = getComputedStyle(node);
-    const scrolls = style.overflowX === 'auto' || style.overflowX === 'scroll'
-      || node instanceof HTMLInputElement;
+    const scrolls = (style.overflowX === 'auto' || style.overflowX === 'scroll')
+      && !tablePart.test(style.display) || node instanceof HTMLInputElement;
     if (scrolls && offLeftEnd(node, node.scrollLeft, style)) return true;
   }
   const overflow = getComputedStyle(speaker).overflowX;
   if (overflow !== 'hidden' && overflow !== 'clip'
-      && offLeftEnd(root, scrollX, getComputedStyle(body || root))) return true;
+      && offLeftEnd(scroller || root, scrollX, heard ? bodyStyle : rootStyle)) return true;
   if (el instanceof HTMLIFrameElement || el instanceof HTMLFrameElement) return el;
   return el instanceof HTMLEmbedElement || el instanceof HTMLObjectElement;
 }"""
@@ -181,7 +206,13 @@ _FRAME_POINT_JS = """(frame, [x, y]) => {
     at[1] / zoom - parseFloat(style.paddingTop),
   ];
 }"""
-_HOST_RE = re.compile(r"^[\w.-]+(\.[a-z]{2,})(:\d+)?(/.*)?$", re.IGNORECASE)
+# A host name, with what may follow it directly: a port, then a path, a
+# query or a fragment.
+_HOST_RE = re.compile(r"^[\w.-]+(\.[a-z]{2,})(:\d+)?([/?#].*)?$", re.IGNORECASE)
+# A scheme and ``://`` where the text starts (``blob:`` and
+# ``view-source:`` wrap such a URL): a ``://`` further in belongs to a
+# URL in a query, or among the words of a search.
+_SCHEME_RE = re.compile(r"(?:(?:blob|view-source):)?[a-z][a-z0-9+.-]*://", re.IGNORECASE)
 # The ``BrowserType.launch_persistent_context: `` prefix of a Playwright
 # message: a capitalised class name, a dot and a method (a lower-case
 # ``chrome.exe: Access is denied.`` is a file name, not an API).
@@ -263,7 +294,7 @@ def normalize_url(text: str) -> str:
         text: What the user typed: a URL, a bare host name, or words.
 
     Returns:
-        ``text`` unchanged when it has a scheme, ``https://`` + text
+        ``text`` unchanged when it starts with a scheme, ``https://`` + text
         for a host name, ``http://`` + text for an IP address or
         ``localhost`` (as browsers do: a LAN device or local server has
         no certificate), otherwise a Google search for the words.
@@ -271,7 +302,7 @@ def normalize_url(text: str) -> str:
     text = text.strip()
     if not text:
         return home_url()
-    if "://" in text or text.startswith(("about:", "chrome:", "data:", "file:")):
+    if _SCHEME_RE.match(text) or text.startswith(("about:", "chrome:", "data:", "file:")):
         return text
     if " " not in text:
         if _is_ip_address(text):
@@ -287,17 +318,81 @@ def _result_in_slices[T](future: concurrent.futures.Future[T], timeout: float) -
     One ``future.result(timeout)`` is a C-level wait that an exception
     injected into the thread (the task runner's Stop) cannot interrupt:
     it would land only once the open finished, possibly minutes later.
+    The Stop is raised between two steps of the wait, never inside one
+    (``call_without_injection``): each takes a lock the loop thread
+    needs to end the future, and a Stop raised as it is taken would
+    leave it held for good (CPython gh-74174).
 
     Raises:
         TimeoutError: *timeout* passed first.
     """
     deadline = time.monotonic() + timeout
-    while not future.done():
+    while not call_without_injection(future.done):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise TimeoutError(f"no answer from the browser within {timeout:g}s")
-        concurrent.futures.wait([future], min(remaining, _WAIT_SLICE))
-    return future.result()
+        call_without_injection(concurrent.futures.wait, [future], min(remaining, _WAIT_SLICE))
+    return call_without_injection(future.result)
+
+
+def _offer_new_loop(offered: list[asyncio.AbstractEventLoop]) -> None:
+    """Make an event loop and put it in *offered*: one step for ``call_without_injection``."""
+    offered.append(asyncio.new_event_loop())
+
+
+def _run_loop(offered: list[asyncio.AbstractEventLoop]) -> None:
+    """Run the loop *offered* until it is stopped, then close it: the service's loop thread.
+
+    The loop is the thread's once it has taken it out of *offered*, and
+    a starter that gives the start up takes it back the same way:
+    whoever takes the loop closes it, so no start leaves one open.  A
+    stop asked for before the loop runs ends the run at once.
+    """
+    try:
+        loop = offered.pop()
+    except IndexError:
+        return  # the starter took it back
+    loop.run_forever()
+    loop.close()
+
+
+def _run_request(
+    future: concurrent.futures.Future[Any],
+    timeout: float | None,
+    request: Callable[[], Coroutine[Any, Any, Any]],
+) -> None:
+    """Start ``request()`` on the running loop: the loop's side of ``_run_threadsafe``.
+
+    The coroutine is made here, on the loop's thread, which no Stop is
+    injected into: the thread that asked never holds one it could
+    leave un-awaited.  *future*, which that thread made before it
+    queued this call, ends as the request does (cancelling it does not
+    stop the request: no caller does).
+
+    Args:
+        future: The asking thread's handle on the request.
+        timeout: Seconds after which the request is cancelled
+            (``asyncio.wait_for``); ``None`` for no limit.
+        request: Makes the coroutine to run.
+    """
+    coro = request()
+    if timeout is not None:
+        coro = asyncio.wait_for(coro, timeout)
+    task = asyncio.ensure_future(coro)
+    task.add_done_callback(functools.partial(_hand_over, future))
+
+
+def _hand_over(future: concurrent.futures.Future[Any], task: asyncio.Task[Any]) -> None:
+    """Done callback of *task*: end *future*, its handle for the other threads, as it ended."""
+    if task.cancelled():
+        future.cancel()
+    if not future.set_running_or_notify_cancel():
+        return  # cancelled, and that call has told those waiting on the future
+    error = task.exception()
+    if error is None:
+        future.set_result(task.result())
+    else:
+        future.set_exception(error)
 
 
 def _start(request: Coroutine[Any, Any, Any]) -> asyncio.Task[Any]:
@@ -432,7 +527,7 @@ class BrowserTabService:
         """
         try:
             future = self._run_threadsafe(
-                self._open_reporting(normalize_url(url), conn_id, open_id)
+                functools.partial(self._open_reporting, normalize_url(url), conn_id, open_id)
             )
         except RuntimeError as exc:
             if not self._closed:
@@ -460,11 +555,13 @@ class BrowserTabService:
         """
         claim = _OpenClaim()
         try:
-            future = self._run_threadsafe(self._open_for_agent(claim), _OPEN_TIMEOUT)
+            future = self._run_threadsafe(
+                functools.partial(self._open_for_agent, claim), _OPEN_TIMEOUT
+            )
             return _result_in_slices(future, _OPEN_TIMEOUT + _CALL_TIMEOUT)
         except BaseException as exc:
             # Also the task runner's Stop: nobody is left to use the tab.
-            self._submit(self._abandon(claim))
+            self._submit(self._abandon, claim)
             if isinstance(exc, Exception):
                 raise RuntimeError(f"Cannot open a Browser tab: {exc}") from exc
             raise
@@ -489,11 +586,13 @@ class BrowserTabService:
         """
         claim = _OpenClaim()
         try:
-            future = self._run_threadsafe(self._open_for_user(url, claim), _OPEN_TIMEOUT)
+            future = self._run_threadsafe(
+                functools.partial(self._open_for_user, url, claim), _OPEN_TIMEOUT
+            )
             _result_in_slices(future, _OPEN_TIMEOUT + _CALL_TIMEOUT)
         except BaseException as exc:
             # Also the task runner's Stop: nobody is left to use the tab.
-            self._submit(self._abandon(claim))
+            self._submit(self._abandon, claim)
             if not isinstance(exc, Exception):
                 raise
             # The caller falls back to another browser.
@@ -532,15 +631,15 @@ class BrowserTabService:
                 hung call is thus the caller's to have closed
                 (:meth:`close`), before its next call.
         """
-        self._submit(self._interrupt(tab_id, act))
+        self._submit(self._interrupt, tab_id, act)
 
     def close(self, tab_id: str) -> None:
         """Close the browser page behind *tab_id* (every surface drops the tab)."""
-        self._submit(self._close(tab_id))
+        self._submit(self._close, tab_id)
 
     def navigate(self, tab_id: str, action: str, url: str) -> None:
         """Drive the address bar: ``go`` (to *url*), ``back``, ``forward`` or ``reload``."""
-        self._submit(self._navigate(tab_id, action, url))
+        self._submit(self._navigate, tab_id, action, url)
 
     def input(self, tab_id: str, event: dict[str, Any]) -> None:
         """Replay a client mouse/key/text event on the page (fire and forget).
@@ -549,7 +648,7 @@ class BrowserTabService:
         finger's point would scroll, and the tab's viewers get the
         answer as a ``browserTouch`` event.
         """
-        self._submit(self._input(tab_id, event))
+        self._submit(self._input, tab_id, event)
 
     def viewport(self, tab_id: str, conn_id: str, width: int, height: int, visible: bool) -> None:
         """Record that *conn_id* shows (or hid) the tab at *width* x *height* CSS px.
@@ -557,7 +656,7 @@ class BrowserTabService:
         Frames are streamed only while at least one connection shows
         the tab; the page viewport follows the most recent visible size.
         """
-        self._submit(self._viewport(tab_id, conn_id, width, height, visible))
+        self._submit(self._viewport, tab_id, conn_id, width, height, visible)
 
     def frame_acked(self, tab_id: str, conn_id: str) -> None:
         """Record that *conn_id* received a frame of the tab (its ``browserFrameAck``).
@@ -565,11 +664,11 @@ class BrowserTabService:
         The frame held back for the connection while it was behind, if
         any, is sent now (see :mod:`kiss.server.frame_flow`).
         """
-        self._submit(self._frame_acked(tab_id, conn_id))
+        self._submit(self._frame_acked, tab_id, conn_id)
 
     def viewer_gone(self, conn_id: str) -> None:
         """Forget every tab *conn_id* was watching (the client disconnected)."""
-        self._submit(self._viewer_gone(conn_id))
+        self._submit(self._viewer_gone, conn_id)
 
     def open_events(self) -> list[dict[str, Any]]:
         """Return one unfocused ``openBrowserTab`` event per live, attached tab."""
@@ -608,7 +707,7 @@ class BrowserTabService:
             if self._loop is None:
                 self._emit(self.snapshot_event(), conn_id)
             else:
-                self._submit(self._send_snapshot(conn_id))
+                self._submit(self._send_snapshot, conn_id)
 
     async def _send_snapshot(self, conn_id: str) -> None:
         self._emit(self.snapshot_event(), conn_id)
@@ -642,7 +741,7 @@ class BrowserTabService:
             # raises, and the rest of the daemon's shutdown must go on.
             logger.warning("browser tab: the loop thread did not stop; leaving it behind")
             return
-        loop.close()
+        loop.close()  # a no-op unless the thread died without closing it
 
     async def _cancel_pending(self) -> None:
         """Cancel outstanding service operations while the private loop still runs."""
@@ -658,74 +757,101 @@ class BrowserTabService:
     # ------------------------------------------------------------------
 
     def _run_threadsafe(
-        self, coro: Coroutine[Any, Any, _T], timeout: float | None = None, start: bool = True
+        self,
+        request: Callable[[], Coroutine[Any, Any, _T]],
+        timeout: float | None = None,
+        start: bool = True,
     ) -> concurrent.futures.Future[_T]:
-        """Hand *coro* to the private loop (started on first use) and return its future.
+        """Run ``request()`` on the private loop (started on first use) and return its future.
 
         The shutdown check and the hand-over are one critical section
         under ``_lock``, the lock :meth:`shutdown` flips ``_closed``
-        under before it stops the loop: a coroutine accepted here is
+        under before it stops the loop: a request accepted here is
         queued ahead of the teardown and runs (finding the service
         closed under ``_launch_lock`` at worst); one that arrives later
         is refused at once instead of landing on a stopped loop, where
         nothing would ever resolve its future and the caller would
         wait out its whole timeout.
 
+        The caller may be a task thread, which the task runner's Stop
+        interrupts at any step.  The request's coroutine is therefore
+        made on the loop's thread (:func:`_run_request`), never here:
+        one made here and not yet the loop's would be nobody's to
+        await or close.  A Stop leaves the request not queued, or
+        running with nobody waiting for it, as a Stop that lands after
+        this has returned does.
+
         Args:
-            coro: The coroutine to run.
-            timeout: Seconds after which the loop cancels *coro*
+            request: Makes the coroutine to run.
+            timeout: Seconds after which the loop cancels the request
                 (``asyncio.wait_for``); ``None`` for no limit.
             start: Whether to start the loop when it does not run yet.
 
         Raises:
             RuntimeError: The service is shut down, the loop does not
                 run and is not to be started, or no thread could be
-                started for it (*coro* is closed).
+                started for it.
         """
-        try:
-            return locked_call(self._lock, self._run_threadsafe_locked, coro, timeout, start)
-        except RuntimeError:
-            coro.close()
-            raise
+        future: concurrent.futures.Future[_T] = concurrent.futures.Future()
+        locked_call(self._lock, self._run_threadsafe_locked, start, future, timeout, request)
+        return future
 
-    def _run_threadsafe_locked(
-        self, coro: Coroutine[Any, Any, _T], timeout: float | None, start: bool
-    ) -> concurrent.futures.Future[_T]:
-        loop = self._ensure_loop_locked(start)
-        if timeout is not None:
-            coro = asyncio.wait_for(coro, timeout)
-        return asyncio.run_coroutine_threadsafe(coro, loop)
+    def _run_threadsafe_locked(self, start: bool, *request: Any) -> None:
+        self._ensure_loop_locked(start).call_soon_threadsafe(_run_request, *request)
 
     def _ensure_loop_locked(self, start: bool = True) -> asyncio.AbstractEventLoop:
-        """Return the private event loop, started on first use if *start*; ``_lock`` held."""
+        """Return the private event loop, started on first use if *start*; ``_lock`` held.
+
+        The loop and its thread are recorded once the thread runs.  A
+        start that fails (no thread to be had, or a task runner's Stop,
+        which can land at any step from the loop's creation to the
+        record) leaves them unrecorded, where no :meth:`shutdown` would
+        find them: the loop is closed here when the thread has not
+        taken it, and will not (:func:`_run_loop`), else asked to stop,
+        and the thread ends and closes it.  The next open starts anew.
+        """
         if self._closed:
             raise RuntimeError("The browser service is shut down.")
         if self._loop is None:
             if not start:
                 raise RuntimeError("The browser service has not started.")
-            loop = asyncio.new_event_loop()
-            thread = threading.Thread(
-                target=loop.run_forever, name="kiss-browser-tab", daemon=True
-            )
+            loop: asyncio.AbstractEventLoop | None = None
+            offered: list[asyncio.AbstractEventLoop] = []
             try:
-                thread.start()
-            except RuntimeError:
-                loop.close()  # no thread will ever run it
+                # The Stop waits for the loop to be made and for the
+                # thread to be started: raised inside, it left a loop
+                # half made that nothing names, or the thread blocked
+                # coming up (the lock of its start held, gh-74174).
+                call_without_injection(_offer_new_loop, offered)
+                loop = offered[0]
+                thread = threading.Thread(
+                    target=_run_loop, args=(offered,), name="kiss-browser-tab", daemon=True
+                )
+                call_without_injection(thread.start)
+                self._loop, self._thread = loop, thread
+            except BaseException:
+                try:
+                    offered.pop().close()  # no thread will ever run it
+                except IndexError:
+                    if loop is not None:
+                        loop.call_soon_threadsafe(loop.stop)  # the thread has it
                 raise
-            self._loop, self._thread = loop, thread
         return self._loop
 
-    def _submit(self, coro: Coroutine[Any, Any, Any]) -> None:
-        """Run *coro* on the private loop without waiting; log failures.
+    def _submit[**P](
+        self, request: Callable[P, Coroutine[Any, Any, Any]], *args: P.args, **kwargs: P.kwargs
+    ) -> None:
+        """Run ``request(*args, **kwargs)`` on the private loop without waiting; log failures.
 
         For what acts on the tabs the browser has: before an open has
-        started the loop there is none, and *coro* is dropped.
+        started the loop there is none, and the request is dropped.
         """
         try:
-            future = self._run_threadsafe(coro, start=False)
+            future = self._run_threadsafe(functools.partial(request, *args, **kwargs), start=False)
         except RuntimeError:
             return
-        future.add_done_callback(_log_future_error)
+        # Not cut by a Stop: it takes the lock the loop ends the future under.
+        call_without_injection(future.add_done_callback, _log_future_error)
 
     def _emit(self, event: dict[str, Any], conn_id: str = "") -> None:
         """Broadcast *event* to one connection (*conn_id*) or to every client."""
@@ -1026,7 +1152,8 @@ class BrowserTabService:
         attaching it: once that has settled (within ``_ATTACH_TIMEOUT``,
         whatever the browser does), a page it announced closes like any
         tab (its listener tells every surface); one never announced has
-        no listener and is closed directly.
+        no listener and is closed directly, and its browser with it
+        when that leaves it no tab.
         """
         with self._lock:
             rec = self._by_page.get(id(page))
@@ -1039,6 +1166,14 @@ class BrowserTabService:
             await asyncio.wait_for(page.close(), _CLOSE_TIMEOUT)
         except Exception as exc:  # noqa: BLE001 — the page may be gone already
             logger.debug("browser tab: unwanted page not closed: %s", exc)
+        # No listener closes the browser with this page, as one does with
+        # the last tab (_on_page_closed): the page of a first open that
+        # failed, or a popup the last tab left behind, would leave a
+        # browser no surface shows and nothing closes.  Decided under the
+        # lock, as there: an open made meanwhile has reserved its page.
+        async with self._launch_lock:
+            if not self._pages and page.context is self._context:
+                await self._teardown_locked(announce=False)
 
     async def _register(self, page: Page, popup: bool) -> _PageRecord | None:
         """Give *page* a tab id, wire its events and announce it (idempotent).
@@ -1052,6 +1187,10 @@ class BrowserTabService:
         The bound is what lets every waiter on ``attached`` settle: the
         second registration below, and :meth:`_close_unwanted`.
 
+        *popup* is what the caller takes the page for; a page another
+        page opened is one whatever the caller says (:meth:`_on_page`
+        cannot tell while an open creates its own page).
+
         Neither is a tab a teardown withdrew during an ``await`` here (a
         shutdown tells every surface the tab is closed and only then has
         the browser exit, so the page is still open): announced, or
@@ -1064,6 +1203,7 @@ class BrowserTabService:
             return rec if rec.cdp is not None and self._record(rec.tab_id) is rec else None
         try:
             async with asyncio.timeout(_ATTACH_TIMEOUT):
+                popup = popup or await page.opener() is not None
                 cdp = await page.context.new_cdp_session(page)
                 info = await cdp.send("Target.getTargetInfo")
             rec.target_id = info["targetInfo"]["targetId"]
@@ -1151,7 +1291,9 @@ class BrowserTabService:
         Fires for popups and ``target=_blank`` links, but also for the
         pages :meth:`_open` creates; the counter tells them apart (so a
         page the user asked for is not announced as a focus-stealing
-        popup, whichever registration runs first).
+        popup, whichever registration runs first), but for a popup that
+        arrives while an open creates its page: :meth:`_register` knows
+        that one by its opener.
         """
         self._schedule(self._register(page, popup=self._creating == 0))
 

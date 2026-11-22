@@ -16,20 +16,97 @@ hundreds of interrupts are injected, then asserts the worker exited
 and that every lock the path takes is free.  The server, sorcar and
 core injection tests all build on it; the per-path drivers stay in
 the test files.
+
+The standard library's own waits (``Event.wait``, ``Queue.get``,
+``Future.result``, ``Thread.start``) take their lock through
+``threading.Condition.__enter__``, a Python function with the same
+check point, and are not the product's to rewrite: a task thread makes
+them through :func:`~kiss.core.tool_interrupt.call_without_injection`.
+:func:`stop_as_it_takes_its_lock` lands a Stop exactly there.
 """
 
 from __future__ import annotations
 
 import ctypes
+import functools
 import gc
 import sys
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
+from types import CodeType, FrameType
+from typing import Any
 
+from kiss.core import tool_interrupt
 from kiss.server import agent_state
 
 INJECTIONS = 300
+
+_CONDITION_ENTER = threading.Condition.__enter__.__code__
+_THREAD_START = threading.Thread.start.__code__
+
+
+def stop_as_it_takes_its_lock(
+    taker: Any, *under: Any, stop: type[BaseException] = KeyboardInterrupt, settle: float = 0.0,
+) -> Callable[[FrameType, str, Any], None]:
+    """Return a profile hook delivering *stop* where the stdlib call *taker* has taken its lock.
+
+    For ``sys.setprofile`` on the thread that makes the call.  *taker*
+    is the function whose ``with`` enters the condition
+    (``threading.Event.wait``, ``queue.Queue.get``, ``Future.done``),
+    and *under* the functions it must be running in, innermost first
+    (``threading.Thread.start`` for the wait that ends a thread's start,
+    then the product function).  A thread's start is no match unless
+    *under* names it.  The Stop is delivered once, with the product's
+    injector, to the calling thread itself: unheld, CPython raises it as
+    ``Condition.__enter__`` returns, the lock taken and no ``with``
+    block to release it (gh-74174).  *settle* seconds pass first with
+    the lock held, for whoever publishes to the wait (a reader its
+    output, a watcher its verdict) to be waiting for that lock by then.
+    """
+    chain = tuple(function.__code__ for function in under)
+    return functools.partial(_stop_as_it_takes_its_lock, taker.__code__, chain, stop, settle)
+
+
+def _stop_as_it_takes_its_lock(
+    taker: CodeType, chain: tuple[CodeType, ...], stop: type[BaseException], settle: float,
+    frame: FrameType, event: str, arg: Any,
+) -> None:
+    walk = frame.f_back
+    if event != "return" or frame.f_code is not _CONDITION_ENTER:
+        return
+    if walk is None or walk.f_code is not taker:
+        return
+    for code in chain:
+        while walk is not None and walk.f_code is not code:
+            if walk.f_code is _THREAD_START and _THREAD_START not in chain:
+                return
+            walk = walk.f_back
+        if walk is None:
+            return
+    sys.setprofile(None)
+    time.sleep(settle)
+    tool_interrupt.inject_async_exception(threading.get_ident(), stop)
+
+
+def stranded_threads(
+    before: Iterable[threading.Thread], seconds: float = 10.0,
+) -> list[threading.Thread]:
+    """Return the threads started since *before* was listed that are still there after *seconds*.
+
+    A thread whose ``start()`` was cut where it had taken the lock of
+    the thread's ``_started`` event never runs its target: it stays
+    blocked setting that event, listed by ``threading.enumerate()`` for
+    good and never alive.  One blocked on a lock a Stop left held (a
+    queue's, a future's) is alive for good.
+    """
+    known = set(before)
+    deadline = time.monotonic() + seconds
+    while True:
+        left = [thread for thread in threading.enumerate() if thread not in known]
+        if not left or time.monotonic() >= deadline:
+            return left
+        time.sleep(0.05)
 
 
 def inject(thread: threading.Thread) -> int:
@@ -100,9 +177,9 @@ class Contender(threading.Thread):
             time.sleep(0.0002)
 
 
-def lock_is_free(lock: object) -> bool:
-    """Whether *lock* can be taken right now (no thread holds it)."""
-    if not lock.acquire(blocking=False):  # type: ignore[attr-defined]
+def lock_is_free(lock: object, within: float = 0.0) -> bool:
+    """Whether *lock* can be taken *within* seconds; by default right now (no thread holds it)."""
+    if not lock.acquire(timeout=within):  # type: ignore[attr-defined]
         return False
     lock.release()  # type: ignore[attr-defined]
     return True
@@ -117,11 +194,14 @@ def hammer(
 
     ``agent_state.STATE_LOCK`` is always checked too.  With *contend*,
     a :class:`Contender` holds that lock in 1 ms bursts for the whole
-    run and is stopped before the locks are checked.
+    run and is stopped before the locks are checked.  A lock is leaked
+    when it stays held: a thread the hammer does not stop (a manager's
+    loop running the callbacks the hammered path queued) may hold one
+    for a moment more, so each lock is given 5 s to come free.
 
     Args:
         call: The code path to hammer, invoked repeatedly on the worker.
-        locks: Name → lock; every one must be free after the hammer.
+        locks: Name → lock; every one must come free after the hammer.
         contend: A lock to keep contended during the run, or ``None``.
     """
     previous_hook = threading.excepthook
@@ -162,5 +242,5 @@ def hammer(
     assert contender is None or not contender.is_alive(), "the contender hung on a leaked lock"
     assert delivered > INJECTIONS // 2, "the interrupts did not reach the worker"
     locks = {"STATE_LOCK": agent_state.STATE_LOCK, **locks}
-    leaked = [name for name, lock in locks.items() if not lock_is_free(lock)]
+    leaked = [name for name, lock in locks.items() if not lock_is_free(lock, within=5.0)]
     assert not leaked, f"an interrupt leaked {leaked}"

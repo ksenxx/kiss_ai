@@ -87,6 +87,14 @@ HASHED_EMBEDDING_DIMS = 1024
 # forth.  Bump this whenever the mapping changes.
 EMBEDDING_INPUT_FORMAT = "3"  # empty inputs now embed the filename instead
 
+# The exception: the format before it (that of every row the releases up to
+# 2026.11.4 wrote) embedded the same input for every page but a blank one.
+# A row of that format whose page is unchanged and not blank keeps its
+# vector, and :meth:`VectorIndex.sync` only brings its format up to date.
+# A bump that changes what a non-blank input embeds must set this to ``""``,
+# a format no row carries.
+_SAME_NON_BLANK_FORMAT = "2"
+
 # Columns added to the ``pages`` table after its first release, with the
 # definition used both in CREATE TABLE and in the ALTER TABLE migration
 # that :meth:`VectorIndex._connect` runs on older index files.
@@ -435,6 +443,8 @@ class SearchHit:
             to, or for want of statement vectors): its scores are lower
             than, and do not compare with, those of a search that ranked
             with statements.
+        digest: SHA-256 of the page file as indexed: *statement* is a
+            position in that text, and in no later one.
     """
 
     name: str
@@ -442,6 +452,7 @@ class SearchHit:
     frontmatter: dict[str, Any]
     statement: int | None = None
     by_page: bool = False
+    digest: bytes = b""
 
     @property
     def title(self) -> str:
@@ -475,6 +486,7 @@ class _Rows:
         revisions: Each row's ``revision``, which its statement vectors
             must carry, in that generation, to count (see
             :meth:`VectorIndex._write`).
+        digests: Each row's ``sha256``: of the page file it was made from.
         vectors: ``len(names) x dims`` float32 matrix of unit embeddings.
     """
 
@@ -482,6 +494,7 @@ class _Rows:
     names: list[str]
     frontmatter: list[str]
     revisions: list[int]
+    digests: list[bytes]
     vectors: "np.ndarray"
 
 
@@ -706,6 +719,10 @@ class VectorIndex:
         has synced — are re-embedded, in batches of at most
         :data:`EMBED_BATCH_INPUTS` inputs / :data:`EMBED_BATCH_BYTES` bytes
         (one request each when the embedder has an ``embed_many`` method).
+        A row of the format before the current one is kept when its page is
+        unchanged and not blank: that mapping gave it the vector the current
+        one would (see :data:`_SAME_NON_BLANK_FORMAT`), so only its format
+        is brought up to date.
         A page's statements are embedded in the request of the page and
         stored in the transaction of its row.  A page whose row is current
         and only lacks statement vectors (every page of an index that
@@ -731,9 +748,10 @@ class VectorIndex:
         snapshot — even with byte-identical content — therefore never
         matches, so a sync never overwrites or removes a row written by a
         concurrent sync.  Writes skipped this way are counted in no
-        category.  (Recording a stat key for an unchanged row is not a
-        content write: it applies only while the row still holds the digest
-        it was verified against.)  Two things the CAS cannot see: the disk —
+        category.  (Recording a stat key for an unchanged row, or the
+        current format for a kept one, is not a content write: it applies
+        only while the row still holds the digest and the format it was
+        verified against.)  Two things the CAS cannot see: the disk —
         a page deleted after its post-embed check keeps (or gains) a row
         until the next sync drops it, exactly as with a single sync — and a
         still-running process on the pre-``revision`` code, whose rows land
@@ -789,7 +807,7 @@ class VectorIndex:
             pages = {name: st for name, st in pages.items() if name in names}
             stored = {filename: row for filename, row in stored.items() if filename[:-3] in names}
         on_disk = {f"{name}.md" for name in pages}
-        restats: list[tuple[str, str, bytes]] = []
+        restats: list[tuple[str, str, bytes, str]] = []
         pending: list[_Pending] = []  # new and modified pages
         backfill: list[_Pending] = []  # pages whose current row only lacks statement vectors
         for name in sorted(pages):
@@ -829,14 +847,28 @@ class VectorIndex:
                 if has_statements:
                     unchanged += 1
                     if key != current[3]:
-                        restats.append((key, filename, digest))
+                        restats.append((key, filename, digest, EMBEDDING_INPUT_FORMAT))
                     continue
                 queue = backfill
             raw = data.decode("utf-8", errors="replace")
+            text = self.embedding_input(raw)
+            if (
+                snapshot is not None
+                and snapshot[1] == _SAME_NON_BLANK_FORMAT
+                and snapshot[0] == digest
+                and text.strip()
+            ):
+                # The row holds the vector the current mapping gives this
+                # page: it is kept, its format is brought up to date, and an
+                # index with statements leaves the page's to the backfill.
+                restats.append((key, filename, digest, _SAME_NON_BLANK_FORMAT))
+                if not self.statements:
+                    unchanged += 1
+                    continue
+                queue = backfill
             # An embeddings API rejects an empty input and, with it, the whole
             # batch: one empty page file would fail every sync.  A page with
             # nothing to embed is embedded as its name, which is its title.
-            text = self.embedding_input(raw)
             inputs = [text if text.strip() else name]
             if self.statements:
                 inputs += page_statements(name, raw)
@@ -894,7 +926,7 @@ class VectorIndex:
         self,
         stored: dict[str, tuple[bytes, str, int, str]],
         rows: list[tuple[str, str, float, bytes, bytes, str, str, bytes | None]],
-        restats: list[tuple[str, str, bytes]],
+        restats: list[tuple[str, str, bytes, str]],
         stale: list[str],
         report: SyncReport,
         generation: str,
@@ -910,7 +942,9 @@ class VectorIndex:
             rows: Embedded rows to insert or update: the columns of a
                 ``pages`` row, then the page's statement vectors (``None``
                 on an index without statements).
-            restats: ``(stat_key, filename, sha256)`` for unchanged rows.
+            restats: ``(stat_key, filename, sha256, input_format)`` for rows
+                whose vector stands: one that still holds that digest and
+                format gets the stat key and the current format.
             stale: Filenames whose rows should be deleted.
             report: Counts so far.
             generation: The ``generation`` of the index file *stored* was
@@ -930,8 +964,8 @@ class VectorIndex:
                 logger.info("index rebuilt after this sync started; skipping this batch")
                 return report
             conn.executemany(
-                "UPDATE pages SET stat_key = ? WHERE filename = ? AND sha256 = ?"
-                f" AND input_format = '{EMBEDDING_INPUT_FORMAT}'",
+                f"UPDATE pages SET stat_key = ?, input_format = '{EMBEDDING_INPUT_FORMAT}'"
+                " WHERE filename = ? AND sha256 = ? AND input_format = ?",
                 restats,
             )
             if not rows and not stale:
@@ -1005,12 +1039,13 @@ class VectorIndex:
             if cache is not None and cache[0] == token:
                 return cache[1]
             rows = conn.execute(
-                "SELECT filename, frontmatter, revision, embedding FROM pages ORDER BY filename"
+                "SELECT filename, frontmatter, revision, sha256, embedding FROM pages"
+                " ORDER BY filename"
             ).fetchall()
-        by_dims: dict[int, list[tuple[str, str, int, bytes]]] = {}
-        for filename, frontmatter_json, revision, blob in rows:
+        by_dims: dict[int, list[tuple[str, str, int, bytes, bytes]]] = {}
+        for filename, frontmatter_json, revision, digest, blob in rows:
             by_dims.setdefault(len(blob) // 4, []).append(
-                (filename[:-3], frontmatter_json, revision, blob)
+                (filename[:-3], frontmatter_json, revision, digest, blob)
             )
         groups = {
             dims: _Rows(
@@ -1018,7 +1053,8 @@ class VectorIndex:
                 names=[row[0] for row in group],
                 frontmatter=[row[1] for row in group],
                 revisions=[row[2] for row in group],
-                vectors=np.frombuffer(b"".join(row[3] for row in group), dtype=np.float32).reshape(
+                digests=[row[3] for row in group],
+                vectors=np.frombuffer(b"".join(row[4] for row in group), dtype=np.float32).reshape(
                     len(group), dims
                 ),
             )
@@ -1137,6 +1173,7 @@ class VectorIndex:
                 frontmatter=json.loads(rows.frontmatter[i]),
                 statement=statement,
                 by_page=best is None,
+                digest=rows.digests[i],
             )
             for negated, i, statement in scored[:k]
             if -negated > min_score

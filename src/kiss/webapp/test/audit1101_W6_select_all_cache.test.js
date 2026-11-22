@@ -360,6 +360,31 @@ async function main() {
     },
   );
 
+  await test(
+    'Audit 2026-11-21 (W1 F2): Select All starts and ends at the white ' +
+      'space a <pre> shows around its elements, not at an empty text ' +
+      'node, nor at the white space a block collapses',
+    async () => {
+      const {win} = makeWindow(
+        '<pre id="code">    <span>indented()</span>  </pre>' +
+          '<div id="block">\n  <p>One</p>\n</div>',
+        {scope: target => target.closest('pre, #block')},
+      );
+      const doc = win.document;
+      const code = doc.getElementById('code');
+      // What a page's script may leave at the edges.
+      code.prepend(doc.createTextNode(''));
+      code.append(doc.createTextNode(''));
+      menu(win, code, 'select-all');
+      const inCode = win.getSelection().getRangeAt(0);
+      assert.strictEqual(inCode.toString(), '    indented()  ');
+      assert.strictEqual(inCode.startContainer, code.childNodes[1]);
+      assert.strictEqual(inCode.endContainer, code.childNodes[3]);
+      menu(win, doc.getElementById('block'), 'select-all');
+      assert.strictEqual(win.getSelection().toString(), 'One');
+    },
+  );
+
   report('audit1101_W6_select_all_cache');
 }
 

@@ -323,6 +323,7 @@ class TestBackfillSubtaskCosts(unittest.TestCase):
         # A file that is no database opens and then fails: its connection is closed too.
         garbage = Path(self.db_dir) / "garbage.db"
         garbage.write_bytes(b"not a database " * 100)
+        gc.collect()  # a connection an earlier test of the process left unclosed warns here
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             self.assertEqual(script.main(["--db", str(garbage)]), 1)

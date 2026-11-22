@@ -263,11 +263,15 @@
   // a re-sent one from a new one.  It would run the user's action again
   // (a prompt, a scheduled job, a device login, a keystroke, an Explorer
   // paste that names its copy afresh each time, a step Back or Forward
-  // in the browser's history, a new browser page, a daemon restart or
-  // update, a Git, worktree, commit or machine action, a sign-in step,
+  // in the browser's history, a new browser page, a file opened in the
+  // default browser or in its default application, a new project, a
+  // daemon restart or
+  // update, a Git, worktree, commit, pull request or machine action, a
+  // sign-in step,
   // a paid transcription or forced task update, a file or model usage
   // count), or refuse the second delivery of the change the first one
-  // made (a promptlet edited or deleted, a custom model added).  Posted
+  // made (a promptlet edited or deleted, a custom model added, a skill
+  // checked and installed).  Posted
   // while the daemon is unreachable (main.js holds prompts back once it
   // hears of the drop, but a socket is CLOSING before ``onclose`` says
   // so) such a frame waits in ``_held``, never in ``_pending``.  Every
@@ -285,12 +289,16 @@
     'editTrick',
     'deleteTrick',
     'saveMyModel',
+    'saveProject',
     'selectModel',
     'recordFileUsage',
     'getTaskUpdate',
+    'installSkill',
     'voiceTranscribe',
     'startCodexLogin',
     'openExternal',
+    'openInBrowser',
+    'openWithDefaultApp',
     'shareChat',
     'browserOpen',
     'browserNavigate',
@@ -304,6 +312,7 @@
     'gitAction',
     'worktreeAction',
     'autocommitAction',
+    'createPrAction',
     'signinLogin',
     'signinPaste',
     'signinCancel',
@@ -666,6 +675,14 @@
   let _authPrompt = null;
   // Pending interactive submission, never populated from cached credentials.
   let _authPassword = '';
+  // The typed password of the ``auth`` frame the current socket has
+  // not answered yet ('' for the stored-password probe); null on a
+  // new socket until ``onopen`` and once ``auth_ok`` or
+  // ``auth_required`` answered the frame.  The server judges one
+  // ``auth`` at a time and reads a frame that follows an accepted one
+  // as a command, whose wrong password ends the session: a password
+  // typed meanwhile waits in ``_authPassword`` for that answer.
+  let _authInFlight = null;
   // The localStorage key of the password the server last accepted, kept
   // for the next page load and for the other tabs of this origin.
   const _PASSWORD_KEY = 'sorcar-remote-pwd';
@@ -849,13 +866,23 @@
     // replayed (and counted) once per open tab.
     _authPassword = pwd;
     if (_ws && _ws.readyState === WebSocket.OPEN) {
-      _sessionPassword = pwd;
-      _ws.send(JSON.stringify({type: 'auth', password: pwd, parts: true}));
+      // Behind a frame in flight it waits for the answer:
+      // ``auth_required`` sends it then, ``auth_ok`` drops it.
+      if (_authInFlight === null) _sendTypedAuth();
     } else {
       // The server dropped the idle socket while the user typed;
       // ``_authPassword`` goes out in ``onopen`` of the reconnect.
       _reconnectNowIfNeeded();
     }
+  }
+
+  /** Send the pending typed password as the open socket's ``auth`` frame. */
+  function _sendTypedAuth() {
+    _authInFlight = _authPassword;
+    _sessionPassword = _authPassword;
+    _ws.send(
+      JSON.stringify({type: 'auth', password: _authPassword, parts: true}),
+    );
   }
 
   /** "Enter password" on the overlay after a Cancel: show the dialog again. */
@@ -888,14 +915,17 @@
 
   // The requests main.js gives up the moment it hears that the daemon is
   // unreachable: a pending file save ("Save failed: the server connection
-  // dropped"; it starts no other until the daemon is back) and whatever
+  // dropped"; it starts no other until the daemon is back), whatever
   // the Explorer or the Source Control view awaited a reply to ("the
   // pending Explorer/Git action was not completed. Try again once it
-  // reconnects"; its reply would find no request any more).  One still
-  // waiting here is no longer owed: sent later, it would write the file
-  // the user was told had not been saved (their retry then refused as a
-  // conflict with it), or run the action behind the user, whose retry
-  // would run it a second time.  An action posted under the banner that
+  // reconnects"; its reply would find no request any more) and a
+  // project's save ("The server connection dropped before this save was
+  // confirmed"; the Projects page unlocks the form of a new project for
+  // another try).  One still waiting here is no longer owed: sent
+  // later, it would write the file the user was told had not been saved
+  // (their retry then refused as a conflict with it), or run the action
+  // behind the user, whose retry would run it a second time (a second
+  // project of the same name).  An action posted under the banner that
   // follows is held for the ``pong`` of the next connection
   // (``_ONCE_ONLY``) and is given up likewise if that one drops first.
   const _GIVEN_UP_AT_DROP = new Set([
@@ -903,6 +933,7 @@
     'fsAction',
     'gitAction',
     'gitShow',
+    'saveProject',
   ]);
 
   function _stillOwed(data) {
@@ -1088,15 +1119,13 @@
     const query = window.name === 'kiss-app-window' ? '?appWindow=1' : '';
     _ws = new WebSocket(scheme + location.host + '/ws' + query);
     _authenticated = false;
-    // The typed password this socket's first ``auth`` carried, '' for
-    // the stored-password probe: what an ``auth_required`` rejects.
-    let typedFirst = '';
+    _authInFlight = null;
 
     _ws.onopen = function () {
       // A password typed while the socket was down (still pending,
       // so not stored yet) wins over the stored one.
-      typedFirst = _authPassword;
-      let pwd = typedFirst;
+      _authInFlight = _authPassword;
+      let pwd = _authInFlight;
       if (!pwd) {
         try {
           pwd = localStorage.getItem(_PASSWORD_KEY) || '';
@@ -1117,6 +1146,10 @@
       const msg = JSON.parse(text);
       if (msg.type === 'heartbeat') return;
       if (msg.type === 'auth_ok') {
+        // The server accepted the frame in flight: a password typed
+        // after it was never sent and gives way to the one accepted.
+        if (_authPassword) _authPassword = _authInFlight || '';
+        _authInFlight = null;
         // An interactive login the server accepted: store it for the
         // next page load (the offline-shell reload below included) and
         // for the other tabs of this origin.
@@ -1231,9 +1264,11 @@
         return;
       }
       if (msg.type === 'auth_required') {
-        // Only this socket's first ``auth`` was judged: a password the
-        // user sent after it (Unlock before this answer) stays pending.
-        if (_authPassword === typedFirst) _authPassword = '';
+        // Only the frame in flight was judged: a password the user
+        // typed after it (Unlock before this answer) stays pending.
+        const refused = _authInFlight;
+        _authInFlight = null;
+        if (_authPassword === refused) _authPassword = '';
         // Stored password (if any) was rejected; drop it so a refresh
         // re-prompts instead of silently retrying the bad value.
         _forgetStoredPassword();
@@ -1261,11 +1296,17 @@
         }
         _setOverlayAction(null, null);
         _dispatchConnected();
+        if (_authPassword) {
+          // That pending password is this socket's second ``auth``;
+          // the dialog waits for its answer, as after any Unlock.
+          _sendTypedAuth();
+          _dropUnreachableNote();
+          return;
+        }
         _promptForPassword();
         // The server answers a wrong FIRST ``auth`` with this frame, not
         // with ``error``: say so when that was a typed password.
-        if (typedFirst)
-          _setAuthError('That password is not correct. Try again.');
+        if (refused) _setAuthError('That password is not correct. Try again.');
         else _dropUnreachableNote();
         return;
       }

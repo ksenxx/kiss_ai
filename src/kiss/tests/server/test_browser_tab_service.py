@@ -21,8 +21,10 @@ from __future__ import annotations
 import asyncio
 import base64
 import concurrent.futures
+import contextlib
 import gc
 import http.server
+import json
 import os
 import shutil
 import signal
@@ -31,6 +33,7 @@ import stat
 import sys
 import threading
 import time
+import urllib.request
 from collections.abc import Callable, Coroutine
 from pathlib import Path
 from typing import Any
@@ -111,6 +114,19 @@ def test_normalize_url_and_home(monkeypatch: pytest.MonkeyPatch) -> None:
         "https://www.google.com/search?q=kiss%20sorcar%20agent"
     )
     assert normalize_url("what is cdp") == "https://www.google.com/search?q=what%20is%20cdp"
+    # A query or a fragment can follow the host directly, a port too.
+    assert normalize_url("example.com?x=1") == "https://example.com?x=1"
+    assert normalize_url("example.com#section") == "https://example.com#section"
+    assert normalize_url("example.com:443?token=s") == "https://example.com:443?token=s"
+    # A scheme is one only where the text starts: not a URL in a query, nor one among words.
+    assert normalize_url("example.com/?next=https://other.example") == (
+        "https://example.com/?next=https://other.example"
+    )
+    assert normalize_url("how to use https://example.com") == (
+        "https://www.google.com/search?q=how%20to%20use%20https%3A//example.com"
+    )
+    assert normalize_url("HTTP://Example.com") == "HTTP://Example.com"
+    assert normalize_url("view-source:https://example.com") == "view-source:https://example.com"
 
 
 def test_key_and_mouse_translation() -> None:
@@ -398,8 +414,35 @@ _DOCUMENTS = {
     "/clip": _wide("clip", "overflow-x:clip", "direction:rtl"),
     # Its body is what scrolls, in a window that has nothing to scroll.
     "/own": _wide("own", "overflow-y:clip", "overflow:auto;width:300px;height:100px"),
-    # An old page: without a doctype the body stands for the window.
+    # An old page: without a doctype the body stands for the window, and
+    # its sizes are the window's (the root of the second, a table, is as
+    # wide as the document).
     "/old": _wide("old", "", "direction:rtl").removeprefix("<!doctype html>"),
+    "/old-table": _wide("old-table", "display:table", "direction:rtl").removeprefix(
+        "<!doctype html>"
+    ),
+    # Containment keeps what the body says from the window: this body
+    # scrolls on its own, and so does the next one, a size container.
+    "/contained": _wide("contained", "contain:paint", "overflow-x:auto;width:300px;height:100px"),
+    "/container": _wide(
+        "container", "", "container-type:inline-size;overflow-x:auto;width:300px;height:100px",
+    ),
+    # Its window reads from right to left, as its root says: the body
+    # (2500px of it left of the window) is not heard.
+    "/contained-rtl": _wide(
+        "contained-rtl", "contain:style;direction:rtl", "direction:ltr;margin-left:-2500px",
+    ),
+    # Size containment has no effect on a table: this body is heard.
+    "/table": _wide("table", "", "display:table;contain:size;direction:rtl"),
+    # A body without a box is not heard: nothing forbids the scrolling.
+    "/boxless": _wide("boxless", "", "display:contents;overflow-x:hidden"),
+    # The rows of a table scroll nothing, whatever their overflow says.
+    "/rows": (
+        "<!doctype html><title>rows</title><body style='margin:0'>"
+        "<table style='direction:rtl;border-spacing:0'>"
+        "<tbody style='overflow-y:auto;border:7px solid'><tr><td style='padding:0'>"
+        "<div style='width:300px;height:100px'></div></td></tr></tbody></table></body>"
+    ),
 }
 
 # Things a finger can land on, 50px apart down the left side of a
@@ -763,14 +806,25 @@ def test_a_finger_is_told_whether_a_drag_to_the_right_would_scroll_the_page(
     # Other documents, each after the script that scrolls it: one that
     # reads right to left starts at its right end, one that forbids
     # sideways scrolling moves under no finger, and in one the body is
-    # what scrolls.
+    # what scrolls, as it is where containment is in effect on the root
+    # or the body: the window then reads as the root does, and scrolls
+    # as the root says, as it does past a body without a box.
     left_end = "scrollTo(-100000, 0)"
+    from_right = {"0": True, left_end: False}
+    own_body = {"document.body.scrollLeft = 300": True, "document.body.scrollLeft = 0": False}
     documents = {
-        "rtl": {"0": True, left_end: False},
+        "rtl": from_right,
         "hidden": {"scrollTo(300, 0)": False},
         "clip": {"0": False},
-        "own": {"document.body.scrollLeft = 300": True, "document.body.scrollLeft = 0": False},
-        "old": {"0": True, left_end: False},
+        "own": own_body,
+        "old": from_right,
+        "old-table": from_right,
+        "contained": own_body,
+        "container": own_body,
+        "contained-rtl": from_right,
+        "table": from_right,
+        "boxless": {"scrollTo(300, 0)": True, "scrollTo(0, 0)": False},
+        "rows": {"0": False},
     }
     for name, scripts in documents.items():
         server._handle_command({
@@ -1306,6 +1360,53 @@ def test_an_open_whose_browser_stops_answering_fails_and_closes_its_page(
 
 @pytest.mark.skipif(not _PLAYWRIGHT_CACHE.is_dir(), reason="Playwright browsers not installed")
 @pytest.mark.skipif(sys.platform != "linux", reason="SIGSTOP and /proc")
+def test_a_first_open_whose_browser_stops_answering_leaves_no_browser_behind(
+    daemon: Any, page_server: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The browser a failed first open launched is closed with the page nobody wanted.
+
+    As above, but the open is the service's first: its page was the
+    only tab the browser would have had.  The failed open closed the
+    page directly (it had no record, so no close listener), and nothing
+    then noticed that the browser was left with no tab: it and its
+    driver ran on, shown by no surface, where no last tab could be
+    closed to end them.  The page's cleanup now closes a browser it
+    leaves empty, which frees the profile for the next open.
+    """
+    server, printer = daemon
+    service = server.browser_tabs
+    monkeypatch.setenv("KISS_HEADLESS", "1")
+    page_event = Pause(BrowserTabService._register.__code__, _entered_by_page_event)
+    agent_thread = concurrent.futures.ThreadPoolExecutor(1)
+    pid = 0
+    try:
+        with page_event:
+            opening = agent_thread.submit(service.open_for_user, page_server)
+            assert page_event.paused.wait(90), "the page event never registered the new page"
+            pid = _browser_pid(service._profile_dir)
+            os.kill(pid, signal.SIGSTOP)
+            page_event.release()
+        # Settled by the attach bound, not by the open's own (longer) one.
+        assert opening.result(_ATTACH_TIMEOUT + 10) is False
+    finally:
+        if pid:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGCONT)
+        agent_thread.shutdown()
+    _wait(
+        lambda: service._context is None and service._playwright is None,
+        "the browser left with no tab to be closed",
+    )
+    _wait(lambda: not Path(f"/proc/{pid}").exists(), "the browser process to exit")
+    # Never attached, never announced: no surface has a tab to drop.
+    assert not _events(printer, "openBrowserTab") and not _events(printer, "closeBrowserTab")
+    # The profile is free: the next open launches a browser of its own.
+    assert service.open_for_user(page_server) is True
+    assert len(service._pages) == 1 and _browser_pid(service._profile_dir) != pid
+
+
+@pytest.mark.skipif(not _PLAYWRIGHT_CACHE.is_dir(), reason="Playwright browsers not installed")
+@pytest.mark.skipif(sys.platform != "linux", reason="SIGSTOP and /proc")
 def test_an_interrupt_the_browser_does_not_answer_settles_and_closes_the_tab(
     daemon: Any, page_server: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1356,7 +1457,7 @@ def test_shutdown_settles_an_outstanding_submission(daemon: Any) -> None:
         finally:
             finalized.set()
 
-    future = service._run_threadsafe(pending_operation())
+    future = service._run_threadsafe(pending_operation)
     assert entered.wait(10)
     service.shutdown()
     assert future.done(), "shutdown abandoned the submitted future"
@@ -1423,3 +1524,61 @@ def test_a_popup_whose_attach_fails_is_closed_not_left_behind(
     _wait(lambda: set(context.pages) == pages_before or None, "the popup to close")
     assert {e["tab_id"] for e in _events(printer, "openBrowserTab")} == {first}
     assert not _events(printer, "closeBrowserTab")
+
+
+def _browser_page_urls(profile_dir: Path) -> list[str]:
+    """The address of every page of *profile_dir*'s browser, as its DevTools port lists them."""
+    port = (profile_dir / "DevToolsActivePort").read_text().split()[0]
+    with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/list", timeout=5) as answer:
+        return [target["url"] for target in json.load(answer)]
+
+
+@pytest.mark.skipif(not _PLAYWRIGHT_CACHE.is_dir(), reason="Playwright browsers not installed")
+def test_a_popup_that_arrives_while_a_tab_is_being_opened_is_announced_as_a_popup(
+    daemon: Any, page_server: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A page's popup asks for the focus even when a surface opens a tab at that moment.
+
+    The ``page`` event of a popup that arrived while an open was
+    creating its own page was taken for that page: announced with
+    ``popup: false, focus: false``, so no surface showing the browser
+    followed it and a sign-in or consent window stayed in the
+    background.  The open is held where it starts, and the service's
+    loop with it, until the browser has the popup: the popup's page
+    event then waits in the driver's pipe, and is read once the open's
+    page creation is in flight.
+    """
+    server, printer = daemon
+    service = server.browser_tabs
+    monkeypatch.setenv("KISS_HEADLESS", "1")
+    assert service.open_for_user(page_server) is True
+    first = _events(printer, "openBrowserTab")[0]["tab_id"]
+    loop = service._loop
+    assert loop is not None
+    opening = Pause(BrowserTabService._new_tab.__code__, lambda local: True)
+    with opening:
+        popup = asyncio.run_coroutine_threadsafe(
+            service._pages[first].page.evaluate("void window.open('about:blank#popup')"), loop,
+        )
+        server._handle_command({"type": "browserOpen", "url": "about:blank", "connId": "c1"})
+        assert opening.paused.wait(30), "the open never started"
+        _wait(
+            lambda: "about:blank#popup" in _browser_page_urls(service._profile_dir),
+            "the browser to open the popup",
+        )
+        time.sleep(1.0)  # the driver has reported the popup by now
+        opening.release()
+    popup.result(30)
+    asked = _wait(lambda: _events(printer, "openBrowserTab", connId="c1"), "the tab asked for")[0]
+    announced = _wait(
+        lambda: [
+            e for e in _events(printer, "openBrowserTab")
+            if e["tab_id"] not in (first, asked["tab_id"])
+        ],
+        "the popup announced",
+    )
+    assert [(e["popup"], e["focus"]) for e in announced] == [(True, True)]
+    # The tab the surface asked for is no popup: everyone gets it unfocused, its asker focused.
+    assert [
+        (e["popup"], e["focus"]) for e in _events(printer, "openBrowserTab", tab_id=asked["tab_id"])
+    ] == [(False, False), (False, True)]

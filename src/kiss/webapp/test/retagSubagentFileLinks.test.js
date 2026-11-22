@@ -10,8 +10,10 @@
 // on every path span, the in-flight check keys and the deferred tail
 // sweep's tab id -- must follow the rename, or the sub-agent's own
 // commit_and_merge never re-verifies its links, a reconnect re-asks
-// under a tab id the daemon has closed, closing the tab leaks the
-// spans, and the frame's collapse work is dropped.
+// under a tab id the page no longer has, closing the tab leaks the
+// spans, and the frame's collapse work is dropped.  The rename itself
+// is not reported to the daemon: the old id stays its view of the
+// sub-agent until the sub-agent ends.
 
 /* global require, console, process */
 
@@ -24,7 +26,7 @@ const {
   readyTabId,
 } = require('./simplify2_harness');
 const {
-  clickClose,
+  finishFanOut,
   announceRetaggedSubagent: announce,
 } = require('./subagent_tab_helpers');
 
@@ -64,8 +66,8 @@ function streamAndRetag(win, posted, parentId) {
   assert.ok(first[0].paths.includes(REL), 'setup: the check names REL');
   announce(win, parentId, 'sa-2');
   assert.ok(
-    posted.some(m => m.type === 'closeTab' && m.tabId === 'sa-1'),
-    'setup: the retag must release the old id',
+    !posted.some(m => m.type === 'closeTab'),
+    'setup: the retag tells the daemon nothing',
   );
   assert.ok(
     win._testApi.openTabs().some(t => t.id === 'sa-2') &&
@@ -166,7 +168,7 @@ function testCloseForgetsTheSpans() {
   const {win, posted, parentId} = bootSubagent();
   streamAndRetag(win, posted, parentId);
   assert.strictEqual(win._testApi.pendingFileLinkCounts().spans, 1);
-  clickClose(win, 'sa-2');
+  finishFanOut(win, ['sa-2']);
   const counts = win._testApi.pendingFileLinkCounts();
   assert.strictEqual(
     counts.spans + counts.checks,

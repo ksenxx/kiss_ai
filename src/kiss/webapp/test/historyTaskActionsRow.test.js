@@ -7,11 +7,11 @@
 // task-history panel.
 //
 // A task panel (``.sidebar-item.running-item`` inside ``#history-list``)
-// is ONE line: its text and, at the right end, a "…" button.  The
-// favourite / copy / details / delete buttons, the "... ago" label and
-// the machine the task ran on are the lines of the menu that button
-// opens (the panel's ``.sidebar-item-actions`` strip, a popover).  They
-// used to sit on a line of their own under the text.
+// is ONE line: its status mark, its text and, at the right end, a "…"
+// button.  It has no fold button and nothing hangs under it.  The
+// favourite / pin / copy / delete buttons, the "... ago" label and the
+// machine the task ran on are the lines of the menu that button opens
+// (the panel's ``.sidebar-item-actions`` strip, a popover).
 //
 // jsdom has no Popover API, so the menu cannot be opened here: these
 // tests cover what the page builds and what the menu's buttons do, and
@@ -28,8 +28,15 @@ const {
   makePage: makeChatPage,
   loadRemoteCss,
   stubClipboard,
+  ofType,
+  plain,
 } = require('./simplify2_harness');
-const {loadHistory, makeSession, historyRow} = require('./history_helpers');
+const {
+  loadHistory,
+  makeSession,
+  historyRow,
+  rowByTitle,
+} = require('./history_helpers');
 
 const ICON_PX = 12;
 
@@ -51,35 +58,31 @@ function childKinds(el, kinds) {
 }
 
 // ---------------------------------------------------------------------------
-// 1. The panel is one line: text, then the "…" button; the buttons are
-//    the menu's.  (Tests 1-2 read and then click the same rendered row,
-//    so they share one page.)
+// 1. The panel is one line: mark, text, then the "…" button; the other
+//    buttons are the menu's.  (Tests 1-2 read and then click the same
+//    rendered row, so they share one page.)
 // ---------------------------------------------------------------------------
 
 function testPanelIsOneLineWithMenu(win) {
   const row = historyRow(win);
   assert.ok(row, 'history row rendered');
+  const kinds = [
+    'sidebar-item-completed',
+    'sidebar-item-text',
+    'sidebar-item-more',
+    'sidebar-item-actions',
+  ];
   assert.deepStrictEqual(
-    childKinds(row, [
-      'sidebar-item-text',
-      'sidebar-item-more',
-      'sidebar-item-actions',
-      'running-item-info',
-    ]),
-    [
-      'sidebar-item-text',
-      'sidebar-item-more',
-      'sidebar-item-actions',
-      'running-item-info',
-    ],
-    'the panel holds its text, the "…" button, its menu and its details',
+    childKinds(row, kinds),
+    kinds,
+    'the panel holds its mark, its text, the "…" button and the menu',
   );
   const text = row.querySelector('.sidebar-item-text');
   const more = row.querySelector('.sidebar-item-more');
   const actions = row.querySelector('.sidebar-item-actions');
 
   // One line: the text takes the room the button leaves and is cut
-  // with an ellipsis; only the details break onto lines of their own.
+  // with an ellipsis (it was clamped to three lines once).
   const textStyle = win.getComputedStyle(text);
   assert.ok(px(textStyle.flexGrow) >= 1, 'the task text fills its line');
   assert.notStrictEqual(
@@ -87,10 +90,15 @@ function testPanelIsOneLineWithMenu(win) {
     '100%',
     'the task text shares its line with the "…" button',
   );
+  assert.deepStrictEqual(
+    [textStyle.whiteSpace, textStyle.overflow, textStyle.textOverflow],
+    ['nowrap', 'hidden', 'ellipsis'],
+    'the task text keeps to one line, cut with an ellipsis',
+  );
   assert.strictEqual(
-    win.getComputedStyle(row.querySelector('.running-item-info')).flexBasis,
-    '100%',
-    'the details take lines of their own below',
+    textStyle.getPropertyValue('-webkit-line-clamp'),
+    '',
+    'the task text is not clamped to several lines',
   );
 
   // The strip is the menu of the "…" button: a popover (closed, so not
@@ -112,36 +120,21 @@ function testPanelIsOneLineWithMenu(win) {
   // last), then when the task was launched and on which machine.  Each
   // button carries the name its line shows (main.css draws it from the
   // aria-label).
-  assert.deepStrictEqual(
-    childKinds(actions, [
-      'sidebar-item-favorite',
-      'sidebar-item-copy',
-      'sidebar-item-collapse',
-      'sidebar-item-delete',
-      'sidebar-item-confirm',
-      'sidebar-item-launched',
-      'sidebar-item-machine',
-    ]),
-    [
-      'sidebar-item-favorite',
-      'sidebar-item-copy',
-      'sidebar-item-collapse',
-      'sidebar-item-delete',
-      'sidebar-item-confirm',
-      'sidebar-item-launched',
-      'sidebar-item-machine',
-    ],
-  );
+  const lines = [
+    'sidebar-item-favorite',
+    'sidebar-item-pin',
+    'sidebar-item-copy',
+    'sidebar-item-delete',
+    'sidebar-item-confirm',
+    'sidebar-item-launched',
+    'sidebar-item-machine',
+  ];
+  assert.deepStrictEqual(childKinds(actions, lines), lines);
   assert.deepStrictEqual(
     Array.from(actions.querySelectorAll(':scope > button')).map(btn =>
       btn.getAttribute('aria-label'),
     ),
-    [
-      'Favourite task',
-      'Copy task to clipboard',
-      'Expand task details',
-      'Delete task',
-    ],
+    ['Favourite task', 'Pin task', 'Copy task to clipboard', 'Delete task'],
   );
   assert.match(
     actions.querySelector('.sidebar-item-launched').textContent,
@@ -153,6 +146,20 @@ function testPanelIsOneLineWithMenu(win) {
     'this machine',
     'and where it ran: here, on a daemon that has not said its name yet',
   );
+  // The delete line is drawn as the menu's other buttons are.
+  const copyStyle = win.getComputedStyle(
+    actions.querySelector('.sidebar-item-copy'),
+  );
+  const delStyle = win.getComputedStyle(
+    actions.querySelector('.sidebar-item-delete'),
+  );
+  for (const prop of ['cursor', 'border-radius', 'background-image']) {
+    assert.strictEqual(
+      delStyle.getPropertyValue(prop),
+      copyStyle.getPropertyValue(prop),
+      `the delete button's ${prop} matches the other row buttons'`,
+    );
+  }
   console.log('  ok - a task panel is one line with a "…" menu');
 }
 
@@ -172,21 +179,18 @@ function testMenuButtonsAct(win, posted) {
   fav.click();
   assert.ok(fav.classList.contains('favorited'), 'the star favourites');
   assert.strictEqual(fav.getAttribute('aria-label'), 'Unfavourite task');
-  assert.ok(
-    posted.some(m => m.type === 'setFavorite'),
-    'favouriting reaches the backend',
-  );
   fav.click();
   assert.ok(!fav.classList.contains('favorited'), 'and unfavourites');
   assert.strictEqual(fav.getAttribute('aria-label'), 'Favourite task');
-
-  const toggle = actions.querySelector('.sidebar-item-collapse');
-  toggle.click();
-  assert.ok(!row.classList.contains('collapsed'), 'the chevron unfolds');
-  assert.strictEqual(
-    toggle.getAttribute('aria-label'),
-    'Collapse task details',
+  assert.deepStrictEqual(
+    plain(ofType(posted, 'setFavorite')),
+    [
+      {type: 'setFavorite', taskId: 'task-1', isFavorite: true},
+      {type: 'setFavorite', taskId: 'task-1', isFavorite: false},
+    ],
+    'each press writes the star of the task to the daemon',
   );
+  assert.strictEqual(opened().length, before, 'and opens nothing');
 
   // A click on a line that is no button (the age) does nothing either.
   actions
@@ -213,21 +217,82 @@ function testMenuButtonsAct(win, posted) {
 }
 
 // ---------------------------------------------------------------------------
-// 3. Rows without a task id have a menu with the details toggle alone.
+// 3. A panel has no fold button and nothing hangs under its line, even
+//    for a running task that carries all a panel once listed there (its
+//    totals, work dir, model, budget, agent and ids).
+// ---------------------------------------------------------------------------
+
+function testNoFoldButtonAndNothingUnderTheLine() {
+  const {win} = makePage();
+  loadHistory(win, [
+    makeSession({
+      is_running: true,
+      parent_task_id: 'task-0',
+      max_budget: 12.5,
+      sea: 'write_paper',
+    }),
+  ]);
+  const row = historyRow(win);
+  assert.strictEqual(
+    row.querySelector('.sidebar-item-collapse'),
+    null,
+    'a task panel has no fold button',
+  );
+  const kinds = [
+    'sidebar-item-running',
+    'sidebar-item-text',
+    'sidebar-item-more',
+    'sidebar-item-actions',
+  ];
+  assert.deepStrictEqual(
+    childKinds(row, kinds),
+    kinds,
+    'after the text come the "…" button and its menu, and nothing else',
+  );
+  assert.strictEqual(
+    win.getComputedStyle(row.lastElementChild).display,
+    'none',
+    'the closed menu takes no room: nothing hangs under the line',
+  );
+  assert.strictEqual(
+    win.getComputedStyle(row).flexWrap,
+    'nowrap',
+    'and nothing of the panel wraps onto a second line',
+  );
+  win.close();
+  console.log('  ok - a task panel has no fold button, nothing under its line');
+}
+
+// ---------------------------------------------------------------------------
+// 4. Rows without a task id keep a menu that says when and where the
+//    task ran, and the keyboard when the list is rebuilt.
 // ---------------------------------------------------------------------------
 
 function testRowWithoutTaskIdKeepsMenu() {
   const {win} = makePage();
-  loadHistory(win, [
-    {
-      id: 'chat-2',
-      title: 'old imported chat',
-      preview: 'old imported chat',
-      has_events: false,
-      timestamp: 1700000000,
-    },
-  ]);
-  const row = historyRow(win);
+  // Three tasks without a task id: one names no chat either, two are
+  // of one chat and only their time tells them apart.
+  const stray = {
+    title: 'stray imported task',
+    preview: 'stray imported task',
+    has_events: false,
+    timestamp: 1700000100,
+  };
+  const newer = {
+    id: 'chat-2',
+    title: 'old imported chat',
+    preview: 'old imported chat',
+    has_events: false,
+    timestamp: 1700000000,
+  };
+  const older = {
+    ...newer,
+    title: 'older imported chat',
+    preview: 'older imported chat',
+    timestamp: 1699990000,
+  };
+  loadHistory(win, [stray, newer, older]);
+  const row = rowByTitle(win, newer.title);
   const actions = row.querySelector('.sidebar-item-actions');
   assert.strictEqual(
     row.querySelector('.sidebar-item-more').popoverTargetElement,
@@ -235,18 +300,37 @@ function testRowWithoutTaskIdKeepsMenu() {
     'a row without a task id has its "…" menu too',
   );
   assert.deepStrictEqual(
-    Array.from(actions.querySelectorAll('button')).map(btn =>
-      btn.getAttribute('aria-label'),
-    ),
-    ['Expand task details'],
-    'with no favourite, copy or delete line',
+    childKinds(actions, ['sidebar-item-launched', 'sidebar-item-machine']),
+    ['sidebar-item-launched', 'sidebar-item-machine'],
+    'with no favourite, pin, copy or delete line',
+  );
+
+  // Such a row is known by its chat and time: a refresh that rebuilds
+  // the rows leaves the keyboard on the "…" button of the same one.
+  const moreBefore = rowByTitle(win, older.title).querySelector(
+    '.sidebar-item-more',
+  );
+  moreBefore.focus();
+  loadHistory(win, [
+    stray,
+    {...newer, preview: 'old imported chat, edited'},
+    older,
+  ]);
+  const moreAfter = rowByTitle(win, older.title).querySelector(
+    '.sidebar-item-more',
+  );
+  assert.notStrictEqual(moreAfter, moreBefore, 'the rows were rebuilt');
+  assert.strictEqual(
+    win.document.activeElement,
+    moreAfter,
+    'the keyboard stays on the "…" button of the same row',
   );
   win.close();
-  console.log('  ok - task-id-less rows keep the menu');
+  console.log('  ok - task-id-less rows keep the menu and the keyboard');
 }
 
 // ---------------------------------------------------------------------------
-// 4. Only the *history* panels have a menu - the promptlets list keeps
+// 5. Only the *history* panels have a menu - the promptlets list keeps
 //    its compact inline buttons (a 12px icon in a "2px 0" padded box).
 // ---------------------------------------------------------------------------
 
@@ -294,6 +378,7 @@ async function main() {
   loadHistory(win, [makeSession()]);
   testPanelIsOneLineWithMenu(win);
   await testMenuButtonsAct(win, posted);
+  testNoFoldButtonAndNothingUnderTheLine();
   testRowWithoutTaskIdKeepsMenu();
   testTricksListUnaffected();
   console.log('All historyTaskActionsRow tests passed');

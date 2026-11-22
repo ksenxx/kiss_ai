@@ -42,7 +42,12 @@ const {
   fakeMatchMedia,
   htmlFrames,
 } = require('./simplify2_harness.js');
-const {contentTabs} = require('./subagent_tab_helpers');
+const {
+  contentTabs,
+  writeReport,
+  reportRequests,
+  answerReport,
+} = require('./subagent_tab_helpers');
 
 const PNG = 'iVBORw0KGgo=';
 
@@ -422,30 +427,17 @@ function testMarkdownPreviewAndReport() {
   );
   console.log('  ok - a stalled preview renders after the safety timer');
 
-  // A finished task's report (the synthetic fileContent of
-  // openReadyReportTabs) resolves its pictures the same way.
+  // A finished task's report (the daemon's reply to the request made
+  // at task_done) resolves its pictures the same way.
   win._testApi.switchToTab(tab);
   const report = '<html><body><img src="fig1.png"></body></html>';
-  send(win, {
-    type: 'tool_call',
-    name: 'Write',
-    path: 'reports/summary.html',
-    content: report,
-    tabId: tab,
-  });
-  send(win, {
-    type: 'tool_result',
-    content: 'Successfully wrote 1 characters to reports/summary.html',
-    is_error: false,
-    tool_name: 'Write',
-    path: 'reports/summary.html',
-    tabId: tab,
-  });
+  writeReport(win, 'reports/summary.html', report, {tabId: tab});
   send(win, {type: 'task_done', success: true, tabId: tab});
+  answerReport(win, reportRequests(posted)[0], report);
   const rep = contentTabs(win).find(t => t.title.includes('summary.html'));
   assert.ok(rep, 'the report tab opened at task_done');
   const reportReq = imageRequests(posted).pop();
-  assert.strictEqual(reportReq.path, 'reports/fig1.png');
+  assert.strictEqual(reportReq.path, '/ws/proj/reports/fig1.png');
   assert.strictEqual(reportReq.tabId, tab, 'asked for the task tab');
   assert.strictEqual(reportReq.workDir, '/ws/proj');
   send(win, pngReply(reportReq));

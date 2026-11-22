@@ -4,8 +4,9 @@
 // add your name here
 
 // A multi-session task ends with one merged Result (the "### Previous
-// Session N" / "### Final Session" summary).  The page renders it as a
-// Previous Sessions panel followed by the Result panel, and the stale
+// Session N" / "### Final Session" summary).  The page renders only
+// its final session, as the Result panel (the earlier sessions' notes
+// are not shown), and the stale
 // per-session Result panels of the earlier `is_continue` results are
 // removed when the merged one arrives (replayed or live).  The split
 // of a single merged summary is pinned by resultPanelHtml.test.js.
@@ -66,23 +67,19 @@ function sendLiveResultEvents(win, summary) {
   resultEvents(summary).forEach(event => send(win, event));
 }
 
-function assertRenderedSummaryOrdering(win, expectedFinalText) {
+function assertOnlyFinalSessionRendered(win, expectedFinalText) {
   const panels = Array.from(win.document.querySelectorAll('#output > .rc'));
   const headings = panels.map(panel => text(panel.querySelector('.rc-h h3')));
   assert.deepStrictEqual(
     headings,
-    ['Previous Sessions', 'Result'],
-    'BUG: stale per-session Result panels must be removed when the merged multi-session Result arrives; got ' +
+    ['Result'],
+    'BUG: stale per-session Result panels must be removed and no Previous Sessions panel shown when the merged multi-session Result arrives; got ' +
       headings.join(' -> '),
   );
-  const [previous, result] = panels;
+  const [result] = panels;
   assert.ok(
-    text(previous).includes('session 1: prepared files'),
-    'Previous Sessions panel must contain prior session text',
-  );
-  assert.ok(
-    !text(previous).includes('session 2: finished the fix'),
-    'Previous Sessions panel must not contain the final session text',
+    !text(result).includes('session 1: prepared files'),
+    'the earlier sessions must not be shown',
   );
   assert.ok(
     text(result).includes(expectedFinalText),
@@ -94,10 +91,10 @@ function assertRenderedSummaryOrdering(win, expectedFinalText) {
   );
 }
 
-function assertSummaryOrdering(summary, expectedFinalText, sendEvents) {
+function assertFinalSessionAlone(summary, expectedFinalText, sendEvents) {
   const win = makePage();
   sendEvents(win, summary);
-  assertRenderedSummaryOrdering(win, expectedFinalText);
+  assertOnlyFinalSessionRendered(win, expectedFinalText);
   win.close();
 }
 
@@ -108,22 +105,22 @@ const FINAL_SESSION_SUMMARY =
   '### Final Session\n' +
   'session 2: finished the fix';
 
-function testPreviousSessionsRenderBeforeTerminalResult() {
-  assertSummaryOrdering(
+function testReplayedMergedResultShowsFinalSessionAlone() {
+  assertFinalSessionAlone(
     FINAL_SESSION_SUMMARY,
     'session 2: finished the fix',
     sendReplayedTaskEvents,
   );
-  console.log('  ok - Previous Sessions renders before replayed terminal Result');
+  console.log('  ok - replayed merged Result shows the final session alone');
 }
 
-function testLivePreviousSessionsRenderBeforeTerminalResult() {
-  assertSummaryOrdering(
+function testLiveMergedResultShowsFinalSessionAlone() {
+  assertFinalSessionAlone(
     FINAL_SESSION_SUMMARY,
     'session 2: finished the fix',
     sendLiveResultEvents,
   );
-  console.log('  ok - Previous Sessions renders before live terminal Result');
+  console.log('  ok - live merged Result shows the final session alone');
 }
 
 function testExhaustionSummaryWithoutFinalSessionHeader() {
@@ -132,17 +129,17 @@ function testExhaustionSummaryWithoutFinalSessionHeader() {
     'session 1: prepared files\n\n' +
     '---\n\n' +
     'Task failed after 2 sub-sessions';
-  assertSummaryOrdering(
+  assertFinalSessionAlone(
     exhaustionSummary,
     'Task failed after 2 sub-sessions',
     sendReplayedTaskEvents,
   );
-  console.log('  ok - Previous Sessions renders before exhaustion Result');
+  console.log('  ok - exhaustion Result shows the banner alone');
 }
 
 function main() {
-  testPreviousSessionsRenderBeforeTerminalResult();
-  testLivePreviousSessionsRenderBeforeTerminalResult();
+  testReplayedMergedResultShowsFinalSessionAlone();
+  testLiveMergedResultShowsFinalSessionAlone();
   testExhaustionSummaryWithoutFinalSessionHeader();
   console.log('multiSessionResultOrder.test.js: all assertions passed.');
 }

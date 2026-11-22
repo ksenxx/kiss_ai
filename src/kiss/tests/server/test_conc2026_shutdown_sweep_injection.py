@@ -42,6 +42,9 @@ from typing import Any
 
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
+from kiss.tests.server.test_shutdown_persists_uninterruptible_worker import (
+    _swallow_interrupts_until,
+)
 
 
 def _make_remote_server(tmp: Path) -> Any:
@@ -92,10 +95,14 @@ class _CooperativeWorker:
 
 
 class _StubbornWorker:
-    """Stands in for a run wedged in a call that ignores the stop event."""
+    """Stands in for a run wedged in a call that ignores the stop event.
 
-    def __init__(self, lifetime: float = 60.0) -> None:
+    An interrupt ends it, after *cleanup_seconds* in its "cleanup finally".
+    """
+
+    def __init__(self, lifetime: float = 60.0, cleanup_seconds: float = 0.0) -> None:
         self.lifetime = lifetime
+        self.cleanup_seconds = cleanup_seconds
         self.interrupted = threading.Event()
         self.finished = threading.Event()
         self.thread = threading.Thread(target=self._spin, daemon=True)
@@ -107,6 +114,7 @@ class _StubbornWorker:
                 time.sleep(0.005)
         except KeyboardInterrupt:
             self.interrupted.set()
+            time.sleep(self.cleanup_seconds)
         finally:
             self.finished.set()
 
@@ -185,3 +193,36 @@ def test_sweep_awaits_a_merging_task_thread(
     assert not worker.interrupted.is_set(), (
         "BUG: the shutdown sweep interrupted an in-flight merge"
     )
+
+
+def test_sweep_interrupts_the_worker_behind_one_that_swallows_its_interrupt(
+    clean_registry: None, tmp_path: Path,
+) -> None:
+    """V15-F2 (audit 2026-11-21): a worker is interrupted whatever the ones before it do.
+
+    The sweep joined each worker against the whole deadline before it turned
+    to the next.  Behind one that swallowed its interrupt, a worker that stops
+    at once was interrupted only as the deadline passed: the sweep returned,
+    and the process exited, with that worker's cleanup still running.  So it
+    was behind one ``_cmd_run`` had registered and not started yet (the state
+    it leaves while it writes the tab registry): the sweep waited for that
+    start until the deadline before it turned to the workers already running.
+    """
+    remote = _make_remote_server(tmp_path)
+    _register("sweep-unstarted", "TAB-SWEEP-UNSTARTED", threading.Thread()).is_task_active = False
+    release = threading.Event()
+    deaf = threading.Thread(target=_swallow_interrupts_until, args=(release,), daemon=True)
+    _register("sweep-deaf", "TAB-SWEEP-DEAF", deaf)
+    worker = _StubbornWorker(lifetime=60.0, cleanup_seconds=0.3)
+    _register("sweep-behind", "TAB-SWEEP-BEHIND", worker.thread)
+    deaf.start()
+    worker.thread.start()
+    try:
+        remote._stop_active_agent_tasks(timeout=3.0)
+        assert worker.finished.is_set(), (
+            "the worker behind an unstarted and a deaf one was interrupted too late "
+            "to finish its cleanup"
+        )
+    finally:
+        release.set()
+        deaf.join(10)

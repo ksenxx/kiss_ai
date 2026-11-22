@@ -15,9 +15,8 @@ bar above the preview carries an "Edit source" toggle: it flips to the
 same editable Monaco surface every other text file gets, and back —
 the preview re-renders from the edited text, unsaved edits and the
 dirty dot survive the round trip, and Save / Ctrl+S writes the SOURCE
-(never the rendered HTML) to disk.  A finished-task report, a file
-that is not valid UTF-8, and a directory named like ``foo.md`` never
-get the toggle.
+(never the rendered HTML) to disk.  A file that is not valid UTF-8 and
+a directory named like ``foo.md`` never get the toggle.
 
 These tests drive a REAL browser (Playwright Chromium) against a REAL
 :class:`RemoteAccessServer` over real ``wss://`` and the real
@@ -68,6 +67,24 @@ _SOURCE_HOLDER = _VIEW + ".content-monaco-holder"
 # the content pane's own row, next to the (always visible) chat.
 _CONTENT_TAB = "#content-tab-list .chat-tab.content-tab"
 _DIRTY_TAB = _CONTENT_TAB + ".content-dirty"
+
+# What leaves the bar `sel`: the classes of its items outside its
+# padding box (the pane clips there), 'bar' when it leaves the window.
+_OUTSIDE_BAR_JS = """sel => {
+  const bar = document.querySelector(sel);
+  const box = bar.getBoundingClientRect();
+  const style = getComputedStyle(bar);
+  const left = box.left + parseFloat(style.paddingLeft) - 0.5;
+  const right = box.right - parseFloat(style.paddingRight) + 0.5;
+  return [box.left < -0.5 || box.right > innerWidth + 0.5 ? 'bar' : '']
+    .concat([...bar.children]
+      .filter(el => {
+        const r = el.getBoundingClientRect();
+        return r.left < left || r.right > right;
+      })
+      .map(el => el.className))
+    .filter(Boolean);
+}"""
 
 
 def _fresh_file(harness, name: str, text: str) -> Path:
@@ -217,6 +234,50 @@ class TestMarkdownHtmlEditSource:
             _dismiss_toasts(page)
             page.click(_MODE_BTN)
             _wait_editor_contains(page, "## Added Section")
+        finally:
+            context.close()
+
+    def test_bar_with_unsaved_edits_fits_a_phone_at_the_largest_text_size(
+        self, browser, harness,
+    ) -> None:
+        """At the largest text size the bar of a Markdown tab with
+        unsaved edits holds more than a 320px phone is wide: under
+        either label of its toggle its items take a second row instead
+        of leaving the pane, which clips them, and Save saves."""
+        context, page, sent = _open_page(browser, harness)
+        try:
+            for _ in range(7):  # 13px, the default, to 20px, the largest
+                page.click('[data-font-step="1"]')
+            assert page.locator('[data-font-step="1"]').is_disabled()
+            path = _fresh_file(harness, "toggle_phone.md", _MD_SOURCE)
+            _open_preview(page, str(path), "lnk-ph")
+            _enter_source_mode(page)
+            _wait_editor_contains(page, "# Alpha Title")
+            _type_at_end(page, "\nphone_line")
+            page.wait_for_selector(_DIRTY_TAB, timeout=10000)
+            _dismiss_toasts(page)
+            page.click(_MODE_BTN)  # back to the preview
+            page.set_viewport_size({"width": 320, "height": 568})
+            # A phone stacks the surfaces (the layout switch hides the
+            # pane): the file's link brings its tab back.
+            page.wait_for_function(
+                "() => !document.body.classList.contains('remote-desktop')", timeout=10000,
+            )
+            page.dispatch_event("#lnk-ph", "click")
+            page.wait_for_function(
+                "() => document.querySelector('#content-tab-area')"
+                ".getBoundingClientRect().width > 0",
+                timeout=10000,
+            )
+            assert page.locator(_STATUS).inner_text() == "Unsaved changes"
+            assert page.locator(_MODE_BTN).inner_text() == "Edit source"
+            assert page.evaluate(_OUTSIDE_BAR_JS, _SAVE_BAR) == []
+            _enter_source_mode(page)
+            assert page.locator(_MODE_BTN).inner_text() == "Preview"
+            assert page.evaluate(_OUTSIDE_BAR_JS, _SAVE_BAR) == []
+            _dismiss_toasts(page)
+            page.click(_SAVE_BTN)
+            _wait_for_disk(path, "phone_line")
         finally:
             context.close()
 
@@ -481,34 +542,6 @@ class TestMarkdownHtmlEditSource:
             saves = [f for f in sent if f.get("type") == "saveFile"]
             assert len(saves) == 1
             assert saves[0]["force"] is False
-        finally:
-            context.close()
-
-    def test_report_tab_gets_no_toggle(self, browser, harness) -> None:
-        """A finished-task report's content is CONVERTED HTML, so it
-        must never be editable — even if a (buggy or malicious) event
-        carried a version stamp, isReport wins.  The synthetic event is
-        injected through the same window `message` dispatch the
-        WebSocket shim uses for real frames."""
-        context, page, sent = _open_page(browser, harness)
-        try:
-            page.evaluate(
-                """() => window.dispatchEvent(new MessageEvent('message',
-                     {data: {type: 'fileContent',
-                             path: '/tmp/reports/r.md', name: 'r.md',
-                             content: '<h1>Report Body</h1>',
-                             isReport: true, version: '1:1'}}))""",
-            )
-            page.wait_for_selector(_FRAME, timeout=30000)
-            frame = page.frame_locator(_FRAME)
-            frame.locator("h1", has_text="Report Body").wait_for(
-                timeout=30000,
-            )
-            assert page.locator(_MODE_BTN).count() == 0
-            assert page.locator(_SAVE_BAR).count() == 0
-            page.keyboard.press("Control+s")
-            page.wait_for_timeout(300)
-            assert not any(f.get("type") == "saveFile" for f in sent)
         finally:
             context.close()
 

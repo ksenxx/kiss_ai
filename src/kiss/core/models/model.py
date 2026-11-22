@@ -64,7 +64,11 @@ from kiss.core.processes import (
     pid_handed_on,
     popen_process_group,
 )
+from kiss.core.tool_interrupt import call_without_injection, wait_interruptible
 from kiss.core.tool_schema import declared_schema, is_unlisted
+
+if typing.TYPE_CHECKING:  # pragma: no cover
+    from kiss.core.models.model_info import ModelInfo
 
 logger = logging.getLogger(__name__)
 
@@ -113,9 +117,9 @@ def _responses_parts_to_chat_parts(parts: list[Any]) -> list[dict[str, Any]]:
 
     ``input_text`` / ``output_text`` become ``text`` parts, ``refusal``
     becomes a ``text`` part, ``input_image`` becomes an ``image_url`` part,
-    ``input_file`` becomes a ``file`` part and ``input_audio`` passes
-    through (the shapes match).  Parts already in Chat-Completions shape
-    are passed through unchanged.
+    ``input_file`` becomes a ``file`` part (an uploaded file keeps its
+    ``file_id``) and ``input_audio`` passes through (the shapes match).
+    Parts already in Chat-Completions shape are passed through unchanged.
 
     Args:
         parts: Content parts from a Responses-API message item.
@@ -139,15 +143,19 @@ def _responses_parts_to_chat_parts(parts: list[Any]) -> list[dict[str, Any]]:
             if isinstance(url, str) and url:
                 out.append({"type": "image_url", "image_url": {"url": url}})
         elif ptype == "input_file":
-            out.append(
-                {
-                    "type": "file",
-                    "file": {
-                        "filename": part.get("filename", "attachment.pdf"),
-                        "file_data": part.get("file_data", ""),
-                    },
-                }
-            )
+            if part.get("file_id") and not part.get("file_data"):
+                # An uploaded file, named by its id.
+                out.append({"type": "file", "file": {"file_id": part["file_id"]}})
+            else:
+                out.append(
+                    {
+                        "type": "file",
+                        "file": {
+                            "filename": part.get("filename", "attachment.pdf"),
+                            "file_data": part.get("file_data", ""),
+                        },
+                    }
+                )
         else:
             out.append(part)
     return out
@@ -1147,6 +1155,96 @@ def _dialogue_transcript(messages: list[Any]) -> str:
     return "\n\n".join(parts)
 
 
+def _embedded_attachment(block: dict[str, Any]) -> Attachment | None:
+    """Decode the file a content block embeds.
+
+    An API adapter keeps an attachment in the content of its message:
+    Anthropic as an ``image`` / ``document`` block with a base64 source,
+    the OpenAI transports as an ``image_url`` / ``file`` part holding a
+    base64 ``data:`` URL.
+
+    Args:
+        block: One content block of a message in chat format.
+
+    Returns:
+        The file, or ``None`` when *block* embeds none that can be decoded
+        (text, a remote URL, an audio part, a block of another shape).
+    """
+    block_type = block.get("type")
+    parsed: tuple[Any, Any] | None = None
+    if block_type in ("image", "document"):
+        source = block.get("source")
+        if isinstance(source, dict) and source.get("type") == "base64":
+            parsed = source.get("media_type"), source.get("data")
+    elif block_type in ("image_url", "file"):
+        part = block.get(block_type)
+        if isinstance(part, dict):
+            url = part.get("url" if block_type == "image_url" else "file_data")
+            if isinstance(url, str):
+                parsed = split_data_url(url)
+    if parsed is None or not all(isinstance(field, str) and field for field in parsed):
+        return None
+    try:
+        return Attachment(base64.b64decode(parsed[1]), parsed[0])
+    except ValueError:
+        return None
+
+
+def _shown_label(
+    attachment: Attachment, shown: dict[str, Attachment], shown_types: tuple[str, ...]
+) -> str | None:
+    """Record *attachment* in *shown* under its label when the CLI takes its type.
+
+    Args:
+        attachment: A file of the conversation.
+        shown: The attachments to hand over so far, by label.
+        shown_types: The MIME types the CLI takes (see :func:`_name_attachments`).
+
+    Returns:
+        The label (``[Image #1]``, the name both CLIs give an image), or
+        ``None`` for a type the CLI does not take.
+    """
+    mime = attachment.mime_type
+    if not any(mime == t or (t.endswith("/") and mime.startswith(t)) for t in shown_types):
+        return None
+    kind = "Image" if mime.startswith("image/") else "Document"
+    label = f"[{kind} #{len(shown) + 1}]"
+    shown[label] = attachment
+    return label
+
+
+def _label_embedded(
+    content: Any, shown: dict[str, Attachment], shown_types: tuple[str, ...]
+) -> Any:
+    """Return *content* with each embedded file the CLI takes replaced by its label.
+
+    A conversation handed over from an API model holds its files as content
+    blocks (:func:`_embedded_attachment`), those a tool returned to Claude
+    inside the ``tool_result`` block.  A block whose file the CLI does not
+    take, or that cannot be decoded, stays: the flattened text declares it
+    omitted.  The blocks of *content* are not changed.
+
+    Args:
+        content: A message's content, or that of a ``tool_result`` block.
+        shown: The attachments to hand over so far, by label; added to.
+        shown_types: The MIME types the CLI takes (see :func:`_name_attachments`).
+    """
+    if not isinstance(content, list):
+        return content
+    labelled: list[Any] = []
+    for block in content:
+        if not isinstance(block, dict):
+            labelled.append(block)
+        elif block.get("type") == "tool_result":
+            nested = _label_embedded(block.get("content"), shown, shown_types)
+            labelled.append({**block, "content": nested})
+        else:
+            attachment = _embedded_attachment(block)
+            label = _shown_label(attachment, shown, shown_types) if attachment else None
+            labelled.append({"type": "text", "text": label} if label else block)
+    return labelled
+
+
 def _name_attachments(
     messages: list[Any], shown_types: tuple[str, ...]
 ) -> tuple[list[Any], dict[str, Attachment]]:
@@ -1156,6 +1254,8 @@ def _name_attachments(
     over beside the prompt and stands in the text as its label (``[Image
     #1]``, the name both CLIs give an image); any other is declared not
     shown, so a model told that files are attached knows which it received.
+    A file another provider's adapter embedded in the content is named in
+    the place of its block (:func:`_label_embedded`).
 
     Args:
         messages: The conversation in chat format
@@ -1165,12 +1265,15 @@ def _name_attachments(
 
     Returns:
         The messages, one with attachments replaced by a copy whose text
-        ends with their labels, and the attachments to hand over by label,
+        holds their labels, and the attachments to hand over by label,
         in label order.
     """
     shown: dict[str, Attachment] = {}
     named: list[Any] = []
     for message in messages:
+        if isinstance(message.get("content"), list):
+            content = _label_embedded(message["content"], shown, shown_types)
+            message = {**message, "content": content}
         attachments = message.get("attachments")
         if not attachments:
             named.append(message)
@@ -1178,14 +1281,11 @@ def _name_attachments(
         lines = [flatten_content_to_text(message.get("content"))]
         hidden: list[str] = []
         for attachment in attachments:
-            mime = attachment.mime_type
-            if any(mime == t or (t.endswith("/") and mime.startswith(t)) for t in shown_types):
-                kind = "Image" if mime.startswith("image/") else "Document"
-                label = f"[{kind} #{len(shown) + 1}]"
-                shown[label] = attachment
+            label = _shown_label(attachment, shown, shown_types)
+            if label is not None:
                 lines.append(label)
             else:
-                hidden.append(f"{mime} ({len(attachment.data)} bytes)")
+                hidden.append(f"{attachment.mime_type} ({len(attachment.data)} bytes)")
         if hidden:
             lines.append(
                 f"[{len(hidden)} attachment(s) of this message could not be shown "
@@ -1384,7 +1484,9 @@ def environ_without(names: Collection[str]) -> dict[str, str]:
 
     Copied key by key with ``get``: a settings save on another thread
     may delete a variable between the key listing and its lookup, which
-    would make ``dict(os.environ)`` raise.
+    would make ``dict(os.environ)`` raise.  The API keys the calling run
+    has of its own (a project's, ``config.run_overlay_env``) replace the
+    daemon's in the copy.
 
     Args:
         names: The variable names to leave out.
@@ -1392,12 +1494,15 @@ def environ_without(names: Collection[str]) -> dict[str, str]:
     Returns:
         The environment copy, for a CLI child.
     """
+    from kiss.core.config import run_overlay_env
+
     env: dict[str, str] = {}
     for name in list(os.environ):
         value = os.environ.get(name)
-        if value is not None and name not in names:
+        if value is not None:
             env[name] = value
-    return env
+    env.update(run_overlay_env())
+    return {name: value for name, value in env.items() if name not in names}
 
 
 REASONING_PASSBACK_FAMILIES = frozenset({"deepseek"})
@@ -1406,6 +1511,13 @@ REASONING_PASSBACK_FAMILIES = frozenset({"deepseek"})
 
 class Model(ABC):
     """Abstract base class for LLM provider implementations."""
+
+    #: The catalog entry the :func:`~kiss.core.models.model_info.model`
+    #: factory built this model with; ``None`` on a model built directly.
+    #: The model is billed and sized by it for as long as it lives,
+    #: whatever becomes of its registration (see
+    #: :func:`~kiss.core.models.model_info._name_and_info`).
+    info: "ModelInfo | None" = None
 
     #: Whether :meth:`native_tools_exposed` serves the tools to the model
     #: (Codex, over MCP).  The agent builds the native tool set and its
@@ -1880,14 +1992,49 @@ class Model(ABC):
         """
         return False
 
-    def drop_stale_reasoning(self) -> int:
-        """Remove the old reasoning with the tool outputs an edit stubbed; return how many blocks.
+    def drop_stale_reasoning(self, rejected: bool = False) -> int:
+        """Remove the reasoning an edit of earlier messages invalidated; return how many blocks.
 
         The agent calls this after it stubbed old tool outputs and arguments
-        in the conversation.  The base adapter keeps no reasoning in its
-        conversation that the provider reads again, and removes nothing.
+        in the conversation or removed whole turns from it, and with
+        *rejected* when the provider rejected a request for reasoning that
+        some other edit left behind (:meth:`KISSAgent._run_agentic_loop`).
+        The base adapter sends back no reasoning of its own that a provider
+        checks against the messages before it, but its conversation can hold
+        Claude's, which Claude 5.1 and later sign over those messages
+        (:meth:`AnthropicModel.drop_stale_reasoning`): the ``thinking``
+        blocks of a session handed over from a Claude model, which the
+        adapter leaves out of its requests and a hand-off back sends again,
+        and the ``reasoning`` items of a Claude model behind a Responses
+        endpoint (OpenRouter's ``format`` of them is ``anthropic-claude-v1``),
+        which are sent back as they are.  All of them go: one kept after an
+        edited message is a 400, whichever adapter made the edit.
+
+        Args:
+            rejected: The provider rejected a request for such reasoning.
+                It changes nothing here, where all of it goes; an adapter
+                that keeps some learns from it
+                (:meth:`AnthropicModel.drop_stale_reasoning`).
         """
-        return 0
+        dropped = 0
+        kept_items: list[Any] = []
+        for item in self.conversation:
+            # As the planner of the edit, this reads past an item that is no dict.
+            msg = item if isinstance(item, dict) else {}
+            if msg.get("type") == "reasoning" and str(msg.get("format")).startswith("anthropic"):
+                dropped += 1
+                continue
+            content = msg.get("content")
+            if msg.get("role") == "assistant" and isinstance(content, list):
+                msg["content"] = [
+                    block for block in content
+                    if not (isinstance(block, dict)
+                            and block.get("type") in ("thinking", "redacted_thinking"))
+                ]
+                dropped += len(content) - len(msg["content"])
+            kept_items.append(item)
+        self.conversation[:] = kept_items
+        return dropped
 
     def keeps_newest_reasoning(self) -> bool:
         """Whether :meth:`drop_stale_reasoning` leaves the newest reply's reasoning in place.
@@ -2579,9 +2726,10 @@ class CLITextModel(Model):
         :func:`responses_items_to_chat_messages`.  The system instruction
         never rides in the prompt: each adapter hands it to its CLI as the
         real system prompt (see :meth:`_build_cli_args` of the subclasses).
-        The files a user attached to a message are named in its text
-        (:func:`_name_attachments`); the adapter hands its CLI those of
-        :attr:`_attachment_types`.
+        The files of a message (those a user attached, and those the
+        adapter of a handed-over conversation embedded in its content) are
+        named in its text (:func:`_name_attachments`); the adapter hands
+        its CLI those of :attr:`_attachment_types`.
 
         Returns:
             The prompt text, without any system instruction, and the
@@ -2615,11 +2763,12 @@ class CLITextModel(Model):
     def supports_images(self) -> bool:
         """Return False: the bytes a tool returned are not handed to the CLI.
 
-        Only what the user attached rides beside the prompt
-        (:meth:`_prompt_and_attachments`); a tool result is text of the
-        transcript, so :meth:`tool_result_text_and_attachments` has a
-        vision model describe its images and PDFs instead of leaving the
-        note of :meth:`_deliver_tool_result_attachments`.
+        Only what the user attached, or a handed-over conversation embeds,
+        rides beside the prompt (:meth:`_prompt_and_attachments`); a tool
+        result is text of the transcript, so
+        :meth:`tool_result_text_and_attachments` has a vision model
+        describe its images and PDFs instead of leaving the note of
+        :meth:`_deliver_tool_result_attachments`.
         """
         return False
 
@@ -3080,6 +3229,8 @@ class _CLIProcess:
         # never starts.  What ending a start that failed needs is kept on
         # the supervisor, for close() to finish it (_end_failed_start).
         self._readers: list[threading.Thread] = []
+        # The readers that took their pipe (see _owns_pipe).
+        self._reading: set[threading.Thread] = set()
         self._spawned: list[subprocess.Popen[str]] = []
         spawn_error: list[OSError | ValueError] = []
         self._spawn_done = threading.Event()
@@ -3092,10 +3243,14 @@ class _CLIProcess:
         )
         try:
             self._closed = False
-            spawner.start()
+            # A Stop raised as a thread's start or a wait takes the lock
+            # of its event leaves that lock held (the stdlib's
+            # ``Condition``): the thread then never runs, and the wait
+            # for the spawn below and in the abort never returns.
+            call_without_injection(spawner.start)
             # In slices: an untimed wait is deaf to a Stop and to the
             # deadline for as long as the spawn itself blocks.
-            while not self._spawn_done.wait(_STOP_POLL_SECONDS):
+            while not call_without_injection(self._spawn_done.wait, _STOP_POLL_SECONDS):
                 if stop_signal.stop_requested():
                     raise stop_error()
                 if time.monotonic() >= self._deadline:
@@ -3123,7 +3278,7 @@ class _CLIProcess:
         ``_cli_turn`` makes then finishes the job.
         """
         locked_call(self._handoff, self._give_up_start)
-        self._spawn_done.wait(_REAP_GRACE_SECONDS)
+        wait_interruptible(self._spawn_done, _REAP_GRACE_SECONDS, cooperative=False)
         if self._spawned:
             self._proc = self._spawned[0]
             self._abort_start(self._readers)
@@ -3217,8 +3372,11 @@ class _CLIProcess:
         after its reader is gone, stdin unconditionally.  A reader is
         recorded before its ``start()`` (see :meth:`_start_reader`), so
         the last one may never have started: only an alive reader is
-        joined, and a reader parked inside ``read(2)`` holding its
-        pipe's buffer lock is always alive, so its pipe is left to it.
+        joined.  The start is given up by now, so the readers that took
+        their pipe are final (:meth:`_owns_pipe`): a pipe is left to
+        one of those that is still alive, parked inside ``read(2)``
+        holding the buffer lock, and any other is closed, also that of a
+        reader a Stop inside ``start()`` left spawned and not alive yet.
         Run again after a Stop cut it short (:meth:`_end_failed_start`),
         it signals nothing once the child is reaped: its pid, and so its
         group's id, may belong to a stranger by then (:func:`pid_handed_on`).
@@ -3235,7 +3393,7 @@ class _CLIProcess:
         owners = dict(zip((self._proc.stdout, self._proc.stderr), readers, strict=False))
         for pipe in (self._proc.stdin, self._proc.stdout, self._proc.stderr):
             owner = owners.get(pipe)
-            if owner is None or not owner.is_alive():
+            if owner not in self._reading or not owner.is_alive():
                 assert pipe is not None  # every pipe is subprocess.PIPE
                 with contextlib.suppress(OSError):
                     pipe.close()
@@ -3252,13 +3410,32 @@ class _CLIProcess:
         """
         thread = threading.Thread(target=target, daemon=True, name=f"cli-{suffix}-drain")
         readers.append(thread)
-        thread.start()
+        call_without_injection(thread.start)
+
+    def _owns_pipe(self) -> bool:
+        """Take the calling reader's pipe, unless the start was given up.
+
+        A reader may come alive only after :meth:`_abort_start` found it
+        not alive and went on to close its pipe; reading then, it would
+        park in ``read(2)`` holding the buffer lock that close waits for.
+        Taken under the lock the start is given up under, so the abort
+        knows every reader that reads, and a later one leaves its pipe to
+        the abort.
+
+        Returns:
+            Whether the reader may read its pipe.
+        """
+        with self._handoff:
+            if not self._gave_up:
+                self._reading.add(threading.current_thread())
+            return not self._gave_up
 
     def _drain_stdout(self) -> None:
         """Move every stdout line into the queue, then post the EOF sentinel."""
         try:
-            for line in self._proc.stdout:  # type: ignore[union-attr]
-                self._stdout_lines.put(line)
+            if self._owns_pipe():
+                for line in self._proc.stdout:  # type: ignore[union-attr]
+                    self._stdout_lines.put(line)
         except (OSError, ValueError):  # pragma: no cover – pipe closed under us
             logger.debug("%s stdout closed while being read", self._label)
         finally:
@@ -3267,8 +3444,9 @@ class _CLIProcess:
     def _drain_stderr(self) -> None:
         """Keep the stderr pipe empty so the child never blocks writing to it."""
         try:
-            for line in self._proc.stderr:  # type: ignore[union-attr]
-                self._stderr_chunks.append(line)
+            if self._owns_pipe():
+                for line in self._proc.stderr:  # type: ignore[union-attr]
+                    self._stderr_chunks.append(line)
         except (OSError, ValueError):  # pragma: no cover – pipe closed under us
             logger.debug("%s stderr closed while being read", self._label)
 
@@ -3316,7 +3494,7 @@ class _CLIProcess:
         # it before closing stdin.  close() skips the join when start()
         # raised (the thread is not alive), so this cannot abort cleanup.
         self._writer = writer
-        writer.start()
+        call_without_injection(writer.start)
         while True:
             try:
                 remaining = self._remaining()
@@ -3462,7 +3640,7 @@ class _CLIProcess:
                 self._raise_for_caller()
                 wait = 0.0
             try:
-                line = self._stdout_lines.get(timeout=wait)
+                line = call_without_injection(self._stdout_lines.get, timeout=wait)
             except queue.Empty:
                 continue
             if line is None:

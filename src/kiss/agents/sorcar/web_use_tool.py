@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import atexit
+import gc
 import inspect
 import json
 import logging
@@ -37,8 +38,8 @@ import threading
 import time
 import weakref
 from collections import Counter, deque
-from collections.abc import Callable
-from contextlib import nullcontext
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager, nullcontext, suppress
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
@@ -58,12 +59,13 @@ from kiss.core.processes import (
     exited_unreaped,
     kill_process_tree,
     pin_process,
-    popen_process_group,
     signal_unreaped_child,
+    start_process_group,
     unpin_process,
 )
 from kiss.core.processes import pid_alive as _pid_alive
 from kiss.core.processes import process_identity as _process_identity
+from kiss.core.tool_interrupt import call_without_injection
 
 logger = logging.getLogger(__name__)
 
@@ -164,6 +166,17 @@ _WIDGET_REACTION_SECS = 1.2
 # a second hold inside that window threw away a fiverr pass.  A person
 # watches what happens first.
 _WIDGET_RETRY_SECS = 5.0
+
+# How long a site's front page is looked at before the wanted page is
+# opened again (:meth:`WebUseTool._start_over`): a person arriving reads
+# it first, and HUMAN's script rates the browser meanwhile (3 s were
+# enough on walmart.com).
+_FRONT_PAGE_READ_SECS = (3.0, 4.5)
+# How often a page is opened again from the front page while the check
+# keeps coming back after a front page that loaded: a second time costs
+# about 9 s, the two holds that follow 40 s (and walmart.com accepted no
+# hold in that state on 22 Nov 2026).
+_START_OVER_TRIES = 2
 
 # DevTools-grade observation (evaluate_script, list_console_messages,
 # list_network_requests, wait_for): per-page ring buffers so a chatty page
@@ -714,6 +727,124 @@ def _end_driver(playwright: Any) -> None:
     logger.warning("Killed Playwright driver (pid %d) did not exit", pid)
 
 
+def _keep_spawned_driver(transport: Any, loop: asyncio.AbstractEventLoop) -> None:
+    """Have *transport*, whose start on *loop* failed, keep the driver that start spawned.
+
+    The transport keeps the driver's process (``_proc``, where
+    :func:`_kill_driver_process` finds it) once the call that spawned
+    it has returned to it.  An interrupt raised before that assignment
+    (the ``KeyboardInterrupt`` of a ``SIGINT``: a Stop is held back for
+    the start, :meth:`WebUseTool._start_playwright`) left a running
+    driver that nothing named: no ``close()`` ended it.  The
+    start made *loop* itself (one found running is refused before
+    there is a transport), so a subprocess on that loop is its driver;
+    asyncio keeps no list of a loop's subprocesses, so it is looked
+    for among the collector's objects (its child watcher keeps it
+    alive) and kept as the spawning call was about to return it.  A
+    subprocess asyncio has no pid for is not kept: the interrupt reached
+    asyncio as it spawned that driver, and asyncio killed it there.
+
+    Args:
+        transport: The Playwright transport of the start that failed.
+        loop: The event loop that start made.
+    """
+    if getattr(transport, "_proc", None) is not None:
+        return
+    for spawned in gc.get_objects():
+        # By its type, not ``isinstance``: that reads ``__class__``, which
+        # a proxy among the collector's objects answers with its own code.
+        if (
+            issubclass(type(spawned), asyncio.SubprocessTransport)
+            and getattr(spawned, "_loop", None) is loop
+            and spawned.get_pid() is not None
+        ):
+            transport._proc = asyncio.subprocess.Process(spawned, spawned.get_protocol(), loop)
+
+
+async def _end_tasks_and_reap(starting: Any, transport: Any) -> None:
+    """On the loop of a start that failed: end its tasks, kill its driver, have the loop reap it.
+
+    Every other task of the loop is the start's: Playwright's, and
+    asyncio's own while it connects the driver's pipes.  One cancel
+    does not end a request of Playwright's: it answers with an abort
+    sent to the driver and waits for the reply, which nothing reads any
+    more.  The driver is looked for and killed once the tasks have
+    ended: a step the interrupt left queued on the loop may be the one
+    that spawns it, and asyncio, cancelled in that spawn, checks on the
+    driver itself, where one already dead would be reaped behind the
+    back of the loop's child watcher.
+
+    The loop is given one turn after the driver's death, in which its
+    child watcher reaps the driver and closes its pidfd.  asyncio's own
+    ``wait()`` is no use for that: it returns once each of the driver's
+    pipes has been connected and closed as well, and a spawn stopped
+    midway connects no more of them.  Closing asyncio's transport then
+    closes the pipes it has connected, and reaps a driver whose spawn
+    was stopped before it had a watcher; the driver's ``Popen`` closes
+    the pipes asyncio had not connected.
+
+    Args:
+        starting: Stands for the Playwright object the start did not return.
+        transport: The Playwright transport of that start.
+    """
+    this = asyncio.current_task()
+    while tasks := asyncio.all_tasks() - {this}:
+        for task in tasks:
+            task.cancel()
+        await asyncio.sleep(0)
+    _keep_spawned_driver(transport, asyncio.get_running_loop())
+    driver = getattr(transport, "_proc", None)
+    if driver is None:
+        return
+    _kill_driver_process(starting)
+    spawn = driver._transport
+    popen = spawn.get_extra_info("subprocess")
+    while not exited_unreaped(popen):
+        await asyncio.sleep(0.01)
+    await asyncio.sleep(0.01)
+    spawn.close()
+    await asyncio.sleep(0)  # the pipes are closed by callbacks
+    with popen:
+        pass
+
+
+def _end_start(starting: Any) -> None:
+    """End a Playwright start that did not return: its driver, and the event loop it made.
+
+    Stopped once the driver had answered, the start is complete but
+    for its return, and its loop still runs under the thread, which
+    can start no other Playwright meanwhile: it is stopped as a started
+    driver is (:func:`_stop_playwright`).  Stopped sooner, the loop has
+    ended its run and nothing would turn it again: it is run until its
+    tasks have ended and it has reaped the killed driver
+    (:func:`_end_tasks_and_reap`), then closed.  The loop's child
+    watcher holds a descriptor on the driver (a pidfd) that only the
+    loop's own reap closes: reaped here in the loop's place, the driver
+    of each stopped start left one open for the life of the process.  A
+    start that failed once its driver had answered or died has stopped
+    itself and closed its loop.  A driver that outlives its loop is
+    killed and reaped here.
+
+    Args:
+        starting: Stands for the Playwright object the start did not
+            return: ``_impl_obj`` is its context manager and ``stop``
+            that manager's exit.
+    """
+    manager = starting._impl_obj
+    try:
+        loop, transport = manager._loop, manager._connection._transport
+    except AttributeError:  # refused before it had made them: no driver, no loop of its own
+        return
+    if loop.is_running():
+        _stop_playwright(starting)
+    elif not loop.is_closed():
+        ending = asyncio.wait_for(_end_tasks_and_reap(starting, transport), _DRIVER_REAP_SECS)
+        with suppress(TimeoutError):  # a driver that outlived its kill is reported below
+            loop.run_until_complete(ending)
+        loop.close()
+    _end_driver(starting)
+
+
 class _Watchdog(threading.Timer):
     """A timer that acts for one operation, and only until that operation has ended.
 
@@ -765,7 +896,9 @@ def _under_timer(timer: _Watchdog, operation: Callable[[], Any]) -> Any:
     that: a Stop raised while its ``__enter__`` returns (inside
     ``Thread.start`` after the thread was started, or at the return
     itself under a tracer) skips ``__exit__``, and the armed watchdog
-    then killed the browser or driver of whatever ran next.
+    then killed the browser or driver of whatever ran next.  One raised
+    as the start takes the lock of the thread's event would leave that
+    thread blocked for good: it is held back until the start returns.
 
     Args:
         timer: The watchdog to arm; ended on return (cancelled, and
@@ -776,7 +909,7 @@ def _under_timer(timer: _Watchdog, operation: Callable[[], Any]) -> Any:
         *operation*'s result.
     """
     try:
-        timer.start()
+        call_without_injection(timer.start)
         return operation()
     finally:
         timer.end()
@@ -1117,8 +1250,12 @@ def _install_chromium(
     running and holding the browser-cache lock.  The launcher is watched
     without being reaped and reaped only once the wait is over: a Stop
     landing after the reap kills nothing, its pid (the group's id)
-    being free for a stranger's group by then.  Output is discarded as
-    before (``capture_output`` never surfaced it).
+    being free for a stranger's group by then.  The ``Popen`` is made
+    before the spawn, which runs inside the ``try``: a Stop raised as
+    the spawning call returns found the installer bound to no name,
+    and it ran on past its timeout, owned by nothing
+    (:func:`kiss.core.processes.start_process_group`).  Output is
+    discarded as before (``capture_output`` never surfaced it).
 
     Args:
         command: The installer command; ``None`` installs Chromium with
@@ -1131,18 +1268,23 @@ def _install_chromium(
     """
     if command is None:
         command = [sys.executable, "-m", web_stealth.playwright_package(), "install", "chromium"]
-    installer = popen_process_group(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    installer: subprocess.Popen[Any] = object.__new__(subprocess.Popen)
     try:
+        start_process_group(
+            installer, command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
         deadline = time.monotonic() + timeout
         while not exited_unreaped(installer):
             if time.monotonic() >= deadline:
                 raise subprocess.TimeoutExpired(command, timeout)
             time.sleep(0.05)
     except BaseException:
-        # Nothing above reaps the launcher: alive or a zombie, its pid
-        # (the group id) cannot have been recycled.
-        kill_process_tree(installer)
-        installer.wait()
+        # Only a spawn that failed has reaped the launcher (its status
+        # is kept then): otherwise, alive or a zombie, its pid (the
+        # group id) cannot have been recycled.
+        if getattr(installer, "pid", None) is not None and installer.returncode is None:
+            kill_process_tree(installer)
+            installer.wait()
         raise
     if installer.wait():
         raise RuntimeError(f"{' '.join(command)} exited with status {installer.returncode}")
@@ -1480,7 +1622,10 @@ class WebUseTool:
         reports the machine's real values, which is what a person's
         browser does, and a fixed ``America/Los_Angeles`` next to a
         different egress IP (or a Retina scale factor on a Linux server)
-        is exactly the inconsistency fingerprinting scripts look for.  A
+        is exactly the inconsistency fingerprinting scripts look for.
+        For the same reason a server that keeps UTC launches Chromium in
+        the zone of its address (:func:`web_stealth.browser_timezone`,
+        through ``TZ`` in :meth:`_ensure_browser`, not an override).  A
         headed window gets ``no_viewport`` so the page fills the window
         like a desktop browser; only real headless mode, which has no
         window, is given an explicit viewport.
@@ -2056,7 +2201,7 @@ class WebUseTool:
                 )
         try:
             if watchdog is not None:
-                watchdog.start()
+                call_without_injection(watchdog.start)
             for obj in (self._context, self._browser):
                 if obj is None:
                     continue
@@ -2296,8 +2441,16 @@ class WebUseTool:
                     "--ignore-gpu-blocklist",
                 ],
             }
+            env: dict[str, str] = {}
             if display is not None:
-                kwargs["env"] = {**os.environ, "DISPLAY": display}
+                env["DISPLAY"] = display
+            # A server's UTC clock next to its address's region is a tell:
+            # Chromium reports the zone of that region instead.
+            zone = web_stealth.browser_timezone(kiss_home() / "browser_timezone.json")
+            if zone is not None:
+                env["TZ"] = zone
+            if env:
+                kwargs["env"] = {**os.environ, **env}
             # Real headless mode reports ``HeadlessChrome``; the headed
             # string of this build, once known, is set with Chrome's own
             # switch (``_launch_browser`` learns it on the first launch).
@@ -2380,8 +2533,9 @@ class WebUseTool:
                 chosen = candidate
         return chosen
 
-    def _profile_lock(self) -> Any:
-        """Return a machine-wide lock over this tool's profile family.
+    @contextmanager
+    def _profile_lock(self) -> Iterator[None]:
+        """Hold the machine-wide lock over this tool's profile family for the block.
 
         The profile directory (and its ``_N`` escalation variants) is
         shared by every kiss process on the machine, so the
@@ -2395,26 +2549,46 @@ class WebUseTool:
         file description.
 
         One lock file sits beside the base profile and therefore covers
-        every escalation variant derived from it.
+        every escalation variant derived from it.  It is named for the
+        directory the profile path resolves to: named for the path as
+        given, a profile and a symlink to it were guarded by two locks,
+        and a launch through the link opened the profile another launch
+        had chosen and was about to clean.  The file named for the path
+        as given is locked as well, and first: it is the only one a kiss
+        daemon from before that change locks, and an upgrade leaves such
+        a daemon running beside this one for a while.  The resolved name
+        is the last lock any holder takes, so no two wait for each
+        other.  Where both names are one file (no link at the end of the
+        path) it is locked once: a second open would wait for the first.
 
-        The wait is bounded by ``_PROFILE_LOCK_TIMEOUT_SECS`` so it polls
+        Each wait is bounded by ``_PROFILE_LOCK_TIMEOUT_SECS`` so it polls
         in Python, where a Stop injected into the task thread lands at
         once; an unbounded wait sits in one kernel ``flock`` call that no
         Stop can interrupt while a holder wedged in Playwright keeps the
         file.  On timeout the ``TimeoutError`` (naming the lock file)
         surfaces as the tool's ``Error <context>: ...`` string.
 
-        Returns:
-            A context manager holding the lock, or a no-op context
-            manager when this tool uses no persistent profile or an
-            ephemeral one (nobody else can open it, and the lock file
-            would outlive the directory).
+        Nothing is locked when this tool uses no persistent profile or
+        an ephemeral one (nobody else can open it, and the lock file
+        would outlive the directory).
+
+        Raises:
+            TimeoutError: A lock file was still held by another process
+                after ``_PROFILE_LOCK_TIMEOUT_SECS``.
         """
         if not self.user_data_dir or self._ephemeral:
-            return nullcontext()
-        return exclusive_file_lock(
-            Path(f"{self.user_data_dir}.lock"), timeout=_PROFILE_LOCK_TIMEOUT_SECS
-        )
+            yield
+            return
+        given = Path(f"{self.user_data_dir}.lock")
+        resolved = Path(f"{os.path.realpath(self.user_data_dir)}.lock")
+        with exclusive_file_lock(given, timeout=_PROFILE_LOCK_TIMEOUT_SECS):
+            second = (
+                nullcontext()
+                if resolved.exists() and resolved.samefile(given)
+                else exclusive_file_lock(resolved, timeout=_PROFILE_LOCK_TIMEOUT_SECS)
+            )
+            with second:
+                yield
 
     def _launch_browser(self, launcher: Any, kwargs: dict[str, Any]) -> None:
         if self._ephemeral and self._ephemeral_dir is None:
@@ -2780,23 +2954,39 @@ class WebUseTool:
         ``start()`` returns once the driver it spawned has answered the
         handshake.  One that has not within :data:`_DRIVER_START_SECS` is
         killed (:func:`_kill_driver`), which fails the start instead of
-        waiting for good.  A start that does not return (that failure,
-        or a Stop) leaves a driver no Playwright object owns and no
-        ``close()`` could find: it is ended here.
+        waiting for good.  A Stop injected meanwhile is raised once the
+        start has ended
+        (:func:`~kiss.core.tool_interrupt.call_without_injection`).
+        Raised inside the start, which runs asyncio's and Playwright's
+        code on this thread, it lost what that code had in hand (the
+        pidfd asyncio had just opened on the driver stayed open), and a
+        ``ToolCallInterrupted`` that landed in a task of the loop stayed
+        with that task, as asyncio lets only ``KeyboardInterrupt`` and
+        ``SystemExit`` out of one (the start then waited out its
+        watchdog and failed with another error).  The Stop is no later
+        for it: the thread waits in the loop's select until the driver
+        answers or is killed, and an injected exception lands only
+        then.  A start that does not return (that failure, the Stop, or
+        the ``KeyboardInterrupt`` of a ``SIGINT``, which nothing holds
+        back) leaves a driver no Playwright object owns and no
+        ``close()`` could find: it is ended here with the start's event
+        loop (:func:`_end_start`), also when it was interrupted before
+        the transport had kept the driver it spawned
+        (:func:`_keep_spawned_driver`).
         """
         manager = web_stealth.playwright_api().sync_playwright()
         # Until the handshake there is no Playwright object: the driver's
         # process hangs off the manager, where ``_kill_driver`` finds it.
-        starting = SimpleNamespace(_impl_obj=manager)
+        starting = SimpleNamespace(_impl_obj=manager, stop=manager.__exit__)
         timer = _Watchdog(
             _DRIVER_START_SECS,
             _kill_driver,
             args=(starting, _DRIVER_START_SECS, "Starting the Playwright driver"),
         )
         try:
-            self._playwright = _under_timer(timer, manager.start)
+            self._playwright = _under_timer(timer, partial(call_without_injection, manager.start))
         except BaseException:
-            _end_driver(starting)
+            _end_start(starting)
             raise
         return self._playwright
 
@@ -3137,7 +3327,35 @@ class WebUseTool:
         except Exception:  # noqa: BLE001 - the page closed, or the watchdog ended it
             logger.debug("Could not release the mouse button", exc_info=True)
 
-    def _press_at(self, box: dict[str, float], hold_secs: float) -> None:
+    def _bar_full(self, vendor: str) -> Callable[[], bool] | None:
+        """Return what tells, while *vendor*'s widget is held, that it has had enough.
+
+        HUMAN's "Press & Hold" bar fills at its own pace and says when it
+        is full (:func:`web_stealth.press_and_hold_full`); the other
+        widgets are clicks.
+
+        Args:
+            vendor: The label :meth:`_challenge_vendor` returned.
+
+        Returns:
+            The check :meth:`_press_at` asks once the drawn hold is over,
+            or ``None`` when the hold is its drawn length whatever the
+            widget shows.
+        """
+        if vendor != web_stealth.PERIMETERX_CHECK:
+            return None
+        boxes = self._read_page(self._page, web_stealth.PRESS_AND_HOLD_BOX_JS)
+        if not boxes:
+            return None
+        # Frame-owner box reads carry no protocol timeout, as raw input.
+        full: Callable[[], bool] | None = self._input_hang_watchdog(
+            lambda: web_stealth.press_and_hold_full(self._page, boxes[0])
+        )
+        return full
+
+    def _press_at(
+        self, box: dict[str, float], hold_secs: float, full: Callable[[], bool] | None = None
+    ) -> None:
         """Press the element *box* like a person and keep it down for *hold_secs*.
 
         A curved approach to the middle of the box, a short pause, then
@@ -3146,35 +3364,134 @@ class WebUseTool:
         element is in a cross-origin frame.  A Stop or an error during
         the hold lets the button go too (:meth:`_release_mouse`).
 
+        A widget that fills while held is not let go half full: with
+        *full* the button stays down past *hold_secs* until *full* says
+        so, and a moment longer (a person sees it first), for at most
+        :data:`web_stealth.BAR_FILL_EXTRA_SECS` more.
+
         Args:
             box: Box to press, in main-frame viewport pixels
                 (:meth:`_challenge_widget`).
             hold_secs: How long the button stays down
                 (:func:`web_stealth.press_hold_secs`).
+            full: Asked on every tremor once *hold_secs* are over
+                (:meth:`_bar_full`); ``None`` for a plain press.
         """
         x = box["x"] + box["width"] * random.uniform(0.35, 0.65)
         y = box["y"] + box["height"] * random.uniform(0.35, 0.65)
+        extra_secs = web_stealth.BAR_FILL_EXTRA_SECS if full is not None else 0.0
+        held_secs = 0.0
 
         def hold() -> None:
+            nonlocal held_secs
             self._move_mouse_to(x, y)
             self._page.wait_for_timeout(random.randint(200, 600))
             try:
                 self._page.mouse.down()
-                release_at = time.monotonic() + hold_secs
+                pressed_at = time.monotonic()
+                release_at = pressed_at + hold_secs
+                give_up_at = release_at + extra_secs
+                watched = False
                 while True:
                     self._page.wait_for_timeout(random.randint(60, 140))
-                    if time.monotonic() >= release_at:
-                        break
+                    now = time.monotonic()
+                    if now >= release_at:
+                        if full is None or now >= give_up_at or full():
+                            break
+                        watched = True  # still filling: the hold goes on
                     self._page.mouse.move(*web_stealth.hold_tremor(x, y), steps=2)
+                if watched and now < give_up_at:
+                    # It filled under the eyes: the hand lets go a moment later.
+                    self._page.wait_for_timeout(random.randint(300, 900))
                 self._page.mouse.up()
+                held_secs = time.monotonic() - pressed_at
             except BaseException:
                 self._release_mouse()
                 raise
 
-        self._input_hang_watchdog(hold, _INPUT_WATCHDOG_SECS + hold_secs)
-        logger.info("pressed the challenge widget for %.1fs on %s", hold_secs, self._page.url)
+        self._input_hang_watchdog(hold, _INPUT_WATCHDOG_SECS + hold_secs + extra_secs)
+        logger.info("pressed the challenge widget for %.1fs on %s", held_secs, self._page.url)
 
-    def _settle_challenge(self) -> str:
+    def _start_over(self, vendor: str, url: str) -> str | None:
+        """Open *url* again as a visitor *vendor* has not rated yet; return what shows then.
+
+        HUMAN's press-and-hold page is the answer to a page opened cold,
+        and the browser is remembered for it
+        (:func:`web_stealth.front_page_url`).  What HUMAN keeps about the
+        browser on this site is forgotten (its own cookies and storage
+        keys, nothing of the site's: a login stays), the site's front
+        page is opened and looked at for a moment, and *url* is opened
+        again.  The pointer rests meanwhile: on walmart.com the page then
+        came 22 times in 24, and 5 times in 7 with the pointer idling
+        about.  What decides the other times is not known, so a check
+        that is back after a front page that loaded gets all this once
+        more (the one time that was seen, the check came back again);
+        one that the front page shows too does not.  Not in a browser
+        the user attached: its cookies are theirs.
+
+        Args:
+            vendor: The label of the check that is showing.
+            url: The URL that was asked for.
+
+        Returns:
+            The label of the check showing now: *vendor* itself when the
+            page was left as it is, otherwise what opening *url* again
+            met (``None``: content).
+
+        Raises:
+            Exception: Opening *url* again failed, as any navigation can.
+        """
+        if vendor != web_stealth.PERIMETERX_CHECK or self._attached_url is not None:
+            return vendor
+        showing: str | None = vendor
+        for _ in range(_START_OVER_TRIES):
+            blocked = self._page.url
+            front = web_stealth.front_page_url(blocked, url)
+            if front is None:
+                break
+            host = urlparse(blocked).hostname or ""
+            try:
+                self._read_page(self._page, web_stealth.FORGET_PERIMETERX_JS)
+                self._driver_call(
+                    partial(self._context.clear_cookies, **web_stealth.perimeterx_cookies(host)),
+                    _ACTION_TIMEOUT_MS,
+                    "Forgetting the check's cookies",
+                )
+            except Exception:  # noqa: BLE001 — nothing to start over from: the check stays
+                logger.info("Could not forget the check's rating on %s", host, exc_info=True)
+                break
+            rated = loaded = False
+            try:
+                self._goto_retrying_network_change(front)
+                self._wait_for_stable()
+                rated = self._challenge_vendor() is None
+                leave_at = time.monotonic() + random.uniform(*_FRONT_PAGE_READ_SECS)
+                while rated and time.monotonic() < leave_at:
+                    self._pause(random.randint(500, 900))
+                loaded = True
+            except Exception:  # noqa: BLE001 — the wanted page is opened again all the same
+                logger.info("Front page %s did not load", front, exc_info=True)
+                rated = False
+            for last in (loaded, True):
+                try:
+                    self._goto_retrying_network_change(url)
+                    break
+                except Exception:
+                    # The error page of a front page that failed commits
+                    # after its ``goto`` raised and can interrupt this
+                    # navigation, which is then tried once more.
+                    if last:
+                        raise
+                    logger.debug("Reopening %s was interrupted; retrying", url, exc_info=True)
+                    self._pause(500)
+            self._wait_for_stable()
+            showing = self._challenge_vendor()
+            logger.info("started over at %s for %s: %s", front, url, showing or "content")
+            if showing != web_stealth.PERIMETERX_CHECK or not rated:
+                break
+        return showing
+
+    def _settle_challenge(self, url: str | None = None) -> str:
         """Wait out a bot-protection interstitial; describe it when it stays.
 
         Cloudflare's managed challenge (and Anubis' proof-of-work page,
@@ -3199,9 +3516,16 @@ class WebUseTool:
         same kind of rating) is looked up on Crossref instead
         (:func:`web_stealth.content_fallback`); Reddit's static block page
         gets no wait either (:func:`web_stealth.challenge_wait_secs`).
+        HUMAN's press-and-hold page met by ``go_to_url`` is first
+        answered by opening the URL again from the site's front page
+        (:meth:`_start_over`); only when the check is back is it pressed.
         The interstitial is recognised by what the page shows
         (:func:`web_stealth.challenge_vendor`), which is also what tells
         when it has cleared.
+
+        Args:
+            url: The URL ``go_to_url`` was asked for; ``None`` when the
+                page was reached another way (a click, a key, a tab).
 
         Returns:
             ``""`` when the page is content, otherwise a ``Note:`` line
@@ -3211,9 +3535,16 @@ class WebUseTool:
         vendor = self._challenge_vendor()
         if vendor is None:
             return ""
-        wait_secs = web_stealth.challenge_wait_secs(vendor)
         started = time.monotonic()
-        deadline = started + wait_secs
+        if url is not None:
+            # Opened again from the site's front page it is content, or the
+            # check is back and is waited on and pressed like any other.
+            again = self._start_over(vendor, url)
+            if again is None:
+                return ""
+            vendor = again
+        wait_secs = web_stealth.challenge_wait_secs(vendor)
+        deadline = time.monotonic() + wait_secs
         box_seen_at: float | None = None
         presses: Counter[str] = Counter()
         while (
@@ -3236,7 +3567,7 @@ class WebUseTool:
                 # pointer meanwhile; a press the instant it appears, with
                 # no pointer history, is what the vendors ignore.  The
                 # verdict then takes a few seconds.
-                self._press_at(box, web_stealth.press_hold_secs(vendor))
+                self._press_at(box, web_stealth.press_hold_secs(vendor), self._bar_full(vendor))
                 presses[vendor] += 1
                 box_seen_at = None
                 deadline = max(deadline, time.monotonic() + wait_secs)
@@ -3339,15 +3670,19 @@ class WebUseTool:
             f"{web_stealth.block_advice(vendor)}"
         )
 
-    def _settled_tree(self) -> str:
+    def _settled_tree(self, url: str | None = None) -> str:
         """The page's tree after a navigation, behind the ``Note:`` of a block that stayed.
 
         Every action that can land on a new document (``go_to_url``, a
         click on a link or a search result, a typed submission, a key
         press) goes through here, so an interstitial met on the way is
         waited out or reported the same way whichever action met it.
+
+        Args:
+            url: The URL ``go_to_url`` was asked for, else ``None``
+                (:meth:`_settle_challenge`).
         """
-        notice = self._settle_challenge()
+        notice = self._settle_challenge(url)
         tree = self._get_ax_tree()
         return f"{notice}\n\n{tree}" if notice else tree
 
@@ -3526,7 +3861,7 @@ class WebUseTool:
 
             self._goto_retrying_network_change(url)
             self._wait_for_stable()
-            return self._settled_tree()
+            return self._settled_tree(url)
         except Exception as e:
             logger.debug("Exception caught", exc_info=True)
             return f"Error navigating to {url}: {e}"

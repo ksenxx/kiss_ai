@@ -42,7 +42,7 @@ PRIMARY_MODEL = "claude-fable-5-2-max"
 REVIEW_MODEL = "gpt-6-astra-xhigh"
 """The model that reviews and debugs the primary model's work."""
 
-WRITER_MODEL = "openrouter/google/gemini-4-neon"
+WRITER_MODEL = "openrouter/google/gemini-4-carbon"
 """The model that writes the documents, papers, reports and results a human reads."""
 
 SYSTEM_PROMPT = f"""\
@@ -64,9 +64,10 @@ work of '{PRIMARY_MODEL}' and '{WRITER_MODEL}',
 keep working while it runs and collect it with `agent_job(job_id, "wait")`. Check
 thoroughly whether the other model missed code or wiring or introduced bugs. Use at most
 75% of the task budget in {REVIEW_MODEL}, leave the reviewer's `max_budget` empty (it
-follows the size of the diff), and ask the model not to invent new problems. A second
-round gets the first round's findings and the diff since then, not the whole change. Use
-the model names literally without hallucinating new model names.
+gets 1/8 of what the task has spent so far, $10 at least), and ask the model not to
+invent new problems. A second round gets the first round's findings and the diff since
+then, not the whole change. Use the model names literally without hallucinating new
+model names.
 
 - Reviewer sub-agents: answer each finding with a change or with quoted evidence from a
 command you ran, never with an argument alone. Dispatch them with run_agent(task,
@@ -76,8 +77,9 @@ while the review runs (impacted tests, the progress log, the lint run) and colle
 it with agent_job(job_id, "wait") when you have nothing left to do but read it, or
 with agent_job("", "wait_any") when several reviewers or fixers are out and the first
 to return is the one to act on; use run_parallel only for several reviewers of one
-artifact. Leave max_budget empty: a review's default budget follows the size of the
-diff. Word the task as: "Verify the listed changes: <files/functions>. Report only
+artifact. Leave max_budget empty: a review's default budget is 1/8 of what the task
+has spent so far, $10 at least. Word the task as: "Verify the listed changes:
+<files/functions>. Report only
 demonstrated issues with file:line evidence and a reproduction or reasoning for each.
 Do not seek novel regressions elsewhere and do not invent problems; say so when a
 change is correct." A second round after fixes gets the first round's findings and

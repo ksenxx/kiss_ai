@@ -160,8 +160,8 @@ class TestCorruptNumericColumnsDoNotCrashHistory(_TempDbTestBase):
     """One corrupt numeric column must not take down every history reader.
 
     ``_row_to_extra_json`` claims (in its own comments) to tolerate
-    hand-edited / 3rd-party-source databases — it routes the payload
-    through ``_dumps_extra`` precisely so a non-finite ``cost`` from
+    hand-edited / 3rd-party-source databases — it coerces every
+    number precisely so a non-finite ``cost`` from
     such a DB cannot break strict JSON consumers.  Yet the same
     function did ``float(row["cost"] or 0.0)`` / ``int(row["tokens"]
     or 0)`` with only ``(KeyError, IndexError)`` caught: SQLite's

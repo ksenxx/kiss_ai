@@ -2,22 +2,23 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""E2E tests: the Settings entry of the composer's "..." menu on the
-remote webapp.
+"""E2E tests: the Settings button of the remote webapp, and the composer's
+"..." menu it left.
 
 The Settings control used to be a gear pill that ``renderTabBar()``
 appended to ``#tab-bar`` (and once regressed into rendering as a tiny
-dot there).  It now lives as a labelled item inside the input footer's
-"..." overflow menu (``#more-btn`` / ``#more-menu`` / ``#settings-btn``
-in ``chat.html``), together with mic, share, attach, Git Commit and the
-remote-only theme toggle.
+dot there), then an item of the input footer's "..." overflow menu.  It
+now is an icon button of the strip under the Chats list
+(``#sidebar-footer`` / ``#settings-btn`` in ``chat.html``); the menu
+(``#more-btn`` / ``#more-menu``) keeps mic, share, attach and the
+Home Screen item.
 
 Static tests pin the CSS wiring (the menu surface and item rules exist
 in ``remote-codex.css``); the live test boots the production
-``RemoteAccessServer`` + headless Chromium, opens the "..." menu and
-asserts the Settings item renders at a clickable size with a visible
-gear icon, and that clicking it opens the settings panel and closes the
-menu.
+``RemoteAccessServer`` + headless Chromium and asserts the Settings
+button renders on the strip at a clickable size with a visible gear
+icon, and that clicking it opens the settings panel and closes an open
+"..." menu.
 """
 
 from __future__ import annotations
@@ -135,28 +136,35 @@ _MEASURE_JS = r"""
   }
   const itemRect = item.getBoundingClientRect();
   const svgRect = svg.getBoundingClientRect();
+  const hit = document.elementFromPoint(
+    itemRect.left + itemRect.width / 2,
+    itemRect.top + itemRect.height / 2,
+  );
   return {
     hasMenu: true,
     hasItem: true,
     hasSvg: true,
     menuOpen: menu.classList.contains('open'),
+    onStrip: !!item.closest('#sidebar-footer'),
+    inMenu: menu.contains(item),
+    reachable: !!hit && item.contains(hit),
     itemWidth: itemRect.width,
     itemHeight: itemRect.height,
     svgWidth: svgRect.width,
     svgHeight: svgRect.height,
-    label: (item.textContent || '').trim(),
+    label: item.getAttribute('aria-label'),
   };
 })()
 """
 
 
 @pytest.mark.timeout(180)
-def test_live_remote_more_menu_settings_item(
+def test_live_settings_button_on_the_chats_strip(
     tmp_path: Path,
 ) -> None:
-    """On the live remote page the "..." button opens the overflow menu,
-    whose Settings item is a real clickable row with a visible gear
-    icon; clicking it opens the settings panel and closes the menu."""
+    """On the live remote page the Settings button of the Chats strip is
+    a real clickable icon button with a visible gear; clicking it opens
+    the settings panel and closes the "..." menu left open."""
     ready = threading.Event()
     done = threading.Event()
     state: dict[str, object] = {}
@@ -222,10 +230,22 @@ def test_live_remote_more_menu_settings_item(
     assert measured["svgWidth"] >= 14 and measured["svgHeight"] >= 14, (
         "settings gear SVG must render at ~16x16; got: " + repr(measured)
     )
-    assert measured["itemWidth"] >= 100 and measured["itemHeight"] >= 24, (
-        "settings item must be a clickable row; got: " + repr(measured)
+    assert measured["onStrip"] and not measured["inMenu"], (
+        "Settings lives on the strip under the Chats list; " + repr(measured)
     )
-    assert "Settings" in str(measured["label"]), repr(measured)
+    # The strip's icons stand close together, so a button is narrower
+    # than it is tall.
+    assert measured["itemHeight"] >= 28, (
+        "settings button must be a clickable icon button; got: "
+        + repr(measured)
+    )
+    assert measured["svgWidth"] <= measured["itemWidth"] < measured["itemHeight"], (
+        "settings button must hold its whole icon; got: " + repr(measured)
+    )
+    assert measured["reachable"], (
+        "nothing may cover the settings button; " + repr(measured)
+    )
+    assert measured["label"] == "Settings", repr(measured)
     assert not after["menuOpen"], (
-        "activating the Settings item must close the menu; " + repr(after)
+        "a click on Settings must close the open menu; " + repr(after)
     )

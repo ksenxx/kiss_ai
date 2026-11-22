@@ -32,7 +32,7 @@
 // (prctl), so each orphaned process is adopted by the helper, which waits
 // for it and reports how it ended.  The helper never kills a process
 // group before it has the fates, so it cannot hide a leak.  The gate
-// helper is copied into a scratch directory with its 90 s timeout
+// helper is copied into a scratch directory with its 8 min timeout
 // lowered (the copy is the only knob).
 //
 // Not reproducible end to end: `runCovered` skips the group kill when

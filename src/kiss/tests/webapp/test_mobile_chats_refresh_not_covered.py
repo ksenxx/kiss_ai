@@ -6,7 +6,8 @@
 
 Below the 900px breakpoint the history panel is a drawer whose close
 button (``#sidebar-close``) sits absolutely in the panel's top-right
-corner.  The Chats header row puts the app refresh button
+corner.  The panel's first row (``.sidebar-refresh-row``, above the
+Projects row and the search box) puts the app refresh button
 (``#chats-refresh-btn``) at its right end, so without a reserved
 margin the x lands on top of it and every tap on "refresh" closes the
 drawer instead.
@@ -71,12 +72,14 @@ _GEOMETRY_JS = """
   const close = rect('sidebar-close');
   const hit = document.elementFromPoint(refresh.cx, refresh.cy);
   const closeStyle = getComputedStyle(document.getElementById('sidebar-close'));
-  const hdrStyle = getComputedStyle(document.querySelector('.sidebar-hdr.chats-hdr'));
+  const rowStyle = getComputedStyle(document.querySelector('.sidebar-refresh-row'));
   return {
     refresh, close,
+    projects: rect('projects-row'),
+    search: rect('history-search'),
     closeVisible: closeStyle.display !== 'none',
     hitId: hit ? (hit.closest('button') || hit).id : null,
-    hdrPaddingRight: hdrStyle.paddingRight,
+    rowPaddingRight: rowStyle.paddingRight,
   };
 }
 """
@@ -136,6 +139,12 @@ def _disjoint(a: dict[str, float], b: dict[str, float]) -> bool:
     )
 
 
+def _assert_refresh_above_projects_above_search(geo: dict[str, dict[str, float]]) -> None:
+    """The refresh button is over the Projects row, the search box under it."""
+    assert geo["refresh"]["bottom"] <= geo["projects"]["top"], geo
+    assert geo["projects"]["bottom"] <= geo["search"]["top"], geo
+
+
 @pytest.mark.parametrize("width", MOBILE_WIDTHS)
 def test_mobile_refresh_button_is_clear_of_the_close_button(
     browser: Browser, remote_url: str, width: int
@@ -149,6 +158,7 @@ def test_mobile_refresh_button_is_clear_of_the_close_button(
         assert _disjoint(geo["refresh"], geo["close"]), geo
         assert geo["refresh"]["right"] <= geo["close"]["left"], geo
         assert geo["hitId"] == "chats-refresh-btn", geo
+        _assert_refresh_above_projects_above_search(geo)
 
         page.mouse.click(geo["refresh"]["cx"], geo["refresh"]["cy"])
         assert page.evaluate("() => window.__clicks") == {
@@ -168,7 +178,8 @@ def test_desktop_row_reserves_no_space_for_the_hidden_close(
         page.wait_for_selector("body.remote-desktop", state="attached")
         geo = page.evaluate(_GEOMETRY_JS)
         assert not geo["closeVisible"], geo
-        assert geo["hdrPaddingRight"] == "0px", geo
+        assert geo["rowPaddingRight"] == "0px", geo
         assert geo["hitId"] == "chats-refresh-btn", geo
+        _assert_refresh_above_projects_above_search(geo)
     finally:
         page.close()

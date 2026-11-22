@@ -156,8 +156,9 @@ def test_wrapper_option_values_and_pipes_into_groups(work: Path) -> None:
         # The shell opens a redirection before `env -C` moves the program:
         # this writes ../notes.md of the work dir, a new file.
         "env -C sub cat <<EOF > ../notes.md\nx\nEOF",
-        # A pipe into an arithmetic command reaches no later command.
-        "cat <<EOF | ((x)); cat > notes.md\nx\nEOF",
+        # A pipe into an arithmetic command reaches no later command.  (Its operand is a
+        # number: the value of one only the shell knows may run a command that reads the pipe.)
+        "x=1; cat <<EOF | ((x)); cat > notes.md\nx\nEOF",
     ):
         assert heredoc_guard(command, cwd, os.path.lexists) is None, command
     assert heredoc_targets("cat <<EOF | (grep x | sort) > out.txt\nx\nEOF") == ["out.txt"]
@@ -168,7 +169,9 @@ def test_wrapper_option_values_and_pipes_into_groups(work: Path) -> None:
 
 
 @posix_only("the host Bash tool runs bash")
-def test_shell_view_target_reads_the_command_as_bash_does(work: Path) -> None:
+def test_shell_view_target_reads_the_command_as_bash_does(
+    work: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """F11: quotes, comments and subshells do not hide the one file shown."""
     a, log = (work / "a.py").resolve(), (work / "sub" / "log.txt").resolve()
     cwd = str(work)
@@ -202,6 +205,18 @@ def test_shell_view_target_reads_the_command_as_bash_does(work: Path) -> None:
     assert tools.Edit(str(a), "line 2\n", "line two\n").startswith("Successfully")
     assert "one" in tools.Bash("(cd sub && cat log.txt) # look", "view")
     assert tools.Edit(str(log), "one", "two").startswith("Successfully")
+    # Audit 2026-11-21 B7-O1: with ``sub`` in the ``CDPATH`` the tool's shell inherits, bash
+    # takes ``cd d`` to ``sub/d``: the file shown is not the ``d/seen.txt`` the text spells.
+    (work / "d").mkdir()
+    (work / "sub" / "d").mkdir()
+    (work / "d" / "seen.txt").write_text("spelt\n")
+    (work / "sub" / "d" / "seen.txt").write_text("searched\n")
+    monkeypatch.setenv("CDPATH", "sub")
+    shown = subprocess.run(["bash", "-c", "cd d > /dev/null && cat seen.txt"], cwd=work,
+                           capture_output=True, text=True, check=True, timeout=30).stdout
+    assert shown == "searched\n"
+    assert shell_view_target("cd d && cat seen.txt", cwd) is None
+    assert shell_view_target("cd ./d && cat seen.txt", cwd) == (work / "d" / "seen.txt").resolve()
 
 
 def test_sed_in_place_is_judged_per_command() -> None:

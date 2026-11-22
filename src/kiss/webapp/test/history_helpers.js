@@ -170,6 +170,47 @@ function selectFilter(win, id, value) {
   sel.dispatchEvent(new win.Event('change', {bubbles: true}));
 }
 
+/** The submenu of the Filter and group menu for the setting `key` (status, tag, group, ...). */
+function filterSubmenu(win, key) {
+  return win.document.querySelector('.fg-submenu[data-fg="' + key + '"]');
+}
+
+/** The labels of the options the submenu `key` offers, in order. */
+function filterOptions(win, key) {
+  return Array.from(filterSubmenu(win, key).querySelectorAll('.fg-option'), o =>
+    o.textContent.trim(),
+  );
+}
+
+/** The labels of the ticked options of the submenu `key`. */
+function tickedFilterOptions(win, key) {
+  return Array.from(
+    filterSubmenu(win, key).querySelectorAll('.fg-option[aria-checked="true"]'),
+    o => o.textContent.trim(),
+  );
+}
+
+/** Press the option `label` of the submenu `key`, as the user does. */
+function pressFilterOption(win, key, label) {
+  const option = Array.from(
+    filterSubmenu(win, key).querySelectorAll('.fg-option'),
+  ).find(o => o.textContent.trim() === label);
+  assert.ok(option, key + ' offers ' + label + ': ' + filterOptions(win, key));
+  option.click();
+}
+
+/** The menu row of the setting `key`: it names the setting and shows its value. */
+function filterRow(win, key) {
+  return win.document.querySelector(
+    '#history-filter-menu > .fg-row[data-fg="' + key + '"]',
+  );
+}
+
+/** The value the menu row of the setting `key` shows. */
+function filterRowValue(win, key) {
+  return filterRow(win, key).querySelector('.fg-row-value').textContent;
+}
+
 /** Open the Chats panel through the burger button, as the user does. */
 function openChatsPanel(win) {
   const btn = win.document.getElementById('menu-btn');
@@ -372,24 +413,12 @@ function historyRow(win) {
   return win.document.querySelector('#history-list .sidebar-item');
 }
 
-/** The workspace metadata span of a history row. */
-function workspaceSpan(row) {
-  return row.querySelector('.running-item-workspace');
-}
-
-/** The metrics span of a history row. */
-function metricsSpan(row) {
-  return row.querySelector('.running-item-metrics');
-}
-
 module.exports = {
   statusMark,
   machineSession,
   rowTitles,
   chatTabs,
   historyRow,
-  workspaceSpan,
-  metricsSpan,
   historyRows,
   visibleTitles,
   rowByTitle,
@@ -402,6 +431,12 @@ module.exports = {
   makeSession,
   gatewaySession,
   selectFilter,
+  filterSubmenu,
+  filterOptions,
+  tickedFilterOptions,
+  pressFilterOption,
+  filterRow,
+  filterRowValue,
   openChatsPanel,
   openChatsPage,
   chatHeader,

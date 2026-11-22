@@ -258,7 +258,7 @@ class TestSubagentPickerHandback(unittest.TestCase):
         worker.join(timeout=5)
         printer.emitted.clear()
 
-        _broadcast_subagent_done(printer, ["tab__sub_0"], "claude-opus-5")
+        _broadcast_subagent_done(printer, ["tab__sub_0"], "SUBTASK", "claude-opus-5")
 
         picks = _model_picks(printer.emitted)
         self.assertEqual(
@@ -275,7 +275,7 @@ class TestSubagentPickerHandback(unittest.TestCase):
     def test_quiet_subagent_tab_costs_nothing(self) -> None:
         printer = MemoryPrinter()
 
-        _broadcast_subagent_done(printer, ["tab__sub_0"], "claude-opus-5")
+        _broadcast_subagent_done(printer, ["tab__sub_0"], "SUBTASK", "claude-opus-5")
 
         self.assertEqual(_model_picks(printer.emitted), [])
 

@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""``/recommendations``: ten suggested next tasks from the user's recent work.
+"""``/recommendations``: twenty suggested next tasks from the user's recent work.
 
 The agent reads the tasks the user ran (``recent_tasks``: the last
 :data:`RECENT_HOURS` hours and, further back, enough older tasks to
@@ -44,7 +44,7 @@ MIN_COMPLETED = 20
 MAX_DAYS = 30
 """How far back ``recent_tasks`` looks for those completed tasks."""
 
-RECOMMENDATION_COUNT = 10
+RECOMMENDATION_COUNT = 20
 """How many suggestions one run stores."""
 
 APP_RECOMMENDATION_COUNT = 3
@@ -100,7 +100,7 @@ SYSTEM_PROMPT = (
 
 
 ## Lessons from recent runs (rsi7d)
-- Draft the ten sentences in one pass right after the memory_pull calls; do not re-rank or
+- Draft the twenty sentences in one pass right after the memory_pull calls; do not re-rank or
   re-weigh picks (the runs that did ran out of budget before saving).
 - Never count characters yourself: keep each sentence to about 15 words;
   `save_recommendations` names any sentence over 160 characters with its length, so call it
@@ -260,11 +260,11 @@ def save_recommendations(tasks: list[str]) -> str:
     """Store the suggested tasks for the sidebar's RECOMMENDATIONS subpanel.
 
     Args:
-        tasks: Exactly ten non-empty one-sentence task prompts of at most
+        tasks: Exactly twenty non-empty one-sentence task prompts of at most
             :data:`MAX_SENTENCE_CHARS` characters each.
 
     Returns:
-        ``"Saved 10 recommendations."`` or an error describing what to fix
+        ``"Saved 20 recommendations."`` or an error describing what to fix
         (the over-long sentences are named with their lengths, so the
         model never has to count characters itself).
     """
@@ -294,14 +294,14 @@ def save_recommendations(tasks: list[str]) -> str:
 
 
 class RecommendationsSea(WorkerSea):
-    """``/recommendations``: suggest ten next tasks from recent history and connected apps."""
+    """``/recommendations``: suggest twenty next tasks from recent history and connected apps."""
 
     def description(self) -> str:
         """One line for ``/help`` and the slash-command menu."""
         return (
             "Reviews your recent tasks (the last 24 hours and at least 20 completed ones), "
             "checks which third-party apps you are signed in to and what you did in them, "
-            "and stores ten suggested tasks, at least three combining those apps, in "
+            "and stores twenty suggested tasks, at least three combining those apps, in "
             "<home>/recommendations.json, shown in the sidebar's RECOMMENDATIONS subpanel. "
             "`/recommendations now` runs it once; a 6-hourly default cron job keeps the "
             "panel fresh."

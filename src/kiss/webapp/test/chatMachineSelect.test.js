@@ -19,9 +19,14 @@
 //   switching to a new chat shows the global pick again;
 // * the daemon's answer to `ready` names every binding (`tabMachines`):
 //   one the page holds that is not among them ended while it was away;
-// * a pick made on a chat that shows a task is also where THAT chat's
-//   next task goes: kept (persisted across a reload) until the submit,
-//   the daemon's binding does not overwrite it; a closed tab forgets it;
+// * a pick of another machine than the chat's opens a new chat on the
+//   picked machine (a chat that is still new is that chat); the chat
+//   left keeps the machine its tasks ran on;
+// * a chat's next task may be headed for another machine than the one
+//   the chat shows (a chat opened for a machine, a submit the daemon
+//   has not bound yet): that unsent pick is kept (persisted across a
+//   reload) until the binding, which does not overwrite it; a closed
+//   tab forgets it;
 // * the drop-down turns `remote` (green) for a registered machine, and
 //   `down` (red) once the daemon reports that machine unreachable;
 //   a pick whose machine went down stays listed so it is not lost;
@@ -29,8 +34,8 @@
 //   own host name when it was registered by its address), its value
 //   stays the registered name;
 // * the drop-down stays enabled while the chat runs: a pick made then
-//   does not move the running task (a message typed meanwhile is
-//   appended to it, no `machine`), it is where the next submit goes.
+//   does not move the running task, which stays open behind the new
+//   chat (a message typed into it is appended to it, no `machine`).
 'use strict';
 
 const assert = require('assert');
@@ -193,65 +198,67 @@ function testAPickIsTheGlobalSettingOfEveryNewChat() {
   console.log('  ok - a pick is the global setting of every new chat');
 }
 
-function testAPickOnAChatShowingATaskGoesToItsNextTask() {
+function testAPickOnAChatShowingATaskOpensANewChatThere() {
   const {win, posted, state} = readyPage();
   const api = win._testApi;
   const first = api.getActiveTabId();
   assert.strictEqual(runTask(win, posted, 'run here').machine, '');
   // The chat shows a task of this machine: a pick of gpu-box is the
-  // global setting AND where this chat's next task goes.
+  // global setting and opens a new chat on gpu-box.  The chat left is
+  // not moved: it is still this machine's.
+  posted.length = 0;
   pick(win, 'gpu-box');
+  const second = api.getActiveTabId();
+  assert.notStrictEqual(second, first, 'a new chat is on screen');
+  assert.ok(
+    posted.some(m => m.type === 'newChat' && m.tabId === second),
+    'the new chat is announced to the daemon',
+  );
   assert.strictEqual(select(win).value, 'gpu-box');
+  assert.ok(select(win).classList.contains('remote'));
   assert.deepStrictEqual(setMachines(posted), ['gpu-box']);
   assert.deepStrictEqual(
     persistedPicks(state),
-    {[first]: 'gpu-box'},
-    'the unsent pick is kept for the chat',
-  );
-  api.createNewTab();
-  const second = api.getActiveTabId();
-  assert.strictEqual(select(win).value, 'gpu-box', 'the global pick');
-  pick(win, '');
-  assert.deepStrictEqual(
-    persistedPicks(state),
-    {[first]: 'gpu-box'},
-    'a pick on a new chat is the global setting only',
+    {},
+    'the new chat follows the global pick; the chat left has no pick',
   );
   api.switchToTab(first);
-  assert.strictEqual(
-    select(win).value,
-    'gpu-box',
-    'the unsent pick stands whatever the global setting',
-  );
-  // The daemon's binding (replayed on a reconnect, say) does not
-  // overwrite the unsent pick either...
-  send(win, {type: 'tabMachine', tabId: first, machine: ''});
-  assert.strictEqual(select(win).value, 'gpu-box');
-  // ...the submit carries it, and the chat's machine is gpu-box from
-  // then on: the daemon's binding confirms it and takes the pick over.
+  assert.strictEqual(select(win).value, '', 'the chat left keeps its machine');
+  api.switchToTab(second);
+  // A chat that is still new is the new chat: a pick only moves it.
+  pick(win, '');
+  assert.strictEqual(api.getActiveTabId(), second, 'the new chat is kept');
+  assert.strictEqual(select(win).value, '');
+  pick(win, 'gpu-box');
+  assert.strictEqual(api.getActiveTabId(), second);
+  // Its task goes to the picked machine, which is the chat's from
+  // then on: the daemon's binding confirms it.
   const sub = runTask(win, posted, 'now on the gpu');
-  assert.strictEqual(sub.tabId, first);
+  assert.strictEqual(sub.tabId, second);
   assert.strictEqual(sub.machine, 'gpu-box');
   assert.deepStrictEqual(
     persistedPicks(state),
-    {[first]: 'gpu-box'},
-    'sent: the pick stands until the daemon binds the chat',
+    {[second]: 'gpu-box'},
+    'sent: the machine stands until the daemon binds the chat',
   );
-  assert.strictEqual(select(win).value, 'gpu-box');
-  send(win, {type: 'tabMachine', tabId: first, machine: 'gpu-box'});
+  send(win, {type: 'tabMachine', tabId: second, machine: 'gpu-box'});
   assert.deepStrictEqual(persistedPicks(state), {}, 'bound: no pick left');
   assert.strictEqual(select(win).value, 'gpu-box');
-  // Re-picking the chat's own machine is no pick of the chat's.
+  // Picking the machine the chat shows moves nothing: no new chat.
   pick(win, 'gpu-box');
+  assert.strictEqual(api.getActiveTabId(), second);
   assert.deepStrictEqual(persistedPicks(state), {});
-  // The daemon bringing the chat home (the run refused, say) shows.
-  send(win, {type: 'tabMachine', tabId: first, machine: ''});
-  assert.strictEqual(select(win).value, '', 'the binding rules');
+  // Home from the gpu-box chat: again a new chat, on this machine.
+  pick(win, '');
+  const third = api.getActiveTabId();
+  assert.ok(third !== second && third !== first, 'a third chat');
+  assert.strictEqual(select(win).value, '');
+  assert.strictEqual(runTask(win, posted, 'back home').machine, '');
   api.switchToTab(second);
-  assert.strictEqual(select(win).value, 'gpu-box', 'the global pick');
+  assert.strictEqual(select(win).value, 'gpu-box', 'the gpu chat is unmoved');
   win.close();
   console.log(
-    "  ok - a pick on a chat showing a task goes to the chat's next task",
+    '  ok - a pick on a chat showing a task opens a new chat on that machine',
   );
 }
 
@@ -280,7 +287,8 @@ function testTheDaemonsBindingIsTheChatsMachine() {
   assert.strictEqual(select(win).value, '');
   send(win, {type: 'tabMachine', tabId: '', machine: 'gpu-box'});
   assert.strictEqual(select(win).value, '', 'no tab, no binding');
-  // A pick on a bound chat is the chat's until submitted.
+  // A pick on a chat the daemon bound before it showed a task is the
+  // chat's until submitted.
   api.switchToTab(first);
   pick(win, '');
   assert.deepStrictEqual(persistedPicks(state), {[first]: ''});
@@ -417,21 +425,27 @@ function testAnAddressNamedMachineIsListedByItsHostName() {
 function testAClosedTabForgetsAndAReloadRestores() {
   const {win, posted, state} = readyPage();
   const api = win._testApi;
-  const first = api.getActiveTabId();
-  runTask(win, posted, 'one');
+  // Two chats sent to gpu-box that the daemon has not bound yet: each
+  // holds its machine as an unsent pick.
   pick(win, 'gpu-box');
+  const first = api.getActiveTabId();
+  submit(win, 'one');
   api.createNewTab();
   const second = api.getActiveTabId();
-  pick(win, '');
-  runTask(win, posted, 'two');
-  pick(win, 'gpu-box');
+  // The daemon takes this chat's prompt (its echo, then the run's
+  // `clear`): once the task has ended nothing is going on in the chat.
+  submit(win, 'two');
+  send(win, {type: 'setTaskText', text: 'two', tabId: second});
+  send(win, {type: 'clear', tabId: second});
+  send(win, {type: 'status', running: true, tabId: second});
+  send(win, {type: 'status', running: false, tabId: second});
   assert.deepStrictEqual(persistedPicks(state), {
     [first]: 'gpu-box',
     [second]: 'gpu-box',
   });
-  win.document
-    .querySelector(`[data-tab-id="${second}"] .chat-tab-close`)
-    .click();
+  // Leaving the idle chat for a new one closes its tab.
+  win.document.getElementById('new-chat-btn').click();
+  assert.ok(!api.openTabs().some(t => t.id === second), 'the chat is closed');
   assert.deepStrictEqual(
     persistedPicks(state),
     {[first]: 'gpu-box'},
@@ -442,9 +456,9 @@ function testAClosedTabForgetsAndAReloadRestores() {
 
   // The reload hands the unsent pick back: the registry snapshot
   // re-opens the tab under its id, and the tab finds its pick again.
-  // The pick was never submitted, so the daemon's binding replayed on
-  // the reconnect does not override it either.  The global pick comes
-  // back from the daemon's config.
+  // The daemon never bound the chat, so the binding replayed on the
+  // reconnect (none) does not override it either.  The global pick
+  // comes back from the daemon's config.
   const again = makePage(persisted);
   send(again.win, {
     type: 'configData',
@@ -539,14 +553,27 @@ function testTheGlobalPickFollowsTheDaemon() {
   const first = api.getActiveTabId();
   runTask(win, posted, 'run here');
   api.createNewTab();
+  const fresh = api.getActiveTabId();
+  const openBefore = api.openTabs().length;
   // Another surface picked gpu-box: this surface's new chats go there.
   send(win, {type: 'machineChanged', machine: 'gpu-box'});
   assert.strictEqual(select(win).value, 'gpu-box');
   assert.ok(select(win).classList.contains('remote'));
   assert.deepStrictEqual(setMachines(posted), [], 'not a pick: not echoed');
   assert.deepStrictEqual(persistedPicks(state), {});
-  // A chat that shows a task keeps that task's machine.
+  assert.strictEqual(api.getActiveTabId(), fresh);
+  // A chat that shows a task keeps that task's machine, and stays on
+  // screen: only a pick in this drop-down opens a new chat.
   api.switchToTab(first);
+  assert.strictEqual(select(win).value, '');
+  send(win, {type: 'machineChanged', machine: ''});
+  send(win, {type: 'machineChanged', machine: 'gpu-box'});
+  assert.strictEqual(
+    api.getActiveTabId(),
+    first,
+    "another surface's pick opens no chat here",
+  );
+  assert.strictEqual(api.openTabs().length, openBefore);
   assert.strictEqual(select(win).value, '');
   send(win, {type: 'machineChanged', machine: ''});
   api.createNewTab();
@@ -577,7 +604,11 @@ function testTheGlobalPickFollowsTheDaemon() {
   );
 }
 
-function testAPickMadeWhileTheChatRunsGoesToTheNextTask() {
+// A pick made while the chat on screen runs a task opens a new chat on
+// the picked machine and leaves the run alone: the running chat stays
+// open on its own machine, takes follow-ups, and its next task goes
+// where its tasks ran.
+function testAPickMadeWhileTheChatRunsOpensANewChatAndLeavesTheRun() {
   const {win, posted, state} = readyPage();
   const api = win._testApi;
   const tab = api.getActiveTabId();
@@ -586,15 +617,27 @@ function testAPickMadeWhileTheChatRunsGoesToTheNextTask() {
   send(win, {type: 'status', running: true, tabId: tab});
   assert.ok(!select(win).disabled, 'the drop-down stays usable mid-run');
 
-  // The user picks gpu-box while the local task runs: the pick is
-  // taken and persisted...
   pick(win, 'gpu-box');
+  const fresh = api.getActiveTabId();
+  assert.notStrictEqual(fresh, tab, 'a new chat is on screen');
+  assert.ok(
+    api.openTabs().some(t => t.id === tab),
+    'the running chat stays open',
+  );
   assert.strictEqual(select(win).value, 'gpu-box');
   assert.ok(select(win).classList.contains('remote'));
-  assert.deepStrictEqual(persistedPicks(state), {[tab]: 'gpu-box'});
+  assert.deepStrictEqual(
+    persistedPicks(state),
+    {},
+    'no pick is kept for the running chat',
+  );
 
-  // ...a message typed meanwhile still goes to the running task, as a
-  // follow-up without a machine (the daemon keeps it where it runs)...
+  // Back on the running chat: it is still this machine's, and a message
+  // typed there goes to the running task as a follow-up without a
+  // machine (the daemon keeps it where it runs).
+  api.switchToTab(tab);
+  assert.strictEqual(select(win).value, '', 'the run was not re-targeted');
+  assert.ok(!select(win).classList.contains('remote'));
   posted.length = 0;
   submit(win, 'and also do this');
   assert.deepStrictEqual(
@@ -606,23 +649,27 @@ function testAPickMadeWhileTheChatRunsGoesToTheNextTask() {
   assert.ok(appended, 'the text is appended to the running task');
   assert.strictEqual(appended.tabId, tab);
   assert.ok(!('machine' in appended), 'the follow-up names no machine');
-  assert.strictEqual(select(win).value, 'gpu-box', 'the pick is kept');
 
-  // ...the daemon's binding of the running task (replayed on a
-  // reconnect, say) does not override the unsent pick...
-  send(win, {type: 'tabMachine', tabId: tab, machine: ''});
-  assert.strictEqual(select(win).value, 'gpu-box');
-
-  // ...and once the task is over, the next submit carries it.
+  // Once the task is over, the chat's next task runs where it ran.
   send(win, {type: 'status', running: false, tabId: tab});
+  posted.length = 0;
+  submit(win, 'go on here');
+  const here = lastSubmit(posted);
+  assert.strictEqual(here.tabId, tab);
+  assert.strictEqual(here.machine, '', 'the chat left keeps its machine');
+
+  // The new chat's task goes to the picked machine.
+  api.switchToTab(fresh);
   assert.strictEqual(select(win).value, 'gpu-box');
   posted.length = 0;
   submit(win, 'now on the gpu');
-  const sub = lastSubmit(posted);
-  assert.strictEqual(sub.tabId, tab);
-  assert.strictEqual(sub.machine, 'gpu-box', 'the next task goes there');
+  const there = lastSubmit(posted);
+  assert.strictEqual(there.tabId, fresh);
+  assert.strictEqual(there.machine, 'gpu-box', 'the new chat runs there');
   win.close();
-  console.log('  ok - a pick made while the chat runs goes to the next task');
+  console.log(
+    '  ok - a pick made while the chat runs opens a new chat and leaves the run',
+  );
 }
 
 // A chat's transcript replayed into `tabId` (the chat is this
@@ -693,14 +740,16 @@ function testAChatThatComesToShowATaskLeavesTheGlobalPick() {
 
 // A submit's machine stays the chat's unsent pick until the daemon's
 // binding confirms it: a refused run (the machine down, say) leaves
-// the pick standing for the retry and the chat on the machine it was
-// on -- a history row of the chat still finds its tab.
+// the pick standing for the retry.  The chat is the new one the
+// drop-down pick opened.
 function testARefusedRunKeepsTheChatsMachineAndThePick() {
   const {win, posted, state} = readyPage();
   const api = win._testApi;
-  const tab = api.getActiveTabId();
-  replay(win, tab, 'chat-1', 'run here');
+  const left = api.getActiveTabId();
+  replay(win, left, 'chat-1', 'run here');
   pick(win, 'gpu-box');
+  const tab = api.getActiveTabId();
+  assert.notStrictEqual(tab, left, 'the pick opened a new chat');
   submit(win, 'now on the gpu');
   assert.strictEqual(lastSubmit(posted).machine, 'gpu-box');
   assert.deepStrictEqual(
@@ -721,15 +770,6 @@ function testARefusedRunKeepsTheChatsMachineAndThePick() {
     'the pick stands for a retry',
   );
   assert.deepStrictEqual(persistedPicks(state), {[tab]: 'gpu-box'});
-  const row = localHistory(win, posted, 'chat-1', 'run here');
-  posted.length = 0;
-  row.click();
-  assert.strictEqual(
-    api.getActiveTabId(),
-    tab,
-    "the chat is still this machine's: its tab is found",
-  );
-  assert.ok(!posted.some(m => m && m.type === 'openTab'), 'no second tab');
   // The retry goes through: the daemon's binding confirms the pick.
   submit(win, 'try again');
   assert.strictEqual(lastSubmit(posted).machine, 'gpu-box');
@@ -838,23 +878,31 @@ function testAReadyAnswerNamesEveryBinding() {
     "a new chat's unsent pick of this machine is not the daemon's to drop",
   );
 
-  // A binding made while the page was away is taken as any binding is:
-  // it confirms the pick that asked for it.
+  // A pick in the drop-down on a chat that shows a task does not
+  // re-target that chat: the new chat comes on screen, on the picked
+  // machine, and no pick is kept for either of them.
   api.switchToTab(home);
   pick(win, 'gpu-box');
-  assert.deepStrictEqual(persistedPicks(state), {
-    [fresh]: '',
-    [home]: 'gpu-box',
-  });
-  send(win, {
-    type: 'tabMachines',
-    machines: {[stays]: 'gpu-box', [home]: 'gpu-box'},
-  });
-  assert.deepStrictEqual(persistedPicks(state), {[fresh]: ''});
+  assert.strictEqual(
+    api.getActiveTabId(),
+    fresh,
+    'the chat that is still new is the new chat of the pick',
+  );
   assert.strictEqual(select(win).value, 'gpu-box');
-  // A daemon with no binding at all (it restarted) names none.
+  assert.deepStrictEqual(
+    persistedPicks(state),
+    {},
+    'the new chat follows the picked machine; the chat left is not re-targeted',
+  );
+  // An answer that binds nothing for the new chat leaves it on the pick.
+  send(win, {type: 'tabMachines', machines: {[stays]: 'gpu-box'}});
+  assert.strictEqual(select(win).value, 'gpu-box');
+  assert.deepStrictEqual(persistedPicks(state), {});
+  // A daemon with no binding at all (it restarted) names none: a chat
+  // that shows a task is back on this machine, a new chat stays on the
+  // global pick.
   send(win, {type: 'tabMachines', machines: {}});
-  assert.strictEqual(select(win).value, '');
+  assert.strictEqual(select(win).value, 'gpu-box');
   api.switchToTab(stays);
   assert.strictEqual(select(win).value, '');
   win.close();
@@ -868,14 +916,14 @@ try {
   testAChatThatComesToShowATaskLeavesTheGlobalPick();
   testARefusedRunKeepsTheChatsMachineAndThePick();
   testAPickIsTheGlobalSettingOfEveryNewChat();
-  testAPickOnAChatShowingATaskGoesToItsNextTask();
+  testAPickOnAChatShowingATaskOpensANewChatThere();
   testTheDaemonsBindingIsTheChatsMachine();
   testARemotePickIsGreenUntilTheDaemonReportsItDown();
   testAnAddressNamedMachineIsListedByItsHostName();
   testAClosedTabForgetsAndAReloadRestores();
   testReachingForTheDropDownAsksForAFreshList();
   testTheGlobalPickFollowsTheDaemon();
-  testAPickMadeWhileTheChatRunsGoesToTheNextTask();
+  testAPickMadeWhileTheChatRunsOpensANewChatAndLeavesTheRun();
   console.log('chatMachineSelect: all tests passed');
 } catch (err) {
   console.error('FAIL:', err && err.stack ? err.stack : err);

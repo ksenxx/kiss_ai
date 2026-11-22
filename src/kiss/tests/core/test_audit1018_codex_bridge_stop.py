@@ -304,13 +304,17 @@ def stuck(text: str) -> str:
 
 
 def test_task_stop_abandons_a_tool_that_survives_the_interrupt(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """A tool nothing can interrupt is abandoned after the bounded wait, not joined for good."""
     turns = [{"mcp_calls": [["stuck", {"text": "x"}]], "text": "never"}]
     _agent, printer, elapsed = _run_until_stopped(tmp_path, monkeypatch, turns, [stuck])
     assert STOP_WAIT_SECONDS <= elapsed < STOP_WAIT_SECONDS + 5, f"the run took {elapsed:.1f}s"
     assert [c for t, c, _ in printer.events if t == "tool_result"] == []
+    # Once: the model exits the bridge again when the Stop ends the block, which redoes nothing.
+    assert [record.getMessage() for record in caplog.records if "abandoned" in record.message] == [
+        "KISS MCP bridge: 1 tool call(s) still running after the Stop; abandoned"
+    ]
 
 
 def test_fatal_limit_on_the_bridge_ends_the_turn_at_once(

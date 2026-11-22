@@ -51,7 +51,6 @@ async function testRegistryRemovalKeepsContentTabs() {
     description: 'child',
     task_id: 'child-1',
     isSubagentTab: true,
-    isDone: false,
   });
   send(win, {
     type: 'fileContent',

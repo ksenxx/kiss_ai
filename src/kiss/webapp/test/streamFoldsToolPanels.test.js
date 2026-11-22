@@ -18,7 +18,9 @@
 //   * a tool-call panel is folded even when it is one of only two;
 //   * a panel the user expanded by hand stays open however old it gets;
 //   * the result event folds nothing, so what was open when the task
-//     ended stays open.
+//     ended stays open;
+//   * a run_parallel / run_agent panel folds by the same rules, while
+//     its sub-agents run in their tabs and after.
 
 'use strict';
 
@@ -213,10 +215,74 @@ function testHiddenTabComesBackFolded() {
   );
 }
 
+// The run's three tool calls are fan-outs here; each call's sub-agent
+// runs in its own tab from the call to its result.
+function testFanOutPanelFoldsLikeAnyToolPanel() {
+  const {win} = makePage();
+  const tab = win._testApi.getActiveTabId();
+  send(win, {type: 'status', running: true, tabId: tab, startTs: TS});
+  const events = run();
+  ['run_parallel', 'run_agent', 'run_parallel'].forEach((name, call) => {
+    events[3 + 5 * call] = {
+      type: 'tool_call',
+      name,
+      extras: {tasks: JSON.stringify(['sub 1'])},
+      ts: TS,
+    };
+  });
+  const subagentTabs = () =>
+    win._testApi.openTabs().filter(t => t.isSubagentTab).length;
+  events.forEach((ev, i) => {
+    send(win, {...ev, tabId: tab});
+    if (ev.type === 'tool_call') {
+      send(win, {
+        type: 'openSubagentTab',
+        tab_id: 'sub-' + i,
+        parent_tab_id: tab,
+        description: 'sub 1',
+        task_id: 'task-' + i,
+      });
+      assert.strictEqual(subagentTabs(), 1, 'the sub-agent runs in its tab');
+    }
+    if (ev.type === 'tool_result')
+      send(win, {type: 'subagentDone', tab_id: 'sub-' + (i - 1)});
+    assertStreamFolding(win, `fan-out, after event #${i + 1} (${ev.type})`);
+    // The user unfolds the first fan-out panel while its sub-agent runs.
+    if (i === 3) {
+      panels(win)[1]
+        .querySelector(':scope > .collapse-header')
+        .dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+    }
+  });
+  assert.strictEqual(subagentTabs(), 0, 'every sub-agent finished');
+  assert.deepStrictEqual(
+    panels(win).map(isCollapsed),
+    [false, false, false, true, false, true, false],
+    'the pinned fan-out panel stays open; the other two are folded',
+  );
+  send(win, {
+    type: 'result',
+    text: 'summary: Done.\nsuccess: true\n',
+    summary: 'Done.',
+    success: true,
+    tabId: tab,
+    ts: TS,
+  });
+  send(win, {type: 'status', running: false, tabId: tab});
+  assert.deepStrictEqual(
+    panels(win).map(isCollapsed),
+    [false, false, false, true, false, true],
+    'the end of the task leaves the fan-out panels as they were',
+  );
+  win.close();
+  console.log('  ok - a fan-out panel folds like any other tool panel');
+}
+
 function main() {
   testVisibleStreamFoldsToolPanels();
   testUserPinnedPanelStaysOpen();
   testHiddenTabComesBackFolded();
+  testFanOutPanelFoldsLikeAnyToolPanel();
   console.log('streamFoldsToolPanels.test.js: all tests passed');
 }
 

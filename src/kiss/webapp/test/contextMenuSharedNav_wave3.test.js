@@ -9,9 +9,10 @@
 // (media/treeContextMenu.js) share one keyboard model (`menuKeyNav`) and one
 // viewport clamp (`clampMenu`), defined in contentContextMenu.js.  The
 // content menu also runs inside the sandboxed iframe of an opened .html file
-// from the `SOURCE` text alone, so that text must carry both helpers: this
-// suite installs the menu from `SOURCE` in a page that never loaded the
-// module, and drives both menus by keyboard at a pointer past the viewport.
+// from the markup of `contentContextMenuBootstrapHtml()` alone, so that
+// markup must carry both helpers: this suite parses it into a page that
+// never loaded the module, as main.js ships it into a preview, and drives
+// both menus by keyboard at a pointer past the viewport.
 
 const assert = require('assert');
 const fs = require('fs');
@@ -24,9 +25,11 @@ const MEDIA = path.join(__dirname, '..', 'media');
 const windows = [];
 const {test, report} = makeRunner({windows});
 
-function makeDom(scripts) {
+/** A page that ran *scripts* of media/, its document ending with *markup*. */
+function makeDom(scripts, markup = '') {
   const dom = new JSDOM(
-    '<!DOCTYPE html><html><body><a id="link" href="https://example.com/x">link</a></body></html>',
+    '<!DOCTYPE html><html><body><a id="link" href="https://example.com/x">link</a></body></html>' +
+      markup,
     {runScripts: 'dangerously', pretendToBeVisual: true, url: 'https://localhost/'},
   );
   const win = dom.window;
@@ -47,12 +50,13 @@ function assertClamped(win, el, width, height) {
   assert.strictEqual(el.style.top, win.innerHeight - height - 4 + 'px');
 }
 
-test('the iframe copy (SOURCE) opens, clamps and navigates by keyboard', () => {
+test('the iframe copy (the bootstrap markup) opens, clamps and navigates by keyboard', () => {
   const host = makeDom(['contentContextMenu.js']);
-  const source = host.ContentContextMenu.installContentContextMenu.SOURCE;
-  const win = makeDom([]);
+  const win = makeDom(
+    [],
+    host.ContentContextMenu.contentContextMenuBootstrapHtml(),
+  );
   assert.strictEqual(win.ContentContextMenu, undefined);
-  win.eval(source);
   const link = win.document.getElementById('link');
   link.dispatchEvent(
     new win.MouseEvent('contextmenu', {

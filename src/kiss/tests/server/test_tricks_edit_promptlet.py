@@ -8,8 +8,9 @@
 Covers :func:`kiss.server.tricks.edit_my_injection_trick` against a real
 ``MY_INJECTION.md`` (``KISS_HOME`` pinned to a temp dir), the daemon's
 ``editTrick`` command handler in ``kiss.server.commands`` (catalog
-entry, ``tricksData`` / ``error`` events and the stamped resync after
-a rejection), and the command over the real local WSS transport.
+entry, ``tricksData`` / ``error`` events, the stamped resync after a
+rejection and the ``trickResult`` that answers a stamped edit), and the
+command over the real local WSS transport.
 """
 
 from __future__ import annotations
@@ -27,7 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from kiss.server import tricks
-from kiss.server.commands import _CommandsMixin
+from kiss.server.commands import _CommandsMixin, broadcast_tricks_data
 from kiss.server.sorcar import API, validate_command
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.conftest import is_root, posix_only
@@ -359,6 +360,19 @@ class _FakePrinter:
         self.messages.append(msg)
 
 
+class _ReadyDuringResultPrinter(_FakePrinter):
+    """Takes an edit's result while another client's ``ready`` asks for the list."""
+
+    def broadcast(self, msg: dict[str, Any]) -> None:
+        if msg.get("type") == "trickResult":
+            self.ready = threading.Thread(target=broadcast_tricks_data, args=(self, ""))
+            self.ready.start()
+            # A list sent within this wait was read after the edit, and
+            # would reach the page before the edit's result.
+            self.ready.join(0.3)
+        super().broadcast(msg)
+
+
 class _FakeServer(_CommandsMixin):
     def __init__(self) -> None:
         self.printer: Any = _FakePrinter()
@@ -439,6 +453,45 @@ class TestEditTrickCommand(_TricksHome):
             resync["tricks"][:3], ["First mine.", "Second mine.", "Third mine."]
         )
         self.assertEqual(self.user_text(), _USER)
+
+    def test_stamped_edit_is_answered_with_its_result_before_the_list(self) -> None:
+        """A page that stamps its edit is told whether THAT edit was made."""
+        self.server._cmd_edit_trick(
+            {"text": "Second mine.", "newText": "Second, edited.", "connId": "c1", "generation": 4}
+        )
+        self.server._cmd_edit_trick(
+            {"text": "First mine.", "newText": "Third mine.", "connId": "c1", "generation": 5}
+        )
+        made, made_list, refused, resync = self.server.printer.messages
+        self.assertEqual(
+            made, {"type": "trickResult", "generation": 4, "error": "", "connId": "c1"}
+        )
+        self.assertNotIn("connId", made_list)
+        self.assertEqual(made_list["tricks"][1], "Second, edited.")
+        # The refusal is the result's: no ``error`` event besides.
+        self.assertEqual(
+            refused,
+            {
+                "type": "trickResult",
+                "generation": 5,
+                "error": "That promptlet is already in ~/.kiss/MY_INJECTION.md",
+                "connId": "c1",
+            },
+        )
+        self.assertEqual((resync["type"], resync["connId"]), ("tricksData", "c1"))
+
+    def test_no_list_of_a_stamped_edit_precedes_its_result(self) -> None:
+        """A list read after the edit is published after the edit's result."""
+        printer = _ReadyDuringResultPrinter()
+        self.server.printer = printer
+        self.server._cmd_edit_trick(
+            {"text": "First mine.", "newText": "First, edited.", "connId": "c1", "generation": 1}
+        )
+        printer.ready.join(10)
+        self.assertEqual(
+            [m["type"] for m in printer.messages],
+            ["trickResult", "tricksData", "tricksData"],
+        )
 
     def test_unknown_body_answers_sender_with_error(self) -> None:
         self.server._cmd_edit_trick(
@@ -569,6 +622,19 @@ class TestEditTrickOverLocalChannel(_TricksHome):
         )
         self.assertEqual(event["userCount"], 3)
         self.assertIn("## Trick\n\nFirst, edited.\n", self.user_text())
+
+    def test_stamped_edit_over_the_wire_gets_its_result(self) -> None:
+        event = self._roundtrip(
+            {
+                "type": "editTrick",
+                "text": "First mine.",
+                "newText": "First, edited.",
+                "generation": 3,
+            },
+            "trickResult",
+        )
+        self.assertEqual((event["generation"], event["error"]), (3, ""))
+        self.assertNotIn("connId", event)
 
     def test_missing_new_text_is_rejected_by_the_catalog(self) -> None:
         event = self._roundtrip({"type": "editTrick", "text": "First mine."}, "error")

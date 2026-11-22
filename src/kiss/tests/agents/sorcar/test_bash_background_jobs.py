@@ -33,6 +33,7 @@ from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.sorcar.useful_tools import JOB_LOG_DIR, UsefulTools
 from kiss.core.kiss_tmp import kiss_tmp_dir
 from kiss.core.processes import exited_unreaped, kill_process_tree, pid_alive
+from kiss.core.secret_redaction import add_secrets
 from kiss.core.tool_interrupt import (
     ToolCallInterrupted,
     end_tool_call,
@@ -57,6 +58,16 @@ def _start(tools: UsefulTools, command: str) -> tuple[str, int, Path]:
     assert match, result
     log_line = next(line for line in result.splitlines() if line.startswith("Log: "))
     return match.group(1), int(match.group(2)), Path(log_line[len("Log: "):])
+
+
+def _shown_tail(tools: UsefulTools, directory: Path, name: str, end: str, chars: int) -> str:
+    """Return the *chars* characters ``bash_job`` shows of a one-line log that ends with *end*."""
+    marker = "--- last 3 log lines ---\n"
+    (directory / name).write_text("p" * 5000 + end, encoding="utf-8")
+    job_id, _pid, _log = _start(tools, f"cat {name}")
+    tools.bash_job(job_id, action="wait", timeout_seconds=20)
+    header = tools.bash_job(job_id, tail_lines=3).index(marker) + len(marker)
+    return tools.bash_job(job_id, tail_lines=3, max_output_chars=header + chars)[header:]
 
 
 def _wait_pid_dead(pid: int, timeout: float = 10) -> None:
@@ -340,6 +351,39 @@ class TestBashJob:
         tools.bash_job(job_id, action="wait", timeout_seconds=30)
         report = tools.bash_job(job_id, tail_lines=3, max_output_chars=400)
         assert report.endswith(",19998,19999,20000") and len(report) <= 400, report
+
+    def test_tail_of_one_long_line_is_cut_after_its_secrets_are_replaced(
+        self, tmp_path: Path,
+    ) -> None:
+        """The end shown of a one-line log holds no part of a secret, wherever the cuts fall.
+
+        S16/F6: the line's end was cut to the budget before the secrets
+        of the result were replaced, so a secret the cut parted left
+        its end in the report (``ascii``), as did one parted by the
+        start of the bytes read from the log (``wide``: 30 characters
+        are 120 bytes, which begin 20 bytes into the secret).  The
+        bytes read before those, to hold such a secret whole, begin
+        inside a secret themselves (``packed``: so many secrets that
+        their names leave room for all that was read): its end stays
+        out, and nothing but names and the ``x`` after them is shown.
+        So it is when they begin inside the first character of the
+        longest secret (``parted``: its 300 characters make them 2,400
+        bytes, and the three bytes left of that character count as
+        three more characters).
+        """
+        secret, packed = "S16-tail-credential-0123456789abcdefghij", "s16-tail-packed-0123456789"
+        add_secrets({"S16_TAIL_KEY": secret, "KEY": packed})
+        tools = UsefulTools(work_dir=str(tmp_path))
+        shown = _shown_tail(tools, tmp_path, "ascii", secret + "TRAILER", 30)
+        assert shown == "p" * 11 + "S16_TAIL_KEY" + "TRAILER"
+        shown = _shown_tail(tools, tmp_path, "wide", secret + "\U0001f600" * 25, 30)
+        assert shown == "L_KEY" + "\U0001f600" * 25
+        shown = _shown_tail(tools, tmp_path, "packed", packed * 60 + "x" * 20, 100)
+        assert re.fullmatch("[KEY]+x{20}", shown), shown
+        parted = "\U0001f600" + "w" * 297 + "YZ"
+        add_secrets({"KEY": parted})
+        shown = _shown_tail(tools, tmp_path, "parted", parted * 10 + "x" * 20, 162)
+        assert re.fullmatch("[KEY]+x{20}", shown), shown
 
     def test_tail_budget_counts_characters_not_bytes(self, tmp_path: Path) -> None:
         """A UTF-8 line that fits ``max_output_chars`` is shown, not lost to its byte count.

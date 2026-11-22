@@ -284,8 +284,10 @@ class _ObjectSpans:
     object: rescanning per delta made a large streamed tool call (a
     ``Write`` of a brace-heavy file) cost minutes of CPU after the CLI
     had finished.  A span that closed while candidates of its stack
-    were still open (``enclosed`` maps its start to them, outermost
-    first) is their data for as long as one of them may still parse
+    were still open (``enclosed`` maps its start to the outermost and
+    the innermost of them, and :meth:`open_from` lists them: a copy of
+    the stack per span cost 1.5 GB for 20,000 nested braces) is their
+    data for as long as one of them may still parse
     (:func:`_may_still_parse`), exactly as the whole-text scanner
     swallows it once the candidate does: judging it on its own would
     promote an envelope-shaped argument into a call.  A candidate that
@@ -302,7 +304,10 @@ class _ObjectSpans:
         self.literal = ""
         self.in_string = False
         self.escaped = False
-        self.enclosed: dict[int, tuple[int, ...]] = {}
+        # The candidate under each candidate on its stack when it opened:
+        # nothing under an open candidate changes.
+        self.under: dict[int, int] = {}
+        self.enclosed: dict[int, tuple[int, int]] = {}
 
     def is_open(self, start: int) -> bool:
         """Return whether the candidate ``{`` at offset *start* is still open on its stack.
@@ -311,6 +316,20 @@ class _ObjectSpans:
             start: The offset of the ``{`` in the whole text.
         """
         return any(start in stack for stack in self.stacks)
+
+    def open_from(self, innermost: int) -> Iterator[int]:
+        """Yield the candidates that were open together with *innermost*.
+
+        Args:
+            innermost: The offset of the innermost of them, as ``enclosed`` holds it.
+
+        Yields:
+            The offset of each candidate ``{``, from *innermost* outwards.
+        """
+        candidate: int | None = innermost
+        while candidate is not None:
+            yield candidate
+            candidate = self.under.get(candidate)
 
     def _continues_candidates(self, ch: str) -> bool:
         """Advance the expectation past *ch*; return whether ``closed_under`` may still parse.
@@ -375,12 +394,14 @@ class _ObjectSpans:
                     if not self.escaped:
                         self.in_string = not self.in_string
                 elif ch == "{":
+                    if stack:
+                        self.under[self.pos] = stack[-1]
                     stack.append(self.pos)
                     self.fresh = stack
                 elif ch == "}" and stack:
                     start = stack.pop()
                     if stack:
-                        self.enclosed[start] = tuple(stack)
+                        self.enclosed[start] = (stack[0], stack[-1])
                         self.closed_under = stack
                         self.allowed = _AFTER_VALUE
                         self.literal = ""
@@ -427,7 +448,7 @@ def _is_tool_calls_object(text: str) -> bool:
     return bool(_iter_tool_calls_lists(parsed))
 
 
-def _may_still_parse(content: str, candidates: tuple[int, ...], end: int) -> bool:
+def _may_still_parse(content: str, candidates: Iterable[int], end: int) -> bool:
     """Return whether one of *candidates* is still a valid JSON prefix at *end*.
 
     The whole-text scanner (:func:`~kiss.core.models.model._iter_balanced_json_objects`)
@@ -442,10 +463,10 @@ def _may_still_parse(content: str, candidates: tuple[int, ...], end: int) -> boo
     Args:
         content: The streamed text so far.
         candidates: Offsets of the ``{`` still open on the inner
-            object's stack when it closed, outermost first.
+            object's stack when it closed, innermost first.
         end: The offset just past the inner object.
     """
-    for start in reversed(candidates):
+    for start in candidates:
         try:
             json.loads(content[start:end], strict=False)
         except json.JSONDecodeError as exc:
@@ -758,6 +779,15 @@ class ClaudeCodeModel(CLITextModel):
             content, result_json = self._parse_stream_events(
                 proc.lines(), stop_on_tool_calls=stop_on_tool_calls
             )
+            if result_json.get("type") == "result":
+                # The turn's final usage has arrived.  It stays staged
+                # until the turn is handed to the caller, so a turn that
+                # fails after it, or a Stop in the wait for the CLI's exit
+                # or in the teardown, is billed like a turn that returned:
+                # what the result reports, which _stamp_billing completed
+                # from the stream's messages (so not those again).
+                self._partial_usage = {}
+                self._rejected_response = result_json
             if not self._stopped_for_tool_calls:
                 try:
                     proc.raise_for_exit()
@@ -778,20 +808,15 @@ class ClaudeCodeModel(CLITextModel):
                             f"(result subtype {result_json.get('subtype')!r})."
                         )
                 except KISSError as e:
-                    if result_json.get("type") == "result":
-                        # Billed like a turn that returned: what the
-                        # result reports, which _stamp_billing completed
-                        # from the stream's messages (so not those again).
-                        self._partial_usage = {}
-                        self._rejected_response = result_json
                     # In -p mode the CLI reports an auth failure as its
                     # *result* on stdout (stderr is empty): surface it,
                     # with the way out when the subscription switch is on.
                     raise self._with_auth_hint(e, result_json) from None
 
-        # The turn completed: its usage is in result_json, so the partial
-        # snapshot must not be billed a second time by a later
-        # take_partial_usage_response() call.
+        # The turn completed: its usage is in result_json, so neither the
+        # staged result nor the partial snapshot may be billed a second
+        # time by a later take_partial_usage_response() call.
+        self._rejected_response = None
         self._partial_usage = {}
         self._open_message_usage = {}
         self.conversation.append({"role": "assistant", "content": content})
@@ -1053,7 +1078,9 @@ class ClaudeCodeModel(CLITextModel):
                                 elif enclosing != pending_under and _is_tool_calls_object(
                                     content[start:end]
                                 ):
-                                    pending_enclosed = _may_still_parse(content, enclosing, end)
+                                    pending_enclosed = _may_still_parse(
+                                        content, object_spans.open_from(enclosing[1]), end
+                                    )
                                     pending_under = enclosing
                                     rescan = not pending_enclosed
                                 if rescan:
@@ -1137,6 +1164,10 @@ class ClaudeCodeModel(CLITextModel):
                     result_text = event.get("result")
                     if isinstance(result_text, str):
                         content = result_text
+                # The turn is over: a CLI winding down behind an open
+                # stdout would be read on until the stall timeout, which
+                # discards this result.
+                break
 
         if found_tool_calls and not self._stopped_for_tool_calls:
             content = content[:last_tc_end]

@@ -134,7 +134,7 @@ async function main() {
 
   await test(
     "a task's own settings win over the next-task defaults, and the " +
-      'Machine row names the binding, not an unsent pick',
+      "Machine row names the chat's binding, not the global pick",
     () => {
       const {win, TAB} = makePage();
       send(win, {type: 'tabMachine', tabId: TAB, machine: 'box'});
@@ -164,21 +164,31 @@ async function main() {
         "the remote task's own settings paint the rows",
       );
       assert.strictEqual(rowText(win, 'meta-model'), 'model-x');
-      // Picking another machine for the NEXT task leaves the rows on
-      // the task the tab shows.
+      // Picking another machine opens a new chat for it (the running
+      // chat stays open behind it): the rows describe that chat's
+      // next task, on the machine picked...
+      send(win, {type: 'status', running: true, tabId: TAB});
       pickMachine(win, '');
+      assert.notStrictEqual(win._testApi.getActiveTabId(), TAB, 'a new chat');
+      assert.deepStrictEqual(rows(win), {
+        workDir: '/local/dir',
+        budget: '$42.00',
+        machine: 'laptop',
+      });
+      // ...and the chat left keeps the rows of the task it shows.
+      win._testApi.switchToTab(TAB);
       assert.deepStrictEqual(rows(win), {
         workDir: '/box/task',
         budget: '$7.50',
         machine: 'gpu.lab',
       });
-      // A new run clears the settings: the rows describe the next
-      // task again, on the machine now picked.
+      // A new run clears the settings: the rows describe the chat's
+      // next task again, on the machine the chat is bound to.
       send(win, {type: 'clear', chat_id: 'chat-1', tabId: TAB});
       assert.deepStrictEqual(rows(win), {
-        workDir: '/local/dir',
-        budget: '$42.00',
-        machine: 'laptop',
+        workDir: '/box/dir',
+        budget: '$100.00',
+        machine: 'gpu.lab',
       });
     },
   );

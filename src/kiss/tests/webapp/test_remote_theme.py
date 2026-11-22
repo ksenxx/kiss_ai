@@ -107,7 +107,7 @@ def test_dark_and_light_palettes_declare_the_same_variables() -> None:
     light = [name for name, _ in VAR_DECL.findall(_LIGHT_THEME_CSS)]
     assert dark == light
     assert len(dark) == len(set(dark)), "duplicate variable in the dark block"
-    assert len(dark) >= 60
+    assert len(dark) >= 59
 
 
 def test_remote_css_colour_literals_are_dark_palette_fallbacks() -> None:

@@ -832,6 +832,7 @@ def transcribe_pcm(
     audio_model: str = DEFAULT_AUDIO_MODEL,
     expect_wake_prefix: bool = False,
     wake_agreed: bool = False,
+    keep_wake_word: bool = False,
 ) -> dict[str, Any]:
     """Transcribe spoken audio with a KISS (Sorcar) transcription agent.
 
@@ -869,6 +870,10 @@ def transcribe_pcm(
             audio whose transcript must confirm the wake.
         wake_agreed: Whether the browser's grammar and grammar-free
             recognizers both heard the wake word (``wakeAgreed``).
+        keep_wake_word: Whether a leading wake phrase stays in the
+            text.  Speech typed with the composer's mic follows no
+            wake word, so a first word that sounds like one ("Soccer
+            practice ...") is the user's.
 
     Returns:
         ``{"text": <english str>, "language": <tag str or None>}``.
@@ -918,7 +923,7 @@ def transcribe_pcm(
             )
             raw_text, language = parse_transcription_reply(reply)
             cleaned = clean_transcript(raw_text)
-            text = strip_leading_wake_word(cleaned)
+            text = cleaned if keep_wake_word else strip_leading_wake_word(cleaned)
             if looks_like_stt_refusal(text, language):
                 print(
                     f"transcription attempt {attempt + 1} returned a "

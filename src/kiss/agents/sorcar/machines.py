@@ -77,7 +77,7 @@ import time
 import urllib.request
 from collections.abc import Buffer, Callable, Iterable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor, wait
-from contextlib import ExitStack, contextmanager, suppress
+from contextlib import ExitStack, contextmanager, nullcontext, suppress
 from dataclasses import asdict, dataclass, field
 from functools import partial
 from pathlib import Path
@@ -109,6 +109,7 @@ from kiss.core.processes import (
     popen_process_group,
     waitid_exited,
 )
+from kiss.core.tool_interrupt import call_without_injection
 from kiss.core.utils import atomic_write_text
 
 logger = logging.getLogger(__name__)
@@ -135,13 +136,15 @@ PIN_TIMEOUT = 30.0
 """Seconds :func:`pin_certificate` may take in all, the lookup of the host's name included."""
 CERT_MAX_BYTES = 1 << 20
 """The most bytes of ``/ca.crt`` :func:`pin_certificate` accepts (a CA is a few thousand)."""
-CORRELATED_REPLIES = frozenset({"models", "history", "myModelsData", "machines", "historyDeleted"})
+CORRELATED_REPLIES = frozenset(
+    {"models", "history", "myModelsData", "machines", "historyDeleted", "taskTags"},
+)
 """The reply types the daemon answers with the request's ``generation`` echoed.
 
 A frame of one of these types that echoes none is not the answer
 (:meth:`MachineLink.request`): a list the daemon pushed to every
-connection unasked (``myModelsData`` for another client's edit,
-``machines`` for a change of its registry), or the answer to an
+connection unasked (``myModelsData`` or ``taskTags`` for another
+client's edit, ``machines`` for a change of its registry), or the answer to an
 earlier request still on its way, which no drain of the frames
 already received can tell from the answer.  A daemon says so with
 ``echoesGeneration`` in its ``auth_ok``; one that does not (an older
@@ -445,7 +448,14 @@ def save_machines(machines: list[Machine]) -> None:
     path = machines_file()
     path.parent.mkdir(parents=True, exist_ok=True)
     registry = {"machines": [asdict(m) for m in machines]}
-    atomic_write_text(path, json.dumps(registry, indent=2), mode=0o600)
+    hosts_path = kiss_home() / HOSTS_FILE
+    with exclusive_file_lock(hosts_path.with_suffix(".lock"), timeout=HOSTS_LOCK_TIMEOUT):
+        # Bind legacy observations while the old registry is still available.
+        # With no known old address, discard them rather than authorise a new daemon.
+        records = _saved_records(locked=True)
+        atomic_write_text(hosts_path, json.dumps(records, indent=2))
+        _remember_hosts(records)
+        atomic_write_text(path, json.dumps(registry, indent=2), mode=0o600)
     close_links(keep=machines)
 
 
@@ -1003,12 +1013,16 @@ class SshTunnel:
             args=(self.process, f"bind [127.0.0.1]:{self.local_port}:", self._up, taken),
             daemon=True, name=f"ssh-tunnel-output {self.ssh}",
         )
+        # The start and each slice of the wait enter a ``threading.Condition``
+        # the reader takes too (to come up, to say the forward is up): a Stop
+        # raised as either had taken its lock left the reader blocked on it for
+        # good, so both are steps a Stop waits for.
         try:
-            self._reader.start()
+            call_without_injection(self._reader.start)
         except RuntimeError as exc:  # out of threads: nothing would read ssh's output
             self._kill()
             raise MachineError(f"ssh {self.ssh}: the port forward could not start: {exc}") from exc
-        while not self._up.wait(0.05):
+        while not call_without_injection(self._up.wait, 0.05):
             if taken.is_set() or _exited(self.process):
                 # Windows' ssh stays up after a failed bind: a moment to
                 # exit by itself, unreaped (``_kill`` signals its group
@@ -1938,7 +1952,10 @@ class MachineLink:
         out, as a token of its own: a Stop of the calling task is
         raised where the dial lock is released, and with the count
         taken ahead of the ``try`` it stayed, for :meth:`retire` to
-        wait its whole bound on.
+        wait its whole bound on.  A Stop raised as the handshake is
+        counted out finds the new socket in *opened* and hangs it up:
+        returned by the ``try`` itself, it was dropped open, with its
+        threads answering the daemon's pings and nobody to close it.
 
         Raises:
             MachineError: When the daemon is unreachable or rejects the
@@ -1946,11 +1963,18 @@ class MachineLink:
         """
         self._check_available()
         dial = object()
+        opened: list[ClientConnection] = []
         try:
-            locked_call(self._idle, self._start_dial, dial)
-            return self._dial(timeout, stream=True)
-        finally:
-            locked_call(self._idle, self._end_dial, dial)
+            try:
+                locked_call(self._idle, self._start_dial, dial)
+                opened.append(self._dial(timeout, stream=True))
+            finally:
+                locked_call(self._idle, self._end_dial, dial)
+            return opened[0]
+        except BaseException:
+            for ws in opened:
+                hang_up(ws)
+            raise
 
     def _start_dial(self, dial: object) -> None:
         """Count the stream handshake *dial* in, unless the link is retired (under the dial lock).
@@ -2202,10 +2226,13 @@ def forget_after_sleep() -> float:
 
 
 # The short host name each registered machine's daemon last gave of
-# itself (registered name -> host), from the ``machine`` of its
+# itself (registered name -> (host, address)), from the ``machine`` of its
 # ``pong`` and the ``localMachine`` of its ``history`` replies; kept
 # while the machine is down, and across restarts in HOSTS_FILE, so the
 # CHATS rows synced in from a machine that is down still name it.
+# Each is remembered with the address of the registration it was
+# observed on, as one immutable pair: a name registered again for another
+# daemon does not inherit the previous daemon's host name (_host_of).
 HOSTS_FILE = "machine_hosts.json"
 HOSTS_LOCK_TIMEOUT = 10.0
 """Seconds :func:`note_host` waits for another writer of :data:`HOSTS_FILE`.
@@ -2216,21 +2243,80 @@ and saved by a later observation.
 """
 
 
-def _saved_hosts() -> dict[str, str]:
-    """Return the host names :func:`note_host` saved ({} when none or unreadable)."""
+def _saved_records(*, locked: bool = False) -> dict[str, tuple[str, str]]:
+    """Load saved hosts, permanently binding legacy observations to their registration.
+
+    Reading both files and persisting that first binding holds the same lock as
+    registry replacement: an old bare host cannot be paired with a new address
+    between reads. Unknown legacy registrations are discarded, not inherited.
+    Callers already holding the host lock pass ``locked=True``.
+    """
+    path = kiss_home() / HOSTS_FILE
+    guard = nullcontext() if locked else exclusive_file_lock(
+        path.with_suffix(".lock"), timeout=HOSTS_LOCK_TIMEOUT,
+    )
     try:
-        raw = json.loads((kiss_home() / HOSTS_FILE).read_text(encoding="utf-8"))
+        with guard:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict):
+                return {}
+            registrations = {machine.name: machine.address() for machine in load_machines()}
+            records: dict[str, tuple[str, str]] = {}
+            legacy = False
+            for name, saved in raw.items():
+                host, address = (
+                    saved if isinstance(saved, list) and len(saved) == 2 else (saved, "")
+                )
+                if not isinstance(host, str) or not isinstance(address, str):
+                    continue
+                if not address:
+                    legacy = True
+                    address = registrations.get(str(name), "")
+                if address:
+                    records[str(name)] = (host, address)
+            if legacy:
+                atomic_write_text(path, json.dumps(records, indent=2))
+            return records
     except (OSError, ValueError):
         return {}
-    if not isinstance(raw, dict):
-        return {}
-    return {str(k): v for k, v in raw.items() if isinstance(v, str)}
 
 
-_hosts: dict[str, str] = _saved_hosts()
+def _saved_hosts() -> dict[str, str]:
+    """Return the host names :func:`note_host` saved ({} when none or unreadable)."""
+    return {name: host for name, (host, _address) in _saved_records().items()}
+
+
+_hosts: dict[str, tuple[str, str]] = {}
 # Machines whose host name is known in memory only (its save failed): the
 # next observation of the same name saves it again.
 _unsaved_hosts: set[str] = set()
+
+
+def _remember_hosts(records: dict[str, tuple[str, str]]) -> None:
+    """Take the (host, address) of every name of *records* into memory."""
+    _hosts.update(records)
+
+
+_remember_hosts(_saved_records())
+
+
+def _host_of(machine: Machine) -> str:
+    """Return the host name remembered for *machine* as registered ("" when none).
+
+    A name observed at another address is the host of the daemon the
+    machine's name was registered for before, not *machine*'s. An observation
+    with no known registration cannot identify a daemon.
+    """
+    host, address = _hosts.get(machine.name, ("", ""))
+    return host if address and address == machine.address() else ""
+
+
+def _registered_elsewhere(machine: Machine) -> bool:
+    """Whether the registry holds *machine*'s name for another address than *machine*'s."""
+    address = machine.address()
+    return bool(address) and any(
+        other.name == machine.name and other.address() != address for other in load_machines()
+    )
 
 
 def note_host(machine: Machine, host: Any) -> None:
@@ -2245,22 +2331,32 @@ def note_host(machine: Machine, host: Any) -> None:
     file lost the other's name for good (a later identical observation
     found it in memory and wrote nothing).  The names read back are
     taken into memory with it.
+
+    The name is remembered for *machine*'s address
+    (:meth:`Machine.address`), which :func:`_host_of` compares.  An
+    observation that lands once the registry holds the machine's name
+    for another address (the history reply of a registration replaced
+    meanwhile) is dropped, under the same file lock: it would put the
+    previous daemon's host name over the one the new daemon gave.
     """
     if not (isinstance(host, str) and host):
         return
-    if _hosts.get(machine.name) == host and machine.name not in _unsaved_hosts:
+    name, record = machine.name, (host, machine.address())
+    if _hosts.get(name) == record and name not in _unsaved_hosts:
         return
     path = kiss_home() / HOSTS_FILE
     try:
         with exclusive_file_lock(path.with_suffix(".lock"), timeout=HOSTS_LOCK_TIMEOUT):
-            hosts = {**_saved_hosts(), machine.name: host}
-            atomic_write_text(path, json.dumps(hosts, indent=2))
-            _hosts.update(hosts)
-        _unsaved_hosts.discard(machine.name)
+            if _registered_elsewhere(machine):
+                return
+            records = {**_saved_records(locked=True), name: record}
+            atomic_write_text(path, json.dumps(records, indent=2))
+            _remember_hosts(records)
+        _unsaved_hosts.discard(name)
     except OSError:
         # Known in memory, but the next identical observation retries the save.
-        _hosts[machine.name] = host
-        _unsaved_hosts.add(machine.name)
+        _remember_hosts({name: record})
+        _unsaved_hosts.add(name)
 
 
 def machine_on_host(host: str, machines: list[Machine]) -> Machine | None:
@@ -2275,7 +2371,7 @@ def machine_on_host(host: str, machines: list[Machine]) -> Machine | None:
     if not wanted:
         return None
     for machine in machines:
-        if _hosts.get(machine.name, "").lower() == wanted:
+        if _host_of(machine).lower() == wanted:
             return machine
     for machine in machines:
         names = {machine.name.lower(), *(h.lower() for h in machine_hosts(machine))}
@@ -2297,10 +2393,16 @@ def label_synced_rows(sessions: list[dict[str, Any]], machines: list[Machine]) -
     A row whose machine is not registered stays this daemon's.  The
     host names saved by another process (a ``/sync_history_and_memory``
     run, which asks each machine its host name over ssh) are taken in
-    first, so a machine whose daemon has never answered maps too.
+    first, so a machine whose daemon has never answered maps too; so
+    is one saved for another address than the one this process
+    remembers (the name was registered again, and only the other
+    process has heard the new daemon), unless this process's own is
+    the one not saved yet.
     """
-    for name, host in _saved_hosts().items():
-        _hosts.setdefault(name, host)
+    for name, (host, address) in _saved_records().items():
+        remembered = _hosts.get(name)
+        if remembered is None or (remembered[1] != address and name not in _unsaved_hosts):
+            _remember_hosts({name: (host, address)})
     for session in sessions:
         machine = machine_on_host(str(session.pop("origin", "") or ""), machines)
         if machine is not None:
@@ -2318,7 +2420,7 @@ def machine_label(machine: Machine) -> str:
     kept, as is the name while the daemon has never answered.
     """
     if machine.name == default_name(machine.ssh or machine.url):
-        return _hosts.get(machine.name) or machine.name
+        return _host_of(machine) or machine.name
     return machine.name
 
 
@@ -2507,7 +2609,8 @@ def merged_history(
     *local* must hold the local rows ``0 .. offset+limit`` (not just the
     requested page) so the union can be re-paginated; its date range is
     widened by the remote histories'.  Rows are ordered running first,
-    then newest first, like the local list; rows that tie keep their
+    then pinned, then the rest, newest first inside each, like the
+    local list (:func:`_history_order`); rows that tie keep their
     source's order, local before remote, earlier machine first.  Of
     several copies of one task id the one that sorts first is kept; it
     is of a running chat (``chat_running``) when any copy says so, as
@@ -2536,7 +2639,7 @@ def merged_history(
         pages.append(served)
         if late is not None:
             future.add_done_callback(partial(_landed_late, served, late))
-    best: dict[str, tuple[tuple[bool, float, int, int], dict[str, Any]]] = {}
+    best: dict[str, tuple[tuple[int, float, int, int], dict[str, Any]]] = {}
     of_running_chat: set[str] = set()
     for source, page in enumerate(pages):
         for rank, session in enumerate(page.rows):
@@ -2560,12 +2663,19 @@ def merged_history(
     )
 
 
-def _history_order(session: dict[str, Any]) -> tuple[bool, float]:
-    """Sort key of the merged list: running tasks first, then latest completed first.
+def _history_order(session: dict[str, Any]) -> tuple[int, float]:
+    """Sort key of the merged list: running tasks, then pinned rows, then the rest.
 
-    The completion time is ``endTs`` (epoch ms) when set, else the launch
-    ``timestamp`` (epoch seconds), the same key the local list sorts by.
+    A row is pinned when its task (``is_pinned``) or its chat
+    (``chat_is_pinned``) is; one that runs sorts as running.  Inside
+    each of the three the latest completed row comes first: the
+    completion time is ``endTs`` (epoch ms) when set, else the launch
+    ``timestamp`` (epoch seconds).  The same key the local list sorts
+    by (``persistence._history_order_sql``).
     """
     end_ms = float(session.get("endTs") or 0)
     done = end_ms / 1000.0 if end_ms > 0 else float(session.get("timestamp") or 0.0)
-    return bool(session.get("is_running")), done
+    if session.get("is_running"):
+        return 2, done
+    pinned = session.get("is_pinned") or session.get("chat_is_pinned")
+    return (1 if pinned else 0), done

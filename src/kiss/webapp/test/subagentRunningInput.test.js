@@ -56,6 +56,13 @@ function testOpenSubagentTabActiveRespectsRunningState() {
   const {win, parentId, subTabIds} = bootParallelRun(1, makePage());
 
   clickTab(win, subTabIds[0]);
+  send(win, {type: 'status', running: false, tabId: subTabIds[0]});
+  assert.ok(
+    !inputVisible(win),
+    'setup: the input must be hidden once the active sub-agent tab ' +
+      'stopped running',
+  );
+
   send(win, {
     type: 'openSubagentTab',
     tab_id: subTabIds[0],
@@ -69,21 +76,6 @@ function testOpenSubagentTabActiveRespectsRunningState() {
     'openSubagentTab for the ACTIVE tab must show the input while the ' +
       'sub-agent is running',
   );
-
-  send(win, {
-    type: 'openSubagentTab',
-    tab_id: subTabIds[0],
-    parent_tab_id: parentId,
-    description: 'sub 1',
-    task_id: 'sub-task-1',
-    taskIndex: 0,
-    isDone: true,
-  });
-  assert.ok(
-    !inputVisible(win),
-    'openSubagentTab with isDone for the ACTIVE tab must hide the ' +
-      'input — the sub-agent task already completed',
-  );
   win.close();
   console.log('  ok - openSubagentTab on active tab respects running state');
 }
@@ -91,21 +83,13 @@ function testOpenSubagentTabActiveRespectsRunningState() {
 function testTabSwitchTogglesInputByRunningState() {
   const {win, parentId, subTabIds} = bootParallelRun(2, makePage());
 
-  send(win, {
-    type: 'openSubagentTab',
-    tab_id: subTabIds[0],
-    parent_tab_id: parentId,
-    description: 'sub 1',
-    task_id: 'sub-task-1',
-    taskIndex: 0,
-    isDone: true,
-  });
+  send(win, {type: 'status', running: false, tabId: subTabIds[0]});
 
   clickTab(win, subTabIds[0]);
   assert.ok(
     !inputVisible(win),
-    'switching to a DONE sub-agent tab must hide the input textbox ' +
-      'and the buttons below it',
+    'switching to a sub-agent tab whose task ended must hide the ' +
+      'input textbox and the buttons below it',
   );
 
   clickTab(win, subTabIds[1]);

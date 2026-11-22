@@ -22,6 +22,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
 from collections.abc import Iterator
@@ -164,6 +165,14 @@ DEFAULTS: dict[str, Any] = {
     # OPENAI_API_KEY / CODEX_API_KEY are kept out of the CLI's environment.
     "codex_use_subscription": _env_flag("KISS_CODEX_USE_SUBSCRIPTION", True),
     "work_dir": "",
+    # The Settings sheet's "Default working directory": the folder a
+    # chat starts in ("" = none, the working directory stays as it is).
+    # The page applies it when a chat is opened, through the same
+    # ``setWorkDir`` as a pick in the chat header, which therefore
+    # overrides it; a project's own default (``projects.settings``)
+    # comes before this one.  The daemon never applies it to a run by
+    # itself, and a ``saveConfig`` stores it without adopting it.
+    "default_work_dir": "",
     "last_model": "",
     # The chat header's machine drop-down pick: the registered machine a
     # new chat's tasks run on ("" = this machine), one global setting
@@ -415,6 +424,61 @@ def setdefault_config(data: dict[str, Any]) -> dict[str, Any]:
     return locked_call(_config_lock, _save_config_locked, sanitize_config(data), True)
 
 
+def _store_target(store: Path) -> Path:
+    """Return the file a write of *store* replaces: the regular file a link names, else *store*."""
+    if os.path.islink(store):
+        real = os.path.realpath(store)
+        if os.path.isfile(real):
+            return Path(real)
+    return store
+
+
+@contextlib.contextmanager
+def _store_file_locks(store: Path, lock_path: Path) -> Iterator[Path]:
+    """Hold the cross-process locks of one read-merge-write of the file *store*.
+
+    Yields the file to read and to replace (:func:`_store_target`).
+
+    *lock_path* is the lock every writer of *store* takes.  A *store*
+    that is a link to a regular file is written where that file lives,
+    and a writer that reaches the file through a link in another home
+    takes another *lock_path*: both read the same content and the
+    second replace dropped what the first had stored.  So the lock of
+    that name beside the file itself is held as well
+    (``scripts/remote_config.py`` holds the same two for
+    ``config.json``).  One lock file under two paths (the link stands
+    beside its file, in a directory reached by another name) is locked
+    once, since a second descriptor of it would wait for the first; the
+    locks are taken in one order in every process, so no two writers
+    wait for each other.
+
+    That order may put the lock beside the file first, so the link is
+    read before any lock is held, and it may name another file by the
+    time they all are: written then, that file would be replaced
+    without its lock, from a content its own writer is changing.  The
+    link is therefore read again under the locks, and when it names
+    another file they are given up and taken anew for that one, once.
+    The caller writes the file yielded and follows no link again.
+
+    Raises:
+        TimeoutError: A lock stayed held for :data:`_LOCK_TIMEOUT_S`,
+            or *store* named another file after the second wait too.
+    """
+    for _ in range(2):
+        target = _store_target(store)
+        lock_paths = {os.path.realpath(lock_path): lock_path}  # by the file each path names
+        if target != store:
+            beside = target.with_name(lock_path.name)
+            lock_paths.setdefault(os.path.realpath(beside), beside)
+        with contextlib.ExitStack() as locks:
+            for real in sorted(lock_paths):
+                locks.enter_context(exclusive_file_lock(lock_paths[real], timeout=_LOCK_TIMEOUT_S))
+            if _store_target(store) == target:
+                yield target
+                return
+    raise TimeoutError(f"{store} named another file after each wait for its locks")
+
+
 def _save_config_locked(
     data: dict[str, Any], only_unset: bool, recent_work_dir: str | None = None,
 ) -> dict[str, Any]:
@@ -432,8 +496,7 @@ def _save_config_locked(
         OSError: ``config.json`` exists but could not be read; replacing
             it would silently drop every setting it holds.
     """
-    cfg_path = _config_path()
-    with exclusive_file_lock(_config_dir() / ".config.lock", timeout=_LOCK_TIMEOUT_S):
+    with _store_file_locks(_config_path(), _config_dir() / ".config.lock") as cfg_path:
         existing = _read_stored_config(cfg_path, strict=True)
         if recent_work_dir is not None:
             same = os.path.normpath(recent_work_dir)
@@ -457,7 +520,9 @@ def _save_config_locked(
         # config stores ``remote_password`` and ``tunnel_token``, so
         # it must never be group/world-readable — and forcing it also
         # repairs a config.json a prior release published as 0644.
-        atomic_write_text(cfg_path, json.dumps(existing, indent=2), mode=0o600)
+        atomic_write_text(
+            cfg_path, json.dumps(existing, indent=2), mode=0o600, follow_symlink=False
+        )
     return existing
 
 
@@ -930,6 +995,15 @@ def _rc_bare_key(key_name: str) -> re.Pattern[str]:
     return re.compile(rf"(?<![A-Za-z0-9_$])(?<!\$\{{){re.escape(key_name)}(?![A-Za-z0-9_])")
 
 
+def _rc_expands_assignment(text: str, key_name: str) -> bool:
+    """Whether bash or zsh, expanding *text*, may assign *key_name*.
+
+    With ``${KEY=…}``, ``${KEY:=…}`` or zsh's ``${KEY::=…}``, in a word
+    of a command or in a here-document whose word is not quoted.
+    """
+    return re.search(rf"\$\{{{re.escape(key_name)}:?:?=", text) is not None
+
+
 def _rc_text_sets(text: str, shell: str, key_name: str) -> bool:
     """Whether *text*, which is not read command by command, may assign *key_name*.
 
@@ -944,9 +1018,8 @@ def _rc_text_sets(text: str, shell: str, key_name: str) -> bool:
     -gx KEY …`` in a quoted help text too.  A text that only passes
     the name on (``docker run -e KEY``) assigns nothing.
     """
-    name = re.escape(key_name)
-    assigns = rf"(?<![A-Za-z0-9_]){name}(?:\[[^]]*\])?\+?=|\$\{{{name}:?:?="
-    if shell != "fish" and re.search(assigns, text):
+    assigns = rf"(?<![A-Za-z0-9_]){re.escape(key_name)}(?:\[[^]]*\])?\+?="
+    if shell != "fish" and (re.search(assigns, text) or _rc_expands_assignment(text, key_name)):
         return True
     bare = _rc_bare_key(key_name)
     return any(
@@ -1070,7 +1143,7 @@ def _rc_key_use(command: _RcCommand, shell: str, key_name: str) -> tuple[str | N
     sets = (
         sets
         # any command expanding ``${KEY=…}``, ``${KEY:=…}``, ``${KEY::=…}``
-        or (shell != "fish" and re.search(rf"\$\{{{key}:?:?=", left) is not None)
+        or (shell != "fish" and _rc_expands_assignment(left, key_name))
         # what follows the ``}`` zsh ends the command at
         or _rc_text_sets(" ".join(words[last + 1 :]), shell, key_name)
         # an ``export`` beside an operand that may expand to none: alone it prints every
@@ -1309,14 +1382,21 @@ def _fish_rc_units(text: str) -> tuple[list[list[int]], int, int]:
     return units, len(lines), len(lines)
 
 
-def _rc_units(text: str, shell: str) -> tuple[list[list[int]], int, int]:
+def _rc_units(
+    text: str, shell: str, expanded: dict[int, str]
+) -> tuple[list[list[int]], int, int]:
     """Read *shell*'s RC *text* as the shell does, into its commands.
 
     Returns ``(units, read, end)``.  *units* lists the commands in order,
     each as the indices of the lines (:data:`_RC_LINE_RE`) it spans: one
     index for a command on a line of its own, several for one that runs
     on (a backslash, a quote or a bracket open at the line's end).  The
-    lines of a here-document are text and belong to no unit.  *read* is
+    lines of a here-document are text and belong to no unit; those of
+    one whose word is not quoted the shell expands, and they are added
+    to *expanded* under the first line of their command, without what
+    a backslash quotes there (the ``$`` of ``\\${KEY:=x}``, which then
+    expands nothing, a backtick, a second backslash) and without a
+    backslash-newline (:func:`_rc_expands_assignment`).  *read* is
     the number of lines read for certain: from the first line of a
     command that bash and zsh read differently, or that the text ends
     in the middle of, nothing is known (``len(lines)`` when all is).
@@ -1358,7 +1438,7 @@ def _rc_units(text: str, shell: str) -> tuple[list[list[int]], int, int]:
             if docs and (top not in ("", "(", "$") or any(doc[0] != len(stack) for doc in docs)):
                 return units, unit[0], len(lines)  # a line feed in a quote: its text starts later
             for depth, mark, tabs, raw in docs:
-                body = ""
+                body, first = "", n
                 while n < len(lines):
                     # An unquoted document joins a line ending in a backslash to the next.
                     joins = not raw and (len(body) - len(body.rstrip("\\"))) % 2 == 1
@@ -1373,6 +1453,11 @@ def _rc_units(text: str, shell: str) -> tuple[list[list[int]], int, int]:
                         return units, unit[0], len(lines)  # bash ends it at ``word)``, zsh does not
                 else:
                     end = unit[0]
+                if not raw:
+                    # A backslash-newline joins two lines; a backslash before ``$``, a
+                    # backtick or a backslash quotes it, and nothing is expanded there.
+                    document = re.sub(r"\\\n|(\\)[$`\\]", r"\1", "".join(lines[first:n]))
+                    expanded[unit[0]] = expanded.get(unit[0], "") + document
             docs, i = [], starts[n]
             if stack:
                 unit.append(n)
@@ -1812,13 +1897,16 @@ def _has_line_break(value: str) -> bool:
 
 
 @contextlib.contextmanager
-def _api_keys_store_flock() -> Iterator[None]:
-    """Hold the cross-process flock guarding the canonical key store.
+def _api_keys_store_flock() -> Iterator[Path]:
+    """Hold the cross-process flock guarding the canonical key store; yield the file to edit.
 
     A :mod:`kiss.core.file_lock` lock on a sidecar ``.api_keys.env.kiss.lock`` in the
     store's directory, so two writers (two daemon threads, or two
     processes sharing one ``$KISS_HOME``) cannot both read the same
-    snapshot and silently drop each other's key.  The sidecar is
+    snapshot and silently drop each other's key; where the store is a
+    link to a file, the sidecar beside that file is locked as well and
+    that file is the one yielded (:func:`_store_file_locks`): the
+    holder reads and writes it, not the link again.  The sidecar is
     flocked rather than the store itself because the store is
     atomically ``os.replace``-d: a lock on the old inode would not
     exclude a writer that opens the new one.
@@ -1832,8 +1920,8 @@ def _api_keys_store_flock() -> Iterator[None]:
     """
     env_path = api_keys_env_path()
     lock_path = env_path.with_name("." + env_path.name + ".kiss.lock")
-    with exclusive_file_lock(lock_path, timeout=_LOCK_TIMEOUT_S):
-        yield
+    with _store_file_locks(env_path, lock_path) as store:
+        yield store
 
 
 def _store_quote(value: str) -> str:
@@ -1848,9 +1936,12 @@ def _store_quote(value: str) -> str:
 
 
 def _edit_api_keys_env_file_locked(
-    mutations: dict[str, str | None], trailer: str = ""
+    env_path: Path, mutations: dict[str, str | None], trailer: str = ""
 ) -> None:
     """Apply *mutations* to the canonical key store atomically.
+
+    *env_path* is the store's file as :func:`_api_keys_store_flock`
+    yielded it.
 
     Each entry maps a variable name to its new value, or to ``None`` to
     delete every line assigning it.  Existing assignment lines are
@@ -1870,7 +1961,6 @@ def _edit_api_keys_env_file_locked(
     snapshot mid-flight.  A legacy systemd mirror is deleted inside the
     same critical section (see :func:`_remove_systemd_mirror`).
     """
-    env_path = api_keys_env_path()
     lines: list[str] = []
     if env_path.exists():
         lines = _read_user_text(env_path).splitlines(keepends=True)
@@ -1901,7 +1991,9 @@ def _edit_api_keys_env_file_locked(
     new_lines += tail
     # The store holds API keys: never world-readable, never observed
     # half-written by a shell that is sourcing it.
-    atomic_write_text(env_path, "".join(new_lines), mode=0o600, errors="surrogateescape")
+    atomic_write_text(
+        env_path, "".join(new_lines), mode=0o600, errors="surrogateescape", follow_symlink=False
+    )
     _remove_systemd_mirror()
 
 
@@ -2003,7 +2095,7 @@ def save_api_key(key_name: str, key_value: str) -> None:
 
 def _save_api_key_locked(key_name: str, key_value: str, user_shell: str) -> None:
     """The store edit and RC scrub of :func:`save_api_key`; the caller holds ``_config_lock``."""
-    with _api_keys_store_flock(), contextlib.ExitStack() as rc_locks:
+    with _api_keys_store_flock() as store, contextlib.ExitStack() as rc_locks:
         # The key must disappear from EVERY RC a previous release may
         # have written it to, not only the current $SHELL's: a copy left
         # in another shell's RC would be re-imported by the legacy-key
@@ -2073,7 +2165,7 @@ def _save_api_key_locked(key_name: str, key_value: str, user_shell: str) -> None
                 atomic_write_text(
                     rc, new, mode=0o600, errors="surrogateescape", follow_symlink=False
                 )
-            _edit_api_keys_env_file_locked({key_name: key_value or None}, trailer)
+            _edit_api_keys_env_file_locked(store, {key_name: key_value or None}, trailer)
         except BaseException:
             for rc, old, mode, _ in reversed(edits[:written]):
                 try:
@@ -2136,9 +2228,11 @@ def _update_rc_for_key(rc: Path, text: str, shell: str, key_name: str, install_h
             naming the first such line: a command that sets it in a
             way the edit does not remove (:func:`_rc_key_use`), or
             that assigns it at all over several lines, which are not
-            edited; a text not read command by command that may
-            (:func:`_rc_text_sets`).  Nothing is to be written then:
-            the key would outlive a deletion reported as done.
+            edited, or in a here-document the shell expands
+            (:func:`_rc_expands_assignment`); a text not read command
+            by command that may (:func:`_rc_text_sets`).  Nothing is to
+            be written then: the key would outlive a deletion reported
+            as done.
     """
     # Bash 4+ drops NUL characters while sourcing a file; Bash 3.2 keeps
     # reading the surrounding here-document, so editing the dropped view
@@ -2146,7 +2240,8 @@ def _update_rc_for_key(rc: Path, text: str, shell: str, key_name: str, install_h
     drops_nul = shell == "bash" and _bash_drops_nul_when_sourcing()
     seen = text.replace("\0", "") if drops_nul else text
     lines = _RC_LINE_RE.findall(seen)
-    units, read, end = _rc_units(seen, shell)
+    expanded: dict[int, str] = {}  # the here-document text the shell expands, by command
+    units, read, end = _rc_units(seen, shell, expanded)
     heads = {unit[0]: unit for unit in units}
     tail = list(range(read, len(lines)))  # the lines not read for certain: one text
     kept: list[str] = []
@@ -2169,7 +2264,7 @@ def _update_rc_for_key(rc: Path, text: str, shell: str, key_name: str, install_h
             else:  # the lines of a command of several are not edited
                 edited, unsure = _scrub_rc_line(whole, shell, key_name, awaited)
                 unsure = unsure or edited != whole
-            if unsure:
+            if unsure or _rc_expands_assignment(expanded.get(n, ""), key_name):
                 raise OSError(
                     f"{rc}: line {n + 1} may set {key_name} where it cannot be edited safely;"
                     " remove it there by hand"
@@ -2436,6 +2531,17 @@ assignment parser ignore it, and :func:`_edit_api_keys_env_file_locked`
 passes it through untouched.
 """
 
+_RC_ENV_DUMP = (
+    'out=$1; shift; for name; do eval "value=\\${$name-}";'
+    ' printf "%s=%s\\0" "$name" "$value"; done >>"$out"'
+)
+"""The ``sh`` script :func:`_source_rc_for_keys` reads the sourcing shell's environment with.
+
+Its arguments are a file and variable names; it appends ``NAME=value``
+and a NUL to the file for each name, the value empty where the
+environment holds none.
+"""
+
 _FISH_ASSIGNMENT_RE = re.compile(
     r"^\s*set\s+-gx\s+([A-Za-z_][A-Za-z0-9_]*)\s+(.*)$",
 )
@@ -2456,9 +2562,9 @@ def _scan_rc_text_for_keys(text: str, shell: str, wanted: set[str]) -> dict[str,
     shell, so an assignment *after* a stock Debian/Ubuntu interactivity
     guard (``case $- in *i*) ;; *) return``) is still found: sourcing
     the RC non-interactively returns before it.  The text is read as
-    the shell reads it (:func:`_rc_units`: a here-document assigns
-    nothing), every command of a line (``export A=…; export B=…``),
-    and later assignments win.
+    the shell reads it (:func:`_rc_units`: the lines of a here-document
+    are no commands), every command of a line (``export A=…; export
+    B=…``), and later assignments win.
 
     A name maps to ``None`` when the RC assigns it but the text cannot
     tell the value the store should hold: an earlier literal is
@@ -2466,15 +2572,20 @@ def _scan_rc_text_for_keys(text: str, shell: str, wanted: set[str]) -> dict[str,
     a last assignment that is empty, expansion-dependent, multi-word
     or NUL-carrying; one the shell may not run or runs in a subshell
     (a branch of ``&&``/``||``, a pipeline member, a background
-    command, the line after one ended by ``&&``, ``||`` or ``|``); one
+    command, the line after one ended by ``&&``, ``||`` or ``|``; for
+    bash a command of an and/or-list that one ``&`` ends, on its line
+    or a later one: bash runs all of such a list in the background,
+    zsh only its last pipeline); one
     that is not the assignment alone on a line of its own (under
     ``then``, in a ``case`` clause, after an option, a second
     operand); and, for the whole text whatever a later line assigns, a
     command that may assign or alter the key otherwise
     (:func:`_rc_key_use`: ``typeset -x KEY=…``, ``read KEY``, ``unset
-    KEY``) or assigns it inside a compound command, followed over its
+    KEY``), assigns it inside a compound command, followed over its
     lines (:func:`_rc_command`: the body of an ``if``, a loop, a
-    function, which may run at any later time).  A command that only
+    function, which may run at any later time) or has a here-document
+    the shell expands an assignment of it in
+    (:func:`_rc_expands_assignment`).  A command that only
     names the key changes nothing: an expansion, a message, an
     existence test, ``env -u KEY``, ``docker run -e KEY``, an
     ``export`` of the name alone.
@@ -2495,9 +2606,11 @@ def _scan_rc_text_for_keys(text: str, shell: str, wanted: set[str]) -> dict[str,
     if shell == "bash" and _bash_drops_nul_when_sourcing():
         text = text.replace("\0", "")  # Bash 4+ drops them
     lines = _RC_LINE_RE.findall(text)
-    units, read, _ = _rc_units(text, shell)
+    expanded: dict[int, str] = {}  # the here-document text the shell expands, by command
+    units, read, _ = _rc_units(text, shell, expanded)
     depth = 0  # the compound commands open where a command begins
     awaited = False  # the command before this one needs one after it (``&&``, ``then``)
+    listed: set[str] = set()  # given a value by a command of the and/or-list still open
     for unit in units:
         line = "".join(lines[n] for n in unit).replace("\\\n", "")
         line = line.removesuffix("\n").removesuffix("\r")
@@ -2528,15 +2641,40 @@ def _scan_rc_text_for_keys(text: str, shell: str, wanted: set[str]) -> dict[str,
                     shell_only.add(name)
                 elif scrubbed is not None:
                     found[name] = None
+                    listed.add(name)
                     if m is not None and m.group(1) == name and bounded:
                         parts = (_split_assignment(pieces[i], m) or (None, None, None))[2]
                         if parts is not None and len(parts) == 1 and "\x00" not in parts[0]:
                             found[name] = parts[0] or None
+            # The list ends where no compound command of it is open: at a ``;``, or at an
+            # ``&`` (not that of ``|&``), which has bash run all of it in the background.
+            ends = pieces[i + 1] if depth == 0 and i + 1 < len(pieces) else ""
+            if ends in (";", "&", "&!") and not (i and pieces[i - 1] == "|" and not pieces[i]):
+                if ends != ";" and shell == "bash":
+                    found.update(dict.fromkeys(listed))
+                listed.clear()
         awaited = _rc_awaits_command(line, awaited)
+        if depth == 0 and not awaited:
+            listed.clear()  # the line's end ends the list
+    documents = "".join(expanded.values())
+    shell_only.update(name for name in wanted if _rc_expands_assignment(documents, name))
     tail = "".join(lines[read:]).replace("\\\n", "")
     shell_only.update(name for name in wanted if _rc_text_sets(tail, shell, name))
     found.update(dict.fromkeys(shell_only))
     return found
+
+
+def _quote_for_shell(shell: str, text: str) -> str:
+    """Return *text* quoted as one word of a command *shell* reads.
+
+    ``shlex.quote`` for bash and zsh.  Not for fish: in its single
+    quotes a backslash quotes a backslash or a quote that follows it, so
+    a path with two backslashes in a row named another file there, and
+    one that ends in a backslash closed no quote.
+    """
+    if shell == "fish":
+        return "'" + text.replace("\\", "\\\\").replace("'", "\\'") + "'"
+    return shlex.quote(text)
 
 
 def _source_rc_for_keys(wanted: set[str]) -> dict[str, str]:
@@ -2552,6 +2690,29 @@ def _source_rc_for_keys(wanted: set[str]) -> dict[str, str]:
     long past the timeout.  Failures (missing shell binary, hanging or
     broken RC) are logged and yield nothing — a user-maintained RC must
     not block startup.
+
+    The environment is read by a child of the sourcing shell
+    (:data:`_RC_ENV_DUMP`), which writes each wanted variable to a
+    temporary file of this process that it alone is given the name of
+    (:func:`_quote_for_shell`: the shell must read that name, and the
+    RC's, as it is).  The shell's output is shared by everything else
+    the shell runs, and nothing is read from it: not what the RC prints
+    (a banner became the head of the first ``env`` record, whose name
+    then matched no key; a printed ``KEY=…`` was read as the key), what
+    its traps and exit handlers print, what a job it leaves running
+    prints at any time (a pipe takes a long value in pieces, and what
+    the job printed meanwhile stood between them, whatever marked the
+    value's ends), or what the shell's own start-up files and their
+    jobs print (zsh's ``.zshenv``; fish reads the RC at its start as
+    well).  A record cut short has no NUL and is no value.
+
+    The shell itself ends once the child has, as it would have by
+    itself: an exit handler of the RC (``trap … EXIT``, zsh's
+    ``zshexit``, fish's ``fish_exit``) runs and may end the jobs the RC
+    started, which a shell replaced by the child would have left
+    running, to be waited for until the timeout.  The ``true`` after
+    the child keeps zsh from replacing itself with a last command.  An
+    RC that ends the shell runs no child and yields nothing.
     """
     shell = _get_user_shell()
     rc = _shell_rc_path(shell)
@@ -2571,15 +2732,16 @@ def _source_rc_for_keys(wanted: set[str]) -> dict[str, str]:
         "TERM": "dumb",
         "USER": os.environ.get("USER", ""),
     }
-    rc_q = shlex.quote(str(rc))
-    if shell == "fish":
-        cmd = f"source {rc_q} 2>/dev/null; env -0 2>/dev/null; or env"
-    else:
-        cmd = f"source {rc_q} 2>/dev/null; {{ env -0 2>/dev/null || env; }}"
     try:
-        stdout = run_process_group(
-            [shell_path, "-c", cmd], timeout=_MIGRATION_TIMEOUT_S, env=clean_env
-        ).stdout
+        # Removed when the block ends, not when closed: Windows lets the child open it then.
+        with tempfile.NamedTemporaryFile(prefix="kiss-rc-keys-", delete_on_close=False) as dump:
+            cmd = (
+                f"source {_quote_for_shell(shell, str(rc))} 2>/dev/null;"
+                f" /bin/sh -c '{_RC_ENV_DUMP}' sh {_quote_for_shell(shell, dump.name)}"
+                f" {' '.join(sorted(wanted))}; true"
+            )
+            run_process_group([shell_path, "-c", cmd], timeout=_MIGRATION_TIMEOUT_S, env=clean_env)
+            records = dump.read().decode(errors="replace").split("\0")[:-1]
     except subprocess.TimeoutExpired:
         logger.warning(
             "Shell RC took longer than %.0fs to source; skipping key migration from it",
@@ -2589,14 +2751,11 @@ def _source_rc_for_keys(wanted: set[str]) -> dict[str, str]:
     except OSError:
         logger.warning("Failed to source shell RC for key migration", exc_info=True)
         return {}
-    records = stdout.split("\0") if "\0" in stdout else stdout.splitlines()
-    found: dict[str, str] = {}
-    for record in records:
-        if "=" in record:
-            k, _, v = record.partition("=")
-            if k in wanted and v and not _has_line_break(v) and "\x00" not in v:
-                found[k] = v
-    return found
+    return {
+        name: value
+        for name, _, value in (record.partition("=") for record in records)
+        if value and not _has_line_break(value)
+    }
 
 
 def _migrate_legacy_rc_keys() -> None:
@@ -2636,8 +2795,7 @@ def _migrate_legacy_rc_keys() -> None:
     plus RC scrub, so the two compound operations serialize in either
     order and a completed deletion stays deleted.
     """
-    with _config_lock, _api_keys_store_flock():
-        env_path = api_keys_env_path()
+    with _config_lock, _api_keys_store_flock() as env_path:
         store_text = ""
         if env_path.exists():
             try:
@@ -2680,5 +2838,5 @@ def _migrate_legacy_rc_keys() -> None:
         }
         if mutations or sourcing:
             _edit_api_keys_env_file_locked(
-                mutations, trailer=_RC_SOURCED_MARKER + "\n" if sourcing else ""
+                env_path, mutations, trailer=_RC_SOURCED_MARKER + "\n" if sourcing else ""
             )

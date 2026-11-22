@@ -63,6 +63,14 @@ async def _recv_until(
             return event
 
 
+async def _frames_until(ws: ClientConnection, wanted: str, seconds: float) -> list[str]:
+    """Return the raw frames *ws* receives up to its first *wanted* event."""
+    frames: list[str] = []
+    while not frames or json.loads(frames[-1]).get("type") != wanted:
+        frames.append(str(await asyncio.wait_for(ws.recv(), seconds)))
+    return frames
+
+
 class TestDaemonLinkPeerFanout(IsolatedAsyncioTestCase):
     """Task copies skip link peers; replies and global events reach them."""
 
@@ -181,3 +189,50 @@ class TestDaemonLinkPeerFanout(IsolatedAsyncioTestCase):
             await asyncio.sleep(0.01)
         with printer._ws_lock:
             self.assertEqual(len(printer._link_clients), 1)
+
+    async def test_the_list_of_projects_is_sent_to_this_daemons_pages_only(self) -> None:
+        """``projects`` holds API keys: every page gets it, a link peer nothing of it."""
+        token_auth = {"token": self.endpoint.token}
+        link = await self._connect({**token_auth, "link": True}, ONE_MIB)
+        page = await self._connect(token_auth, ONE_MIB)
+        other_page = await self._connect(token_auth, ONE_MIB)
+        await self._wait_for_clients(links=1, local=2)
+        key = "sk-ant-linkpeer-0123456789abcdef"
+        own = {"api_keys": {"ANTHROPIC_API_KEY": key}}
+        await page.send(json.dumps(
+            {"type": "saveProject", "project": {"name": "Paper", "settings": own}},
+        ))
+        for ws in (page, other_page):
+            listed = await _recv_until(ws, "projects", 10.0)
+            assert listed is not None, "every page must get the new list"
+            self.assertEqual([p["settings"] for p in listed["projects"]], [own])
+        # What the link peer was sent up to the next global event: no
+        # list, and the key in no frame.
+        await asyncio.to_thread(self.server._printer.broadcast, {"type": "tasks_updated"})
+        frames = await _frames_until(link, "tasks_updated", 10.0)
+        self.assertNotIn("projects", [json.loads(frame).get("type") for frame in frames])
+        self.assertNotIn(key, "".join(frames))
+        # It can still ask for the list itself, as for the settings.
+        await link.send(json.dumps({"type": "getProjects"}))
+        asked = await _recv_until(link, "projects", 10.0)
+        assert asked is not None
+        self.assertEqual(asked["chatProjects"], {})
+
+    def _enter_project_as_a_run(self, task_id: str, chat_id: str, project_id: str) -> None:
+        """Put *chat_id* in *project_id* from a thread bound to *task_id*, as its run does."""
+        printer = self.server._printer
+        printer.adopt_thread_binding(task_id)
+        try:
+            self.server._agent_server._enter_project({"projectId": project_id}, chat_id)
+        finally:
+            printer.adopt_thread_binding("")
+
+    async def test_a_runs_chat_move_reaches_a_page_that_does_not_show_the_run(self) -> None:
+        """``chatProject`` sent from a run's thread is a global event, not a task copy."""
+        page = await self._connect({"token": self.endpoint.token}, ONE_MIB)
+        await self._wait_for_clients(links=0, local=1)
+        project_id = th._save_project("", "Paper", "", {}, None)
+        await asyncio.to_thread(self._enter_project_as_a_run, "task-7", "chat-7", project_id)
+        moved = await _recv_until(page, "chatProject", 5.0)
+        assert moved is not None, "a page with no tab on the run's task must be told"
+        self.assertEqual((moved["chatId"], moved["projectId"]), ("chat-7", project_id))

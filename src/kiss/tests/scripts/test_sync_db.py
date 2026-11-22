@@ -1883,7 +1883,7 @@ def test_a_deleted_task_takes_its_sub_tasks_wherever_they_are(tmp_path: Path) ->
 def test_a_deleted_chat_loses_its_summary_row_but_a_deleted_task_does_not(
     tmp_path: Path,
 ) -> None:
-    """Only a chat deletion drops the chat's row: a task deletion keeps its title and star.
+    """Only a chat deletion drops the chat's row: a task deletion keeps its title, star and pin.
 
     A chat deleted long ago and started again is a deleted chat once
     more when its last task goes: its row is dropped by the merge that
@@ -1906,12 +1906,12 @@ def test_a_deleted_chat_loses_its_summary_row_but_a_deleted_task_does_not(
     dst.execute(
         "CREATE TABLE chat_summaries (chat_id TEXT PRIMARY KEY, summary TEXT,"
         " last_launched INTEGER, last_finished INTEGER, user_summary TEXT DEFAULT '',"
-        " is_favorite INTEGER DEFAULT 0)"
+        " is_favorite INTEGER DEFAULT 0, is_pinned INTEGER DEFAULT 0)"
     )
-    dst.execute("INSERT INTO chat_summaries VALUES ('chat-kept', 's', 1, 1, 'My title', 1)")
-    dst.execute("INSERT INTO chat_summaries VALUES ('chat-gone', 's', 1, 1, '', 1)")
-    dst.execute("INSERT INTO chat_summaries VALUES ('chat-again', 's', 2000, 1, 'Again', 0)")
-    dst.execute("INSERT INTO chat_summaries VALUES ('chat-sub', 's', 2000, 1, 'Sub', 0)")
+    dst.execute("INSERT INTO chat_summaries VALUES ('chat-kept', 's', 1, 1, 'My title', 1, 1)")
+    dst.execute("INSERT INTO chat_summaries VALUES ('chat-gone', 's', 1, 1, '', 1, 1)")
+    dst.execute("INSERT INTO chat_summaries VALUES ('chat-again', 's', 2000, 1, 'Again', 0, 0)")
+    dst.execute("INSERT INTO chat_summaries VALUES ('chat-sub', 's', 2000, 1, 'Sub', 0, 0)")
     dst.close()
 
     done = sync(str(source), str(target))
@@ -1919,9 +1919,11 @@ def test_a_deleted_chat_loses_its_summary_row_but_a_deleted_task_does_not(
     assert done.returncode == 0, done.stderr
     assert task_ids(target) == []
     # What was worked out from the deleted task goes with it, as in the web app.
+    # The last column is ``project_id``, which this target's table lacked:
+    # the sync adds it empty (a chat's project never travels).
     assert rows(target, "SELECT * FROM chat_summaries ORDER BY chat_id") == [
-        ("chat-kept", "", 0, 0, "My title", 1),
-        ("chat-sub", "s", 2000, 1, "Sub", 0),
+        ("chat-kept", "", 0, 0, "My title", 1, 1, ""),
+        ("chat-sub", "s", 2000, 1, "Sub", 0, 0, ""),
     ]
     assert "3 chat summary row(s) refreshed" in done.stdout
     assert "0 chat summary row(s) refreshed" in sync(str(source), str(target)).stdout

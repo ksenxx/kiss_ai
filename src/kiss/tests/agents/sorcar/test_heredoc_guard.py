@@ -13,7 +13,12 @@ guard function itself.
 
 from __future__ import annotations
 
+import json
 import os
+import shutil
+import subprocess
+import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -24,8 +29,9 @@ from kiss.agents.sorcar.edit_guards import (
     heredoc_guard,
     heredoc_targets,
 )
+from kiss.agents.sorcar.shell_scan import TooDeepError, simple_commands
 from kiss.agents.sorcar.useful_tools import UsefulTools
-from kiss.tests.conftest import posix_only
+from kiss.tests.conftest import host_sed_is_gnu, posix_only
 
 pytestmark = posix_only("the host Bash tool runs bash here-documents")
 
@@ -97,6 +103,15 @@ def test_heredoc_may_create_but_not_rewrite_a_file(work: Path) -> None:
         ("cat <<EOF | bash -c 'tee notes.md' > /dev/null\nnew\nEOF", notes),
         ("cat <<EOF | eval 'tee notes.md' > /dev/null\nnew\nEOF", notes),
         ("cat <<EOF | sh -c 'cat' | tee notes.md\nnew\nEOF", notes),
+        # the operator spelt across two quoted strings of that text: the command as written
+        # holds no ``<<`` (audit 2026-11-21 B7-O2: the host tool has no gate on the text)
+        ("bash -c 'cat > notes.md <''<EOF\nnew\nEOF'", notes),
+        ("eval 'cat > notes.md <''<EOF\nnew\nEOF'", notes),
+        # that text as an ANSI-C string, which bash decodes before the shell or ``eval`` reads
+        # it (audit 2026-11-22 LH3: the scan took it for a value only the shell knows)
+        ("bash -c $'cat > notes.md <<EOF\\nnew\\nEOF'", notes),
+        ("eval $'cat > notes.md <<EOF\\nnew\\nEOF'", notes),
+        ("X=$'cat > notes.md <<EOF\\nnew\\nEOF'; eval \"$X\"", notes),
     ):
         # Since 2026-10-31 a single copy into a file not shown names the Read
         # and Write to make after the verdict; the file is not touched.
@@ -107,6 +122,182 @@ def test_heredoc_may_create_but_not_rewrite_a_file(work: Path) -> None:
     assert not (work / "fresh.txt").exists()  # nothing of a refused command ran
     out = tools.Bash("cat <<EOF | bash -c 'tee piped.txt' > /dev/null\nfresh\nEOF", "create")
     assert "REFUSED" not in out and (work / "piped.txt").read_text() == "fresh\n"
+    out = tools.Bash("bash -c $'cat > decoded.txt <<EOF\\nfresh\\nEOF'", "create")
+    assert "REFUSED" not in out and (work / "decoded.txt").read_text() == "fresh\n"
+
+
+@pytest.mark.parametrize("redirect", [
+    "<\\\n<'EOF'", "<<\\\n'EOF'", "<\\\n<\\\n-'EOF'", "<<-E\\\nOF",
+    "<<'EOF' >\\\n>",
+])
+def test_continued_heredoc_tokens_cannot_hide_a_rewrite(work: Path, redirect: str) -> None:
+    """Bash joins physical lines before reading operators and delimiter words (LH4/O1)."""
+    command = (f"cat {redirect} notes.md\nnew\nEOF" if redirect.endswith(">")
+               else f"cat > notes.md {redirect}\n\tnew\nEOF")
+    result = UsefulTools(work_dir=str(work)).Bash(command, "continued rewrite")
+    assert result.startswith("REFUSED"), (command, result)
+    assert (work / "notes.md").read_text() == "old\n"
+
+
+def test_continued_tokens_keep_literal_data_and_new_files(work: Path) -> None:
+    """Continued operators are tokens; quoted backslash-newlines and bodies stay data."""
+    tools = UsefulTools(work_dir=str(work))
+    for name, command, expected in (
+        ("doc", "cat > doc <\\\n<'EOF'\na\\\nb\nEOF", "a\\\nb\n"),
+        ("expanded", "LH4=fresh; cat > expanded <<E\\\nOF\n$LH4\nEOF", "fresh\n"),
+        ("tabs", "cat > tabs <\\\n<\\\n-\\\n 'EOF'\n\tfresh\nEOF", "fresh\n"),
+        ("string", "cat > string <\\\n<\\\n< 'fresh'", "fresh\n"),
+        ("append", "cat >\\\n> append <<'EOF'\nfresh\nEOF", "fresh\n"),
+        ("fd", "cat 1\\\n> fd <<'EOF'\nfresh\nEOF", "fresh\n"),
+        ("and", "true &\\\n& cat > and <<'EOF'\nfresh\nEOF", "fresh\n"),
+        ("stream", "cat <\\\n(echo fresh) > stream", "fresh\n"),
+        ("stdin", "cat > stdin < <\\\n(echo fresh)", "fresh\n"),
+        ("quoted", "printf %s '<\\\n<' > quoted", "<\\\n<"),
+    ):
+        result = tools.Bash(command, "continued creation")
+        assert "REFUSED" not in result, (command, result)
+        assert (work / name).read_text() == expected, command
+    # A script file's contents are outside T2; unrelated literal data is still data.
+    (work / "harmless.sh").write_text(":\n")
+    # Hidden script-looking words are ordinary data in a known non-evaluating command.
+    for command in ("printf %s 'cat > notes.md <<EOF\nnew\nEOF'",
+                    "bash harmless.sh; printf %s 'cat > notes.md <<EOF\nnew\nEOF'",
+                    "printf '%s\\n' bash 'cat > notes.md <<EOF\nnew\nEOF' | grep bash",
+                    "X=('cat > notes.md <<EOF\nnew\nEOF'); printf %s \"${X[0]}\""):
+        assert "REFUSED" not in tools.Bash(command, "quoted data"), command
+    assert (work / "notes.md").read_text() == "old\n"
+
+
+@pytest.mark.parametrize("ansi", [False, True])
+@pytest.mark.parametrize("form", [
+    "declare X={}; eval \"$X\"", "readonly X={}; eval \"$X\"",
+    "typeset X={}; eval \"$X\"", "X={} eval 'eval \"$X\"'",
+    "X=({}); eval \"${{X[0]}}\"", "X=({}); eval \"$X\"",
+    "set -- {}; eval \"$1\"", "bash -c 'eval \"$0\"' {}",
+    "bash -c 'eval \"$1\"' _ {}", ": ${{X:={}}}; eval \"$X\"",
+    "X=${{Y:-{}}}; eval \"$X\"", "for X in {}; do eval \"$X\"; done",
+    "find . -maxdepth 0 -exec sh -c {} \\;", "setsid -w bash -c {}",
+    "source /dev/stdin <<< {}", ". /dev/stdin <<< {}", "bash <<< {}", "bash -s <<< {}",
+    "echo {} | bash", "printf '%s\\n' {} | sh", "cat <<< {} | bash",
+    "bash < <(echo {})", "X={}; Y=$X; eval \"$Y\"", "X={}; eval \"${{X:-}}\"",
+    "X={}; eval \"${{X%z}}\"", "X=a; X+={}; eval \"${{X#a}}\"",
+    "printf -v X %s {}; eval \"$X\"", "read -r -d '' X <<< {}; eval \"$X\"",
+    "IFS= read -r -d '' X < <(printf %s {}); eval \"$X\"",
+])
+def test_unread_shell_text_cannot_hide_a_heredoc(work: Path, form: str, ansi: bool) -> None:
+    """All 29 LH3 forms contain the executed text, inside T2; unread values fail closed."""
+    text = ("$'cat > notes.md <<EOF\\nnew\\nEOF'" if ansi
+            else "'cat > notes.md <<EOF\nnew\nEOF'")
+    command = "unset X Y; " + form.format(text)
+    result = UsefulTools(work_dir=str(work)).Bash(command, "indirect rewrite")
+    assert result.startswith("REFUSED"), (command, result)
+    assert (work / "notes.md").read_text() == "old\n"
+
+
+@pytest.mark.parametrize("command", [
+    'echo "$\\\n(cat > notes.md <<EOF\nnew\nEOF\n)"',
+    "eval $\\\n'cat > notes.md <<EOF\\nnew\\nEOF'",
+    "find . -maxdepth 0 -exec env sh -c 'cat > notes.md <<EOF\nnew\nEOF' \\;",
+    "flock lockfile setsid -w bash -c 'cat > notes.md <<EOF\nnew\nEOF'",
+    "printf 'cat > notes.md <<EOF\\nnew\\nEOF\\n' | bash",
+    "printf -v X 'cat > notes.md <<EOF\\nnew\\nEOF\\n'; eval \"$X\"",
+    "X='cat > notes.md <'; X+='<EOF\nnew\nEOF'; eval \"$X\"",
+    "X=('cat > notes.md <''<EOF\nnew\nEOF'); eval \"$X\"",
+])
+def test_unread_script_fragments_fail_closed(work: Path, command: str) -> None:
+    """LH4 review: continued expansion openers, nested runners and assembled script text."""
+    assert heredoc_guard(command, str(work), os.path.lexists) is not None, command
+    result = UsefulTools(work_dir=str(work)).Bash(command, "hidden script fragments")
+    assert result.startswith("REFUSED"), (command, result)
+    assert (work / "notes.md").read_text() == "old\n"
+
+
+def test_long_quoted_data_does_not_trigger_quadratic_hidden_text_search(work: Path) -> None:
+    """A run of '<' without a newline is data, not 60,000 failed regex suffix searches."""
+    command = "printf %s '" + "<" * 60_000 + "' > long-data"
+    start = time.monotonic()
+    assert heredoc_guard(command, str(work), os.path.lexists) is None
+    assert time.monotonic() - start < 0.1
+    assert "REFUSED" not in UsefulTools(work_dir=str(work)).Bash(command, "long literal data")
+    assert (work / "long-data").read_text() == "<" * 60_000
+
+
+@pytest.mark.parametrize("command", [
+    # a backslash-newline is gone before bash reads a word, an operator or a name (J)
+    "i\\\nf false; then cd sub; fi; cat > notes.md <<EOF\nnew\nEOF",
+    "false &&\\\n\ncd sub\ncat > notes.md <<EOF\nnew\nEOF",
+    "function f\\\n { cat > notes.md; }; f <<EOF\nnew\nEOF",
+    "T=notes.md; cat > $\\\n{T} <<EOF\nnew\nEOF",
+    "eval 'cat > notes.md <\\\n<EOF\nnew\nEOF'",
+    # one ``<`` in each of two pieces, escapes that spell one, a function's or a pipe's text (H)
+    "A='<'; printf -v X 'cat > notes.md %s%sEOF\\nnew\\nEOF\\n' \"$A\" \"$A\"; eval \"$X\"",
+    "X=$(printf 'cat > notes.md \\74\\x3cEOF\\nnew\\nEOF\\n'); eval \"$X\"",
+    "f() { eval \"$1\"; }; f 'cat > notes.md <<EOF\nnew\nEOF'",
+    "echo 'cat > notes.md <<EOF\nnew\nEOF' | { IFS= read -r -d '' l; eval \"$l\"; }",
+    "awk 'BEGIN{print \"cat > notes.md <<EOF\\nnew\\nEOF\"}' | bash",
+    "source <(sed 's/^/cat > notes.md <<EOF\\nnew\\nEOF/' <<< '')",
+    # a runner that puts its input into the script of the shell it runs
+    "echo '<' | xargs -I@ sh -c 'cat > notes.md @@EOF\nnew\nEOF\n'",
+    # the script of a shell that runners or an expansion name is read as one
+    "K=sh; env -u NOPE setsid -w nohup sh -c '\"$0\" -c \"cat > notes.md <<EOF\nnew\nEOF\n\"' $K",
+])
+def test_joined_lines_and_text_for_an_unread_shell_fail_closed(work: Path, command: str) -> None:
+    """LH4b: lines are joined before any token is judged; a ``<`` that may reach a shell
+    the scan did not read is refused however the text is put together."""
+    result = UsefulTools(work_dir=str(work)).Bash(command, "joined or assembled rewrite")
+    assert result.startswith("REFUSED"), (command, result)
+    assert (work / "notes.md").read_text() == "old\n"
+
+
+def test_kept_continuations_and_plain_data_beside_an_unread_shell_run(work: Path) -> None:
+    """LH4b: bash keeps a backslash-newline in quotes, comments and quoted bodies; a ``<``
+    in the operands of a program is data, whatever else the command runs."""
+    tools = UsefulTools(work_dir=str(work))
+    (work / "harmless.sh").write_text(":\n")
+    for name, command, expected in (
+        ("tabsq", "cat > tabsq <<-'EOF'\n\ta\\\n\tb\n\tEOF", "a\\\nb\n"),
+        ("open", "cat > open <<'EOF'\na\\\nb", "a\\\nb\n"),
+        ("later", "cat > later <<'EOF'\nx\nEOF\necho a \\\n >> later", "x\na\n"),
+        ("comment", "echo one > comment # c \\\necho two >> comment", "one\ntwo\n"),
+        ("ansi", "printf %s $'a\\\nb' > ansi", "a\\\nb"),
+        ("plain", "unset Y; eval \"$Y\"; echo '<b>' > plain", "<b>\n"),
+        ("count", "n=$(grep -c '<old' notes.md); echo $((n+1)) > count", "1\n"),
+        ("group", "unset Y; { echo '<a>'; echo '<b>'; } > group; eval \"$Y\"", "<a>\n<b>\n"),
+        ("fed", "unset Y; X=1 <<< '<a>'; eval \"$Y\"; echo ok > fed", "ok\n"),
+        ("sourced", ". ./harmless.sh; grep -c '<' notes.md > sourced; eval \"$Y\"", "0\n"),
+        # a script the scan can read is judged by what it does, under runners too: the
+        # shape of the script that starts a background job in a container
+        ("nested", "setsid -w sh -c 'tr a-z A-Z < notes.md > nested'; eval \"$Y\"", "OLD\n"),
+        ("job", "env -u NOPE setsid -w nohup sh -c 'k=bash; command -v bash >/dev/null || k=sh; "
+                "\"$k\" -c '\\''tr a-z A-Z < notes.md > job'\\'' < /dev/null' < /dev/null",
+         "OLD\n"),
+    ):
+        assert heredoc_guard(command, str(work), os.path.lexists) is None, command
+        if "setsid " in command and shutil.which("setsid") is None:
+            continue  # util-linux's: stock macOS has none to run the script with
+        result = tools.Bash(command, "data")
+        assert "REFUSED" not in result, (command, result)
+        assert (work / name).read_text() == expected, command
+    assert (work / "notes.md").read_text() == "old\n"
+
+
+def test_more_kept_continuations_than_the_scan_restarts_for_are_refused(work: Path) -> None:
+    """LH4b: the scan starts over once per quoted string holding a backslash-newline, and
+    refuses the command past its limit; a gate reads what it found.
+
+    (Through ``run_commands_parallel``: ``Bash`` does not catch the scan's error for a
+    command the destructive guard does not read, reported as LH4b-N1.)"""
+    tools = UsefulTools(work_dir=str(work))
+    command = "echo " + " ".join(["'a\\\nb'"] * 70) + " > many"
+    with pytest.raises(TooDeepError, match="backslash-newline"):
+        heredoc_guard(command, str(work), os.path.lexists)
+    report = tools.run_commands_parallel(json.dumps([command]))
+    assert "1 failed" in report and "backslash-newline" in report, report
+    assert not (work / "many").exists()
+    assert simple_commands(command, str(work), optimistic=True)
+    few = "echo " + " ".join(["'a\\\nb'"] * 3) + " > few"
+    assert "REFUSED" not in tools.Bash(few, "kept pairs")
+    assert (work / "few").read_text() == " ".join(["a\\\nb"] * 3) + "\n"
 
 
 def test_cd_moves_where_relative_targets_resolve(work: Path) -> None:
@@ -282,6 +473,8 @@ def test_a_child_shell_is_read_with_its_own_variables_and_options(work: Path) ->
     (its exported variables, as the assignments before the command set them, none after
     ``env -i``), not its unexported variables, and the shell reads its options to their end
     (``--``, a later ``-e``, ``-co posix``, a valued ``-o`` / ``--rcfile``) before the text.
+    (FX45: after ``-o posix`` bash runs the text otherwise, an assignment before ``:`` stays,
+    so only the shell knows the file.)
     Review 2026-11-08 R7 S8/F3: an ``export`` that may not run (after ``&&`` once its list
     ends, after ``||``, in an ``if``) leaves the child's value unknown, as does an ``export
     -n`` that may not run, and ``unset`` drops the export attribute with the value."""
@@ -308,7 +501,7 @@ def test_a_child_shell_is_read_with_its_own_variables_and_options(work: Path) ->
          _unresolved("${T}notes.md")),
         ("bash -c -- 'cat > notes.md <<EOF\nnew\nEOF'", _refusal(notes)),
         ("bash -c -e 'cat > notes.md <<EOF\nnew\nEOF'", _refusal(notes)),
-        ("bash -co posix 'cat > notes.md <<EOF\nnew\nEOF'", _refusal(notes)),
+        ("bash -co posix 'cat > notes.md <<EOF\nnew\nEOF'", _unresolved("notes.md")),
         ("bash -o pipefail -c 'cat > notes.md <<EOF\nnew\nEOF'", _refusal(notes)),
         ("bash --rcfile /dev/null -c 'cat > notes.md <<EOF\nnew\nEOF'", _refusal(notes)),
         ("bash -rcfile /dev/null -c 'cat > notes.md <<EOF\nnew\nEOF'", _refusal(notes)),
@@ -386,3 +579,136 @@ def test_guard_reads_commands_as_bash_does(tmp_path: Path) -> None:
         "python3 - <<'EOF' > out.json\nprint(1)\nEOF\ncat <<EOF | tee -a a.txt\nx\nEOF\n"
         "cat <<EOF | sed s/a/b/ > 'b c.txt'\nx\nEOF\necho > not-a-heredoc.txt",
     ) == ["out.json", "a.txt", "b c.txt"]
+
+
+def _tree(root: Path) -> dict[str, str]:
+    """Every file under *root* with its text, by relative path."""
+    return {str(path.relative_to(root)): path.read_text()
+            for path in sorted(root.rglob("*")) if path.is_file()}
+
+
+def test_a_rewrite_after_a_cd_is_judged_where_the_inherited_cdpath_leads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Audit 2026-11-21 B7-O1: the host tool's shell inherits this process's ``CDPATH``; with
+    ``sub`` there bash takes ``cd d`` to ``sub/d``.  The conversions and the rewrite guard
+    read that ``cd`` without it, so ``cd d && cat > victim <<EOF`` ran as the creation of
+    ``d/victim`` and overwrote ``sub/d/victim``, was applied as a ``Write``/``Edit`` of
+    ``d/victim`` where that existed, and a multi-line ``sed -i`` or a python rewrite of
+    ``sub/d/victim`` passed as one of a file that is not there.  Bash is the oracle."""
+    python = ("python3 - <<'EOF'\ns = open('victim').read()\n"
+              "open('victim', 'w').write(s.replace('ORIGINAL', 'owned'))\nEOF")
+    monkeypatch.setenv("CDPATH", "sub")
+    for number, (command, both, refusal) in enumerate((
+        ("cd d && cat > victim <<'EOF'\nowned\nEOF", False, _unresolved("victim")),
+        ("cd d && cat >> victim <<'EOF'\nowned\nEOF", True, _unresolved("victim")),
+        ("cd d && tee victim <<'EOF'\nowned\nEOF", True, _unresolved("victim")),
+        ("cd d && sed -i ':a;N;$!ba;s/ORIGINAL\\nsecond/owned/' victim", False,
+         "REFUSED: the `sed -i` call did NOT run"),
+        (f"cd d && {python}", False, "REFUSED: the python heredoc did NOT run"),
+        # A one-substitution ``sed -i`` is no ``Edit`` of ``d/victim`` here, and what bash
+        # does not look up in ``CDPATH`` is where the text says: both run as written.
+        ("cd d && sed -i 's/ORIGINAL/owned/' victim", True, None),
+        ("cd ./d && cat > fresh.txt <<'EOF'\nowned\nEOF", True, None),
+        ("CDPATH= cd d && cat > fresh.txt <<'EOF'\nowned\nEOF", True, None),
+    )):
+        if "sed -i" in command and not host_sed_is_gnu():
+            continue  # BSD sed takes the script for the backup suffix
+        oracle, work = tmp_path / f"bash{number}", tmp_path / f"tool{number}"
+        for root in (oracle, work):
+            (root / "sub" / "d").mkdir(parents=True)
+            (root / "d").mkdir()
+            (root / "sub" / "d" / "victim").write_text("ORIGINAL\nsecond\n")
+            if both:  # the file the text spells exists too
+                (root / "d" / "victim").write_text("ORIGINAL\nsecond\n")
+        seeded = _tree(work)
+        subprocess.run(["bash", "-c", command], cwd=oracle, stdin=subprocess.DEVNULL,
+                       capture_output=True, check=False, timeout=30)
+        tools = UsefulTools(work_dir=str(work))
+        for victim in sorted(work.rglob("victim")):
+            tools.Read(str(victim))  # shown: a rewrite read as one of it would be applied
+        out = tools.Bash(command, "rewrite")
+        if refusal is None:
+            assert _tree(work) == _tree(oracle) != seeded, (command, out)
+        else:
+            assert out.startswith(refusal), (command, out)
+            assert _tree(work) == seeded != _tree(oracle), command
+
+
+#: Audit 2026-11-21 B7-O3: copies of the here-document into ``victim`` through a descriptor
+#: the command itself opened on the file, or through the name of one (``/dev/stdin``).
+_DESCRIPTOR_COPIES = (
+    "cat 3>>victim >&3 <<'EOF'\nowned\nEOF\n",
+    "cat 3<>victim >&3 <<'EOF'\nowned\nEOF\n",
+    "cat <>victim >&0 <<'EOF'\nowned\nEOF\n",
+    "cat 3>victim 1>&3- <<'EOF'\nowned\nEOF\n",
+    "cat 3>victim 4>&3 >&4 <<'EOF'\nowned\nEOF\n",
+    "cat 2>victim >&2 <<'EOF'\nowned\nEOF\n",
+    "tee 3>victim >&3 <<'EOF'\nowned\nEOF\n",
+    "{ cat; } 3>victim >&3 <<'EOF'\nowned\nEOF\n",
+    "cat <<'EOF' | cat 3>victim >&3\nowned\nEOF\n",
+    "cat <(cat <<'EOF'\nowned\nEOF\n) 3>victim >&3\n",
+    "cat <>victim >/dev/stdin <<'EOF'\nowned\nEOF\n",
+)
+
+
+def _bash_copies(victim: Path, command: str) -> bool:
+    """Whether bash, run in the directory of *victim*, copies ``owned`` into that file."""
+    victim.write_text("ORIGINAL\n")
+    subprocess.run(["bash", "-c", command], cwd=victim.parent, stdin=subprocess.DEVNULL,
+                   capture_output=True, check=False, timeout=30)
+    return "owned" in victim.read_text()
+
+
+def test_a_copy_through_a_descriptor_into_a_file_only_the_shell_knows_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Audit 2026-11-21 B7-O3: ``cat 3>>victim >&3 <<EOF`` copies the text into ``victim``
+    through descriptor 3.  The guard named the file only where it could resolve it: in a
+    directory only the shell knows (an exec bridge without one, after ``cd "$D"``), or
+    opened by a word only the shell expands (``3>"$X"``), the copy passed; so did one
+    through ``/dev/stdin``, the name of descriptor 0, in any directory.  Bash is the oracle."""
+    victim, cwd = tmp_path / "victim", str(tmp_path)
+    monkeypatch.setenv("X", str(victim))
+    monkeypatch.setenv("D", cwd)
+    for command in _DESCRIPTOR_COPIES:
+        assert _bash_copies(victim, command), command
+        assert heredoc_guard(command, None, bool) == _unresolved("victim"), command
+        assert heredoc_guard(command, cwd, os.path.lexists) == _refusal(victim), command
+    # The coding SEA's ledger gate counts that write too.
+    assert heredoc_targets(_DESCRIPTOR_COPIES[0]) == ["victim"]
+    # Through the tool, whose shell inherits ``X`` and ``D``: nothing ran.
+    tools = UsefulTools(work_dir=cwd)
+    for command, verdict in (
+        ("cat 3>\"$X\" >&3 <<'EOF'\nowned\nEOF", _unresolved("$X")),
+        ("tee 3>\"$X\" >&3 <<'EOF'\nowned\nEOF", _unresolved("$X")),
+        ("cat 2>\"$X\" >&2 <<'EOF'\nowned\nEOF", _unresolved("$X")),
+        ("cd \"$D\" && cat 3>>victim >&3 <<'EOF'\nowned\nEOF", _unresolved("victim")),
+        ("cat <>victim >/dev/stdin <<'EOF'\nowned\nEOF", _refusal(victim)),
+    ):
+        assert _bash_copies(victim, command), command
+        victim.write_text("ORIGINAL\n")
+        assert tools.Bash(command, "copy") == verdict, command
+        assert victim.read_text() == "ORIGINAL\n", command
+    # No copy of the text: the descriptor is opened and not written, or the output ends
+    # elsewhere.
+    for command in ("cat 3>\"$X\" <<'EOF'\nowned\nEOF",
+                    "cat 3>\"$X\" >&3 >/dev/null <<'EOF'\nowned\nEOF",
+                    "cat >&2 3>\"$X\" <<'EOF'\nowned\nEOF"):
+        assert not _bash_copies(victim, command), command
+        assert heredoc_guard(command, cwd, os.path.lexists) is None, command
+
+
+def test_a_bare_cd_is_pinned_whatever_cdpath_the_developer_exports(tmp_path: Path) -> None:
+    """Leftover H1 (audit 2026-11-21): the guards judge a bare ``cd`` by the ``CDPATH`` the
+    tool's shell inherits, so a pytest started from a shell that exports one failed the tests
+    that pin where such a ``cd`` leads.  ``conftest.py`` drops it for the session: the test
+    of ``cd`` above passes in a nested run started with ``..`` exported."""
+    tmp = str(tmp_path)
+    proc = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+         f"{__file__}::test_cd_moves_where_relative_targets_resolve"],
+        env=dict(os.environ, TMPDIR=tmp, TMP=tmp, TEMP=tmp, CDPATH=".."),
+        capture_output=True, text=True, check=False,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr

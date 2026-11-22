@@ -33,11 +33,25 @@ const {JSDOM} = require('jsdom');
 const MEDIA = path.join(__dirname, '..', 'media');
 const SOURCE = fs.readFileSync(path.join(MEDIA, 'mobileSwipe.js'), 'utf8');
 
+// The instant every page's clock stands at.
+const FROZEN_NOW_MS = 1_700_000_000_000;
+
+/**
+ * Stop `win`'s clock.  The detector times a touch with the page's
+ * `Date.now`: on a running clock a stall of the run between two touch
+ * events turns a fast drag into a slow one.  The slow-drag cases move
+ * the clock themselves.
+ */
+function freezeNow(win) {
+  win.Date.now = () => FROZEN_NOW_MS;
+}
+
 function makePage(html) {
   const dom = new JSDOM(html || '<!DOCTYPE html><body><div id="page"></div></body>', {
     runScripts: 'outside-only',
     pretendToBeVisual: true,
   });
+  freezeNow(dom.window);
   dom.window.eval(SOURCE);
   return dom.window;
 }
@@ -105,8 +119,8 @@ function testSwipeRules() {
   assert.strictEqual(swipes.length, 2, 'a cancelled touch is not a swipe');
 
   // A slow drag is not a swipe (the detector reads the page's own clock).
-  const realNow = win.Date.now;
-  let now = realNow();
+  const frozenNow = win.Date.now;
+  let now = frozenNow();
   win.Date.now = () => now;
   try {
     touchEvent(win, 'touchstart', page, [point(300, 100)]);
@@ -118,7 +132,7 @@ function testSwipeRules() {
     touchEvent(win, 'touchend', page, [], [point(100, 100)]);
     assert.strictEqual(swipes.length, 3, 'a 1.4s drag is in time');
   } finally {
-    win.Date.now = realNow;
+    win.Date.now = frozenNow;
   }
 }
 
@@ -218,6 +232,7 @@ function testPreviewBootstrap() {
   const preview = new JSDOM('<!DOCTYPE html><body><p id="p">text</p></body>', {
     runScripts: 'outside-only',
   }).window;
+  freezeNow(preview);
   const posted = [];
   Object.defineProperty(preview, 'parent', {
     value: {postMessage: (msg, origin) => posted.push([msg, origin])},

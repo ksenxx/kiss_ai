@@ -12,8 +12,8 @@
 // lived on.  Two suites leave one behind:
 //
 //  1. hung.coverage.js, a coverage gate that starts the worker and then
-//     runs its suite, which hangs: the gate's CHILD_TIMEOUT_MS (90 s,
-//     below the runner's 120 s cap) ends the suite, then the gate exits
+//     runs its suite, which hangs: the gate's CHILD_TIMEOUT_MS (8 min,
+//     below the runner's 10 min cap) ends the suite, then the gate exits
 //     and is reported, and only the runner's group kill ends the worker.
 //     The gate starts the worker itself, before its timeout is armed,
 //     so that the worker's pid is on record whatever the suite does: a
@@ -27,7 +27,7 @@
 // the runner runs under a Python helper that makes itself a child
 // subreaper (prctl), so each orphaned worker is adopted by the helper,
 // which waits for it and reports how it ended.  The runner and the gate
-// helper are copied into a scratch directory, the gate's 90 s timeout
+// helper are copied into a scratch directory, the gate's 8 min timeout
 // lowered to GATE_TIMEOUT_MS (the copy is the only knob).
 
 'use strict';

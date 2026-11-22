@@ -9,7 +9,7 @@
 // evals media/main.js into chat.html).
 
 const assert = require('assert');
-const {send} = require('./simplify2_harness');
+const {send, ofType} = require('./simplify2_harness');
 
 /** Every sub-agent tab rendered in the tab bar, in DOM order. */
 function subagentTabEls(win) {
@@ -48,36 +48,26 @@ function togglePanel(win, panel, drain) {
   if (drain) drain();
 }
 
-/** The user clicks the close button of tab *tabId*. */
-function clickClose(win, tabId) {
-  const btn = win.document.querySelector(
-    `#tab-list .chat-tab[data-tab-id="${tabId}"] .chat-tab-close`,
-  );
-  assert.ok(btn, 'sub-agent tab ' + tabId + ' must render a close button');
-  btn.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-}
-
-/** The daemon reports every sub-agent in *tabIds* finished. */
+/**
+ * The daemon reports every sub-agent in *tabIds* finished: the one way
+ * a sub-agent's tab closes (it has no close control).
+ */
 function finishFanOut(win, tabIds) {
   for (const id of tabIds) send(win, {type: 'subagentDone', tab_id: id});
 }
 
 /**
- * The daemon's replay burst for finished children: one `openSubagentTab`
- * per task, `isDone: true`, carrying the tab id `tabIdFor(taskId, i)`
- * gives (a stable id, or the id the fan-out opened).
+ * What the daemon says of finished children when it replays their
+ * parent: one `subagentDone` per task, naming the task and the tab id
+ * `tabIdFor(taskId, i)` gives (a stable id, or the id the fan-out
+ * opened).
  */
-function announceFinished(win, parentId, taskIds, tabIdFor) {
+function announceFinished(win, taskIds, tabIdFor) {
   taskIds.forEach((taskId, i) =>
     send(win, {
-      type: 'openSubagentTab',
+      type: 'subagentDone',
       tab_id: tabIdFor(taskId, i),
-      parent_tab_id: parentId,
-      description: 'sub ' + (i + 1),
       task_id: taskId,
-      taskIndex: i,
-      isSubagentTab: true,
-      isDone: true,
     }),
   );
 }
@@ -106,12 +96,11 @@ function deliverTo(page) {
  * the backend drives the page: `status running`, the run_parallel
  * `tool_call`, then `new_tab` + `openSubagentTab` per sub-agent.
  *
- * @param {{deliver?: Function, done?: boolean, declared?: number,
- *   replay?: boolean}} [opts] `deliver(msg)` replaces `send(win, msg)`
- *   for a page fed through a transport shim; `done` opens every
- *   sub-agent tab already finished (`isDone: true`); `declared` is how
- *   many tasks the run_parallel call lists (default *n*: a run may
- *   spawn fewer children than it declared); `replay` follows every
+ * @param {{deliver?: Function, declared?: number, replay?: boolean}}
+ *   [opts] `deliver(msg)` replaces `send(win, msg)` for a page fed
+ *   through a transport shim; `declared` is how many tasks the
+ *   run_parallel call lists (default *n*: a run may spawn fewer
+ *   children than it declared); `replay` follows every
  *   `openSubagentTab` with the child's (empty) `task_events` transcript,
  *   the way the daemon does, which binds the tab to its task id.
  * @returns {{win: object, posted: Array<object>, parentId: string,
@@ -119,12 +108,7 @@ function deliverTo(page) {
  */
 function bootParallelRun(n, page, opts) {
   const {win, posted} = page;
-  const {
-    deliver = deliverTo(page),
-    done = false,
-    declared = n,
-    replay = false,
-  } = opts || {};
+  const {deliver = deliverTo(page), declared = n, replay = false} = opts || {};
   if (page.drain) page.drain();
   const ready = posted.find(m => m.type === 'ready');
   assert.ok(ready && ready.tabId, 'the page must post ready with a tabId');
@@ -154,7 +138,6 @@ function bootParallelRun(n, page, opts) {
     taskIds.push(taskId);
     const tabId = spawnSubagent(page, parentId, taskId, 'sub ' + (i + 1), i, {
       deliver,
-      extra: {isDone: done},
     });
     subTabIds.push(tabId);
     if (replay) {
@@ -212,6 +195,37 @@ function writeReport(win, filePath, content, extra) {
       extra || {},
     ),
   );
+}
+
+/** The requests the page posted for finished tasks' reports, in order. */
+function reportRequests(posted) {
+  return ofType(posted, 'openFile').filter(m =>
+    String(m.token).startsWith('report:'),
+  );
+}
+
+/**
+ * Play the daemon for report request *req*: its `fileContent` reply,
+ * echoing the request's token and tab.
+ *
+ * @param {object} win The page window.
+ * @param {object} req A request of `reportRequests`.
+ * @param {string} [content] The file's text as read from disk; none
+ *   for a reply that carries no text (an `error`).
+ * @param {object} [extra] Reply fields to add or replace: `path`, where
+ *   the daemon found the file (default: the request's path, resolved in
+ *   its folder, `/ws` when it names none), `error`, `machine`.
+ */
+function answerReport(win, req, content, extra) {
+  const dir = /^[\\/]/.test(req.path) ? '' : (req.workDir || '/ws') + '/';
+  const reply = {type: 'fileContent', token: req.token, tabId: req.tabId};
+  reply.path = dir + req.path;
+  if (typeof content === 'string') {
+    Object.assign(reply, {content, version: '1:' + content.length});
+  }
+  Object.assign(reply, extra);
+  reply.name = reply.path.split(/[\\/]/).pop();
+  send(win, reply);
 }
 
 /** Every open content tab (file, report) of the tab registry. */
@@ -348,8 +362,6 @@ function announceRetaggedSubagent(win, parentId, tabId) {
     parent_tab_id: parentId,
     description: 'sub 1',
     task_id: 't1',
-    isSubagentTab: true,
-    isDone: false,
   });
 }
 
@@ -375,11 +387,12 @@ module.exports = {
   toolPanel,
   runParallelPanel,
   togglePanel,
-  clickClose,
   finishFanOut,
   bootParallelRun,
   writeSuccess,
   writeReport,
+  reportRequests,
+  answerReport,
   contentTabs,
   contentTabFor,
   stripContentTabEls,

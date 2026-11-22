@@ -228,20 +228,23 @@ def test_write_stores_the_facts_not_stored_in_one_new_page_per_task(
     repo = tmp_path / "repo"
     init_repo(repo)
     (domain,) = _repo_memory_domains(str(repo))
-    now = time.time()
+    # The tasks ended a day before the quiz, within the two days it looks back: the day a
+    # page gives for its task is never the day the page is written.
+    ended = time.time() - 86400
     plain = persist_task("Move staging postgres", (), REPORT, success=True,
-                         work_dir=str(tmp_path), timestamp=now - 10)
+                         work_dir=str(tmp_path), timestamp=ended - 10)
     in_repo = persist_task("Document the failover", (), REPORT, success=True,
-                           work_dir=str(repo), timestamp=now - 20)
+                           work_dir=str(repo), timestamp=ended - 20)
     nothing = persist_task("Rename a variable", (), REPORT, success=True,
-                           work_dir=str(tmp_path), timestamp=now - 30)
+                           work_dir=str(tmp_path), timestamp=ended - 30)
     refused = persist_task("Tune the rota", (), REPORT, success=True,
-                           work_dir=str(tmp_path), timestamp=now - 40)
+                           work_dir=str(tmp_path), timestamp=ended - 40)
     sea = MemoryQuizSea()
     no_reply = text_body("I cannot.").replace(b'"stop"', b'"content_filter"')
     # Memory is empty for the first task: nothing can answer and no judge is asked about it.
     # The second task's question finds the page just written for the first, which does not
     # answer.
+    started_on = datetime.now(UTC).date()
     with judge_model([stated(1, 2), stated(1), PARTIAL]) as judged:
         report, _ = run_memory_job(
             sea,
@@ -249,6 +252,7 @@ def test_write_stores_the_facts_not_stored_in_one_new_page_per_task(
             [questions(Q_RUNBOOK, Q_ROTA), questions(Q_BACKUPS), questions(), no_reply],
             tmp_path,
         )
+    written_on = {started_on, datetime.now(UTC).date()}  # two days for a run over midnight
     assert len(judged) == 3 and f"=== page quiz-{plain[:12]} ===" in prompts(judged)[2]
     page, repo_page = f"quiz-{plain[:12]}", f"{domain}/quiz-{in_repo[:12]}"
     head, lines, tail = report.split("\n\n")
@@ -291,11 +295,12 @@ def test_write_stores_the_facts_not_stored_in_one_new_page_per_task(
         "- The on-call rotation changes every Monday at 09:00 UTC.\n"
         f"  Source: \"{ROTA[:-1]}\"\n"
     )
-    assert f"final report of task {plain} ({datetime.now(UTC).date()})" in stored.body
+    task_day = datetime.fromtimestamp(ended - 10, UTC).date()
+    assert f"final report of task {plain} ({task_day})" in stored.body
     meta = stored.frontmatter
     assert meta["writer"] == "quiz" and "verified" not in meta
     assert meta["sources"] == f"final report of task {plain}"
-    assert meta["review_after"] == str(datetime.now(UTC).date() + timedelta(days=21))
+    assert meta["review_after"] in {str(day + timedelta(days=21)) for day in written_on}
     records = log_records(memory_root)
     assert meta["task"] == records[0]["job"] != plain
     assert [(r["task"], r["outcome"], r.get("stored")) for r in records] == [

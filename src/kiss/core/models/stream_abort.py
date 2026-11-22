@@ -37,6 +37,7 @@ import truststore._api as truststore_api
 
 from kiss.core import stop_signal
 from kiss.core.locked import locked_call
+from kiss.core.tool_interrupt import call_without_injection
 
 logger = logging.getLogger(__name__)
 
@@ -123,8 +124,11 @@ class StreamAbortWatchdog:
         inside the ``try`` whose ``finally`` calls :meth:`stop`.  A thread
         started by ``__init__`` would be running before that ``try``, and
         a Stop injected in between would leave it with nobody to disarm it.
+        One raised as ``start()`` takes the lock of the thread's event
+        would leave the thread blocked for good, so it is held back until
+        the start has returned.
         """
-        self._thread.start()
+        call_without_injection(self._thread.start)
 
     def beat(self) -> None:
         """Record that an event arrived (resets the stall clock)."""
@@ -442,7 +446,7 @@ class RequestAbortWatchdog:
             locked_call(stale._lock, stale._disarm)
         self._last_armed.watchdog = weakref.ref(self)
         try:
-            self._thread.start()
+            call_without_injection(self._thread.start)
         except BaseException:
             # ``__exit__`` never runs for an ``__enter__`` that raised,
             # and a Stop injected inside ``start()`` may land after the
@@ -643,7 +647,7 @@ class AbortableNetworkBackend(httpcore.NetworkBackend):
         # From here on only this call can give the connection up, so it
         # does on every exit but the return, a Stop injected here included.
         try:
-            connecting.thread.start()
+            call_without_injection(connecting.thread.start)
             while connecting.thread.is_alive():
                 if self._aborted:
                     raise self.errors.ConnectError(_ABORTED_CONNECT)

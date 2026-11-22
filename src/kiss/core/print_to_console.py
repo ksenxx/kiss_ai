@@ -17,6 +17,7 @@ from kiss.core.html_render import html_to_rich
 from kiss.core.locked import locked_call
 from kiss.core.printer import (
     Printer,
+    bash_status_lines,
     cost_fields,
     extract_extras,
     extract_path_and_lang,
@@ -202,8 +203,8 @@ class ConsolePrinter(Printer):
             content: The content to display.
             type: Content type (e.g. "text", "prompt", "tool_call",
                 "tool_result", "result").
-            **kwargs: Additional options such as tool_input, is_error, cost,
-                total_tokens.
+            **kwargs: Additional options such as tool_input, is_error,
+                interrupted, cost, total_tokens.
         """
         locked_call(self._lock, self._render, content, type, **kwargs)
 
@@ -268,6 +269,7 @@ class ConsolePrinter(Printer):
                     is_error=is_error,
                     tool_name=tool_name,
                     tool_input=tool_input,
+                    interrupted=bool(kwargs.get("interrupted", False)),
                 )
             return
         if type == "usage_info":
@@ -413,6 +415,7 @@ class ConsolePrinter(Printer):
         is_error: bool = False,
         tool_name: str = "",
         tool_input: dict[str, Any] | None = None,
+        interrupted: bool = False,
     ) -> None:
         label = "FAILED" if is_error else "RESULT"
         style = "red" if is_error else "green"
@@ -446,6 +449,12 @@ class ConsolePrinter(Printer):
                     self._console.file.flush()
             self._console.rule(style=style)
         else:
+            # The stream showed the command's output, not how the call ended:
+            # that is in the lines the tool wrote around it, and in the whole
+            # result of a call the user stopped.
+            status = content.splitlines() if interrupted else bash_status_lines(content)
+            for line in status:
+                self._console.file.write(line + "\n")
             if is_error:
                 self._console.rule(label, style=style, align="center")
             else:

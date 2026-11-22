@@ -9,7 +9,7 @@ Audit finding C3-F1.  A ``run_agent`` child used to broadcast its
 released the state's thread slot (``_release_run_state``).  In that
 window the child's state still reported ``running()``, so a parent
 replay (``_open_persisted_subagent_tabs``) announced the sub-agent tab
-with ``isDone: False`` and subscribed it to the child's stream — but
+as running and subscribed it to the child's stream — but
 the fan-out signal had already gone out, and the run ended with only
 a ``status running=False`` for the tab.  The tab stayed open although
 the sub-agent had finished.
@@ -165,7 +165,6 @@ class SubagentDoneOrderTest(DaemonLocalHarness):
                 ),
                 what="the replay's sub-agent tab announcement",
             )
-            assert announcement["isDone"] is False
         finally:
             if parked:
                 printer._model_pick_lock.release()
@@ -197,7 +196,7 @@ class SubagentDoneOrderTest(DaemonLocalHarness):
         while not _closed_after_announcement():
             assert time.monotonic() < deadline, (
                 "no subagentDone for the tab announced as live; events: "
-                f"{[(e.get('type'), e.get('tab_id'), e.get('isDone')) for e in list(received)]}"
+                f"{[(e.get('type'), e.get('tab_id')) for e in list(received)]}"
             )
             time.sleep(0.02)
 
@@ -300,21 +299,31 @@ class SubagentDoneOrderTest(DaemonLocalHarness):
             )
             assert _subagent_is_done(first_row)
             assert not _subagent_is_done(second_row)
+            # A replay now closes the first row's tab, by tab and by
+            # task, and announces only the row that runs.
             replayed_from = len(received)
             agent_server._open_persisted_subagent_tabs(
                 parent_task_id=parent.task_id,
                 parent_tab_id=PARENT_TAB_ID,
+                replay_id="again",
             )
             first_again = self._wait_for(
-                lambda: announcement_after(replayed_from, first_sub_tab),
-                what="the second replay's announcement of the first row",
+                lambda: next(
+                    (
+                        e
+                        for e in list(received)[replayed_from:]
+                        if e.get("type") == "subagentDone" and e.get("replayId") == "again"
+                    ),
+                    None,
+                ),
+                what="the second replay's close of the first row",
             )
-            assert first_again["isDone"] is True
-            second_live = self._wait_for(
+            assert (first_again["tab_id"], first_again["task_id"]) == (first_sub_tab, first_row)
+            self._wait_for(
                 lambda: announcement_after(replayed_from, _viewer_sub_tab_id(second_row)),
                 what="the second replay's announcement of the second row",
             )
-            assert second_live["isDone"] is False
+            assert announcement_after(replayed_from, first_sub_tab) is None
         finally:
             release.set()
             second_release.set()
@@ -325,15 +334,16 @@ class SubagentDoneOrderTest(DaemonLocalHarness):
             lambda: _subagent_is_done(second_row),
             what="the child's thread slot release",
         )
-        if announcement["isDone"] is False:
-            # Announced live: its ``subagentDone`` must follow the
-            # announcement, as for the last row.
-            events = list(received)
-            after = events[events.index(announcement, announced_from) + 1 :]
-            assert any(
-                e.get("type") == "subagentDone" and e.get("tab_id") == first_sub_tab
-                for e in after
-            ), (
-                "the first row's tab was announced live and never closed; events: "
-                f"{[(e.get('type'), e.get('tab_id'), e.get('isDone')) for e in after]}"
-            )
+        # Announced live: the child's own ``subagentDone`` must follow
+        # the announcement, as for the last row.
+        events = list(received)
+        after = events[events.index(announcement, announced_from) + 1 :]
+        assert any(
+            e.get("type") == "subagentDone"
+            and e.get("tab_id") == first_sub_tab
+            and "replayId" not in e
+            for e in after
+        ), (
+            "the first row's tab was announced live and never closed; events: "
+            f"{[(e.get('type'), e.get('tab_id')) for e in after]}"
+        )

@@ -34,6 +34,11 @@ already past its cap back down to it.
 Also here: the metadata backfill honours the ``success`` column the
 live finalizer honours, so ``--refresh`` reproduces the daemon's tags.
 
+Also here: the wait a statement does make for another process's write
+transaction (30 s at most) is taken in slices, so the Stop of a task
+reaches a thread in it; its length, SQLite's error at its end and the
+refusals SQLite makes without waiting are those of one unbroken wait.
+
 Everything is real: a real second connection holding SQLite's write
 lock, a real second OS process holding the kernel file lock, real
 threads and the real module state.  Nothing is mocked or patched.
@@ -50,6 +55,7 @@ import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
+from types import FrameType
 
 import pytest
 
@@ -60,7 +66,18 @@ from kiss.agents.sorcar.history_columns import (
     missing_columns,
 )
 from kiss.agents.sorcar.task_metadata import backfill_task_metadata
+from kiss.core.tool_interrupt import inject_async_exception
+from kiss.tests.agents.sorcar import rwlock_probe
 from kiss.tests.persistence_helpers import close_db
+
+_HOLD_WRITE_SCRIPT = """
+import sqlite3, sys
+db = sqlite3.connect(sys.argv[1], isolation_level=None)
+db.execute("BEGIN IMMEDIATE")
+print("held", flush=True)
+sys.stdin.readline()
+db.execute("ROLLBACK")
+"""
 
 _HOLD_LOCK_SCRIPT = """
 import sys, time
@@ -127,6 +144,234 @@ def test_a_missing_column_is_still_added_with_its_backfill(kiss_home: Path) -> N
     assert missing_columns(conn, TASK_TABLE, ADDED_TASK_COLUMNS) == []
     assert not conn.in_transaction
     conn.close()
+
+
+def record_a_file_on_new_thread(outcome: list[object]) -> None:
+    """Thread body: one write; *outcome* gets how it ended, then whether a transaction is left."""
+    try:
+        persistence._record_file_usage("waited.py")
+        outcome.append("written")
+    except BaseException as exc:
+        outcome.append(type(exc).__name__)
+    finally:
+        outcome.append(persistence._get_db().in_transaction)
+        persistence._close_thread_db()
+
+
+def test_a_stop_reaches_a_write_that_waits_for_another_process(kiss_home: Path) -> None:
+    """A write behind another process's transaction is stopped at once; left alone, it waits.
+
+    The wait was one C call of up to 30 s (SQLite's busy handler), in
+    which no injected exception is raised: the Stop of a task stayed
+    pending until the other process let go of the database.
+    """
+    persistence._get_db()  # the schema: the writers' connections open without a write
+    peer = subprocess.Popen(
+        [sys.executable, "-c", _HOLD_WRITE_SCRIPT, str(persistence._DB_PATH)],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+    )
+    stopped: list[object] = []
+    waited: list[object] = []
+    stoppee = threading.Thread(target=record_a_file_on_new_thread, args=(stopped,), daemon=True)
+    waiter = threading.Thread(target=record_a_file_on_new_thread, args=(waited,), daemon=True)
+    try:
+        assert peer.stdout is not None and peer.stdout.readline().strip() == "held"
+        stoppee.start()
+        deadline = time.monotonic() + 10.0
+        while not rwlock_probe.writer(persistence._rw_lock):
+            assert time.monotonic() < deadline, "the write never took the history lock"
+            time.sleep(0.01)
+        time.sleep(0.3)  # its BEGIN IMMEDIATE waits for the peer by now
+        assert inject_async_exception(stoppee.ident or 0, KeyboardInterrupt) == 1
+        stoppee.join(persistence._BUSY_SLICE_MS / 1000 + 0.9)  # 1 s, unless SQLite is an old one
+        assert not stoppee.is_alive(), "the Stop waited for the other process's transaction"
+        assert stopped == ["KeyboardInterrupt", False]
+        assert not rwlock_probe.writer(persistence._rw_lock)
+        waiter.start()
+        waiter.join(2.0)
+        assert waiter.is_alive(), "the write gave up on a database that was busy for 2 s"
+        peer.communicate("release\n", timeout=10)
+        waiter.join(10.0)
+        assert waited == ["written", False]
+    finally:
+        peer.kill()
+        peer.wait()
+        for thread in (stoppee, waiter):
+            if thread.is_alive():
+                thread.join(10.0)
+    counts = persistence._get_db().execute("SELECT path, count FROM file_usage").fetchall()
+    assert [tuple(row) for row in counts] == [("waited.py", 1)]
+
+
+def test_a_busy_database_is_given_up_on_after_the_whole_wait_or_where_sqlite_refuses(
+    kiss_home: Path,
+) -> None:
+    """The wait ends in SQLite's own error after its whole length; none is made in SQLite's place.
+
+    SQLite refuses the write of a connection that holds a read
+    transaction without waiting (in rollback-journal mode the two
+    would wait for each other); repeating the statement must not wait
+    for it either.
+    """
+    saved = persistence._BUSY_TIMEOUT_MS
+    persistence._BUSY_TIMEOUT_MS = 500  # the whole wait, shortened
+    try:
+        db = persistence._get_db()
+        for path in ("a.py", "b.py"):
+            persistence._record_file_usage(path)
+        peer = sqlite3.connect(str(persistence._DB_PATH), isolation_level=None, timeout=1)
+        peer.execute("BEGIN IMMEDIATE")
+        try:
+            started = time.monotonic()
+            with pytest.raises(sqlite3.OperationalError, match="database is locked") as info:
+                persistence._record_file_usage("c.py")
+            elapsed = time.monotonic() - started
+            assert info.value.sqlite_errorcode == sqlite3.SQLITE_BUSY
+            assert 0.5 <= elapsed < 3.0, f"gave up after {elapsed:.2f}s of a 0.5 s wait"
+            assert not db.in_transaction and not rwlock_probe.writer(persistence._rw_lock)
+            persistence._BUSY_TIMEOUT_MS = saved  # 30 s: what a wait in SQLite's place would last
+            half_read = db.execute("SELECT path FROM file_usage")
+            half_read.fetchone()
+            started = time.monotonic()
+            with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+                db.execute("BEGIN IMMEDIATE")
+            assert time.monotonic() - started < 1.0, "waited where SQLite does not"
+            half_read.close()
+        finally:
+            peer.close()
+    finally:
+        persistence._BUSY_TIMEOUT_MS = saved
+
+
+def test_a_new_database_gets_its_tables_once_a_peer_lets_go_of_it(kiss_home: Path) -> None:
+    """The schema script waits for a peer's transaction as long as that lasts, not for one slice."""
+    peer = sqlite3.connect(str(persistence._DB_PATH), isolation_level=None, timeout=1)
+    peer.execute("PRAGMA journal_mode=WAL")
+    peer.execute("BEGIN IMMEDIATE")
+    done = threading.Event()
+    errors: list[BaseException] = []
+    try:
+        threading.Thread(target=get_db_on_new_thread, args=(done, errors), daemon=True).start()
+        assert not done.wait(0.5), f"the schema did not wait for the peer: {errors}"
+    finally:
+        peer.execute("ROLLBACK")
+        peer.close()
+    assert done.wait(10.0), "the schema was not created after the peer let go"
+    assert errors == []
+    assert persistence._get_db().execute("SELECT COUNT(*) FROM task_history").fetchone()[0] == 0
+
+
+class ReaderInTheWay:
+    """A second connection whose half-read SELECT keeps a commit waiting for half a second.
+
+    The database is in rollback-journal mode, where a commit needs
+    every reader gone.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self.conn = sqlite3.connect(str(path), isolation_level=None, check_same_thread=False)
+        self.inserts = 0
+
+    def read(self) -> None:
+        """Start the SELECT; a timer thread ends it 0.5 s later."""
+        cursor = self.conn.execute("SELECT x FROM t")
+        cursor.fetchone()
+        threading.Timer(0.5, cursor.close).start()
+
+    def read_before_the_second_insert(self, sql: str) -> None:
+        """Trace callback of the writer: the first INSERT commits freely, the second waits."""
+        self.inserts += sql.startswith("INSERT")
+        if self.inserts == 2:
+            self.inserts += 1
+            self.read()
+
+
+def stop_as_the_slice_is_set_back(frame: FrameType, event: str, arg: object) -> None:
+    """Profile hook: a Stop for the calling thread as its connection sets the slice back."""
+    if (
+        event == "call"
+        and frame.f_code is persistence._LockedConnection.execute.__code__
+        and frame.f_locals["sql"] == f"PRAGMA busy_timeout={persistence._BUSY_SLICE_MS}"
+    ):
+        sys.setprofile(None)
+        inject_async_exception(threading.get_ident(), KeyboardInterrupt)
+
+
+def commit_stopped_there(conn: sqlite3.Connection, outcome: list[object]) -> None:
+    """Thread body: *outcome* gets how the commit ended and the ``busy_timeout`` it left."""
+    sys.setprofile(stop_as_the_slice_is_set_back)
+    try:
+        conn.commit()
+    except BaseException as exc:
+        outcome.append(type(exc).__name__)
+    finally:
+        sys.setprofile(None)
+    outcome.append(conn.execute("PRAGMA busy_timeout").fetchone()[0])
+
+
+def test_the_calls_that_run_their_statements_from_c_wait_as_long(tmp_path: Path) -> None:
+    """``commit()``, ``with conn:`` and a later set of an autocommit ``executemany`` wait 0.5 s.
+
+    None can be repeated from the statement that found the database
+    busy: SQLite makes their whole wait, which a slice of it would cut
+    short here, and no Stop leaves the connection waiting that way.
+    So does the last row of a write that returns rows, where it
+    commits.  A statement that is repeated is applied once, also when
+    SQLite counted a trigger's change in the attempts it undid.
+    """
+    path = tmp_path / "journal.db"
+    conn = persistence._LockedConnection(path, check_same_thread=False, isolation_level=None)
+    conn.execute(f"PRAGMA busy_timeout={persistence._BUSY_SLICE_MS}")  # as _get_db() opens one
+    conn.execute("CREATE TABLE t (x INTEGER)")
+    conn.executemany("INSERT INTO t VALUES (?)", [(1,), (2,)])
+    reader = ReaderInTheWay(path)
+    waits = []
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("INSERT INTO t VALUES (3)")
+        reader.read()
+        started = time.monotonic()
+        conn.commit()
+        waits.append(time.monotonic() - started)
+        with conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("INSERT INTO t VALUES (4)")
+            reader.read()
+            started = time.monotonic()
+        waits.append(time.monotonic() - started)
+        conn.set_trace_callback(reader.read_before_the_second_insert)
+        started = time.monotonic()
+        conn.executemany("INSERT INTO t VALUES (?)", [(5,), (6,)])
+        waits.append(time.monotonic() - started)
+        conn.set_trace_callback(None)
+        returned = conn.execute("WITH v(x) AS (SELECT 7) INSERT INTO t SELECT x FROM v RETURNING x")
+        reader.read()
+        started = time.monotonic()
+        assert [tuple(row) for row in returned.fetchall()] == [(7,)]
+        waits.append(time.monotonic() - started)
+        conn.execute("CREATE TABLE log (x INTEGER)")
+        conn.execute(
+            "CREATE TRIGGER logged AFTER INSERT ON t BEGIN INSERT INTO log VALUES (new.x); END",
+        )
+        reader.read()
+        started = time.monotonic()
+        conn.execute("INSERT INTO t VALUES (8)")
+        waits.append(time.monotonic() - started)
+        assert [wait >= 0.4 for wait in waits] == [True] * 5, waits
+        assert [row[0] for row in conn.execute("SELECT x FROM t")] == list(range(1, 9))
+        assert [row[0] for row in conn.execute("SELECT x FROM log")] == [8]
+        assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == persistence._BUSY_SLICE_MS
+        stopped: list[object] = []
+        worker = threading.Thread(target=commit_stopped_there, args=(conn, stopped), daemon=True)
+        worker.start()
+        worker.join(10.0)
+        assert stopped == ["KeyboardInterrupt", persistence._BUSY_SLICE_MS]
+        conn._unsliced(conn.close)  # closed by the call itself: nothing is left to set back
+    finally:
+        conn.close()
+        reader.conn.close()
+    with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
+        conn.commit()
 
 
 def hold_journal_lock_in_subprocess(lock_file: Path, hold_s: float) -> subprocess.Popen[bytes]:

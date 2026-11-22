@@ -29,18 +29,20 @@ _MEDIA_DIR = (
 class TestGitCommitButtonWiring(unittest.TestCase):
     """The page carries the button and posts the command."""
 
-    def test_button_markup_in_more_menu(self) -> None:
+    def test_button_markup_on_the_task_info_strip(self) -> None:
         html = (_MEDIA_DIR / "chat.html").read_text(encoding="utf-8")
-        i_menu = html.find('id="more-menu"')
+        i_strip = html.find('id="meta-footer"')
         i_btn = html.find('id="autocommit-btn"')
-        self.assertGreater(i_menu, -1)
-        self.assertGreater(i_btn, -1)
-        self.assertLess(i_menu, i_btn, 'button must be in the "..." menu')
+        i_resizer = html.find('id="meta-resizer"')
+        self.assertGreater(i_strip, -1)
+        self.assertTrue(
+            i_strip < i_btn < i_resizer,
+            "button must be on the strip under the task-info panel",
+        )
         tag = html[html.rfind("<button", 0, i_btn) : html.index(">", i_btn) + 1]
-        self.assertIn('data-tooltip="git commit"', tag)
-        self.assertIn("more-menu-item", tag)
-        btn_block = html[i_btn : html.index("</button>", i_btn)]
-        self.assertIn('<span class="more-item-label">Git Commit</span>', btn_block)
+        self.assertIn('data-tooltip="Git commit"', tag)
+        self.assertIn('aria-label="Git commit"', tag)
+        self.assertIn('class="sidebar-tool-btn"', tag)
 
     def test_main_js_posts_autocommit_action(self) -> None:
         # Since 81905ace3 (editor-title git-commit button) the click
@@ -48,14 +50,11 @@ class TestGitCommitButtonWiring(unittest.TestCase):
         # helper instead of posting autocommitAction inline.
         js = (_MEDIA_DIR / "main.js").read_text(encoding="utf-8")
         self.assertIn("getElementById('autocommit-btn')", js)
-        wiring = re.search(
-            r"autocommitBtn\.addEventListener\('click',(.*?)\}\);\s*\}",
+        self.assertIn(
+            "bindStripButton('autocommit-btn', triggerManualGitCommit);",
             js,
-            re.DOTALL,
+            "button click handler must exist",
         )
-        self.assertIsNotNone(wiring, "button click handler must exist")
-        assert wiring is not None
-        self.assertIn("triggerManualGitCommit()", wiring.group(1))
         helper = re.search(
             r"function triggerManualGitCommit\(\) \{(.*?)\n  \}",
             js,

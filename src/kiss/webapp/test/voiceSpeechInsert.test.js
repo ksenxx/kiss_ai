@@ -23,16 +23,21 @@ const windows = [];
 // transcript of a round it posted, so every test dictates a real one.
 // No main.js runs here, so nothing submits and the words stay in the
 // composer.  Rounds across conversations are conc2026_voice_rounds'.
+// `errors` collects what the page's listeners throw: jsdom reports an
+// exception of a listener to the window, not to the test that sent the
+// message.
 async function makePage() {
   const inputEvents = {count: 0};
+  const errors = [];
   const page = makeBareVoicePage({}, w => {
     w.document
       .getElementById('task-input')
       .addEventListener('input', () => inputEvents.count++);
+    w.addEventListener('error', event => errors.push(String(event.error)));
   });
   windows.push(page.win);
   await startPipeline(page);
-  return {page, win: page.win, inputEvents};
+  return {page, win: page.win, inputEvents, errors};
 }
 
 async function main() {
@@ -79,7 +84,7 @@ async function main() {
   });
 
   await test('non-string voiceSpeech payloads are treated as no speech', async () => {
-    const {page, win, inputEvents} = await makePage();
+    const {page, win, inputEvents, errors} = await makePage();
     const inp = win.document.getElementById('task-input');
     // Tagged with a round that is outstanding, so only the payload can
     // be what keeps them out.
@@ -89,6 +94,14 @@ async function main() {
     sendHostMessage(win, {type: 'voiceSpeech', round});
     assert.strictEqual(inp.value, '');
     assert.strictEqual(inputEvents.count, 0);
+    // They were ignored, not crashed on (a listener that throws types
+    // nothing either), and they did not answer the round: its
+    // transcript is still typed, once.
+    assert.deepStrictEqual(errors, []);
+    sendHostMessage(win, {type: 'voiceSpeech', text: 'Hello everyone', round});
+    assert.strictEqual(inp.value, 'Hello everyone');
+    assert.strictEqual(inputEvents.count, 1);
+    assert.deepStrictEqual(errors, []);
   });
 
   windows.forEach(win => win.close());

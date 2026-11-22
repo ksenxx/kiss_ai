@@ -16,6 +16,7 @@ task's persisted id are the real ones.
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import threading
 from collections.abc import Iterator
@@ -35,6 +36,7 @@ from kiss.agents.sorcar.cron_agent import cron_job, load_jobs
 from kiss.agents.sorcar.sea_apply import apply_sea
 from kiss.agents.sorcar.sea_settings import resolve_settings
 from kiss.core.models.model_info import MODEL_INFO, get_available_models
+from kiss.scripts.sync_kiss_notes import lock_note
 from kiss.tests.agents.seas.conftest import (
     git,
     registered,
@@ -267,6 +269,55 @@ def test_observed_evidence_cuts_an_over_long_file_at_a_line_break(
     assert autorouter_sea.observed_evidence() == autorouter_sea.NO_EVIDENCE
     evidence.unlink()
     assert autorouter_sea.observed_evidence() == autorouter_sea.NO_EVIDENCE
+
+
+def _read_evidence(reads: list[str]) -> None:
+    """Thread body: record what ``observed_evidence`` returns."""
+    reads.append(autorouter_sea.observed_evidence())
+
+
+def test_observed_evidence_of_a_note_that_cannot_be_read_is_no_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A note that is not UTF-8 failed the import of the SEA (``UnicodeDecodeError``), and a
+    named pipe in its place held that import until the pipe had a writer."""
+    monkeypatch.setenv("KISS_HOME", str(tmp_path))
+    evidence = tmp_path / "AUTOROUTER.md"
+    evidence.write_bytes("- caf\xe9\n".encode("latin-1"))
+    assert autorouter_sea.observed_evidence() == autorouter_sea.NO_EVIDENCE
+    evidence.unlink()
+    evidence.mkdir()
+    assert autorouter_sea.observed_evidence() == autorouter_sea.NO_EVIDENCE
+    if hasattr(os, "mkfifo"):
+        evidence.rmdir()
+        os.mkfifo(evidence)
+        reads: list[str] = []
+        reader = threading.Thread(target=_read_evidence, args=(reads,), daemon=True)
+        reader.start()
+        reader.join(5)
+        assert reads == [autorouter_sea.NO_EVIDENCE], "the read waits for a writer of the pipe"
+
+
+def test_observed_evidence_waits_for_a_writer_of_the_note(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The evidence is read under the note's lock, which a notes sync holds while it rewrites
+    the note in place: such a note was read between the writer's write and its truncate."""
+    monkeypatch.setenv("KISS_HOME", str(tmp_path))
+    evidence = tmp_path / "AUTOROUTER.md"
+    evidence.write_text("- old evidence, a longer line\n", encoding="utf-8")
+    reads: list[str] = []
+    reader = threading.Thread(target=_read_evidence, args=(reads,), daemon=True)
+    with open(evidence, "r+", encoding="utf-8") as note:
+        lock_note(note)
+        note.write("- new\n")
+        note.flush()  # on disk: the new line, then the rest of the old one
+        reader.start()
+        reader.join(0.5)
+        waited = reader.is_alive()
+        note.truncate()
+    reader.join(5)
+    assert waited and reads == ["- new"]
 
 
 def test_log_decision_writes_a_table_in_the_kiss_home_with_a_dash_task_id_outside_a_task(

@@ -34,18 +34,21 @@ server side by counting distinct TCP peers.
 from __future__ import annotations
 
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import pytest
 
 from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
 from kiss.core.models.openai_compatible_model2 import OpenAICompatibleModel2
+from kiss.core.tool_interrupt import inject_async_exception
 from kiss.tests.core.models.openai_sse_harness import (
     Reply,
     Request,
     ScriptedOpenAIServer,
     responses_event,
 )
+from kiss.tests.server.pause import Pause
 
 _MODEL = "gpt-delegate-under-test"
 _REASONING_TEXT = "weighing the options"
@@ -522,3 +525,27 @@ def test_delegated_turn_returns_the_tool_call(streaming: bool) -> None:
     assert function_calls == [
         {"id": "call_1", "name": "echo", "arguments": {"text": "hi"}}
     ]
+    assert model.take_partial_usage_response() is None, "a returned response is billed again"
+
+
+def test_a_forced_stop_after_the_delegate_returned_still_bills_its_response() -> None:
+    """A forced Stop while the owner files the delegated turn loses no usage (audit C8/F2).
+
+    The delegate gives its record of the response up as it returns, and
+    the owner kept none: the runner's ``KeyboardInterrupt`` landing in the
+    owner's own processing left the agent nothing to bill.  The turn is
+    held as it appends the assistant message.
+    """
+    filing_code = OpenAICompatibleModel._append_assistant_turn.__code__
+    with ScriptedOpenAIServer(_ToolTurnPolicy()) as server, ThreadPoolExecutor(1) as task:
+        model = _make_chat_model(server.base_url)
+        thread_id = task.submit(threading.get_ident).result(10)
+        with Pause(filing_code, lambda _locals: True) as filing:
+            turn = task.submit(model.generate_and_process_with_tools, {"echo": echo}, _TOOLS)
+            assert filing.paused.wait(10), "the delegated turn never came back"
+            assert inject_async_exception(thread_id, KeyboardInterrupt) == 1  # the runner's Stop
+        assert isinstance(turn.exception(10), KeyboardInterrupt), "the Stop was ignored"
+    billed = model.take_partial_usage_response()
+    assert billed is not None, "the delegated response was lost to the bill"
+    assert model.extract_input_output_token_counts_from_response(billed)[:2] == (5, 4)
+    assert model.take_partial_usage_response() is None, "the response is billed twice"

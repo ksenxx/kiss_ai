@@ -36,7 +36,7 @@ from kiss.agents.sorcar.container_jobs import JOBS_DIR, ContainerJobs
 from kiss.agents.sorcar.shell_scan import MAX_NESTING, bash_path, simple_commands
 from kiss.agents.sorcar.useful_tools import UsefulTools, digest_parallel_report
 from kiss.core.kiss_tmp import kiss_tmp_dir
-from kiss.core.processes import find_bash
+from kiss.core.processes import bash_version, find_bash
 from kiss.core.tool_interrupt import USER_INTERRUPTED_MESSAGE
 from kiss.tests.conftest import IS_WINDOWS
 
@@ -51,6 +51,28 @@ def _bash(command: str, work_dir: Path) -> tuple[int, str]:
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=60, check=False,
     )
     return done.returncode, done.stdout
+
+
+#: The bash a command below needs, by a text only that command has (each measured with bash
+#: 3.2 to 5.3): the table of the programs bash has hashed came with 4.0, and ``! !`` is a
+#: command since 4.2.  macOS has bash 3.2.
+_SINCE = (("BASH_CMDS[bash]=", (4, 0)), ("; ! !", (4, 2)))
+
+
+def _bash_shows(command: str) -> bool:
+    """Whether the bash of this machine runs *command* as the bash the readers read it for.
+
+    Not a bash older than a construct of :data:`_SINCE`.  Nor any bash where a directory of
+    ``PATH`` has a blank in its name (``Program Files`` on Windows), for the unquoted ``$PATH``
+    in a word of ``env``: the blank ends the word.  Nor the one of Windows for ``env -i``:
+    the ``env`` of MSYS finds no ``bash`` once ``PATH`` is gone.  What the readers say of the
+    command is checked on every machine.
+    """
+    if "env PATH=tmp/fake:$PATH" in command and " " in os.environ.get("PATH", ""):
+        return False
+    if "env -i " in command and IS_WINDOWS:
+        return False
+    return all(bash_version() >= since for mark, since in _SINCE if mark in command)
 
 
 def test_a_bash_result_shows_its_exit_in_the_format_of_the_tool_that_returned_it(
@@ -289,18 +311,66 @@ def test_exit_0_is_the_verifiers_pass_only_when_its_run_decides_the_commands_exi
     -s``: stdin; ``--rcfile``: an option's value) or runs nothing (``-D``), and ``set -n``
     / ``set -o noexec`` before it.  Finish review 2026-11-04: ``--`` (or ``-``) ends the
     shell's options, so ``bash -- -x tmp/verify.sh`` runs a file named ``-x`` and only
-    passes the verifier to it as an argument.  Bash says what each command's exit shows:
-    over a failing verifier a hiding command exits 0 and a deciding one as the verifier."""
+    passes the verifier to it as an argument.  Audit 2026-11-21 (LF): the ``exec`` is the
+    shell's own behind an assignment, ``command``, ``builtin`` or ``time -p`` too, and the
+    program the shell becomes is the word after its options, a wrapper as well (``exec
+    env``).  Audit 2026-11-21 (LF2): ``shopt -so noexec`` and a sourced file keep the
+    verifier from running, a function, a ``PATH`` or a hash-table entry makes the word
+    ``bash`` another program, ``BASH_ENV`` and ``SHELLOPTS`` start the verifier's shell
+    otherwise, and a trap whose action leaves the shell decides the exit after it; so may
+    a line only the shell knows how to run, and a wrapper's option may keep it from
+    running anything.  A trap that only cleans up, an appended ``PATH`` and ``command
+    bash`` past a function do not (LF3: an appended directory holds the programs no
+    earlier one has, so only ``bash``, ``sh`` and a path are then what they were, with
+    no wrapper in front).  Audit 2026-11-21 (LF3): nor do the options of
+    ``timeout`` for its signals and its messages or those of ``env`` that take variables
+    out of the environment; a wrapper at another path is another program, a word of a
+    wrapper the shell expands may be an option or hold another command, and a login shell
+    and zsh read other text before the script.  Bash says what each command's
+    exit shows: over a failing verifier a hiding command exits 0 and a deciding one as
+    the verifier."""
     script = tmp_path / "tmp" / "verify.sh"
     script.parent.mkdir()
     script.write_text("echo FAILURE; exit 7\n")
     (tmp_path / "-x").write_text("echo OTHER; exit 0\n")  # the script ``bash -- -x`` runs
     (tmp_path / "sub").mkdir()
-    work, verifier = str(tmp_path), str(script)
+    fake = tmp_path / "tmp" / "fake" / "bash"  # another program of the shell's name
+    fake.parent.mkdir()
+    fake.write_text("#!/bin/sh\nexit 0\n")
+    fake.chmod(0o755)
+    (tmp_path / "tmp" / "quit.sh").write_text("exit 0\n")
+    shutil.copy(fake, fake.with_name("env"))  # another program of a wrapper's name
+    for missing in ("exec", "verify.sh"):  # names no directory of bash's ``PATH`` has
+        shutil.copy(fake, fake.with_name(missing))
+    home = tmp_path / "tmp" / "home"  # its startup files end the shell that reads them
+    home.mkdir()
+    for startup in (".bash_profile", ".zshenv"):
+        (home / startup).write_text("exit 0\n")
+    work, verifier, named = str(tmp_path), str(script), shlex.quote(str(script))
     not_run = ("bash -n tmp/verify.sh", "sh -xn ./tmp/verify.sh", "bash -s tmp/verify.sh",
                "bash -D tmp/verify.sh", "bash --rcfile tmp/verify.sh",
-               "bash -- -x tmp/verify.sh", "sh - -x tmp/verify.sh", "bash -e -- -x tmp/verify.sh")
-    hidden = (*not_run, "bash tmp/verify.sh || true", "bash tmp/verify.sh | cat",
+               "bash -- -x tmp/verify.sh", "sh - -x tmp/verify.sh", "bash -e -- -x tmp/verify.sh",
+               # the word runs a function, or what only the shell knows by then
+               "bash() { :; }; bash tmp/verify.sh", "function bash { true; }; bash tmp/verify.sh",
+               "timeout() { :; }; timeout 60 bash tmp/verify.sh", "tmp/fake/bash tmp/verify.sh",
+               # a wrapper's option under which it runs nothing
+               "command -v bash tmp/verify.sh", "timeout --help 60 bash tmp/verify.sh",
+               "xargs -r bash tmp/verify.sh", "timeout -k 5 --h 60 bash tmp/verify.sh",
+               # a wrapper at another path is another program, and a word of a wrapper the
+               # shell expands may hold another command
+               "tmp/fake/env bash tmp/verify.sh",
+               "timeout ${KISS_NO_SUCH_NAME:-60 true} bash tmp/verify.sh",
+               "env KISS_X=1${IFS}true bash tmp/verify.sh",
+               "env PATH=tmp/fake:$PATH bash tmp/verify.sh",
+               # the shell reads other text first: a login shell its profiles, zsh ``.zshenv``
+               "HOME=$PWD/tmp/home bash -l tmp/verify.sh",
+               "HOME=$PWD/tmp/home bash --login tmp/verify.sh",
+               *(["ZDOTDIR=tmp/home zsh tmp/verify.sh"] if shutil.which("zsh") else []),
+               f"${{KISS_NO_SUCH_NAME:-exit}} 0; bash {named}",
+               f"shopt -s expand_aliases\nalias bash=true\nbash {named}")
+    # the verifier runs, as a command only the shell knows: a trap may run after any command
+    unread = (f"trap 'exit 0' ERR; bash {named}",)
+    hidden = (*not_run, *unread, "bash tmp/verify.sh || true", "bash tmp/verify.sh | cat",
               "true || bash tmp/verify.sh", "bash tmp/verify.sh; echo done",
               "bash tmp/verify.sh &", "(bash tmp/verify.sh) || true",
               "bash tmp/verify.sh && echo PASS || echo FAIL", "bash tmp/verify.sh && true &",
@@ -310,15 +380,46 @@ def test_exit_0_is_the_verifiers_pass_only_when_its_run_decides_the_commands_exi
               "exec true; bash tmp/verify.sh", "true && ! bash tmp/verify.sh",
               "set -n; bash tmp/verify.sh", "set -o noexec; bash tmp/verify.sh",
               "set -xn; bash tmp/verify.sh", "set -eo noexec; bash tmp/verify.sh",
-              "set +n -n; bash tmp/verify.sh")
+              "set +n -n; bash tmp/verify.sh",
+              "command exec true; bash tmp/verify.sh", "builtin exec true; bash tmp/verify.sh",
+              "X=1 command -p builtin -- exec -a v true; bash tmp/verify.sh",
+              "time -p exec true; bash tmp/verify.sh",
+              "exec env; bash tmp/verify.sh", "X=1 exec -l -- env; bash tmp/verify.sh",
+              "shopt -so noexec; bash tmp/verify.sh", "shopt -o -qs noexec; bash tmp/verify.sh",
+              "bash tmp/verify.sh; ((1))", "bash tmp/verify.sh; time", "bash tmp/verify.sh; ! !",
+              f". tmp/quit.sh; bash {named}", f"command source tmp/quit.sh && bash {named}",
+              "trap 'exit 0' EXIT; bash tmp/verify.sh",
+              "trap -- 'true; exec true' 0; bash tmp/verify.sh",
+              "trap '${KISS_NO_SUCH_NAME:-exit} 0' EXIT; bash tmp/verify.sh",
+              "trap 'eval \"${KISS_NO_SUCH_NAME:-exit 0}\"' EXIT; bash tmp/verify.sh",
+              "X=$(echo 'exit 0'); trap \"$X\" EXIT; bash tmp/verify.sh",
+              "quit() { exit 0; }; trap quit EXIT; bash tmp/verify.sh",
+              "PATH=tmp/fake:$PATH; bash tmp/verify.sh",
+              'export PATH="$PWD/tmp/fake:$PATH" && bash tmp/verify.sh',
+              "PATH=tmp/fake:$PATH bash tmp/verify.sh",
+              "env PATH=tmp/fake bash tmp/verify.sh",
+              "read PATH <<< tmp/fake; bash tmp/verify.sh",
+              "export P{ATH,}=tmp/fake; bash tmp/verify.sh",
+              "N=PA; export ${N}TH=tmp/fake; bash tmp/verify.sh",
+              "printf 'P\\101TH' > tmp/name; read {x,$(cat tmp/name)} <<< 'a tmp/fake'; "
+              "bash tmp/verify.sh",
+              "PATH=$\"PATH\":tmp/fake; bash tmp/verify.sh",
+              # an appended directory gives the names no earlier one has: the program
+              # ``exec`` a wrapper asks for, a script named by a bare word
+              "PATH=$PATH:tmp/fake; env exec bash tmp/verify.sh",
+              "PATH=$PATH:$PWD/tmp/fake; cd tmp && verify.sh",
+              "BASH_CMDS[bash]=tmp/fake/bash; bash tmp/verify.sh",
+              "BASH_ENV=tmp/quit.sh bash tmp/verify.sh",
+              "env SHELLOPTS=noexec bash tmp/verify.sh")
     for command in hidden:
         code, output = _bash(command, tmp_path)
-        assert code == 0, (command, output)  # exit 0, verifier or not
-        if command in not_run:
-            assert "FAILURE" not in output, (command, output)  # the verifier did not run
+        if _bash_shows(command):
+            assert code == 0, (command, output)  # exit 0, verifier or not
+            if command in not_run:
+                assert "FAILURE" not in output, (command, output)  # the verifier did not run
         assert not gr.verifier_decides(command, work, verifier), command
         found = gr.verifier_command(simple_commands(command, bash_path(work)), verifier)
-        assert (found is None) == (command in not_run), command
+        assert (found is None) == (command in (*not_run, *unread)), command
     deciding = (f"cd {shlex.quote(str(tmp_path))} && bash tmp/verify.sh",
                 "timeout 60 bash -x ./tmp/verify.sh 2>&1", "bash tmp/verify.sh > tmp/log",
                 # through a directory and back (audit 2026-11-10 S10-F6, review round 1)
@@ -333,17 +434,50 @@ def test_exit_0_is_the_verifiers_pass_only_when_its_run_decides_the_commands_exi
                 # off, ``--`` ends the options (``-n`` is then a positional
                 # parameter), a later ``+n`` undoes ``-n`` (merge review 2026-11-04)
                 "set +o noexec; bash tmp/verify.sh", "set -- -n; bash tmp/verify.sh",
-                "set -n +n; bash tmp/verify.sh", "set -e +o noexec; bash tmp/verify.sh")
+                "set -n +n; bash tmp/verify.sh", "set -e +o noexec; bash tmp/verify.sh",
+                # no ``exec`` of a program: a bare one behind ``command`` or with a name,
+                # the one ``command -v`` describes, the program of that name ``env`` asks for
+                "command exec 2>&1; bash tmp/verify.sh", "exec -a v; bash tmp/verify.sh",
+                "command -v exec true; bash tmp/verify.sh", "env exec true; bash tmp/verify.sh",
+                # noexec left off, a trap that only cleans up, a function of another name
+                # or behind ``command``, a ``PATH`` with the directory of another ``bash``
+                # appended, a variable whose name only ends in ``PATH``
+                "shopt -uo noexec; bash tmp/verify.sh", "shopt -so nounset; bash tmp/verify.sh",
+                "trap 'rm -f tmp/gone' EXIT; bash tmp/verify.sh", "trap - EXIT; bash tmp/verify.sh",
+                "tidy() { rm -f tmp/gone; }; trap tidy EXIT; bash tmp/verify.sh",
+                "sh() { :; }; bash tmp/verify.sh", "bash() { :; }; command bash tmp/verify.sh",
+                "PATH=$PATH:tmp/fake; bash tmp/verify.sh",
+                'export PATH="${PATH}:tmp/fake" && bash tmp/verify.sh',
+                "PATH=$PATH:tmp/fake KISS_X=1 /bin/sh tmp/verify.sh",
+                "PYTHONPATH=tmp/fake bash tmp/verify.sh", "time bash tmp/verify.sh",
+                f"eval 'true'; bash {named}", "/bin/sh tmp/verify.sh",
+                "export KISS_X=$HOME && bash tmp/verify.sh",
+                "printf '%s\\n' \"$HOME\" > /dev/null; bash tmp/verify.sh",
+                # the options under which a wrapper still runs its command and exits as it
+                # does: ``timeout``'s for its signals and its messages, ``env``'s that take
+                # variables out of the environment
+                "timeout -k 5 60 bash tmp/verify.sh", "env -i bash tmp/verify.sh",
+                "timeout -k5 --kill-after=5 --kill-after 5 -s KILL -sKILL --signal=KILL "
+                "--signal KILL --foreground -v --verbose --preserve-status 1.5m bash tmp/verify.sh",
+                "KISS_W=1 /usr/bin/env -i -u KISS_X -uKISS_Y -- KISS_Z=1 bash tmp/verify.sh",
+                "nice timeout -s KILL 60 env -u KISS_X bash tmp/verify.sh")
     for command in deciding:
         assert gr.verifier_decides(command, work, verifier), command
-        assert _bash(command, tmp_path)[0] == 7, command
+        assert _bash(command, tmp_path)[0] == 7 or not _bash_shows(command), command
     # named by its absolute path, the verifier need not be under the work dir
     # (a sub-agent's is in its private folder)
     outside = f"bash {shlex.quote(verifier)}"
     assert gr.verifier_decides(outside, str(tmp_path / "sub"), verifier)
     assert _bash(outside, tmp_path / "sub")[0] == 7
+    # a shell is its word or in /bin or /usr/bin: ``/usrbash`` is neither (no such
+    # program here, so bash is not asked)
+    assert not gr.verifier_decides("/usrbash tmp/verify.sh", work, verifier)
+    # a NUL in a wrapper's word is no end of it: with the NUL gone this is ``env
+    # -uKISS_X-u --help``, which runs nothing (bash takes no NUL in its ``-c`` text, so
+    # bash is not asked)
+    assert not gr.verifier_decides("env -uKISS_X\0-u --help bash tmp/verify.sh", work, verifier)
     script.write_text("echo RUN; exit 0\n")
-    for command in deciding:
+    for command in filter(_bash_shows, deciding):
         code, output = _bash(command, tmp_path)
         assert code == 0 and ("RUN" in output) == ("> tmp/log" not in command), (command, output)
     # the commands past the scanner's nesting limit are unread and may decide the exit
@@ -426,8 +560,11 @@ def test_a_container_job_report_is_read_by_its_status_line(tmp_path: Path) -> No
     if os.path.isdir(JOBS_DIR) and not os.access(JOBS_DIR, os.W_OK):
         pytest.skip(f"{JOBS_DIR} belongs to another user")
     (tmp_path / "tmp").mkdir()
+    # the verifier runs until tmp/go releases it, however long this process takes to get
+    # there; once this process is gone nobody is left to release it, and it ends by itself
     (tmp_path / "tmp" / "verify.sh").write_text(
-        "for i in $(seq 300); do [ -f tmp/go ] && break; sleep .05; done\nexit $(cat tmp/code)\n")
+        f"until [ -f tmp/go ] || ! kill -0 {os.getpid()} 2>/dev/null; do sleep .05; done\n"
+        "exit $(cat tmp/code)\n")
     jobs = ContainerJobs(functools.partial(_container_bash, tmp_path))
     command, code = "bash tmp/verify.sh", tmp_path / "tmp" / "code"
     bash: dict[str, Any] = {"command": command, "on_timeout": "background", "timeout_seconds": 1}
@@ -463,6 +600,9 @@ def test_a_container_job_report_is_read_by_its_status_line(tmp_path: Path) -> No
     finally:
         (tmp_path / "tmp" / "go").touch()
         for job in jobs.commands:
-            jobs.wait(job, 15)  # ended: it writes no file after these are removed
+            # released, a job ends well within the wait; one that still runs on a stalled
+            # host is killed (a second each): no job writes a file after these are removed
+            if jobs.wait(job, 15) == "running":
+                jobs.bash_job(job, "kill")
             for path in Path(jobs.dirs[job]).glob(f"{job}.*"):
                 path.unlink()

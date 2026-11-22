@@ -34,20 +34,29 @@ travelled to another machine outlives at the next sync.  (A sync treats
 a page and a deletion of the same moment, within the difference it
 measures between the two clocks, as a conflict it names and leaves to a
 person: so it does a restore made that soon after its merge.)
+
+A merge can be undone from its first write on: it records the page it is
+about to write before it writes it, and a restore waits for a merge of
+its memory that is being committed (:func:`_merge_lock`).
 """
 
 import hashlib
 import json
+import re
 import shutil
+import tempfile
 from collections.abc import Iterable
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from kiss.core.file_lock import exclusive_file_lock
 from kiss.core.memoryfield.index import VectorIndex
 from kiss.core.memoryfield.pages import (
     MAX_PAGE_BYTES,
+    MUTATION_LOCK_TIMEOUT,
     PROVENANCE_KEYS,
     MemoryDir,
     Page,
@@ -279,6 +288,47 @@ def _archive_dir(memory: MemoryDir) -> Path:
     return directory
 
 
+def _merge_lock(memory: MemoryDir) -> AbstractContextManager[bool]:
+    """Hold the lock under which the merges of *memory* are committed and restored, one at a time.
+
+    An inter-process file lock beside the memory directory, like the lock
+    of its writes (which a merge takes inside this one, for each page it
+    writes or deletes), held for the whole of :func:`commit` and of
+    :func:`restore`.  A restore that ran while its merge was still
+    deleting the older members found them in place and left them out; the
+    merge then deleted them, and its last record replaced the restore's.
+    Entering raises ``TimeoutError`` when the lock is still held after
+    :data:`~kiss.core.memoryfield.pages.MUTATION_LOCK_TIMEOUT`.
+    """
+    return exclusive_file_lock(Path(f"{memory.root}.merge.lock"), timeout=MUTATION_LOCK_TIMEOUT)
+
+
+def _undated(raw: str) -> str:
+    """Return a SHA-256 of page text *raw* that is the same at any ``updated`` time.
+
+    It is of the text before and after the line of that time, as every
+    write renders it, byte for byte.  The page is not parsed: with a
+    comment added to its frontmatter, or a blank line to its end, it is
+    another page.
+    """
+    around = re.split(r"(?m)^updated: '\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ'$", raw, maxsplit=1)
+    return hashlib.sha256(json.dumps(around).encode()).hexdigest()
+
+
+def _draft(family: Family, body: str, title: str, summary: str, extra: dict[str, str]) -> Page:
+    """Return the page that is to replace *family*, as a write renders it, in no memory.
+
+    Written over a copy of the newest member in a directory of its own.
+    :func:`commit` records it before it writes the page for real, and
+    that write makes this page again, but for the ``updated`` time.
+    """
+    with tempfile.TemporaryDirectory(prefix="kiss-merge-") as scratch:
+        memory = MemoryDir(Path(scratch) / "memory")
+        copy = memory.page_path(family.target.name)
+        atomic_write_text(copy, family.target.raw, create_mode=0o666)
+        return memory.write(family.target.name, body, title=title, summary=summary, extra=extra)
+
+
 def commit(
     memory: MemoryDir, family: Family, body: str, title: str, summary: str, task_id: str = ""
 ) -> Merge:
@@ -299,65 +349,86 @@ def commit(
         PageChangedError: If the newest member is no longer the text
             that was read; no page is written or deleted.
         ValueError: If *body* is empty or the archive directory is a symlink.
-        TimeoutError: If the memory's lock stays held; as above.
+        TimeoutError: If the memory's lock, or the lock of its merges,
+            stays held; as above.
     """
-    time = datetime.now(UTC)
-    folder = _archive_dir(memory) / f"{time:%Y%m%dT%H%M%SZ}-{family.target.name}"
-    folder.mkdir(parents=True)
-    names = [page.name for page in family.pages]
-    for page in family.pages:
-        atomic_write_text(folder / f"{page.name}.md", page.raw, create_mode=0o666)
-    record: dict[str, Any] = {
-        "target": family.target.name,
-        "members": names,
-        "time": f"{time:%Y-%m-%dT%H:%M:%SZ}",
-        "task": task_id,
-    }
-    atomic_write_text(folder / RECORD_FILE, json.dumps(record, indent=2), create_mode=0o666)
-    try:
-        merged = memory.write(
-            family.target.name,
-            body,
-            title=title,
-            summary=summary,
-            extra=merged_provenance(family, task_id),
-            expected=family.target.raw,
-        )
-    except (PageChangedError, ValueError, TimeoutError):
-        # The failures of a write that has written nothing: no merge, no
-        # record of one.  After any other (a Stop landing in the write) the
-        # archive stays, since the page may have been replaced.
-        shutil.rmtree(folder)
-        raise
-    # What restore may replace: the page as long as it is this text.
-    record["written"] = hashlib.sha256(merged.raw.encode("utf-8")).hexdigest()
-    atomic_write_text(folder / RECORD_FILE, json.dumps(record, indent=2), create_mode=0o666)
-    deleted, kept = [], []
-    for page in family.pages[:-1]:
+    with _merge_lock(memory):
+        extra = merged_provenance(family, task_id)
+        draft = _draft(family, body, title, summary, extra)
+        time = datetime.now(UTC)
+        folder = _archive_dir(memory) / f"{time:%Y%m%dT%H%M%SZ}-{family.target.name}"
+        folder.mkdir(parents=True)
+        names = [page.name for page in family.pages]
+        for page in family.pages:
+            atomic_write_text(folder / f"{page.name}.md", page.raw, create_mode=0o666)
+        record: dict[str, Any] = {
+            "target": family.target.name,
+            "members": names,
+            "time": f"{time:%Y-%m-%dT%H:%M:%SZ}",
+            "task": task_id,
+            # Recorded before the page is written: a Stop that lands between
+            # the write and the record of it leaves a merge restore can undo.
+            "draft": _undated(draft.raw),
+        }
+        atomic_write_text(folder / RECORD_FILE, json.dumps(record, indent=2), create_mode=0o666)
         try:
-            memory.delete(page.name, expected=page.raw)
-        except (FileNotFoundError, PageChangedError):
-            kept.append(page.name)
-        else:
-            deleted.append(page.name)
-    record["deleted"] = deleted
-    atomic_write_text(folder / RECORD_FILE, json.dumps(record, indent=2), create_mode=0o666)
-    return Merge(folder.name, merged, deleted, kept)
+            # The draft with its frontmatter: a page that had no ``uuid`` or
+            # ``created`` takes the draft's, not others this write would make.
+            merged = memory.write(
+                family.target.name, draft.raw, extra=extra, expected=family.target.raw
+            )
+        except (PageChangedError, ValueError, TimeoutError):
+            # The failures of a write that has written nothing: no merge, no
+            # record of one.  After any other (a Stop landing in the write) the
+            # archive stays, since the page may have been replaced.
+            shutil.rmtree(folder)
+            raise
+        # What restore may replace: the page as long as it is this text.
+        record["written"] = hashlib.sha256(merged.raw.encode("utf-8")).hexdigest()
+        atomic_write_text(folder / RECORD_FILE, json.dumps(record, indent=2), create_mode=0o666)
+        deleted, kept = [], []
+        for page in family.pages[:-1]:
+            try:
+                memory.delete(page.name, expected=page.raw)
+            except (FileNotFoundError, PageChangedError):
+                kept.append(page.name)
+            else:
+                deleted.append(page.name)
+        record["deleted"] = deleted
+        atomic_write_text(folder / RECORD_FILE, json.dumps(record, indent=2), create_mode=0o666)
+        return Merge(folder.name, merged, deleted, kept)
 
 
 def merges(memory: MemoryDir) -> list[dict[str, Any]]:
     """Return the records of the merges in *memory*'s archive, newest first.
 
     Each record holds ``id`` (the folder :func:`restore` takes),
-    ``target``, ``members``, ``time``, ``task``, ``written`` (the SHA-256
-    of the merged page as written), ``deleted`` (the members the merge
-    deleted; absent when the merge was interrupted before it had deleted
-    them all) and, once undone, ``restored``.
+    ``target``, ``members``, ``time``, ``task``, ``draft`` (a SHA-256 of
+    the merged page as the merge set out to write it, the same at any
+    ``updated`` time), ``written`` (the SHA-256 of the merged page as
+    written; absent when the merge was interrupted before it had recorded
+    its write),
+    ``deleted`` (the members the merge deleted; absent when the merge was
+    interrupted before it had deleted them all) and, once undone,
+    ``restored``.
     """
     records = []
     for file in sorted(_archive_dir(memory).glob(f"*/{RECORD_FILE}"), reverse=True):
         records.append({"id": file.parent.name} | json.loads(file.read_text(encoding="utf-8")))
     return records
+
+
+def _wrote(record: dict[str, Any], stored: str) -> bool:
+    """Whether page text *stored* is the merged page as the merge of *record* wrote it.
+
+    To the byte, by the digest the merge recorded after its write.  A
+    merge stopped before that goes by the page it had set out to write,
+    whatever the time of its writing.
+    """
+    written: str | None = record.get("written")
+    if written is None:
+        return _undated(stored) == record.get("draft")
+    return hashlib.sha256(stored.encode("utf-8")).hexdigest() == written
 
 
 def restore(memory: MemoryDir, merge_id: str) -> tuple[list[str], dict[str, str]]:
@@ -371,7 +442,10 @@ def restore(memory: MemoryDir, merge_id: str) -> tuple[list[str], dict[str, str]
     and nothing written since the merge is touched: a deleted page comes
     back only where no page of its name exists, and the merged page gives
     way to the page it replaced only while it is, byte for byte, what the
-    merge wrote (a line added to it by hand is in no archive).
+    merge wrote (a line added to it by hand is in no archive).  After a
+    merge that was stopped before it had recorded what it wrote, that is
+    the page the merge had set out to write, whatever its ``updated`` time.
+    A merge of the memory that is being committed is waited for.
 
     Args:
         memory: The memory the merge was made in.
@@ -382,36 +456,39 @@ def restore(memory: MemoryDir, merge_id: str) -> tuple[list[str], dict[str, str]
 
     Raises:
         ValueError: If the archive holds no such merge.
+        TimeoutError: If the lock of the memory's merges stays held;
+            nothing is restored.
     """
-    folder = _archive_dir(memory) / merge_id
-    if Path(merge_id).name != merge_id or not (folder / RECORD_FILE).is_file():
-        raise ValueError(f"no merge {merge_id!r} in {_archive_dir(memory)}")
-    record = json.loads((folder / RECORD_FILE).read_text(encoding="utf-8"))
-    restored: list[str] = []
-    skipped: dict[str, str] = {}
-    # Members come oldest first, the target last.
-    for name in [*record.get("deleted", record["members"][:-1]), record["target"]]:
-        frontmatter, body = split_frontmatter(read_page_text(folder / f"{name}.md"))
-        current = _read_existing(memory, [name])
-        stored = current[0].raw if current else ""
-        merged = name == record["target"] and (
-            hashlib.sha256(stored.encode("utf-8")).hexdigest() == record.get("written")
-        )
-        if stored and not merged:
-            skipped[name] = "a page of this name exists that the merge did not write"
-            continue
-        # Every key the page had, and none of the merged page's: an empty
-        # value removes a key, and ``updated`` is the time of this write.
-        extra = {key: "" for key in ("title", "summary", *PROVENANCE_KEYS)}
-        extra |= {key: value for key, value in frontmatter.items() if key != "updated"}
-        extra["verified"] = evidence_time(frontmatter)[1]
-        try:
-            memory.write(name, body, extra=extra, expected=stored)
-        except (PageChangedError, ValueError, TimeoutError) as error:
-            skipped[name] = str(error)
-        else:
-            restored.append(name)
-    if restored:
-        record["restored"] = f"{datetime.now(UTC):%Y-%m-%dT%H:%M:%SZ}"
-        atomic_write_text(folder / RECORD_FILE, json.dumps(record, indent=2), create_mode=0o666)
+    with _merge_lock(memory):
+        folder = _archive_dir(memory) / merge_id
+        if Path(merge_id).name != merge_id or not (folder / RECORD_FILE).is_file():
+            raise ValueError(f"no merge {merge_id!r} in {_archive_dir(memory)}")
+        record = json.loads((folder / RECORD_FILE).read_text(encoding="utf-8"))
+        restored: list[str] = []
+        skipped: dict[str, str] = {}
+        # Members come oldest first, the target last.
+        for name in [*record.get("deleted", record["members"][:-1]), record["target"]]:
+            frontmatter, body = split_frontmatter(read_page_text(folder / f"{name}.md"))
+            current = _read_existing(memory, [name])
+            stored = current[0].raw if current else ""
+            merged = name == record["target"] and _wrote(record, stored)
+            if stored and not merged:
+                skipped[name] = "a page of this name exists that the merge did not write"
+                continue
+            # Every key the page had, and none of the merged page's: an empty
+            # value removes a key, and ``updated`` is the time of this write.
+            extra = {key: "" for key in ("title", "summary", *PROVENANCE_KEYS)}
+            extra |= {key: value for key, value in frontmatter.items() if key != "updated"}
+            extra["verified"] = evidence_time(frontmatter)[1]
+            try:
+                memory.write(name, body, extra=extra, expected=stored)
+            except (PageChangedError, ValueError, TimeoutError) as error:
+                skipped[name] = str(error)
+            else:
+                restored.append(name)
+        if restored:
+            record["restored"] = f"{datetime.now(UTC):%Y-%m-%dT%H:%M:%SZ}"
+            atomic_write_text(
+                folder / RECORD_FILE, json.dumps(record, indent=2), create_mode=0o666
+            )
     return restored, skipped

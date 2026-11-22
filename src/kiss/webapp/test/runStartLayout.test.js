@@ -162,7 +162,6 @@ async function main() {
       description: 'child',
       task_id: 'child-task',
       isSubagentTab: true,
-      isDone: false,
     });
     win._testApi.switchToTab('sub1');
     assert.strictEqual(win._testApi.getActiveTabId(), 'sub1');

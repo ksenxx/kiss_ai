@@ -93,6 +93,9 @@ class ModelInfo:
         # Long-prompt price tiers (OpenRouter ``pricing.overrides``); see
         # _parse_prompt_tiers and calculate_cost.
         self.prompt_tiers = prompt_tiers
+        # Loaded from ``MY_MODELS.json`` alone, a name the catalog does not
+        # list (set by _load_catalog_file; see _loaded_model_info).
+        self.registry_only = False
 
 
 PACKAGE_MODEL_INFO_PATH = Path(__file__).parent / "MODEL_INFO.json"
@@ -295,7 +298,7 @@ must never flock the sidecar through two descriptors at once.
 
 
 @contextlib.contextmanager
-def _my_models_flock() -> Iterator[None]:
+def _my_models_flock() -> Iterator[Path]:
     """Hold the cross-process flock guarding ``MY_MODELS.json`` edits.
 
     A :mod:`kiss.core.file_lock` lock on a sidecar ``.MY_MODELS.json.kiss.lock`` next
@@ -306,16 +309,29 @@ def _my_models_flock() -> Iterator[None]:
     old inode would not exclude a writer that opens the new one.  Same
     technique as ``user_config._api_keys_store_flock``.
 
+    A registry that is a symlink to a file is rewritten through the link
+    (:func:`atomic_write_text`), so the sidecar stands next to that file:
+    two homes linking one registry take one lock, not one each.
+
     Callers must already hold :data:`_MY_MODELS_EDIT_LOCK`.
+
+    Yields:
+        The file the edit reads and rewrites: the registry, or the file
+        its symlink names.  Resolved once, so an edit never reads one
+        file and rewrites another under the first one's lock.
 
     Raises:
         TimeoutError: another process held the sidecar for longer than
             :data:`MY_MODELS_LOCK_TIMEOUT`.
     """
     path = USER_MY_MODELS_PATH
+    if path.is_symlink():
+        real = Path(os.path.realpath(path))
+        if real.is_file():
+            path = real
     lock_path = path.with_name("." + path.name + ".kiss.lock")
     with exclusive_file_lock(lock_path, timeout=MY_MODELS_LOCK_TIMEOUT):
-        yield
+        yield path
 
 
 _CUSTOM_MODEL_DEFAULTS: dict[str, Any] = {
@@ -331,8 +347,10 @@ every entry the settings panel creates carries them.
 """
 
 
-def _read_my_models_file() -> dict[str, Any] | None:
+def _read_my_models_file(path: Path | None = None) -> dict[str, Any] | None:
     """Return the full parsed ``MY_MODELS.json`` object (auto-seeded).
+
+    An edit reads *path*, the file its lock guards (:func:`_my_models_flock`).
 
     Unlike :func:`_read_my_models`, keeps ``_``-prefixed documentation
     keys and non-dict values so a rewrite preserves them byte-for-value.
@@ -346,23 +364,25 @@ def _read_my_models_file() -> dict[str, Any] | None:
     the default provider.
     """
     _seed_my_models_file()
+    path = path or USER_MY_MODELS_PATH
     try:
-        raw = json.loads(read_bytes_waiting_for_writer(USER_MY_MODELS_PATH).decode("utf-8"))
+        raw = json.loads(read_bytes_waiting_for_writer(path).decode("utf-8"))
     except (OSError, ValueError):
-        logger.debug("Unreadable or corrupt %s", USER_MY_MODELS_PATH, exc_info=True)
+        logger.debug("Unreadable or corrupt %s", path, exc_info=True)
         return None
     return raw if isinstance(raw, dict) else None
 
 
-def _write_my_models_file(raw: dict[str, Any]) -> None:
-    """Atomically rewrite ``MY_MODELS.json`` with *raw*.
+def _write_my_models_file(path: Path, raw: dict[str, Any]) -> None:
+    """Atomically rewrite the registry file *path* with *raw*.
 
     Staged in a sibling temp file and ``os.replace``-d into position so
     a concurrent reader (catalog load, another settings panel) never
-    observes a truncated file.
+    observes a truncated file.  *path* is the file the edit's lock
+    guards (:func:`_my_models_flock`).
     """
-    USER_MY_MODELS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_text(USER_MY_MODELS_PATH, json.dumps(raw, indent=2) + "\n")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_text(path, json.dumps(raw, indent=2) + "\n")
 
 
 def list_custom_models() -> list[dict[str, str]]:
@@ -494,8 +514,8 @@ def save_custom_model(
         # them through the rename path.
         return "Original model name must not start with '_'"
     try:
-        with _MY_MODELS_EDIT_LOCK, _my_models_flock():
-            raw = _read_my_models_file()
+        with _MY_MODELS_EDIT_LOCK, _my_models_flock() as path:
+            raw = _read_my_models_file(path)
             if raw is None:
                 return _MY_MODELS_CORRUPT_ERROR
             if original_name not in raw:
@@ -526,7 +546,7 @@ def save_custom_model(
                 else:
                     entry.pop(key, None)
             raw[name] = entry
-            _write_my_models_file(raw)
+            _write_my_models_file(path, raw)
     except TimeoutError as e:
         return str(e)
     return None
@@ -554,14 +574,14 @@ def delete_custom_model(name: str) -> str | None:
     if name.startswith("_"):
         return "Custom model name must not start with '_'"
     try:
-        with _MY_MODELS_EDIT_LOCK, _my_models_flock():
-            raw = _read_my_models_file()
+        with _MY_MODELS_EDIT_LOCK, _my_models_flock() as path:
+            raw = _read_my_models_file(path)
             if raw is None:
                 return _MY_MODELS_CORRUPT_ERROR
             if name not in raw:
                 return None
             del raw[name]
-            _write_my_models_file(raw)
+            _write_my_models_file(path, raw)
     except TimeoutError as e:
         return str(e)
     return None
@@ -1017,6 +1037,8 @@ def _load_catalog_file(catalog_path: Path) -> dict[str, ModelInfo]:
         except (KeyError, TypeError, ValueError):
             logger.warning("Ignoring malformed MY_MODELS.json entry %r", name, exc_info=True)
             del user_entries[name]
+        else:
+            built[name].registry_only = name not in raw
     raw.update(user_entries)
     # Mutates only non-user aliases, so the user entries built above stay current.
     _sync_alias_transport_flags(raw, set(user_entries))
@@ -2198,6 +2220,33 @@ def _strip_provider_prefix(model_name: str) -> str:
     return model_name
 
 
+def _loaded_model_info(name: str, registered: dict[str, Any] | None = None) -> ModelInfo | None:
+    """Return the entry *name* was loaded with, unless its registration is gone.
+
+    An entry loaded from ``MY_MODELS.json`` alone is a custom model, which
+    the settings panel may delete or rename while the daemon runs.  It
+    counts only while the registry, read as it is NOW, still holds the
+    name: the loaded table kept a removed model selectable until the next
+    start, and a task then ran it against the vendor its name routes to.
+    An entry of the catalog, overridden by the registry or not, is the
+    one loaded at start.
+
+    Args:
+        name: A model name.
+        registered: The registry as read by a caller that walks the table
+            (:func:`_read_my_models`); read here when omitted.
+
+    Returns:
+        The loaded :class:`ModelInfo`, or ``None``.
+    """
+    info = MODEL_INFO.get(name)
+    if info is None or not info.registry_only:
+        return info
+    if registered is None:
+        registered = _read_my_models()
+    return info if name in registered else None
+
+
 def is_known_model(model_name: str) -> bool:
     """Whether *model_name* has catalog or ``MY_MODELS.json`` metadata (pricing, context).
 
@@ -2205,12 +2254,37 @@ def is_known_model(model_name: str) -> bool:
         model_name: Name of the model (with or without provider prefix).
 
     Returns:
-        True when :func:`calculate_cost` can price the model.
+        True when the catalog or the registry, as it is now, holds the
+        name: :func:`calculate_cost` then prices the name.  A model built
+        while it was held stays priced by the entry it was built with
+        (:func:`_name_and_info`).
     """
     return _lookup_model_info(model_name) is not None
 
 
-def _lookup_model_info(model_name: str) -> ModelInfo | None:
+def get_model_prices(model_name: str) -> tuple[float, float]:
+    """Return the input and output price of *model_name*, in USD per 1M tokens.
+
+    The base rates of the entry :func:`calculate_cost` bills the name by
+    (the one rule of :func:`_lookup_model_info`: the loaded catalog, else
+    ``MY_MODELS.json`` as it is now), so a price shown for a model is the
+    price a run on it pays.
+
+    Args:
+        model_name: Name of the model (with or without provider prefix).
+
+    Returns:
+        ``(input, output)``; ``(0.0, 0.0)`` for a model without pricing.
+    """
+    info = _lookup_model_info(model_name)
+    if info is None:
+        return 0.0, 0.0
+    return info.input_price_per_1M or 0.0, info.output_price_per_1M or 0.0
+
+
+def _lookup_model_info(
+    model_name: str, registered: dict[str, Any] | None = None
+) -> ModelInfo | None:
     """Return the catalog entry for *model_name*, or ``None`` when unknown.
 
     The one lookup rule shared by :func:`calculate_cost`,
@@ -2225,7 +2299,10 @@ def _lookup_model_info(model_name: str) -> ModelInfo | None:
     custom model saved later would otherwise be unknown to the running
     daemon (no pricing, no context length) until a restart.  Bundled
     entries are never shadowed this way; a registry edit of a bundled
-    name takes effect on the next start, as before.  A prefixed name
+    name takes effect on the next start, as before.  A custom model
+    loaded at import is unknown again once the registry drops its name
+    (:func:`_loaded_model_info`); a model built on it keeps the entry it
+    was built with (:func:`_name_and_info`).  A prefixed name
     registered under itself (``openai/gpt-6-astra`` for a gateway that
     uses that id) is priced by its own entry, hot-added or loaded, not
     by the bundled entry of its stripped form, as the :func:`model`
@@ -2241,16 +2318,19 @@ def _lookup_model_info(model_name: str) -> ModelInfo | None:
 
     Args:
         model_name: Name of the model (with or without provider prefix).
+        registered: The registry as read by a caller that takes several
+            answers from one reading (:func:`model`); read here when
+            omitted.
 
     Returns:
         The matching :class:`ModelInfo`, or ``None``.
     """
-    info = MODEL_INFO.get(model_name)
+    info = _loaded_model_info(model_name, registered)
     if info is not None:
         return info
     bare = bedrock_catalog_name(model_name) or _strip_provider_prefix(model_name)
-    info = MODEL_INFO.get(bare)
-    my_models = _read_my_models()
+    info = _loaded_model_info(bare, registered)
+    my_models = _read_my_models() if registered is None else registered
     key = model_name if model_name in my_models else bare
     entry = my_models.get(key) if info is None or key == model_name else None
     if entry is not None:
@@ -2275,7 +2355,7 @@ def _lookup_model_info(model_name: str) -> ModelInfo | None:
         base = model_name if entry is not None else _strip_thinking_alias(model_name)
         if base == model_name:
             return None
-        info = _lookup_model_info(base)
+        info = _lookup_model_info(base, registered)
         if info is not None and info.thinking is not None:
             info = copy.copy(info)
             info.thinking = None
@@ -2285,7 +2365,39 @@ def _lookup_model_info(model_name: str) -> ModelInfo | None:
     return _scaled_prices(info, bedrock_price_factor(model_name))
 
 
-def _is_registered_endpoint_model(model_name: str) -> bool:
+def _name_and_info(model: str | Model) -> tuple[str, ModelInfo | None]:
+    """Return the name of *model* and the entry it is billed and sized by.
+
+    A registry edit is not a Stop.  A model that is running when the
+    settings panel deletes or renames its entry, or while
+    ``MY_MODELS.json`` cannot be read, still returns answers the provider
+    charges for, at the prices of the endpoint it was built for: it keeps
+    the entry the :func:`model` factory routed it by (:attr:`Model.info`)
+    for as long as it lives, on whichever thread it runs.  A name is
+    looked up in the registration as it is now, so a deleted model is
+    unknown to new work at once, although a model built on it may still
+    be referenced.
+
+    Args:
+        model: A model name (with or without provider prefix), or a model.
+
+    Returns:
+        The name, and its :class:`ModelInfo` or ``None`` when unknown.  A
+        model without an entry (built directly, or under a name unknown
+        then) is looked up by its name.
+    """
+    if isinstance(model, str):
+        return model, _lookup_model_info(model)
+    # Duck-typed model stand-ins may predate the attribute.
+    info: ModelInfo | None = getattr(model, "info", None)
+    if info is None:
+        info = _lookup_model_info(model.model_name)
+    return model.model_name, info
+
+
+def _is_registered_endpoint_model(
+    model_name: str, registered: dict[str, Any] | None = None
+) -> bool:
     """Return whether *model_name* is EXACTLY a ``MY_MODELS.json`` model with an endpoint.
 
     Read live (as :func:`_lookup_model_info` reads the registry), so a
@@ -2293,11 +2405,14 @@ def _is_registered_endpoint_model(model_name: str) -> bool:
 
     Args:
         model_name: The full name as passed to the :func:`model` factory.
+        registered: The registry as the caller read it; read here when omitted.
 
     Returns:
         ``True`` when the registry holds that key with an ``endpoint``.
     """
-    entry = _read_my_models().get(model_name)
+    if registered is None:
+        registered = _read_my_models()
+    entry = registered.get(model_name)
     return entry is not None and bool(_entry_str(entry, "endpoint"))
 
 
@@ -2430,15 +2545,22 @@ def model(
     Raises:
         KISSError: If the model name is not recognized.
     """
+    # One reading of the registry decides the name, the route and the
+    # entry of the model: an edit that lands meanwhile cannot leave a
+    # gateway's id billed at the prices of its bundled twin.
+    registered = _read_my_models()
     bare = _strip_provider_prefix(model_name)
     if (
         bare != model_name
         and not (
             model_config
             and model_config.get("base_url")
-            and _is_registered_endpoint_model(model_name)
+            and _is_registered_endpoint_model(model_name, registered)
         )
-        and (is_known_model(bare) or not is_known_model(model_name))
+        and (
+            _lookup_model_info(bare, registered) is not None
+            or _lookup_model_info(model_name, registered) is None
+        )
     ):
         # A harbor-style ``openai/gpt-6-astra`` is the bundled
         # ``gpt-6-astra`` — unless that exact name is a ``MY_MODELS.json``
@@ -2447,7 +2569,39 @@ def model(
         # prices are what it charges, so neither is replaced by the
         # bundled entry's.
         model_name = bare
-    info = _lookup_model_info(model_name)
+    info = _lookup_model_info(model_name, registered)
+    built = _build_model(
+        model_name, info, registered, model_config, token_callback, thinking_callback
+    )
+    # What the model is billed and sized by from here on (see _name_and_info).
+    built.info = info
+    return built
+
+
+def _build_model(
+    model_name: str,
+    info: ModelInfo | None,
+    registered: dict[str, Any],
+    model_config: dict[str, Any] | None,
+    token_callback: TokenCallback | None,
+    thinking_callback: ThinkingCallback | None,
+) -> Model:
+    """Build the adapter *model_name* routes to: the dispatch of :func:`model`.
+
+    Args:
+        model_name: The name as :func:`model` resolved it.
+        info: Its registration as it is now; ``None`` for an unknown name.
+        registered: The registry as :func:`model` read it.
+        model_config: As for :func:`model`.
+        token_callback: As for :func:`model`.
+        thinking_callback: As for :func:`model`.
+
+    Returns:
+        Model: The adapter instance.
+
+    Raises:
+        KISSError: If no route takes the name.
+    """
     if info is not None and info.is_decisions_supported:
         # Typed-decision models (``"dec": true``) speak a different
         # protocol from every text transport below, so the catalog flag
@@ -2473,7 +2627,11 @@ def model(
         use_v2 = model_config.get("use_responses_api")
         if use_v2 is None:
             vendor = _match_openai_compatible_provider(model_name)
-            if vendor is None and info is not None and _is_registered_endpoint_model(model_name):
+            if (
+                vendor is None
+                and info is not None
+                and _is_registered_endpoint_model(model_name, registered)
+            ):
                 use_v2 = info.use_responses_api
             else:
                 use_v2 = (
@@ -2550,15 +2708,21 @@ def model(
 def get_available_models() -> list[str]:
     """Return model names for which an API key is configured and generation is supported.
 
+    A custom model the registry has dropped since start is left out
+    (:func:`_loaded_model_info`).
+
     Returns:
         list[str]: Sorted list of model name strings that have a configured API key
             and support text generation.
     """
     configured = _configured_providers()
+    registered = _read_my_models()
     return sorted(
         name
         for name, info in MODEL_INFO.items()
-        if info.is_generation_supported and configured.get(get_model_provider(name), False)
+        if info.is_generation_supported
+        and configured.get(get_model_provider(name), False)
+        and _loaded_model_info(name, registered) is not None
     )
 
 
@@ -2622,8 +2786,8 @@ def _output_price(model_name: str) -> float:
     return MODEL_INFO[model_name].output_price_per_1M
 
 
-_ANTHROPIC_DEFAULT_MODEL = "claude-opus-5-5"
-_ANTHROPIC_FAST_MODEL = "claude-sonnet-5-5"
+_ANTHROPIC_DEFAULT_MODEL = "claude-opus-5-5-medium"
+_ANTHROPIC_FAST_MODEL = "claude-haiku-5-5"
 
 
 def registered_bedrock_model(cheapest: bool) -> str | None:
@@ -2631,7 +2795,8 @@ def registered_bedrock_model(cheapest: bool) -> str | None:
 
     The candidates are the catalog's ``bedrock/<id>`` entries: the ids
     the model updater listed in its AWS region plus any the user added
-    under Settings → Custom Models.  Preferred is a Bedrock id of the
+    under Settings → Custom Models (and has not removed since, see
+    :func:`_loaded_model_info`).  Preferred is a Bedrock id of the
     Anthropic default model (:data:`_ANTHROPIC_DEFAULT_MODEL`) or, for
     the fast model, of :data:`_ANTHROPIC_FAST_MODEL`, the cheapest of its
     ids first (the ``global.`` profile, billed at the first-party rate; a
@@ -2648,7 +2813,9 @@ def registered_bedrock_model(cheapest: bool) -> str | None:
     names = sorted(
         name
         for name, info in MODEL_INFO.items()
-        if name.startswith(BEDROCK_PREFIX) and info.is_generation_supported
+        if name.startswith(BEDROCK_PREFIX)
+        and info.is_generation_supported
+        and _loaded_model_info(name) is not None
     )
     if not names:
         return None
@@ -2709,12 +2876,12 @@ def get_fast_model() -> str:
     return _model_for_first_configured_provider(
         {
             "Anthropic": _ANTHROPIC_FAST_MODEL,
-            "OpenAI": "gpt-6-luna",
-            "Gemini": "gemini-3.5-flash-lite",
-            "OpenRouter": "openrouter/anthropic/claude-sonnet-5.5",
+            "OpenAI": "gpt-6.2-luna-medium",
+            "Gemini": "gemini-4-hydrogen-medium",
+            "OpenRouter": "openrouter/anthropic/claude-haiku-5.5-medium",
             "Bedrock": registered_bedrock_model(cheapest=True) or "",
             "Claude Code CLI": "cc/haiku",
-            "Codex CLI": "codex/default",
+            "Codex CLI": "codex/gpt-6-luna",
         }
     )
 
@@ -2730,9 +2897,9 @@ def get_default_model() -> str:
     return _model_for_first_configured_provider(
         {
             "Anthropic": _ANTHROPIC_DEFAULT_MODEL,
-            "OpenAI": "gpt-6.1-sol-medium",
-            "Gemini": "gemini-3.8-flash",
-            "OpenRouter": "openrouter/anthropic/claude-opus-5.5",
+            "OpenAI": "gpt-6.2-sol-medium",
+            "Gemini": "gemini-4-neon-medium",
+            "OpenRouter": "openrouter/anthropic/claude-opus-5.5-medium",
             "Bedrock": registered_bedrock_model(cheapest=False) or "",
             "Claude Code CLI": "cc/opus",
             "Codex CLI": "codex/default",
@@ -2827,7 +2994,7 @@ def _long_context_uplift(model_name: str) -> tuple[int, float, float] | None:
 
 
 def calculate_cost(
-    model_name: str,
+    model_name: str | Model,
     num_input_tokens: int,
     num_output_tokens: int,
     num_cache_read_tokens: int = 0,
@@ -2839,11 +3006,14 @@ def calculate_cost(
     num_image_output_tokens: int = 0,
     *,
     single_request: bool = True,
+    cache_read_only: bool = False,
 ) -> float:
     """Calculates the cost in USD for the given token counts.
 
     Args:
-        model_name: Name of the model (with or without provider prefix).
+        model_name: Name of the model (with or without provider prefix),
+            or the model itself, priced by the entry it was built with
+            (see :func:`_name_and_info`).
         num_input_tokens: Number of non-cached TEXT input tokens (audio
             input tokens already split out).
         num_output_tokens: Number of TEXT output tokens (audio output
@@ -2878,6 +3048,11 @@ def calculate_cost(
             300K-token request from thirty 10K-token ones, so no tier is
             applied to it and every token bills at the short-context
             rates.
+        cache_read_only: Return only the share of that cost the tokens
+            read from cache (text and audio) account for, at the rates
+            the whole request is priced at.  For a provider tier that
+            discounts cached input differently from the rest (Gemini
+            Flex on the models whose cached price it leaves alone).
 
     A catalog entry with ``prompt_tiers`` (OpenRouter's published
     long-prompt prices, see :func:`_parse_prompt_tiers`) is priced by
@@ -2892,7 +3067,7 @@ def calculate_cost(
     Raises:
         KISSError: If positive usage is reported for a model without pricing.
     """
-    info = _lookup_model_info(model_name)
+    model_name, info = _name_and_info(model_name)
     total_tokens = (
         num_input_tokens
         + num_output_tokens
@@ -2965,6 +3140,8 @@ def calculate_cost(
     input_cost = num_input_tokens * input_price
     output_cost = num_output_tokens * output_price
     cache_read_cost = num_cache_read_tokens * cr_price
+    if cache_read_only:
+        return (cache_read_cost + num_audio_cache_read_tokens * audio_cr_price) / 1_000_000
     return (
         input_cost
         + output_cost
@@ -3074,7 +3251,7 @@ def openrouter_twin(model_name: str) -> str | None:
     for key in MODEL_INFO:
         if not key.startswith("openrouter/") or "/~" in key:
             continue
-        if _twin_key(key.rsplit("/", 1)[-1]) == wanted:
+        if _twin_key(key.rsplit("/", 1)[-1]) == wanted and _loaded_model_info(key) is not None:
             if level_suffix:
                 leveled = MODEL_INFO.get(key + level_suffix)
                 if leveled is not None and leveled.alias_of == key:
@@ -3083,42 +3260,45 @@ def openrouter_twin(model_name: str) -> str | None:
     return None
 
 
-def get_max_context_length(model_name: str) -> int:
+def get_max_context_length(model_name: str | Model) -> int:
     """Returns the maximum context length supported by the model.
 
     Args:
-        model_name: Name of the model (with or without provider prefix).
+        model_name: Name of the model (with or without provider prefix),
+            or the model itself (see :func:`_name_and_info`).
     Returns:
         int: Maximum context length in tokens.
     """
-    info = _lookup_model_info(model_name)
+    model_name, info = _name_and_info(model_name)
     if info is None:
         raise KISSError(f"Model '{model_name}' not found in MODEL_INFO")
     return info.context_length
 
 
-def get_cache_discount(model_name: str) -> float | None:
+def get_cache_discount(model_name: str | Model) -> float | None:
     """Return the model's cache-read price as a share of its input price, or ``None``.
 
     Args:
-        model_name: Name of the model (with or without provider prefix).
+        model_name: Name of the model (with or without provider prefix),
+            or the model itself (see :func:`_name_and_info`).
 
     Returns:
         ``cache_read_price_per_1M / input_price_per_1M`` (0.05 for an
         Anthropic model, 0.1 for an OpenAI one), or ``None`` for an
         unknown model or one without both prices.
     """
-    info = _lookup_model_info(model_name)
+    info = _name_and_info(model_name)[1]
     if info is None or not info.input_price_per_1M or info.cache_read_price_per_1M is None:
         return None
     return info.cache_read_price_per_1M / info.input_price_per_1M
 
 
-def get_cache_write_ratio(model_name: str) -> float | None:
+def get_cache_write_ratio(model_name: str | Model) -> float | None:
     """Return how many cache reads one cache write of the model costs, or ``None``.
 
     Args:
-        model_name: Name of the model (with or without provider prefix).
+        model_name: Name of the model (with or without provider prefix),
+            or the model itself (see :func:`_name_and_info`).
 
     Returns:
         ``cache_write_price_per_1M / cache_read_price_per_1M`` (50 for
@@ -3126,7 +3306,7 @@ def get_cache_write_ratio(model_name: str) -> float | None:
         other Claude models), or ``None`` for an unknown model or one
         without both prices.
     """
-    info = _lookup_model_info(model_name)
+    info = _name_and_info(model_name)[1]
     if info is None or not info.cache_read_price_per_1M or info.cache_write_price_per_1M is None:
         return None
     return info.cache_write_price_per_1M / info.cache_read_price_per_1M

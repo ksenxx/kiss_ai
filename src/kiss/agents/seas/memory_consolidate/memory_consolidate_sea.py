@@ -259,7 +259,7 @@ def restore_merge(indexes: dict[str, VectorIndex], merge: str) -> str:
         return f"Error: no memory {memory!r}."
     try:
         restored, skipped = consolidate.restore(index.memory, merge_id)
-    except ValueError as error:
+    except (ValueError, TimeoutError) as error:
         return f"Error: {error}"
     lines = [f"Merge `{merge}`: restored {', '.join(restored) or 'no page'}."]
     lines += [f"- `{name}` not restored: {why}" for name, why in skipped.items()]

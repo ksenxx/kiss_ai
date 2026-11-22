@@ -4,7 +4,7 @@
 # add your name here
 """Report the authentication status of every third-party channel agent.
 
-The right sidebar's "Apps" panel lists each installed channel agent
+The right sidebar's "Connectors" panel lists each installed channel agent
 with a connected / not-connected badge.  Deciding that means importing
 the channel module, building its agent (which loads the credentials
 persisted under ``$KISS_HOME/third_party_agents/``) and asking
@@ -19,7 +19,7 @@ which prints one JSON array on stdout, one object per channel::
     {"name": "slack", "label": "Slack", "authenticated": true, "error": ""}
 
 :func:`probe_statuses` runs that subprocess and parses its answer; it
-serves the sidebar's Apps panel and the ``/recommendations`` agent.
+serves the sidebar's Connectors panel and the ``/recommendations`` agent.
 
 Channels are probed concurrently, each with a deadline: a channel whose
 constructor hangs (a network call, a stuck bridge) is reported with

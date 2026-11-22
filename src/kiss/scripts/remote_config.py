@@ -40,15 +40,18 @@ being new enough to have it.
 
 from __future__ import annotations
 
+import contextlib
 import errno
 import json
 import os
 import secrets
 import shutil
+import stat
 import string
 import sys
 import tempfile
 import time
+from collections.abc import Iterator
 from typing import IO, Any
 
 # Self-contained on purpose (see the module docstring): this file travels
@@ -129,6 +132,95 @@ def _unlock(lock_file: IO[str]) -> None:
         lock_file.seek(0)
         msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)  # pyright: ignore[reportAttributeAccessIssue]
 
+
+@contextlib.contextmanager
+def _locked(lock_path: str) -> Iterator[None]:
+    """Hold the exclusive lock on the file *lock_path*, created when missing, for the block."""
+    with open(lock_path, "w", encoding="utf-8") as lock_file:
+        _lock_exclusive(lock_file)
+        try:
+            yield
+        finally:
+            _unlock(lock_file)
+
+
+def _target_and_locks(path: str) -> tuple[str, dict[str, str]]:
+    """Return the file a deploy writes for *path* and the lock files of that write.
+
+    The file is the one a link names, else *path*: renaming over a link
+    replaces the link, and the file it points at -- the one somebody
+    maintains, and the one the web app follows the link to read -- would
+    keep the settings this is meant to change.
+
+    The locks, by the real path of each, are the ``.config.lock`` files
+    the web app's save_config takes (``kiss.core.user_config``): the one
+    beside the path as *named*, link or not, and the one beside the file
+    itself, which a writer that reaches the file by another path holds
+    too.  Both under one real path are one lock.  A link into a
+    directory that does not exist has no second lock yet: nobody holds
+    one there, and :func:`_config_locks` takes it as it makes the
+    directory.
+    """
+    named = os.path.join(os.path.dirname(path) or ".", ".config.lock")
+    lock_paths = {os.path.realpath(named): named}
+    target = path
+    if os.path.islink(path):
+        target = os.path.realpath(path)
+        if os.path.isdir(os.path.dirname(target)):
+            beside = os.path.join(os.path.dirname(target), ".config.lock")
+            lock_paths.setdefault(os.path.realpath(beside), beside)
+    return target, lock_paths
+
+
+@contextlib.contextmanager
+def _config_locks(path: str) -> Iterator[str]:
+    """Hold the locks of one load-modify-replace of the configuration *path*.
+
+    Yields the file to read and to replace (:func:`_target_and_locks`).
+    The locks are taken in the order of their real paths, as save_config
+    takes them, so a deploy and a settings save never wait for each
+    other.  That order may put the lock beside the linked file first, so
+    the link is read before any lock is held; it is read again once they
+    all are, and when it names another file by then (save_config
+    replaces a link whose target is gone with a regular file) the locks
+    are given up and taken anew for that file, once.
+
+    A link into a directory that was not there had no lock beside the
+    file among those waited for.  The directory is made with the lock
+    beside the link held, where the link is known to name it still, and
+    the lock in it is taken at once, without a wait: the read and the
+    replace then hold it like any other, against a writer whose own
+    file the linked one is.  When such a writer has it already, the
+    locks are given up and taken anew in their order as well.  Whether
+    that lock is held decides, not whether the directory is there by
+    now: such a writer may have made it a moment ago.
+
+    Raises:
+        TimeoutError: When another process still holds a lock after
+            :data:`LOCK_TIMEOUT` seconds, or the locks were not those of
+            the file *path* names after the second wait either.
+    """
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    for _ in range(2):
+        target, lock_paths = _target_and_locks(path)
+        with contextlib.ExitStack() as locks:
+            for real in sorted(lock_paths):
+                locks.enter_context(_locked(lock_paths[real]))
+            if _target_and_locks(path) != (target, lock_paths):
+                continue
+            directory = os.path.dirname(target) or "."
+            beside = os.path.join(directory, ".config.lock")
+            if os.path.realpath(beside) not in lock_paths:
+                os.makedirs(directory, exist_ok=True)
+                lock_file = locks.enter_context(open(beside, "w", encoding="utf-8"))
+                if not _try_lock(lock_file):
+                    continue
+                locks.callback(_unlock, lock_file)
+            yield target
+            return
+    raise TimeoutError(f"{path} named another file after each wait for its locks")
+
+
 PASSWORD_LENGTH = 20
 PASSWORD_ALPHABET = string.ascii_letters + string.digits
 
@@ -142,6 +234,11 @@ def new_password() -> str:
     return "".join(secrets.choice(PASSWORD_ALPHABET) for _ in range(PASSWORD_LENGTH))
 
 
+def _open_without_waiting(path: str, flags: int) -> int:
+    """Opener for ``open``: a named pipe nobody writes to opens at once instead of never."""
+    return os.open(path, flags | getattr(os, "O_NONBLOCK", 0))
+
+
 def load_config(path: str) -> dict[str, Any]:
     """Read a configuration file, keeping an unusable one as a backup.
 
@@ -153,19 +250,28 @@ def load_config(path: str) -> dict[str, Any]:
         no file or its content cannot be used.
 
     Raises:
-        OSError: If an unusable file could not be kept.  Writing a fresh
-            configuration over the only copy of settings that took a
-            while to get right is worse than stopping the deploy.
+        OSError: If the path names something other than a regular file
+            (a named pipe, a device: nothing to read, and nothing to
+            keep), or an unusable file could not be kept.  Writing a
+            fresh configuration over the only copy of settings that took
+            a while to get right is worse than stopping the deploy.
     """
     if not os.path.exists(path):
         return {}
     reason = ""
     loaded: Any = None
+    regular = True
     try:
-        with open(path, encoding="utf-8") as handle:
-            loaded = json.load(handle)
+        # What was opened is what is examined: a check of the path before a
+        # plain open would leave a pipe put there in between to wait on.
+        with open(path, encoding="utf-8", opener=_open_without_waiting) as handle:
+            regular = stat.S_ISREG(os.fstat(handle.fileno()).st_mode)
+            if regular:
+                loaded = json.load(handle)
     except (OSError, ValueError) as exc:
         reason = str(exc)
+    if not regular:
+        raise OSError(errno.EINVAL, "not a regular file", path)
     if not reason and isinstance(loaded, dict):
         return loaded
     # Valid json that is not an object is as unusable as json that does not
@@ -193,61 +299,41 @@ def configure(path: str, work_dir: str, password: str = "") -> str:
 
     Raises:
         OSError: When the file cannot be read, kept or written, or (a
-            ``TimeoutError``) when another writer still holds its lock
-            after :data:`LOCK_TIMEOUT` seconds.
+            ``TimeoutError``) when its locks could not be had within
+            :data:`LOCK_TIMEOUT` seconds (:func:`_config_locks`).
     """
-    # The lock is keyed to the path as *named* -- the web app's save_config
-    # flocks ``.config.lock`` beside the ``config.json`` it was told about,
-    # link or not -- so it must be derived BEFORE the link is resolved:
-    # locking beside the link's target (say ``~/dotfiles/.config.lock``)
-    # while the web app locks ``~/.kiss/.config.lock`` would give two
-    # writers two different locks and no mutual exclusion at all.
-    lock_directory = os.path.dirname(path) or "."
-    # Renaming over a link replaces the link; the file it points at -- the one
-    # somebody maintains, and the one the web app follows the link to read --
-    # would keep the settings this is meant to change.  So the real file is
-    # what gets read, backed up and written.
-    if os.path.islink(path):
-        path = os.path.realpath(path)
-    directory = os.path.dirname(path) or "."
-    os.makedirs(lock_directory, exist_ok=True)
-    os.makedirs(directory, exist_ok=True)
-    # The load-modify-replace runs under the same ``.config.lock`` flock
+    # The load-modify-replace runs under the same ``.config.lock`` flocks
     # the web app's save_config takes for this file, so a deploy and a
     # settings save (or two concurrent deploys) serialize instead of the
     # later replace silently discarding the earlier writer's changes.
-    with open(
-        os.path.join(lock_directory, ".config.lock"), "w", encoding="utf-8"
-    ) as lock_file:
-        _lock_exclusive(lock_file)
+    # The real file is what gets read, backed up and written.
+    with _config_locks(path) as path:
+        directory = os.path.dirname(path) or "."
+        config = load_config(path)
+        configured = config.get("remote_password")
+        chosen = password or (configured if isinstance(configured, str) else "")
+        chosen = chosen or new_password()
+        config["remote_password"] = chosen
+        config["work_dir"] = work_dir
+        # mkstemp gives every writer its own staging file; a fixed
+        # name would let two concurrent runs truncate and publish
+        # each other's half-written JSON.  It is created readable by
+        # its owner only, as the file holding the password must be.
+        fd, temporary = tempfile.mkstemp(
+            prefix=os.path.basename(path) + ".sorcar-new-", dir=directory
+        )
         try:
-            config = load_config(path)
-            configured = config.get("remote_password")
-            chosen = password or (configured if isinstance(configured, str) else "")
-            chosen = chosen or new_password()
-            config["remote_password"] = chosen
-            config["work_dir"] = work_dir
-            # mkstemp gives every writer its own staging file; a fixed
-            # name would let two concurrent runs truncate and publish
-            # each other's half-written JSON.  It is created readable by
-            # its owner only, as the file holding the password must be.
-            fd, temporary = tempfile.mkstemp(
-                prefix=os.path.basename(path) + ".sorcar-new-", dir=directory
-            )
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(config, handle, indent=2)
+                handle.flush()
+                os.fsync(handle.fileno())
+            _replace_waiting_for_readers(temporary, path)
+        except BaseException:
             try:
-                with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                    json.dump(config, handle, indent=2)
-                    handle.flush()
-                    os.fsync(handle.fileno())
-                _replace_waiting_for_readers(temporary, path)
-            except BaseException:
-                try:
-                    os.unlink(temporary)
-                except OSError:
-                    pass
-                raise
-        finally:
-            _unlock(lock_file)
+                os.unlink(temporary)
+            except OSError:
+                pass
+            raise
     return chosen
 
 

@@ -21,12 +21,11 @@ Spec
    history tab should only show parent tasks.
 
 3. ``AgentServer._replay_session``, when the loaded row carries an
-   ``extra.subagent`` blob:
+   ``extra.subagent`` blob and its sub-agent still runs:
 
    a. Broadcasts ``openSubagentTab`` for the freshly allocated tab
       with ``description`` derived from the row's own ``task``
-      column and ``isDone`` derived from the agent-state registry's
-      knowledge of the sub-agent's own task id.
+      column.
 
    b. Never steals the parent's running state — sub-agents share
       the parent's chat_id but run as threads inside the parent's
@@ -172,10 +171,18 @@ class TestReplaySessionOpensSubagentTab:
         )
         server, events = _make_server()
         new_tab_id = "tab-history-click"
-
-        server._replay_session(
-            chat_id=chat_id, tab_id=new_tab_id, task_id=task_id,
+        running = agent_state.AgentState(
+            task_id, chat_id=chat_id, tab_id=f"owner-{task_id}", parent_task_id=parent_id,
+            server_owned=True, is_task_active=True,
         )
+        agent_state.register(running)
+
+        try:
+            server._replay_session(
+                chat_id=chat_id, tab_id=new_tab_id, task_id=task_id,
+            )
+        finally:
+            agent_state.unregister(task_id, running)
 
         opens = [e for e in events if e.get("type") == "openSubagentTab"]
         assert len(opens) == 1, f"events={events}"
@@ -183,7 +190,6 @@ class TestReplaySessionOpensSubagentTab:
         assert op["tab_id"] == new_tab_id
         assert op["isSubagentTab"] is True
         assert op["description"] == "Sub-task A"
-        assert op["isDone"] is True
 
         replays = [e for e in events if e.get("type") == "task_events"]
         assert len(replays) == 1

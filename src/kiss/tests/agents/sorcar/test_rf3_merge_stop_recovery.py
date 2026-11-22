@@ -20,16 +20,26 @@ asynchronous ``KeyboardInterrupt`` (``PyThreadState_SetAsyncExc``):
   (:class:`TestStopDuringSquashApply`);
 * retiring the worktree must keep the ``git stash pop`` instructions of
   an interrupted merge (:class:`TestRetirementKeepsRecoveryWarning`).
+
+The steps that follow the squash commit (the stash pop, the branch's
+deletion) are finished when a Stop cuts them
+(:class:`TestStopAfterTheSquashLanded`, audit 2026-11-21 GW1 F2 and F3).
+The message of a failed merge, which alone names the stash it kept,
+outlives a Stop in the re-attach that follows it
+(:class:`TestStopDuringTheReattach`, audit 2026-11-21 GW2 N1).
 """
 
 from __future__ import annotations
 
+import functools
 import shutil
 import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Callable
 from pathlib import Path
+from types import CodeType
 from typing import Any
 
 import pytest
@@ -43,9 +53,15 @@ from kiss.tests.agents.sorcar.test_audit1020_merge_stop_stash import (
 )
 from kiss.tests.conftest import posix_only
 from kiss.tests.lock_injection import inject
+from kiss.tests.server.pause import Pause, Pauses
 
 AGENT_EDIT = "a\nB-agent\nc\n"
 _SH_HOOKS = posix_only("the lingering git hooks are sh scripts")
+
+
+def _git_call(prefix: tuple[str, ...], frame_locals: dict[str, Any]) -> bool:
+    """A :class:`Pause` matcher: the call whose ``args`` start with *prefix* (any, when empty)."""
+    return bool(frame_locals.get("args", ())[: len(prefix)] == prefix)
 
 
 def _install_hook(repo: Path, hooks: Path, name: str, body: str) -> None:
@@ -103,6 +119,30 @@ class _MergeStopHarness:
         if before_stop is not None:
             before_stop()
         assert inject(merger) == 1
+        merger.join(timeout=30)
+        assert not merger.is_alive()
+        assert isinstance(merger.raised, KeyboardInterrupt), repr(merger.raised)
+
+    def _merge_stopped_at(
+        self, *git_args: str, code: CodeType = _git.__code__,
+        before_stop: Callable[[], object] | None = None,
+        merge: Callable[[], object] | None = None,
+    ) -> None:
+        """Run the merge on a thread and inject the Stop at the entry of a call it makes.
+
+        Args:
+            git_args: The first arguments of the git call to stop at.
+            code: The function to stop at, at its first call, instead of ``_git``.
+            before_stop: Optional callable run just before the Stop.
+            merge: The merge to run instead of ``agent.merge``.
+        """
+        merger = _MergeThread(merge or self.agent.merge)
+        with Pause(code, functools.partial(_git_call, git_args)) as held:
+            merger.start()
+            assert held.paused.wait(30), f"the merge never ran git {git_args}: {merger.raised!r}"
+            if before_stop is not None:
+                before_stop()
+            assert inject(merger) == 1
         merger.join(timeout=30)
         assert not merger.is_alive()
         assert isinstance(merger.raised, KeyboardInterrupt), repr(merger.raised)
@@ -268,25 +308,99 @@ class TestUserStashDuringMerge(_MergeStopHarness):
 
 @_SH_HOOKS
 class TestStopDuringSquashApply(_MergeStopHarness):
-    """A Stop between ``merge --squash`` and its commit leaves main's index clean."""
+    """A Stop between the squash being staged and its commit leaves main's index clean."""
 
     def test_no_baseline_squash_is_rolled_back(self) -> None:
         assert self.wt.baseline_commit is None  # main was clean at create_worktree
         (self.repo / "notes.txt").write_text(USER_NOTES)
-        # Fires when ``merge --squash`` has written the index with the
-        # agent's edit staged, and lingers there.
+        # Fires when the squash has written the index with the agent's
+        # edit staged, and lingers there.  The index tells the moment,
+        # not the command that wrote it: the squash is prepared apart
+        # and published, no ``git merge --squash`` runs in the checkout.
         _install_hook(
             self.repo,
             self.hooks,
             "post-index-change",
-            'case "$(ps -o args= -p $PPID)" in'
-            f" *merge*--squash*) touch {self.ready}; sleep 0.5;; esac",
+            'case "$(git diff --cached --diff-filter=M --name-only)" in'
+            f" f.txt) touch {self.ready}; sleep 0.5;; esac",
         )
 
         self._merge_stopped_when(self.ready.exists)
 
         self._assert_main_untouched()
         assert self.agent._merge_conflict_warning is None
+
+
+class TestStopAfterTheSquashLanded(_MergeStopHarness):
+    """A Stop in a step that follows the squash commit has that step finished.
+
+    The stash pop and the branch's deletion are safe to repeat.  Cut
+    by a Stop, the pop left the user's notes in ``git stash`` with no
+    warning (and the retry said "Successfully merged" without them);
+    a branch deleted while its task stayed pending made the retry
+    report a merge conflict.
+    """
+
+    @pytest.mark.parametrize(
+        ("code", "git_args", "pending"),
+        [
+            (_git.__code__, ("stash", "apply"), True),
+            (GitWorktreeOps._drop_stash.__code__, (), True),  # before the drop's thread starts
+            (_git.__code__, ("stash", "drop"), True),  # on that thread: raised as the pop ends
+            (_git.__code__, ("config", "--remove-section"), False),  # ``git branch -D`` has run
+        ],
+        ids=["stash-apply", "drop-entry", "stash-drop", "branch-config"],
+    )
+    def test_the_step_the_stop_cut_is_finished(
+        self, code: CodeType, git_args: tuple[str, ...], pending: bool,
+    ) -> None:
+        notes = self.repo / "notes.txt"
+        notes.write_text(USER_NOTES)
+
+        self._merge_stopped_at(*git_args, code=code)
+
+        assert (self.repo / "f.txt").read_text() == AGENT_EDIT
+        assert GitWorktreeOps.status_porcelain(self.repo) == "?? notes.txt"
+        assert notes.read_text() == USER_NOTES
+        assert _git("stash", "list", cwd=self.repo).stdout == ""
+        assert self.agent._merge_conflict_warning is None
+        # Pending with its branch, which a retry deletes, or neither.
+        assert bool(self.agent._wts) == pending
+        assert GitWorktreeOps.branch_exists(self.repo, self.wt.branch) == pending
+        if pending:
+            assert "Successfully merged" in self.agent.merge()
+            assert GitWorktreeOps.status_porcelain(self.repo) == "?? notes.txt"
+        assert not self.agent._wts
+        assert GitWorktreeOps.load_original_branch(self.repo, self.wt.branch) is None
+
+    def test_a_pop_that_cannot_be_finished_is_named(self) -> None:
+        notes = self.repo / "notes.txt"
+        notes.write_text(USER_NOTES)
+
+        # A file appears where the stash would put the notes: git refuses the pop.
+        self._merge_stopped_at(
+            "stash", "apply", before_stop=functools.partial(notes.write_text, "intruder\n"),
+        )
+
+        assert (self.repo / "f.txt").read_text() == AGENT_EDIT
+        assert "kiss: auto-stash before merge" in _git("stash", "list", cwd=self.repo).stdout
+        assert "git stash pop" in (self.agent._merge_conflict_warning or "")
+
+    def test_the_warnings_of_the_merge_outlive_a_stop_in_the_cleanup(self) -> None:
+        # The user's edit of the line the task changed: the pop conflicts.
+        (self.repo / "f.txt").write_text("a\nB-user\nc\n")
+        # Another git's lock on the branch: it cannot be deleted.
+        lock = self.repo / ".git" / "refs" / "heads" / f"{self.wt.branch}.lock"
+        lock.parent.mkdir(parents=True, exist_ok=True)
+
+        self._merge_stopped_at("branch", "-D", before_stop=lock.touch)
+
+        warning = self.agent._merge_conflict_warning or ""
+        assert "kiss: auto-stash before merge" in _git("stash", "list", cwd=self.repo).stdout
+        assert "git stash pop" in warning
+        assert GitWorktreeOps.branch_exists(self.repo, self.wt.branch)
+        assert f"git branch -D {self.wt.branch}" in warning
+        assert not self.agent._wts
 
 
 @_SH_HOOKS
@@ -317,3 +431,44 @@ class TestRetirementKeepsRecoveryWarning(_MergeStopHarness):
         kept = self.agent._merge_conflict_warning or ""
         assert "git stash pop" in kept
         assert f"committed to branch '{self.wt.branch}'" in kept
+
+
+@_SH_HOOKS
+class TestStopDuringTheReattach(_MergeStopHarness):
+    """A Stop while a failed merge's worktree is checked out again keeps that merge's message.
+
+    The stash of a failed merge is kept on purpose, and only the message
+    ``commit_and_merge`` returns said so: stopped in the
+    ``git worktree add`` that follows the merge, the tool said nothing.
+    """
+
+    def test_the_message_of_the_failed_merge_is_queued(self) -> None:
+        (self.repo / "notes.txt").write_text(USER_NOTES)
+        _install_hook(self.repo, self.hooks, "pre-commit", "exit 1")  # no squash commit
+
+        self._merge_stopped_at("worktree", "add", merge=self.agent.commit_and_merge)
+
+        assert "kiss: auto-stash before merge" in _git("stash", "list", cwd=self.repo).stdout
+        warning = self.agent._merge_conflict_warning or ""
+        assert f"Merge of '{self.wt.branch}'" in warning and "git stash pop" in warning
+
+    def test_a_merge_the_stop_cut_as_well_has_no_message_to_queue(self) -> None:
+        (self.repo / "notes.txt").write_text(USER_NOTES)
+        # The stop watchdog injects again while the thread lives: into
+        # the merge, nothing stashed yet, then into its re-attach.
+        stops = [
+            Pause(_git.__code__, functools.partial(_git_call, git_args))
+            for git_args in (("stash", "push"), ("worktree", "add"))
+        ]
+        merger = _MergeThread(self.agent.commit_and_merge)
+        with Pauses(*stops):
+            merger.start()
+            for held in stops:
+                assert held.paused.wait(30), f"a Stop's git call never ran: {merger.raised!r}"
+                assert inject(merger) == 1
+                held.release()
+        merger.join(timeout=30)
+        assert isinstance(merger.raised, KeyboardInterrupt), repr(merger.raised)
+
+        self._assert_main_untouched()
+        assert self.agent._merge_conflict_warning is None

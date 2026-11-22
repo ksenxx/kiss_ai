@@ -44,6 +44,7 @@ from kiss.core import processes, stop_signal
 from kiss.core.models import model as model_module
 from kiss.core.models.model import _CLIProcess
 from kiss.tests.conftest import posix_only
+from kiss.tests.lock_injection import stop_as_it_takes_its_lock, stranded_threads
 from kiss.tests.server.pause import Pause, Pauses
 
 _set_async_exc = ctypes.pythonapi.PyThreadState_SetAsyncExc
@@ -470,13 +471,27 @@ def test_a_stop_inside_the_stdout_reader_start_does_not_hang_cleanup(tmp_path: P
     outcome: dict[str, BaseException] = {}
 
     def stop_as_the_reader_start_returns(frame: FrameType, event: str, arg: Any) -> Any:
-        """Raise the Stop as the first ``Thread.start()`` after the spawn is about to return."""
-        if event == "return" and frame.f_code is threading.Thread.start.__code__:
+        """Raise the Stop as the stdout reader's ``Thread.start()`` is about to return.
+
+        Not before the reader took its pipe: the spawn helper's ``start()``
+        returns first, with no reader for the abort to leave a pipe to.
+        """
+        if (
+            event == "return"
+            and frame.f_code is threading.Thread.start.__code__
+            and frame.f_locals["self"].name == "cli-stdout-drain"
+        ):
             sys.settrace(None)
+            starter = frame.f_back
+            while starter is not None and starter.f_code is not _CLIProcess._start_reader.__code__:
+                starter = starter.f_back
+            assert starter is not None
+            reading = starter.f_locals["self"]._reading
             deadline = time.monotonic() + 30
-            while not marker.exists() and time.monotonic() < deadline:
+            while not (marker.exists() and reading) and time.monotonic() < deadline:
                 time.sleep(0.01)
             assert marker.exists(), "the child never started its grandchild"
+            assert reading, "the reader never took its pipe"
             raise KeyboardInterrupt("Stop inside the stdout reader's start()")
         return stop_as_the_reader_start_returns
 
@@ -500,6 +515,107 @@ def test_a_stop_inside_the_stdout_reader_start_does_not_hang_cleanup(tmp_path: P
     assert not worker.is_alive()
     assert returned_while_the_grandchild_held_stdout, "cleanup blocked closing the held pipe"
     assert isinstance(outcome.get("error"), KeyboardInterrupt)
+
+
+@posix_only("the grandchild outlives the child's group in its own POSIX session")
+@pytest.mark.parametrize(
+    ("stream", "alive"),
+    [("stdout", False), ("stderr", False), ("stdout", True)],
+    ids=["stdout", "stderr", "stdout-alive"],
+)
+def test_a_reader_reaching_its_pipe_as_the_abort_closes_it_does_not_hang_cleanup(
+    tmp_path: Path, stream: str, alive: bool
+) -> None:
+    """A Stop inside a reader's ``start()`` may leave it spawned and not alive yet.
+
+    The abort took such a reader for one that never started and closed
+    its pipe.  Coming alive between that check and the close, the reader
+    parked in ``read(2)``, and the close waited on its buffer lock for as
+    long as a grandchild kept the pipe open.  The schedule: the reader is
+    held at its bootstrap, the Stop lands as ``start()`` begins to wait
+    for it, and it is let go as the abort calls ``close()`` on its pipe.
+
+    A reader that is alive when the Stop lands (before the next reader
+    is started) but has not taken its pipe is no different: its pipe is
+    closed, and it never reads.
+    """
+    marker = tmp_path / "grandchild.pid"
+    unheld = {"stdout": "stderr", "stderr": "stdout"}[stream]
+    child = [sys.executable, "-c", _PIPE_HOLDER_CHILD.replace("stderr=", f"{unheld}="), str(marker)]
+    name = f"cli-{stream}-drain"
+    readers: list[threading.Thread] = []
+    spawned: list[subprocess.Popen[str]] = []
+    closing = threading.Event()
+    close = threading.Event()
+    outcome: dict[str, BaseException] = {}
+
+    def the_reader(frame_locals: dict[str, Any]) -> bool:
+        """Hold the reader at its bootstrap, which makes it alive, or as it takes its pipe."""
+        thread = threading.current_thread() if alive else frame_locals["self"]
+        if thread.name != name:
+            return False
+        readers.append(thread)
+        return True
+
+    def the_task(frame_locals: dict[str, Any]) -> bool:
+        """Hold the task as ``start()`` begins to wait for the reader, or before the next one."""
+        if alive:
+            return bool(frame_locals["suffix"] == "stderr")
+        on_the_task = threading.current_thread() is task
+        return on_the_task and any(thread.name == name for thread in threading.enumerate())
+
+    def hold_the_close(frame: FrameType, event: str, arg: Any) -> None:
+        """Hold the abort as it calls ``close()`` on the reader's pipe."""
+        if event == "c_call" and frame.f_code is _CLIProcess._abort_start.__code__:
+            proc = frame.f_locals["self"]._proc
+            if arg.__name__ == "close" and arg.__self__ is getattr(proc, stream):
+                spawned.append(proc)
+                closing.set()
+                close.wait(60)
+
+    def construct() -> None:
+        sys.setprofile(hold_the_close)
+        try:
+            _CLIProcess(child, "probe", 60)
+        except BaseException as exc:
+            outcome["error"] = exc
+        finally:
+            sys.setprofile(None)
+
+    bootstrap = threading.Thread._bootstrap_inner.__code__  # type: ignore[attr-defined]
+    pending = Pause(_CLIProcess._owns_pipe.__code__ if alive else bootstrap, the_reader)
+    start = _CLIProcess._start_reader if alive else threading.Event.wait
+    starting = Pause(start.__code__, the_task)
+    task = threading.Thread(target=construct, daemon=True, name="interrupted-constructor")
+    try:
+        with Pauses(pending, starting):
+            task.start()
+            assert starting.paused.wait(30) and pending.paused.wait(30), "no reader was started"
+            deadline = time.monotonic() + 30
+            while not marker.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert marker.exists(), "the child never started its grandchild"
+            _set_async_exc(task.ident or 0, ctypes.py_object(KeyboardInterrupt))
+            starting.release()
+            assert closing.wait(30), "the abort never came to close the reader's pipe"
+            pending.release()
+            # The reader goes on: it leaves its pipe alone, or parks in read(2).
+            time.sleep(0.5)
+            close.set()
+            task.join(timeout=10)
+            returned_while_the_grandchild_held_the_pipe = not task.is_alive()
+    finally:
+        # EOF for a parked reader, which also frees a cleanup stuck on the pipe.
+        if marker.exists():
+            os.kill(int(marker.read_text()), signal.SIGKILL)
+    task.join(timeout=30)
+    assert not task.is_alive()
+    assert returned_while_the_grandchild_held_the_pipe, "cleanup blocked closing the held pipe"
+    assert isinstance(outcome.get("error"), KeyboardInterrupt)
+    (proc,) = spawned
+    readers[0].join(timeout=30)
+    assert not readers[0].is_alive()
+    assert [pipe.closed for pipe in (proc.stdin, proc.stdout, proc.stderr) if pipe] == [True] * 3
 
 
 @pytest.mark.parametrize("after_the_reap", [False, True], ids=["before-the-kill", "after-the-reap"])
@@ -571,3 +687,45 @@ def test_a_second_stop_during_the_start_abort_still_ends_the_child(after_the_rea
             child.wait(timeout=30)
         for pipe in (child.stdin, child.stdout, child.stderr):
             pipe.close()
+
+
+@pytest.mark.parametrize(
+    "under",
+    [
+        (threading.Thread.start, _CLIProcess.__init__),
+        (_CLIProcess.__init__,),
+        (threading.Thread.start, _CLIProcess._start_reader),
+    ],
+    ids=["spawner-start", "spawn-wait", "reader-start"],
+)
+def test_a_stop_as_a_wait_of_the_start_takes_its_lock_strands_nothing(
+    under: tuple[Any, ...],
+) -> None:
+    """A Stop landing where a wait of the start has taken its lock is raised once the wait is over.
+
+    The starts of the spawn helper and of a reader end in a wait for the
+    thread to come up, and the constructor waits for the spawn in slices:
+    each enters a ``threading.Condition``, which leaves its lock held when
+    the Stop is raised as ``__enter__`` returns (gh-74174).  The started
+    thread then never ran (it blocks setting the event the lock belongs
+    to), and the abort's own wait for the spawn blocked on the lock the
+    constructor had left held: the stopped turn never ended.
+    """
+    outcome: list[BaseException] = []
+
+    def construct() -> None:
+        sys.setprofile(stop_as_it_takes_its_lock(threading.Event.wait, *under))
+        try:
+            _CLIProcess(_CHILD, "probe", 60)
+        except BaseException as exc:
+            outcome.append(exc)
+        finally:
+            sys.setprofile(None)
+
+    before = threading.enumerate()
+    worker = threading.Thread(target=construct, daemon=True, name="interrupted-constructor")
+    worker.start()
+    worker.join(timeout=20)
+    assert not worker.is_alive(), "the abort blocked on the lock the Stop left held"
+    assert [type(exc) for exc in outcome] == [KeyboardInterrupt]
+    assert stranded_threads(before) == []

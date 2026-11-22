@@ -11,18 +11,13 @@ integration test is also picked up by ``uv run pytest``.
 
 Invariant under test (chat page, ``media/main.js``)
 ------------------------------------------------------
-A ``run_agent`` dispatch's sub-agent tab behaves exactly like a
-``run_parallel`` sub-task's: ``subagentDone`` closes it, the tool-call
-panel collapses once the fan-out is complete (for ``run_agent`` when
-its ``tool_result`` arrives, since a dispatch may spawn none, one, or
-several children in sequence), the daemon's re-announce of the finished
-child on every parent replay (``openSubagentTab {isDone: true,
-startTs}``, sent on each page ``ready``) is attributed to the call
-that was running when the child started and opens no tab, and
-expanding the panel is what brings the child's transcript back.  Before
-the fix the ``run_agent`` panel was not a fan-out panel, so every
-reconnect re-opened the finished child's tab — the tab looked like it
-never closed.
+A ``run_agent`` dispatch's sub-agent tab lives and dies exactly like a
+``run_parallel`` sub-task's: the tab opens when the child starts and
+``subagentDone`` closes it, a client that connects while the parent
+runs shows the running child's tab, and a replay of the finished
+parent opens no tab for a finished child.  The page ties no tab to a
+tool-call panel; the share export puts each child under the panel of
+the call that was running when the child started.
 """
 
 from __future__ import annotations

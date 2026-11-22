@@ -5,12 +5,10 @@
 """E2E: a running sub-agent's tab is announced to EVERY client, and closed
 on every client once the sub-agent is over.
 
-The invariant (the user's ``AGENTS.md`` under the daemon home, ``~/.s10s/``)::
-
-    Across all surfaces of KISS Sorcar you must show the same tabs.
-    If a subagent is running, its tab must be open unless the user has
-    closed the tab.  A subagent tab must be closed as soon as the
-    subagent finishes its task.
+The invariant: a sub-agent's tab is open on a page exactly while the
+sub-agent runs.  The daemon announces a sub-agent only while it runs
+and tells every page when it is over; nothing else opens or closes the
+tab.
 
 A surface is one chat page, i.e. one connection to the daemon.  This
 test runs the REAL daemon on its local WSS endpoint with several real
@@ -26,34 +24,25 @@ Checked on the wire, per client:
    spawned; every announcement of the grandchild names the nesting
    child's tab as its parent.
 2. A client connecting MID-RUN gets the same running sub-agents from its
-   ``ready`` replay (``openSubagentTab``, not done).  A running child's
-   tab the user closes on one client is closed on all of them
-   (``closeSubagentTab``) and stays closed for a client connecting
-   afterwards, whose replay repeats the close and never says the
-   running sub-agent is done; the other running sub-agents keep their
-   tabs.
-3. After the children finish: every client gets ``subagentDone`` for the
-   sub-agents it still shows.
-4. A client connecting AFTER completion is never told to open a finished
-   sub-agent's tab as running.
+   ``ready`` replay (``openSubagentTab``).  The daemon holds each tab's
+   view of its sub-agent by itself: no page tells it anything about a
+   sub-agent's tab.
+3. After the children finish: every client gets ``subagentDone`` for
+   each of them, naming the tab and the sub-agent's task, and the
+   daemon has forgotten the tab by then (no fan-out subscription, no
+   task pin), with no page closing it.
+4. A client connecting AFTER completion is told to open no sub-agent
+   tab: its replay of the chat sends it, and it alone, the
+   ``subagentDone`` of each finished sub-agent, the grandchild below
+   its finished parent included.  Asking for a finished child's tab by
+   name is answered the same way, and the daemon attaches nothing.
 5. (second test) The user closes the RUNNING chat's tab -- the registry
    drops it for every client, whose pages close the child's tab with
    it -- and reopens the chat under a new tab id: the running child, and
    a child spawned after the reopen, are announced under the new tab to
-   every client.
-6. (third test) A surface is away while the user closes a running
-   child's tab and reconnects; the user then reopens the child.  The
-   frames that surface got are played into the real chat page
-   (``media/main.js`` under jsdom): it shows the child's tab again and
-   never asks the daemon to close it.
-7. (fourth test) The close a page sends when a child finishes reaches
-   the daemon only after a user reopened the child's tab on another
-   surface, and another page's is sent twice: the reopened tab stays
-   open everywhere.  A page that closes the reopened tab is obeyed.
-8. (fifth test) A reopened grandchild's tab closes with its parent's
-   when the parent finishes, and the daemon holds it open no longer.
-9. (sixth test) Another chat resumed into a running child's tab id
-   keeps its tab when the child ends.
+   every client.  The child's end drops the daemon's view of both ids.
+6. (third test) Another chat resumed into a running child's tab id
+   keeps its tab, and what the daemon holds for it, when the child ends.
 """
 
 from __future__ import annotations
@@ -207,13 +196,11 @@ class SubagentTabsTwoClientsTest(TwoClientHarness):
         )
 
     def _running_announced(self, client: Client) -> set[str]:
-        """Sub-agent tabs *client* was told to open as running, minus closes."""
+        """Sub-agent tabs *client* was told to open, minus the ones told over."""
         opened: set[str] = set()
         for e in list(client.events):
-            if e.get("type") == "openSubagentTab" and not e.get("isDone"):
+            if e.get("type") == "openSubagentTab":
                 opened.add(str(e["tab_id"]))
-            elif e.get("type") == "closeSubagentTab":
-                opened.discard(str(e["tab_id"]))
             elif e.get("type") == "subagentDone":
                 opened.discard(str(e.get("tab_id")))
         return opened
@@ -251,6 +238,16 @@ class SubagentTabsTwoClientsTest(TwoClientHarness):
             "scoped": True,
         })
         self.wait_event(client, "task_events", tabId=tab_id)
+
+    def _daemon_view(self, tab_id: str) -> tuple[list[str], str | None]:
+        """The tasks *tab_id* is a fan-out viewer of and the task it is pinned to, per the daemon.
+
+        Read under the daemon's state lock: the step that told the
+        pages a sub-agent's end has finished by then.
+        """
+        server = self.server._agent_server
+        with server._state_lock:
+            return server.printer.tasks_for_tab(tab_id), server._tab_opened_task_ids.get(tab_id)
 
     def _two_pages(self) -> tuple[Client, Client]:
         """Connect two pages; the second has the registry's first snapshot."""
@@ -348,6 +345,7 @@ class SubagentTabsTwoClientsTest(TwoClientHarness):
             plain_tab = f"{a.tab_id}__sub_{ids['plain']}"
             nesting_tab = f"{a.tab_id}__sub_{ids['nesting']}"
             grand_tab = f"{nesting_tab}__sub_{ids['grand']}"
+            tabs = {plain_tab: ids["plain"], nesting_tab: ids["nesting"], grand_tab: ids["grand"]}
 
             # 1. Live spawn: both connected clients are told to open all
             #    three running sub-agents, each under the right parent.
@@ -366,18 +364,14 @@ class SubagentTabsTwoClientsTest(TwoClientHarness):
             c = self.open_client("c")
             c.ready()
             self.wait_for(
-                lambda: self._running_announced(c)
-                == {plain_tab, nesting_tab, grand_tab},
+                lambda: self._running_announced(c) == set(tabs),
                 what=f"c: running sub-agent tabs on replay, got "
                 f"{self._running_announced(c)}",
             )
             # c's own replay is over once it has offered c each child's
-            # transcript.  The announcements counted above reach every
-            # client, those of a's and b's resumes in step 1 too, so c
-            # can hold all three while its replay is still on its way:
-            # that replay repeats to c a close made before it reaches
-            # the child, and c was then told twice in step 2b.
-            for tab in (plain_tab, nesting_tab, grand_tab):
+            # transcript (the announcements counted above reach every
+            # client, those of a's and b's resumes in step 1 too).
+            for tab in tabs:
                 self.wait_event(c, "replay_deferred", tabId=tab)
             # Every announcement of the grandchild -- the live spawn and
             # each replay -- names the NESTING child as its parent, never
@@ -391,53 +385,55 @@ class SubagentTabsTwoClientsTest(TwoClientHarness):
                             ev["parent_tab_id"], nesting_tab, (client.name, ev),
                         )
 
-            # 2b. The user closes a running child's tab on one client: the
-            #     close mirrors to every client, the other running
-            #     sub-agents stay, and a client connecting afterwards does
-            #     not get the closed tab back from its replay.
-            b.send({"type": "closeTab", "tabId": plain_tab})
+            # 2b. While they run the daemon holds each tab's view (the
+            #     pages asked for it by name in step 1), and no client
+            #     is told that a sub-agent is over.
+            for client in (a, b):
+                self._settled(client)
+            for tab, task_id in tabs.items():
+                self.assertEqual(self._daemon_view(tab), ([task_id], task_id), tab)
             for client in (a, b, c):
-                self.wait_event(client, "closeSubagentTab", tab_id=plain_tab)
-            d = self.open_client("d")
-            d.ready()
-            self.wait_for(
-                lambda: self._running_announced(d) == {nesting_tab, grand_tab},
-                what=f"d: replay without the user-closed tab, got "
-                f"{self._running_announced(d)}",
-            )
-            # d's replay says the tab is closed (a surface that was away
-            # during the close still shows it), never that the running
-            # sub-agent finished: a page keeps a finished sub-agent's
-            # tab closed for good, so it would not show this one again
-            # when a user reopens it.  The others were told once.
-            self.wait_event(d, "closeSubagentTab", tab_id=plain_tab)
-            time.sleep(0.5)
-            self.assertEqual(d.of_type("openSubagentTab", tab_id=plain_tab), [])
-            self.assertEqual(d.of_type("subagentDone", tab_id=plain_tab), [])
-            for client in (a, b, c):
-                closes = client.of_type("closeSubagentTab", tab_id=plain_tab)
-                self.assertEqual(len(closes), 1, (client.name, closes))
+                self.assertEqual(client.of_type("closeSubagentTab"), [], client.name)
+                self.assertEqual(client.of_type("subagentDone"), [], client.name)
         finally:
             leaf_release.set()
 
-        # 3. Once the sub-agents are over, every client is told so.
-        for client in (a, b, c, d):
-            for tab in (nesting_tab, grand_tab):
-                self.wait_event(client, "subagentDone", tab_id=tab)
+        # 3. Once the sub-agents are over, every client is told so, by
+        #    tab and by task, and the daemon forgot the tab in the step
+        #    that told them: no page sent anything for it.
+        for tab, task_id in tabs.items():
+            for client in (a, b, c):
+                self.wait_event(client, "subagentDone", tab_id=tab, task_id=task_id)
+            self.assertEqual(self._daemon_view(tab), ([], None), tab)
         self.wait_for(
             lambda: a.of_type("status", running=False, tabId=a.tab_id),
             what="parent task to finish",
         )
+        told = len(a.of_type("subagentDone"))
 
-        # 4. A client connecting after completion is never told to open a
-        #    finished sub-agent as running.
+        # 4. A client connecting after completion is told that each
+        #    sub-agent is over (the grandchild below its finished parent
+        #    too) and to open none.
         late = self.open_client("late")
         late.ready()
         self._open_deferred_tab(late, a.tab_id)
-        time.sleep(0.5)
-        self.assertEqual(
-            self._running_announced(late), set(), late.of_type("openSubagentTab"),
-        )
+        for tab, task_id in tabs.items():
+            self.wait_event(late, "subagentDone", tab_id=tab, task_id=task_id)
+        # A page still holding a finished child's tab asks for it by
+        # name: the answer closes it and nothing is attached to the tab.
+        late.send({
+            "type": "resumeSession", "taskId": ids["plain"], "tabId": plain_tab,
+            "scoped": True, "replayId": "by-name",
+        })
+        self.wait_event(late, "replayDone", replayId="by-name")
+        (answer,) = late.of_type("subagentDone", replayId="by-name")
+        self.assertEqual((answer["tab_id"], answer["task_id"]), (plain_tab, ids["plain"]))
+        self.assertEqual(late.of_type("openSubagentTab"), [])
+        self.assertEqual(late.of_type("task_events", tabId=plain_tab), [])
+        self.assertEqual(self._daemon_view(plain_tab), ([], None))
+        # All of it went to the asking connection alone.
+        self._settled(a)
+        self.assertEqual(len(a.of_type("subagentDone")), told)
 
     def test_children_follow_a_chat_closed_and_reopened_while_running(
         self,
@@ -496,11 +492,21 @@ class SubagentTabsTwoClientsTest(TwoClientHarness):
             for client in (a, b):
                 ev = self.wait_event(client, "openSubagentTab", tab_id=new_child_tab)
                 self.assertEqual(ev["parent_tab_id"], new_tab, (client.name, ev))
-                self.assertFalse(ev.get("isDone"), (client.name, ev))
+            # The id under the closed tab is still a viewer (no page
+            # closed it); a surface connecting now gets one tab for the child.
+            c = self.open_client("c")
+            c.ready()
+            self.wait_event(c, "replay_deferred", tabId=new_child_tab)
+            self.assertEqual(self._running_announced(c), {new_child_tab})
         finally:
             wave1_release.set()
 
         try:
+            # The child's end drops the daemon's view of both ids.
+            for tab in (f"{a.tab_id}__sub_{ids['child']}", new_child_tab):
+                self.wait_event(a, "subagentDone", tab_id=tab, task_id=ids["child"])
+                self.assertEqual(self._daemon_view(tab), ([], None), tab)
+
             # A child spawned AFTER the reopen is announced under the new
             # tab too.
             def _wave2() -> str | None:
@@ -522,215 +528,6 @@ class SubagentTabsTwoClientsTest(TwoClientHarness):
             self.wait_event(
                 client, "subagentDone", tab_id=f"{new_tab}__sub_{second_id}",
             )
-
-    def test_a_page_away_during_a_close_shows_the_reopened_child(self) -> None:
-        wave1_release = threading.Event()
-        wave2_release = threading.Event()
-        self._install_two_wave_stub(wave1_release, wave2_release)
-
-        a = self.open_client("a")
-        a.ready()
-        b = self.open_client("b")
-        b.ready()
-        self.wait_event(b, "tabs_state")
-        self._submit(a, PARENT_PROMPT)
-
-        try:
-            def _child() -> str | None:
-                parent_task_id = self._parent_task_id()
-                children = self._child_rows(parent_task_id) if parent_task_id else []
-                return str(children[0]["task_id"]) if children else None
-
-            child = self.wait_for(_child, what="child row")
-            for client in (a, b):
-                self.wait_event(client, "new_tab", task_id=child)
-                child_tab = self._watch_child(client, child, a.tab_id)
-            self.wait_event(b, "openSubagentTab", tab_id=child_tab)
-
-            # b's surface goes away with the child's tab open; the user
-            # closes that tab on a; b's surface comes back showing the
-            # chat (a new connection, its page as it was).
-            b.close()
-            a.send({"type": "closeTab", "tabId": child_tab})
-            self.wait_event(a, "closeSubagentTab", tab_id=child_tab)
-            back = self.open_client("b-back")
-            back.tab_id = a.tab_id
-            back.ready()
-            self.wait_for(
-                lambda: [e for e in list(back.events) if e.get("tab_id") == child_tab],
-                what="b-back: the replay's word on the closed child",
-            )
-
-            # The user expands the fan-out panel on a: the child's tab
-            # is asked for again and opens on every surface.
-            a.send({
-                "type": "resumeSession", "taskId": child, "tabId": child_tab,
-                "parentTabId": a.tab_id, "reopen": True,
-            })
-            self.wait_event(back, "openSubagentTab", tab_id=child_tab, reopened=True)
-
-            self.assertEqual(
-                page_after(a.tab_id, list(b.events) + list(back.events)),
-                {"shown": [child_tab], "closed": []},
-            )
-        finally:
-            wave1_release.set()
-            wave2_release.set()
-        self.wait_for(
-            lambda: a.of_type("status", running=False, tabId=a.tab_id),
-            what="parent task to finish",
-        )
-
-    def test_a_late_echo_of_a_finished_close_spares_the_reopened_tab(self) -> None:
-        wave1_release = threading.Event()
-        wave2_release = threading.Event()
-        self._install_two_wave_stub(wave1_release, wave2_release)
-        a, b = self._two_pages()
-        self._submit(a, PARENT_PROMPT)
-        try:
-            (child,) = self.wait_for(
-                lambda: self._children(self._parent_task_id(), 1), what="child row",
-            )
-            child_tab = self._watch_spawn((a, b), child, a.tab_id)
-
-            # The child finishes: each page closes its tab and tells the
-            # daemon so.
-            wave1_release.set()
-            echoes = []
-            for client in (a, b):
-                self.wait_event(client, "subagentDone", tab_id=child_tab)
-                (echo,) = page_after(a.tab_id, list(client.events))["closed"]
-                self.assertEqual(echo["tabId"], child_tab, client.name)
-                echoes.append(echo)
-            echo_a, echo_b = echoes
-
-            # a's close arrives, and a user expands the fan-out panel on a.
-            a.send(echo_a)
-            self.wait_event(b, "closeSubagentTab", tab_id=child_tab)
-            a.send({
-                "type": "resumeSession", "taskId": child, "tabId": child_tab,
-                "parentTabId": a.tab_id, "reopen": True,
-            })
-            reopened = self.wait_event(b, "openSubagentTab", tab_id=child_tab, reopened=True)
-
-            # b's close arrives only now, and a's again (the transport
-            # re-sends what a dropped socket left unconfirmed).
-            b.send(echo_b)
-            a.send(echo_a)
-            for client in (a, b):
-                self._settled(client)
-            for client in (a, b):
-                self.assertEqual(
-                    len(client.of_type("closeSubagentTab", tab_id=child_tab)), 1, client.name,
-                )
-                self.assertIn(
-                    child_tab, page_after(a.tab_id, list(client.events))["shown"], client.name,
-                )
-            c = self.open_client("c")
-            c.tab_id = a.tab_id
-            c.ready()
-            self.wait_event(c, "openSubagentTab", tab_id=child_tab, reopened=True)
-
-            # The frames a page gets when the reopening lands between the
-            # child's release and its ``subagentDone`` (two statements
-            # apart in ``_run_task``, so no test can hold the daemon
-            # there): the tab it then closes is the reopened one, and the
-            # daemon takes its word.
-            done = next(
-                i for i, e in enumerate(b.events)
-                if e.get("type") == "subagentDone" and e.get("tab_id") == child_tab
-            )
-            (echo,) = page_after(a.tab_id, [*b.events[:done], reopened, b.events[done]])["closed"]
-            self.assertEqual(
-                (echo["tabId"], echo["incarnation"]), (child_tab, reopened["incarnation"]),
-            )
-            b.send(echo)
-            self.wait_for(
-                lambda: len(a.of_type("closeSubagentTab", tab_id=child_tab)) == 2,
-                what="a: the reopened tab closed",
-            )
-            d = self.open_client("d")
-            d.tab_id = a.tab_id
-            d.ready()
-            self.wait_event(d, "openSubagentTab", tab_id=child_tab, closedHistory=True)
-        finally:
-            wave1_release.set()
-            wave2_release.set()
-        self.wait_for(partial(self._run_ended, a, a.tab_id), what="parent task to finish")
-
-    def test_a_reopened_grandchild_closes_with_its_finished_parent(self) -> None:
-        grand_release = threading.Event()
-        nest_release = threading.Event()
-
-        def plan(agent: Any, prompt: str) -> None:
-            if GRANDCHILD_MARK in prompt:
-                grand_release.wait(timeout=60)
-            elif NEST_MARK in prompt:
-                _fan_out(agent, [f"{GRANDCHILD_MARK} leaf"])
-                nest_release.wait(timeout=60)
-            elif PARENT_PROMPT in prompt:
-                _fan_out(agent, [f"{CHILD_MARK} {NEST_MARK} parent of a grandchild sub-agent"])
-
-        self._install_plan(plan)
-        a, b = self._two_pages()
-        self._submit(a, PARENT_PROMPT)
-        try:
-            (nesting,) = self.wait_for(
-                lambda: self._children(self._parent_task_id(), 1), what="child row",
-            )
-            (grand,) = self.wait_for(lambda: self._children(nesting, 1), what="grandchild row")
-            nesting_tab = self._watch_spawn((a, b), nesting, a.tab_id)
-            grand_tab = self._watch_spawn((a, b), grand, nesting_tab)
-
-            # The grandchild finishes and its tab closes everywhere.
-            grand_release.set()
-            for client in (a, b):
-                self.wait_event(client, "subagentDone", tab_id=grand_tab)
-            (echo,) = page_after(a.tab_id, list(a.events))["closed"]
-            a.send(echo)
-            self.wait_event(b, "closeSubagentTab", tab_id=grand_tab)
-
-            # Users on both surfaces expand its fan-out panel at once.
-            for client in (a, b):
-                client.send({
-                    "type": "resumeSession", "taskId": grand, "tabId": grand_tab,
-                    "parentTabId": nesting_tab, "reopen": True,
-                })
-            self.wait_for(
-                lambda: len(a.of_type("openSubagentTab", tab_id=grand_tab, reopened=True)) == 2,
-                what="a: both reopenings",
-            )
-            first, second = a.of_type("openSubagentTab", tab_id=grand_tab, reopened=True)
-            self.assertLess(first["incarnation"], second["incarnation"])
-
-            # Its parent finishes: a page closes both tabs, the
-            # grandchild's as it was last announced.
-            nest_release.set()
-            for client in (a, b):
-                self.wait_event(client, "subagentDone", tab_id=nesting_tab)
-            *_, nesting_close, grand_close = page_after(a.tab_id, list(a.events))["closed"]
-            self.assertEqual(nesting_close["tabId"], nesting_tab)
-            self.assertEqual(
-                (grand_close["tabId"], grand_close["incarnation"]),
-                (grand_tab, second["incarnation"]),
-            )
-            a.send(nesting_close)
-            a.send(grand_close)
-            self.wait_for(
-                lambda: len(b.of_type("closeSubagentTab", tab_id=grand_tab)) == 2,
-                what="b: the reopened grandchild closed",
-            )
-            # The daemon holds it reopened no longer: a surface connecting
-            # now is told it is over.
-            c = self.open_client("c")
-            c.tab_id = a.tab_id
-            c.ready()
-            self.wait_event(c, "subagentDone", tab_id=grand_tab)
-            self.assertEqual(c.of_type("openSubagentTab", tab_id=grand_tab), [])
-        finally:
-            grand_release.set()
-            nest_release.set()
-        self.wait_for(partial(self._run_ended, a, a.tab_id), what="parent task to finish")
 
     def test_a_chat_resumed_into_a_child_tab_survives_the_childs_end(self) -> None:
         wave1_release = threading.Event()
@@ -782,16 +579,14 @@ class SubagentTabsTwoClientsTest(TwoClientHarness):
                 self.assertEqual(page["closed"], [], client.name)
                 self.assertIn(child_tab, page["shown"], client.name)
 
-            # A page that closed the sub-agent's tab before it heard of
-            # the other chat: its close is not for that chat's tab, and
-            # the snapshot that still lists the tab answers the close.
-            a.send({"type": "closeTab", "tabId": child_tab, "incarnation": 0, "ack": "kept"})
-            self.wait_for(
-                lambda: [e for e in a.of_type("tabs_state") if "kept" in e.get("acks", [])],
-                what="a: the kept tab's snapshot",
-            )
+            # The child's end, which no page answers, tore down nothing
+            # of what the chat's resume attached to the tab.
             for client in (a, b):
                 self.assertTrue(self._registry_lists(client, child_tab), client.name)
+            self.assertEqual(self._daemon_view(child_tab)[1], str(other["id"]))
+            self.assertEqual(
+                self.server._agent_server._tab_chat_views.get(child_tab), other["chat_id"],
+            )
         finally:
             wave1_release.set()
             wave2_release.set()

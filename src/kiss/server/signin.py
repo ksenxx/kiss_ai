@@ -276,7 +276,9 @@ class SigninLogin:
     One login at a time: a new :meth:`start` ends the running one, so a
     second click (another window's, a retry, the other provider) never
     leaves two hooks waiting on two loopback ports.  A window whose
-    login another window ended is told so (:data:`ENDED_ELSEWHERE`).
+    login another window ended is told so (:data:`ENDED_ELSEWHERE`),
+    and its pastes never reach the login that replaced its own
+    (:meth:`paste`).
     """
 
     def __init__(self) -> None:
@@ -284,13 +286,14 @@ class SigninLogin:
         self._proc: subprocess.Popen[str] | None = None
         self._owner = ""
         """The window whose :meth:`start` ran ``_proc`` (``""``: none to tell), with the
-        provider it clicked and its reply; all under ``_lock``."""
+        provider it clicked, the click's attempt token and its reply; all under ``_lock``."""
         self._provider = ""
+        self._attempt = ""
         self._reply: Reply | None = None
         self._ending: list[threading.Thread] = []
         """The :meth:`_end` threads of ended hooks not yet gone, under ``_lock``."""
 
-    def start(self, provider: str, reply: Reply, owner: str = "") -> None:
+    def start(self, provider: str, reply: Reply, owner: str = "", attempt: str = "") -> None:
         """Run ``signin login`` *provider*; relay its lines to *reply* from a thread.
 
         The window that clicked gets ``signinUrl`` (``provider``, ``url``)
@@ -307,6 +310,8 @@ class SigninLogin:
             owner: The clicking window (its connection id): the one
                 told when another window ends this login, and the one
                 whose own running login this click ends silently.
+            attempt: The click's token (``""``: the page sent none): a
+                :meth:`paste` naming another one is not for this login.
         """
         hook = signin_hook()
         if hook is None:
@@ -335,6 +340,7 @@ class SigninLogin:
             os.set_blocking(proc.stdin.fileno(), False)  # see paste()
             self._proc = proc
             self._owner, self._provider, self._reply = owner, provider, reply
+            self._attempt = attempt
         thread = threading.Thread(
             target=self._relay,
             args=(proc, provider, reply),
@@ -351,8 +357,23 @@ class SigninLogin:
             assert proc.stdout is not None
             proc.stdout.close()  # the relay's job, done here for want of one
 
-    def paste(self, text: str) -> bool:
+    def paste(self, text: str, owner: str = "", attempt: str = "") -> bool:
         """Write the pasted redirect URL or code to the running hook's stdin.
+
+        Only a paste for the click that started the hook reaches it.  One
+        from another window that has clicked is refused: that window's
+        own login was replaced or has ended, and the paste was on its
+        way, or typed into the paste row its window still shows.  So is
+        one naming another attempt than the hook's click.  A page that
+        reconnected since its click pastes on a connection that has
+        clicked nothing (``owner=""``): it is recognised by the attempt,
+        which it must name.  The page names every click by an id no
+        other click has, in any window, so the attempt tells the
+        windows apart.  A page of an earlier version counts its clicks
+        instead, alike in every window: that is why a connection that
+        has clicked is still held to its own login, and such a page,
+        reconnected after its login was replaced by a click counted the
+        same, is taken for the replacement's.
 
         The text is cut to :data:`PASTE_LIMIT` characters (a redirect URL
         or a code is far shorter) and written to the non-blocking pipe
@@ -366,17 +387,29 @@ class SigninLogin:
         happens under the lock, so the stream is closed only once no
         paste can reach it any more.
 
+        Args:
+            text: The pasted redirect URL or code.
+            owner: The pasting window (its connection id), ``""`` for
+                a connection that has started no login.
+            attempt: The token of the click the paste is for, ``""``
+                when the page sent none.
+
         Returns:
-            ``False`` when no login is running (or the hook closed its
-            stdin, or is not reading it), so the window can say so.  A
-            paste that a nearly full pipe took only in part ends the
-            login: only a write of at most ``PIPE_BUF`` bytes is all or
-            nothing, and the part written, with no newline, would be
-            glued to the next paste the hook reads.
+            ``False`` when no login is running (or the paste is not for
+            the running one, or the hook closed its stdin, or is not
+            reading it), so the window can say so.  A paste that a
+            nearly full pipe took only in part ends the login: only a
+            write of at most ``PIPE_BUF`` bytes is all or nothing, and
+            the part written, with no newline, would be glued to the
+            next paste the hook reads.
         """
         with self._lock:
             proc = self._proc
             if proc is None or proc.poll() is not None or proc.stdin is None:
+                return False
+            if owner != self._owner and (owner or not attempt):  # another window's
+                return False
+            if attempt and attempt != self._attempt:  # another click's
                 return False
             data = (text.strip()[:PASTE_LIMIT] + "\n").encode()
             try:

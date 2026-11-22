@@ -33,6 +33,7 @@ from typing import Any
 
 from kiss.core import stop_signal
 from kiss.core.models.model_info import _lookup_model_info
+from kiss.core.tool_interrupt import call_without_injection
 
 logger = logging.getLogger(__name__)
 
@@ -182,7 +183,7 @@ class PromptCacheKeepAlive:
 
     def __enter__(self) -> PromptCacheKeepAlive:
         try:
-            self._thread.start()
+            call_without_injection(self._thread.start)
         except BaseException:
             # ``__exit__`` never runs for an ``__enter__`` that raised,
             # and the Stop may have landed after the thread was spawned.

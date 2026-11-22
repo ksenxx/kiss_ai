@@ -6,51 +6,38 @@
 
 The real assertions live in
 ``src/kiss/webapp/test/runParallelSubagentTabDedupe.test.js``
-(run under node, like ``runParallelPanelTabsSync.test.js``).  This
-wrapper spawns ``node`` on that file so the test is also picked up by
-``uv run pytest``.
+(run under node).  This wrapper spawns ``node`` on that file so the
+test is also picked up by ``uv run pytest``.
 
 Invariant under test (chat page, ``media/main.js``)
 ------------------------------------------------------
 A sub-agent occupies AT MOST ONE tab on a client, no matter how many
 tab ids the daemon addresses it by.  A sub-agent is identified by its
-task id; over one fan-out's life the daemon names the same sub-agent's
-tab by
+task id; over one fan-out's life the daemon may name the same
+sub-agent's tab by
 
-* the live sub-task id the daemon announces while the ``run_parallel``
-  child runs (``task-<parentTaskId>__sub_<idx>``),
+* a live id that differs from the tab's current one
+  (``task-<parentTaskId>__sub_<idx>``),
 * the deterministic replay id minted by
   :meth:`kiss.server.server.AgentServer._open_persisted_subagent_tabs`
   (``<parentTabId>__sub_<subTaskId>``), and
-* whatever tab id the page itself asked to resume the sub-agent on
-  (``media/main.js`` mints a fresh one when a collapsed ``run_parallel``
-  panel is expanded again).
+* the tab id the page itself resumed the sub-agent on (the same
+  deterministic id, minted when the spawn is announced).
 
 Behaviours verified by the underlying JS test:
 
-* a persisted-replay announcement for a sub-agent that already has a
-  tab renames that tab instead of opening a second one;
-* the same holds when the replay burst lands after a collapse/expand
-  cycle reopened the tabs under client-minted ids;
+* a replay's announcement of a sub-agent that already has a tab lands
+  on that tab, and one under another id renames it instead of opening
+  a second one (the retired id is released; the tabs and files below
+  follow the rename);
 * a re-delivered ``new_tab`` for a sub-agent that already has a tab
-  opens nothing;
-* a panel that learned about one sub-agent twice (live tab + spawn
-  recorded while collapsed) still opens exactly one tab per sub-agent
-  when expanded;
-* a collapsed ``run_parallel`` panel keeps every sub-agent tab closed
-  whichever id form the daemon uses, and expanding it opens one tab per
-  sub-agent;
-* a sub-agent tab the user closed by hand is never resurrected by a
-  later announcement under a different tab id (its siblings stay open
-  and the panel stays uncollapsed);
-* collapsing still sends ``closeTab`` for every sub-agent tab and
-  expanding still sends ``resumeSession`` for every sub-agent task.
+  opens nothing, also when it is mixed with the daemon's own
+  announcement of the same sub-agent;
+* a finished sub-agent has no tab, whichever id form the daemon uses;
+* the sub-agent of a parent this page does not show opens no tab.
 
-Every behaviour is asserted twice: once on an in-memory stub
-``acquireTransport`` host and once on the real webapp transport
-(``media/transport.js`` over a fake WebSocket, including its
-``auth``/``auth_ok`` handshake), because the app must behave
-identically whatever carries the frames.
+The page runs on the real webapp transport (``media/transport.js``
+over a fake WebSocket, including its ``auth``/``auth_ok`` handshake).
 """
 
 from __future__ import annotations

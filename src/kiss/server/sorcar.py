@@ -103,7 +103,7 @@ from pathlib import Path
 from typing import Any, Literal, Protocol, TypeVar
 from urllib.parse import urlsplit
 
-from kiss.agents.sorcar import cron_agent
+from kiss.agents.sorcar import cron_agent, skill_install
 
 # The synchronous client half of this API lives in the sorcar layer
 # (``kiss.agents.sorcar.daemon_client``) so sorcar-layer code — the
@@ -124,7 +124,7 @@ from kiss.core.config import kiss_home
 from kiss.core.remote_password import password_accepted
 from kiss.core.user_config import load_config
 from kiss.core.utils import is_root_dir
-from kiss.server import sidebar_panels
+from kiss.server import input_draft, sidebar_panels
 from kiss.server.commands import broadcast_to_conn, request_generation, str_field
 from kiss.server.remote_tabs import ROUTED_COMMANDS, RemoteTabs
 from kiss.server.remote_views import VIEW_COMMANDS, RemoteViews
@@ -238,10 +238,21 @@ API: dict[str, ApiCommand] = {c.name: c for c in (
     ApiCommand("setFavorite", required=("taskId", "isFavorite")),
     ApiCommand("setChatSummary", required=("chatId", "summary")),
     ApiCommand("setChatFavorite", required=("chatId", "isFavorite")),
+    ApiCommand("setPinned", required=("taskId", "isPinned")),
+    ApiCommand("setChatPinned", required=("chatId", "isPinned")),
+    ApiCommand("getTaskTags", required=("taskId",)),
+    ApiCommand("setTaskTags", required=("taskId", "tags")),
     ApiCommand("deleteTask", required=("taskId",)),
     ApiCommand("deleteChat", required=("chatId",)),
+    ApiCommand("getProjects"),
+    ApiCommand("saveProject", required=("project",)),
+    ApiCommand("deleteProject", required=("projectId",)),
+    ApiCommand("setProjectPinned", required=("projectId", "pinned")),
+    ApiCommand("setChatProject", required=("chatId", "projectId")),
     ApiCommand("openExternal", required=("url",)),
     ApiCommand("getInputHistory"),
+    ApiCommand("saveInputDraft", required=("text",), handler="save_input_draft"),
+    ApiCommand("getInputDraft", handler="get_input_draft"),
     ApiCommand("getSeaCommands"),
     ApiCommand("getWelcomeInfo", handler="get_welcome_info"),
     ApiCommand("activeTasksQuery", handler="active_tasks_query"),
@@ -286,6 +297,13 @@ API: dict[str, ApiCommand] = {c.name: c for c in (
     ApiCommand(
         "saveFile", required=("path", "content"), handler="save_file"
     ),
+    ApiCommand("openInBrowser", required=("path",), handler="open_in_browser"),
+    ApiCommand(
+        "openWithDefaultApp", required=("path",), handler="open_with_default_app"
+    ),
+    ApiCommand(
+        "stageHtmlView", required=("token", "html"), handler="stage_html_view"
+    ),
     ApiCommand("checkPaths", required=("paths",), handler="check_paths"),
     ApiCommand(
         "getReplayImage", required=("taskId", "index"), handler="get_replay_image"
@@ -297,6 +315,9 @@ API: dict[str, ApiCommand] = {c.name: c for c in (
     ApiCommand("getMachines", handler="get_machines"),
     ApiCommand("machineAction", required=("action", "name"), handler="machine_action"),
     ApiCommand("getAppsStatus", handler="get_apps_status"),
+    ApiCommand("getSkills", handler="get_skills"),
+    ApiCommand("searchSkills", handler="search_skills"),
+    ApiCommand("installSkill", required=("id",), handler="install_skill"),
     ApiCommand("getSpendReport", handler="get_spend_report"),
     ApiCommand("getRecommendations", handler="get_recommendations"),
     ApiCommand("listDir", handler="list_dir"),
@@ -314,6 +335,7 @@ API: dict[str, ApiCommand] = {c.name: c for c in (
     ApiCommand("complete", required=("query",)),
     ApiCommand("worktreeAction", required=("action",), handler="worktree_action"),
     ApiCommand("autocommitAction", handler="autocommit_action"),
+    ApiCommand("createPrAction", handler="create_pr_action"),
     ApiCommand("auth", handler="auth"),
     ApiCommand("runUpdate", handler="run_update"),
     ApiCommand("updateModels", handler="update_models"),
@@ -618,6 +640,7 @@ class ServerBackend(Protocol):
 
     _printer: Any
     _agent_server: Any
+    _shutdown_initiated: bool
     port: int
 
     def _lan_urls(self) -> list[str]: ...
@@ -635,6 +658,16 @@ class ServerBackend(Protocol):
     async def _handle_save_file(
         self, cmd: dict[str, Any], endpoint: Any,
     ) -> None: ...
+
+    async def _handle_open_in_browser(
+        self, cmd: dict[str, Any], endpoint: Any,
+    ) -> None: ...
+
+    async def _handle_open_with_default_app(
+        self, cmd: dict[str, Any], endpoint: Any,
+    ) -> None: ...
+
+    async def _handle_stage_html_view(self, cmd: dict[str, Any]) -> None: ...
 
     async def _handle_share_chat(
         self, cmd: dict[str, Any], endpoint: Any,
@@ -877,7 +910,8 @@ class ServerApi:
            sheet opened for the machine:
            :data:`kiss.server.sidebar_panels.MACHINE_SETTINGS_REPLIES`)
            a subpanel command stamped ``machine`` (the Schedule,
-           Apps, Spend and Recommendations subpanels shown for it:
+           Skills, Connectors, Spend and Recommendations subpanels
+           shown for it:
            :data:`kiss.server.sidebar_panels.MACHINE_PANEL_REPLIES`)
            or the task-info panel's ``getTaskUpdate`` stamped
            ``machine`` (the Task update of the task such a tab runs
@@ -958,10 +992,11 @@ class ServerApi:
         # the settings sheet opened for the machine shows and saves
         # its config, API keys and custom models, the model picker
         # lists and sets its models, and the Schedule, Machines,
-        # Apps, Spend and Recommendations subpanels show the machine
-        # the chat header has picked, and the task-info panel's Task
-        # update subpanel reports on the task the tab runs there: a
-        # workspace, settings, model, subpanel or task-update command
+        # Skills, Connectors, Spend and Recommendations subpanels show
+        # the machine the chat header has picked, and the task-info
+        # panel's Task update subpanel and Tags row report on the task
+        # the tab runs there: a workspace, settings, model, subpanel,
+        # task-update or task-tags command
         # stamped ``machine`` is answered by that machine's daemon.  The
         # subpanels poll, and a machine's app probe takes
         # seconds, as does its Codex device login: their replies are
@@ -975,20 +1010,22 @@ class ServerApi:
         machine = str(cmd.get("machine") or "")
         forwarder = sidebar_panels.MACHINE_FORWARDERS.get(name) if machine else None
         if forwarder is not None:
+            history_writes = (*sidebar_panels.MACHINE_HISTORY_WRITES, "setTaskTags")
             forwarded = self._forwarded_reply(
                 ctx.endpoint, forwarder, machine, cmd,
-                refetch_history=name in sidebar_panels.MACHINE_HISTORY_WRITES,
+                refetch_history=name in history_writes,
             )
             if name in (
                 "cronAction", "machineAction", "startCodexLogin", "recordFileUsage",
-                "shareChatTasks",
+                "shareChatTasks", "searchSkills", "installSkill",
             ) or (name == "getTaskUpdate" and cmd.get("refresh")):
                 # A user's own action (the Task update's refresh button
                 # and the share button's history fetch included), never
                 # dropped; slow (the device login's CLI may take a
                 # minute to print its code, the share's reply may be
-                # megabytes of transcripts) but in the background, so
-                # it holds up none of the sender's later commands.
+                # megabytes of transcripts, a skill's check takes a
+                # model call) but in the background, so it holds up
+                # none of the sender's later commands.
                 self._spawn_reply(forwarded)
             elif name == "getTaskUpdate":
                 # The Task update's 5 s poll, deduplicated per tab: a
@@ -1010,6 +1047,12 @@ class ServerApi:
                 # but the one for the mention on screen.
                 key = (cmd["connId"], str(cmd.get("tabId") or ""), machine)
                 self._spawn_after(self._pending_files, key, forwarded, newest_only=True)
+            elif name == "getSkills":
+                # The Skills subpanel's poll, deduplicated per folder:
+                # the list asked when the tab's folder changes is not
+                # the repeat of the one on its way for the folder left.
+                key = (cmd["connId"], f"{name}:{cmd.get('workDir') or ''}", machine)
+                self._spawn_panel_reply(key, forwarded)
             elif name in sidebar_panels.MACHINE_PANEL_REPLIES or name in (
                 "getModels", "getClaudeCodeStatus", "getCodexStatus",
             ):
@@ -1019,11 +1062,12 @@ class ServerApi:
                 # bound; the Codex login polls it every 5 s): a repeat
                 # while one is on its way is not asked again.
                 self._spawn_panel_reply((cmd["connId"], name, machine), forwarded)
-            elif name in ("gitAction", "fsAction") or name in sidebar_panels.MACHINE_HISTORY_WRITES:
+            elif name in ("gitAction", "fsAction") or name in history_writes:
                 # A Source Control or Explorer action, waited for up to
                 # MACHINE_COMMIT_TIMEOUT (the machine may wait minutes
                 # for the repository's lock, or copy a whole folder),
-                # or a CHATS-panel write to the machine's history.db
+                # or a write of the CHATS panel or of the Task Info
+                # panel's Tags row to the machine's history.db
                 # (every page then refetches the merged history, see
                 # ``refetch_history``): in the background, so none of
                 # the sender's later commands (a stop, a submit, a tab
@@ -1318,13 +1362,20 @@ class ServerApi:
             cmd: The command.
             refetch_history: Whether *cmd* writes the machine's history
                 (a :data:`~kiss.server.sidebar_panels.MACHINE_HISTORY_WRITES`
-                command): every page is then nudged to refetch the
-                merged history, as after a write here.
+                command or a ``setTaskTags``): every page is then nudged
+                to refetch the merged history, as after a write here.
         """
         try:
             reply = await asyncio.to_thread(forwarder, machine, cmd)
             if reply is not None:
                 await self._backend._reply_direct(endpoint, reply, str(cmd["type"]))
+                if reply.get("type") == "skillInstall" and reply.get("status") == "installed":
+                    # The machine's skills changed: its new list
+                    # follows, as after an install here.
+                    skills = await asyncio.to_thread(
+                        sidebar_panels.machine_panel_reply, machine, {**cmd, "type": "getSkills"},
+                    )
+                    await self._backend._reply_direct(endpoint, skills, "getSkills")
         except Exception:  # noqa: BLE001 - a background task must not die silently
             logger.warning("forwarding %s to %s failed", cmd.get("type"), machine, exc_info=True)
         if refetch_history:
@@ -1876,6 +1927,29 @@ class ServerApi:
             cmd: The ``autocommitAction`` command.
             ctx: The transport context of the current call.
         """
+        await self._forward_press(cmd, ctx)
+
+    async def create_pr_action(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
+        """Run the Create PR button's command on the backend.
+
+        Its tab-stamped ``pr_done`` reaches a daemon-link peer the way
+        the Git Commit's ``autocommit_done`` does: through the
+        ``replyTo`` stamp of :meth:`autocommit_action`
+        (``_create_pr`` of :mod:`kiss.server.pr_flow`).
+
+        Args:
+            cmd: The ``createPrAction`` command.
+            ctx: The transport context of the current call.
+        """
+        await self._forward_press(cmd, ctx)
+
+    async def _forward_press(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
+        """Forward a button press whose outcome is a tab-stamped event, stamped ``replyTo``.
+
+        Args:
+            cmd: The ``autocommitAction`` or ``createPrAction`` command.
+            ctx: The transport context of the current call.
+        """
         # The stamp is this daemon's alone: a client's own ``replyTo``
         # must not aim another connection's reply.
         cmd["replyTo"] = cmd["connId"] if ctx.conn_state.get("link") else ""
@@ -1929,7 +2003,10 @@ class ServerApi:
         A client clicked a file or directory link in a chat page.  The
         daemon resolves the path (``~``, the tab's work dir, its pending
         worktree) and answers with the file's content (or a plain-text
-        directory listing) for an in-page content tab.
+        directory listing) for an in-page content tab.  A binary file
+        no tab can show is answered ``unsupported``: the client has it
+        opened by the default application (``openWithDefaultApp``) or
+        asks for its bytes to save (``download``).
 
         Args:
             cmd: The ``openFile`` command.
@@ -1956,6 +2033,71 @@ class ServerApi:
             ctx: The transport context of the current call.
         """
         await self._backend._handle_save_file(cmd, ctx.endpoint)
+
+    async def open_in_browser(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
+        """Open an HTML file in the default browser of the daemon's machine.
+
+        The "Open in Browser" button of an HTML content tab sends this
+        when its page runs on the daemon's own machine and the daemon
+        can start a browser there.  The path is resolved like
+        ``openFile`` resolves it and must name an existing ``.html`` /
+        ``.htm`` file.  The reply is an ``openInBrowserResult`` event
+        sent to the requester only; when nothing opened, the page shows
+        the document through ``stageHtmlView`` instead.
+
+        The opener can wait a few seconds for a launcher that fails at
+        once, and each connection's commands are dispatched one at a
+        time, so the reply is produced by a background task.
+
+        Args:
+            cmd: The ``openInBrowser`` command (``path``, optional
+                ``workDir``, ``tabId``, and a ``token`` the reply echoes).
+            ctx: The transport context of the current call.
+        """
+        self._spawn_reply(self._backend._handle_open_in_browser(cmd, ctx.endpoint))
+
+    async def open_with_default_app(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
+        """Open a file no tab can show with its default application on the daemon's machine.
+
+        A click on a link to a file that ``openFile`` answers
+        ``unsupported`` (binary, and neither a PDF nor an image) sends
+        this when the page runs on the daemon's own machine and the
+        daemon can start programs there.  The path is resolved like
+        ``openFile`` resolves it and must name an existing regular
+        file; the operating system's file association picks the
+        application, and a program (a native executable, a type the
+        shell runs) is never started.  The reply is an
+        ``openWithDefaultAppResult`` event sent to the requester only.
+        The command is this daemon's own: it is never forwarded to a
+        registered machine, whose screen the user is not at.
+
+        The opener can wait a few seconds for a launcher that fails at
+        once, and each connection's commands are dispatched one at a
+        time, so the reply is produced by a background task.
+
+        Args:
+            cmd: The ``openWithDefaultApp`` command (``path``, optional
+                ``workDir``, ``tabId``, and a ``token`` the reply echoes).
+            ctx: The transport context of the current call.
+        """
+        self._spawn_reply(self._backend._handle_open_with_default_app(cmd, ctx.endpoint))
+
+    async def stage_html_view(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
+        """Keep an HTML document for the browser tab a page is opening on it.
+
+        The "Open in Browser" button of an HTML content tab, on a page
+        that cannot have the daemon open the file (a remote page, a
+        headless daemon, a file of a registered machine): the page
+        uploads the document its preview shows under a random ``token``
+        and opens ``/view/<token>/<name>`` in a new tab, which the
+        daemon answers with the document.  There is no reply.
+
+        Args:
+            cmd: The ``stageHtmlView`` command (``token``, ``html``,
+                optional ``name``).
+            ctx: The transport context of the current call.
+        """
+        await self._backend._handle_stage_html_view(cmd)
 
     async def check_paths(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
         """Report which file paths exist to the requesting client.
@@ -2055,7 +2197,7 @@ class ServerApi:
     async def get_apps_status(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
         """Send a client every third-party agent's authentication status.
 
-        Feeds the right sidebar's "Apps" subpanel.  The status comes
+        Feeds the right sidebar's "Connectors" subpanel.  The status comes
         from :func:`kiss.server.sidebar_panels.apps_status` (a cached
         probe subprocess; ``refresh: true`` — the subpanel's refresh
         button, or an app waiting for its connect task — probes again).
@@ -2080,12 +2222,125 @@ class ServerApi:
             refresh: Probe again even when the cache is fresh.
         """
         try:
-            apps, _ = await asyncio.to_thread(sidebar_panels.apps_status, refresh)
+            apps = await asyncio.to_thread(sidebar_panels.apps_status, refresh)
             await self._backend._reply_direct(
                 endpoint, {"type": "appsStatus", "apps": apps}, "getAppsStatus",
             )
         except Exception:  # noqa: BLE001 - a background task must not die silently
             logger.warning("getAppsStatus reply failed", exc_info=True)
+
+    async def get_skills(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
+        """Send a client the skills the agent can use.
+
+        Feeds the list of the right sidebar's "Skills" subpanel.  The
+        direct reply is the ``skills`` event of
+        :func:`kiss.agents.sorcar.skill_install.skills_reply`: the
+        bundled and the user's skills plus the project skills of the
+        command's ``workDir`` (the daemon's work dir when it has none).
+        It names that ``workDir`` ("" for none): the page drops the
+        list of another folder than the one it browses by then.
+
+        Args:
+            cmd: The ``getSkills`` command (optional ``workDir``).
+            ctx: The transport context of the current call.
+        """
+        reply = await asyncio.to_thread(
+            skill_install.skills_reply, self._backend._cmd_work_dir(cmd),
+        )
+        reply["workDir"] = str_field(cmd, "workDir")
+        await self._backend._reply_direct(ctx.endpoint, reply, "getSkills")
+
+    async def search_skills(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
+        """Search the skills.sh registry for the Skills subpanel.
+
+        The direct reply is the ``skillSearch`` event of
+        :func:`kiss.agents.sorcar.skill_install.search_reply`: the
+        registry's skills for ``query``, the most installed first (its
+        all-time leaderboard for a query under two characters), or its
+        ``error``, and the command's ``generation`` (0 when it had
+        none): the page shows the answer to its newest search only,
+        and two searches may ask for the same text.  The registry may
+        take seconds to answer, so the reply is produced by a
+        background task, like an app probe's.
+
+        Args:
+            cmd: The ``searchSkills`` command (``query``, optional
+                ``workDir`` and ``generation``).
+            ctx: The transport context of the current call.
+        """
+        self._spawn_reply(self._reply_skill_search(
+            ctx.endpoint, str_field(cmd, "query"), self._backend._cmd_work_dir(cmd),
+            request_generation(cmd),
+        ))
+
+    async def _reply_skill_search(
+        self, endpoint: Any, query: str, work_dir: str, generation: int,
+    ) -> None:
+        """Ask the registry in a thread and send the ``skillSearch`` reply.
+
+        Args:
+            endpoint: The requesting client's transport endpoint.
+            query: What the user typed.
+            work_dir: The folder whose skills count as installed.
+            generation: The command's ``generation``, echoed on the reply.
+        """
+        try:
+            reply = await asyncio.to_thread(skill_install.search_reply, query, work_dir)
+            reply["generation"] = generation
+            await self._backend._reply_direct(endpoint, reply, "searchSkills")
+        except Exception:  # noqa: BLE001 - a background task must not die silently
+            logger.warning("searchSkills reply failed", exc_info=True)
+
+    async def install_skill(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
+        """Check a registry skill for vulnerabilities and install it.
+
+        The + button of a found skill in the Skills subpanel.  The
+        direct reply is the ``skillInstall`` event of
+        :func:`kiss.agents.sorcar.skill_install.install_reply`, which
+        downloads the skill, checks it (rules, the registry's audits
+        and a model's reading) and installs it only when the check
+        allows; ``force: true`` is the user's answer to a ``review``
+        reply and installs the files that reply was about.  A fresh
+        ``skills`` event follows an install, naming the command's
+        ``workDir`` as a ``getSkills`` reply does.  The download and
+        the model call take from seconds to minutes, so all of it runs
+        in a background task.
+
+        Args:
+            cmd: The ``installSkill`` command (``id``, optional
+                ``force`` and ``workDir``).
+            ctx: The transport context of the current call.
+        """
+        self._spawn_reply(self._reply_skill_install(
+            ctx.endpoint, str_field(cmd, "id"), cmd.get("force") is True,
+            self._backend._cmd_work_dir(cmd), str_field(cmd, "workDir"),
+        ))
+
+    async def _reply_skill_install(
+        self, endpoint: Any, skill: str, force: bool, work_dir: str, named_dir: str,
+    ) -> None:
+        """Install in a thread; send the ``skillInstall`` reply and, after an install, ``skills``.
+
+        Args:
+            endpoint: The requesting client's transport endpoint.
+            skill: The registry id of the skill.
+            force: Install the files the user reviewed.
+            work_dir: The folder whose project skills count as
+                installed and which the ``skills`` event lists.
+            named_dir: The command's ``workDir`` ("" for none), which
+                the ``skills`` event names.
+        """
+        try:
+            reply = await asyncio.to_thread(
+                skill_install.install_reply, skill, force, work_dir,
+            )
+            await self._backend._reply_direct(endpoint, reply, "installSkill")
+            if reply["status"] == "installed":
+                skills = await asyncio.to_thread(skill_install.skills_reply, work_dir)
+                skills["workDir"] = named_dir
+                await self._backend._reply_direct(endpoint, skills, "getSkills")
+        except Exception:  # noqa: BLE001 - a background task must not die silently
+            logger.warning("installSkill reply failed", exc_info=True)
 
     async def cron_action(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
         """Apply a Schedule subpanel button to a cron job and send the fresh list.
@@ -2103,7 +2358,8 @@ class ServerApi:
         (closes its in-place form only when its own create or update
         went through, matched on the generation it stamped the save
         with, and re-arms a refused removal's Delete only on the reply
-        naming that job).
+        naming that job).  A ``run_now`` is refused once the daemon is
+        shutting down.
 
         Args:
             cmd: The ``cronAction`` command (``action``, optional
@@ -2111,12 +2367,19 @@ class ServerApi:
                 ``generation``).
             ctx: The transport context of the current call.
         """
-        error = await asyncio.to_thread(
-            cron_agent.apply_job_action,
-            str(cmd["action"]), str(cmd.get("jobId") or ""), str(cmd.get("name") or ""),
-            str(cmd.get("schedule") or ""), str(cmd.get("what") or ""),
-            str(cmd.get("kind") or "prompt"),
-        )
+        if str(cmd["action"]) == "run_now" and self._backend._shutdown_initiated:
+            # Shutdown admission gate, as a submit's: the scheduler's
+            # stop ends the runs that are alive when it looks, once
+            # (``cron_agent.stop_scheduler_thread``), and a run started
+            # after that would outlive the daemon.
+            error = "Server is shutting down; job not started."
+        else:
+            error = await asyncio.to_thread(
+                cron_agent.apply_job_action,
+                str(cmd["action"]), str(cmd.get("jobId") or ""), str(cmd.get("name") or ""),
+                str(cmd.get("schedule") or ""), str(cmd.get("what") or ""),
+                str(cmd.get("kind") or "prompt"),
+            )
         jobs = await asyncio.to_thread(sidebar_panels.cron_jobs_report)
         await self._backend._reply_direct(
             ctx.endpoint,
@@ -2201,7 +2464,7 @@ class ServerApi:
                 machine link never takes one for its answer.
         """
         ip, port = self._local_machine_address()
-        rows, _ = sidebar_panels.machines_report(ip, port, refresh)
+        rows = sidebar_panels.machines_report(ip, port, refresh)
         event: dict[str, Any] = {
             "type": "machines", "machines": rows,
             "action": action, "name": name, "error": error,
@@ -2421,16 +2684,20 @@ class ServerApi:
         the view lists the work dir, expanding a folder lists that
         folder, and clicking a file goes through ``openFile``.  The
         reply is a ``dirListing`` event sent to the requester only.
+        ``sort`` is the order the folder's context menu ("Sort") picked
+        (:data:`kiss.server.explorer.DIR_SORT_ORDERS`).
 
         With ``machine`` (the Explorer, folder picker and the pick
         check of the chat header's WORKDIR drop-down of a tab bound to
         that machine) the listing is the machine's, from its daemon:
-        :meth:`dispatch` forwards it before this handler runs
+        :meth:`dispatch` forwards it, ``sort`` included, before this
+        handler runs
         (:data:`kiss.server.sidebar_panels.MACHINE_WORKSPACE_REPLIES`).
 
         Args:
             cmd: The ``listDir`` command (optional ``path``,
-                ``workDir``, ``tabId``, ``token``, ``machine``).
+                ``workDir``, ``tabId``, ``token``, ``sort``,
+                ``machine``).
             ctx: The transport context of the current call.
         """
         await self._backend._handle_list_dir(cmd, ctx.endpoint)
@@ -2607,7 +2874,8 @@ class ServerApi:
             cmd: The ``shareChatTasks`` command (``chatId``, optional
                 ``tabId``, optional ``taskId`` — a sub-agent tab's
                 share narrows the reply to that one task and its
-                sub-agents).
+                sub-agents — and optional ``token``, echoed in the
+                reply).
             ctx: The transport context of the current call.
         """
         await self._backend._handle_share_chat_tasks(cmd, ctx.endpoint)
@@ -2775,6 +3043,51 @@ class ServerApi:
             {"type": "notification", "id": VSCODE_RETIRED_NOTICE_ID, "close": True},
         )
 
+    async def save_input_draft(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
+        """Keep the composer's text in the daemon's saved-input file.
+
+        Services the composer's Save button: ``text`` becomes the saved
+        text, kept in ``$KISS_HOME/saved_input.txt``
+        (:mod:`kiss.server.input_draft`), and an empty ``text`` (the
+        page sends one when the saved text is submitted or cleared)
+        deletes the file while it holds one of the texts in ``was``.
+        What another browser saved since stays.  The file is this
+        daemon's whatever machine the sender's chat runs on: the
+        command is never forwarded.  The direct reply is ``{"type":
+        "inputDraft", "text": <what the file holds now>, "path": <the
+        file>, "seq": <the command's>}``, with ``"error": <one
+        sentence>`` when the file is as it was: ``text`` is not a
+        string or is longer than
+        :data:`~kiss.server.input_draft.MAX_INPUT_DRAFT_BYTES`, or the
+        file could not be changed.
+
+        Args:
+            cmd: The ``saveInputDraft`` command with its ``text``, the
+                list ``was`` and the sender's ``seq``.
+            ctx: The transport context of the current call; the reply
+                goes to this sender only.
+        """
+        reply = await asyncio.to_thread(
+            input_draft.save_reply, cmd["text"], cmd.get("was"), cmd.get("seq"),
+        )
+        await self._backend._reply_direct(ctx.endpoint, reply, "saveInputDraft")
+
+    async def get_input_draft(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
+        """Send a client the text the composer's Save button kept.
+
+        The chat page asks when it starts, so a saved text reaches a
+        browser that never held it.  The direct reply is ``{"type":
+        "inputDraft", "text": <what the file holds>, "path": <the
+        file>}``; ``text`` is ``""`` when nothing is saved.
+
+        Args:
+            cmd: The ``getInputDraft`` command (no fields).
+            ctx: The transport context of the current call; the reply
+                goes to this sender only.
+        """
+        reply = await asyncio.to_thread(input_draft.read_reply)
+        await self._backend._reply_direct(ctx.endpoint, reply, "getInputDraft")
+
     def _signin_reply(
         self, conn_id: str, attempt: str = ""
     ) -> Callable[[dict[str, Any], bool], None]:
@@ -2821,26 +3134,34 @@ class ServerApi:
                 the ``conn_id`` the URL and errors are stamped with.
         """
         conn_id = ctx.conn_state["conn_id"]
-        reply = self._signin_reply(conn_id, self._signin_attempt(cmd))
-        await asyncio.to_thread(self.signin.start, str(cmd["provider"]), reply, conn_id)
+        attempt = self._signin_attempt(cmd)
+        ctx.conn_state["signin_clicked"] = True  # see signin_paste
+        reply = self._signin_reply(conn_id, attempt)
+        await asyncio.to_thread(
+            self.signin.start, str(cmd["provider"]), reply, conn_id, attempt
+        )
 
     async def signin_paste(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
         """Forward a pasted redirect URL or code to the running sign-in hook.
 
         For a browser on another machine, whose redirect to the hook's
-        loopback port cannot land.  Without a running login the window
-        gets a ``signinError`` saying to start over.
+        loopback port cannot land.  Without a running login of the
+        window's own click (:meth:`kiss.server.signin.SigninLogin.paste`)
+        the window gets a ``signinError`` saying to start over.  A
+        connection that has clicked nothing is a page that reconnected
+        since its click (it keeps its paste row), not another window.
 
         Args:
             cmd: The ``signinPaste`` command with the pasted ``text``
                 (and the click's ``attempt`` token, echoed on the error).
             ctx: The transport context of the current call.
         """
-        if not await asyncio.to_thread(self.signin.paste, str(cmd["text"])):
+        conn_id = ctx.conn_state["conn_id"]
+        attempt = self._signin_attempt(cmd)
+        owner = conn_id if ctx.conn_state.get("signin_clicked") else ""
+        if not await asyncio.to_thread(self.signin.paste, str(cmd["text"]), owner, attempt):
             error = "No sign-in is in progress: click a button to start one."
-            self._signin_reply(ctx.conn_state["conn_id"], self._signin_attempt(cmd))(
-                {"type": "signinError", "error": error}, False
-            )
+            self._signin_reply(conn_id, attempt)({"type": "signinError", "error": error}, False)
 
     async def signin_cancel(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
         """End the running sign-in hook: the window was closed with "Not now".

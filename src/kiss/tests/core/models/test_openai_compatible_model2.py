@@ -50,7 +50,11 @@ import pytest
 
 from kiss.core.models.anthropic_model import AnthropicModel
 from kiss.core.models.gemini_model import GeminiModel
-from kiss.core.models.model import Attachment, responses_items_to_chat_messages
+from kiss.core.models.model import (
+    Attachment,
+    hand_off_conversation,
+    responses_items_to_chat_messages,
+)
 from kiss.core.models.model_info import MODEL_INFO, model
 from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
 from kiss.core.models.openai_compatible_model2 import OpenAICompatibleModel2
@@ -7878,7 +7882,10 @@ class TestModelSwitchingIntoV2:
     def test_chat_handoff_content_parts_are_translated(
         self, capture_server: str
     ) -> None:
-        """Chat ``text`` / ``image_url`` parts become input_text / input_image."""
+        """Chat ``text`` / ``image_url`` parts become input_text / input_image.
+
+        A ``file`` part naming an uploaded file keeps its id (audit C8/F3).
+        """
         m = OpenAICompatibleModel2("gpt-5.5", base_url=capture_server, api_key="k")
         m.initialize("seed")
         m.conversation = [
@@ -7890,6 +7897,7 @@ class TestModelSwitchingIntoV2:
                         "type": "image_url",
                         "image_url": {"url": "data:image/png;base64,AAAA"},
                     },
+                    {"type": "file", "file": {"file_id": "file-abc"}},
                 ],
             }
         ]
@@ -7905,6 +7913,7 @@ class TestModelSwitchingIntoV2:
                         "image_url": "data:image/png;base64,AAAA",
                         "detail": "auto",
                     },
+                    {"type": "input_file", "file_id": "file-abc"},
                 ],
             }
         ]
@@ -8091,6 +8100,45 @@ class TestModelSwitchingOutOfV2:
             "content": "5",
         }
         assert "function_call_output" not in json.dumps(messages)
+
+    def test_v2_file_parts_reach_v1_and_survive_the_way_back(self, capture_server: str) -> None:
+        """An ``input_file`` part naming an uploaded file keeps its id in Chat format.
+
+        The hand-off to another endpoint replaced the id by an empty
+        inline file, so the document was missing from the v1 request and
+        from the request after a switch back to v2.  An inline file is
+        converted as before.
+        """
+        inline = {"filename": "report.pdf", "file_data": "data:application/pdf;base64,AAAA"}
+        v2 = OpenAICompatibleModel2("gpt-5.5", base_url="http://127.0.0.1:9/v1", api_key="k")
+        v2.initialize("seed")
+        v2.conversation = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "summarize"},
+                    {"type": "input_file", "file_id": "file-abc"},
+                    {"type": "input_file", **inline},
+                ],
+            }
+        ]
+        v1 = OpenAICompatibleModel("gpt-4o", base_url=capture_server, api_key="k")
+        v1.initialize("seed")
+        hand_off_conversation(v2, v1)
+        _CapturingHandler.next_response_body = _chat_completion_response_json().encode()
+        v1.generate()
+        assert _last_path().endswith("/chat/completions")
+        assert _last_body()["messages"][0]["content"] == [
+            {"type": "text", "text": "summarize"},
+            {"type": "file", "file": {"file_id": "file-abc"}},
+            {"type": "file", "file": inline},
+        ]
+        back = OpenAICompatibleModel2("gpt-5.5", base_url=capture_server, api_key="k")
+        back.initialize("seed")
+        hand_off_conversation(v1, back)
+        _CapturingHandler.next_response_body = b""
+        back.generate()
+        assert _last_body()["input"][0] == v2.conversation[0]
 
     def test_v2_conversation_to_anthropic_normalization(self) -> None:
         """Anthropic's normalizer converts v2 items to tool_use/tool_result."""

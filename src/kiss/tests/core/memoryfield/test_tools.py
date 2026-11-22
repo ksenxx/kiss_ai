@@ -2,15 +2,18 @@
 
 import os
 import re
+import sys
 import threading
 import time
 from pathlib import Path
+from types import FrameType
 
 import pytest
 
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.memoryfield import tools as tools_module
 from kiss.core.memoryfield.index import VectorIndex, hashed_embedding
+from kiss.core.memoryfield.pages import MemoryDir
 from kiss.core.memoryfield.tools import MEMORY_PROTOCOL, PULL_CHAR_LIMIT, MemoryTools
 
 live_api = pytest.mark.live_api
@@ -464,6 +467,43 @@ def test_search_lists_a_page_deleted_since_the_scan_without_its_statement(tmp_pa
     gone = next(i for i, line in enumerate(lines) if "  daemon-ports  —  Ports" in line)
     assert not any(line.startswith("       > ") for line in lines[gone + 1 : gone + 2])
     assert "       > The daemon port is in the unit file." in lines
+
+
+class RewritesPageAtItsStatement:
+    """Profile hook: another task rewrites *page* as the search is about to quote its statement."""
+
+    def __init__(self, memory: MemoryDir, page: str, body: str) -> None:
+        self.memory = memory
+        self.page = page
+        self.body = body
+
+    def __call__(self, frame: FrameType, event: str, arg: object) -> None:
+        if (event == "call" and frame.f_code is MemoryTools._statement.__code__
+                and frame.f_locals["hit"].name == self.page):
+            self.memory.write(self.page, self.body)
+
+
+def test_search_does_not_quote_a_page_rewritten_since_it_was_indexed(tmp_path: Path) -> None:
+    """The statement that matched is a position in the indexed text: in the page as
+    rewritten it was another sentence, which the search quoted as the match."""
+    tools = make_tools(tmp_path)
+    tools.memory_write(
+        "spices", "- saffron threads are expensive\n- cumin is cheap", title="Spices")
+    tools.memory_write("paella", "- paella takes saffron threads and rice", title="Paella")
+    rewritten = "- hammers are kept in the garage\n- saffron threads are expensive"
+    previous = sys.getprofile()
+    sys.setprofile(RewritesPageAtItsStatement(MemoryDir(tmp_path), "spices", rewritten))
+    try:
+        lines = tools.memory_search("saffron threads").splitlines()
+    finally:
+        sys.setprofile(previous)
+    assert tools.memory.read("spices").body == rewritten + "\n"
+    spices = next(i for i, line in enumerate(lines) if "  spices  —  Spices" in line)
+    assert not any(line.startswith("       > ") for line in lines[spices + 1 : spices + 2])
+    assert "       > - paella takes saffron threads and rice" in lines
+    # Indexed as rewritten by the next search, the page is quoted where it matches now.
+    lines = tools.memory_search("saffron threads").splitlines()
+    assert "       > - saffron threads are expensive" in lines
 
 
 @live_api

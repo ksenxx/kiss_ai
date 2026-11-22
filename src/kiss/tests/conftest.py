@@ -89,6 +89,23 @@ os.environ["BROWSER"] = "true"
 # monkeypatch.setenv("KISS_MUSE_AUTH", "1").
 os.environ["KISS_MUSE_AUTH"] = "0"
 
+# A developer's ``CDPATH`` redirects a bare ``cd`` in every shell the tests
+# start, and the shell guards judge such a ``cd`` by it (what follows it is
+# then the shell's to resolve): the tests that pin where ``cd sub`` leads
+# would pass only where none is exported.  A test of the guards' reading
+# of ``CDPATH`` sets its own with monkeypatch.setenv("CDPATH", ...).
+os.environ.pop("CDPATH", None)
+
+# ``sshd`` exports ``SSH_CLIENT``, and a top-level bash started under it reads
+# ``~/.bashrc`` before its command, so the sleep guard spends no long ``sleep``
+# on a running job there (``useful_tools._runs_environment_text``).  A login
+# shell that exports ``SHLVL`` hides the login from the suite; PowerShell
+# under OpenSSH on Windows exports none, and the tests of that wait would
+# pass only in a suite started locally.  A test of the guard's reading of
+# the login sets its own with monkeypatch.setenv("SSH_CLIENT", ...).
+for _ssh_login_marker in ("SSH_CLIENT", "SSH2_CLIENT"):
+    os.environ.pop(_ssh_login_marker, None)
+
 
 def _seed_voice_models(test_home: str, real_home: Path) -> None:
     """Link the developer's downloaded voice models into the test home.
@@ -291,7 +308,7 @@ os.environ["KISS_HOME"] = _test_kiss_home
 # (a host whose ``~/.s10s/MY_MODELS.json`` lists 25 endpoint models failed
 # the catalog, picker and user-config tests, 2026-11-04).
 from kiss.agents.sorcar import persistence as _th  # noqa: E402
-from kiss.core import stop_signal, user_config  # noqa: E402
+from kiss.core import stop_signal, tool_interrupt, user_config  # noqa: E402
 from kiss.core.kiss_error import KISSError  # noqa: E402
 from kiss.core.processes import suppress_error_dialogs  # noqa: E402
 from kiss.tests import subprocess_reaper  # noqa: E402
@@ -965,15 +982,17 @@ def click_row_menu_item(row, control: str) -> None:
     """Click the line *control* of the "…" menu of a Chats-panel *row*.
 
     A chat panel's header and a task panel show one line: their buttons
-    (fold, favourite, rename, copy, delete) are the lines of a menu that
+    (favourite, pin, rename, copy, delete) are the lines of a menu that
     the row's "…" button opens (``makeSidebarRowMenu`` in
     ``media/main.js``), so a button is clicked the way a user reaches it.
+    The fold button is not one of them: it sits on the row's line, left
+    of the "…" button (``row.locator(":scope > .sidebar-item-collapse")``).
 
     Args:
         row: A ``playwright.sync_api.Locator`` of one
             ``.history-chat-header`` or one ``.running-item``.
         control: A CSS selector of the menu's button to click, e.g.
-            ``".history-chat-collapse"``.
+            ``".history-chat-pin"``.
     """
     row.locator(":scope > .sidebar-item-more").click()
     row.locator(":scope > .sidebar-item-actions").locator(control).click()
@@ -1055,6 +1074,12 @@ def pytest_runtest_call(item: pytest.Item) -> Iterator[None]:
     test's first ``print()`` raise ``KeyboardInterrupt``.  Production
     unbinds per run; tests get it centrally here.
 
+    A test that leaves the runner thread marked as holding Stops back
+    (``tool_interrupt.call_without_injection``) fails here: only a
+    tracer raising at the first line of that call's ``finally`` does
+    it, a point no real exception reaches, and every later test's Stop
+    aimed at the thread would be parked for good.
+
     Args:
         item: The test about to run. For ``unittest.TestCase`` items its
             ``tearDown`` — and for ``IsolatedAsyncioTestCase`` items its
@@ -1082,6 +1107,8 @@ def pytest_runtest_call(item: pytest.Item) -> Iterator[None]:
     finally:
         join_orphan_sweeps()
         stop_signal.set_thread_stop_event(None)
+        if tool_interrupt._HELD.pop(threading.get_ident(), None) is not None:
+            pytest.fail("the test left its thread holding Stops back (tool_interrupt._HELD)")
 
 
 def simple_calculator(expression: str) -> str:

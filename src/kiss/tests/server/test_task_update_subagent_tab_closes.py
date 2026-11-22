@@ -7,12 +7,10 @@
 The task-info panel polls ``getTaskUpdate`` while a tab shows a running
 task; the daemon answers by asking the ``/ask`` agent about that task
 (:func:`kiss.server.task_update.run_task_update_sea`) as an in-process
-sub-agent of it.  Like the chat's ``/ask`` answerer it is a side
-channel: its answer goes to the task-info panel, so its nested tab is
-open only while it runs.  Before the ``side_channel`` stamp, every
-reload of the chat page (a ``resumeSession`` of the parent) re-announced
-each finished update as ``openSubagentTab{isDone: true}`` — one dead
-tab per periodic update.
+sub-agent of it.  Like every sub-agent, it has a nested tab only while
+it runs: a reload of the chat page (a ``resumeSession`` of the parent)
+that announced each finished update again would leave one dead tab per
+periodic update.
 
 Real daemon on a loopback WSS endpoint (:class:`DaemonLocalHarness`); only the LLM
 boundary (``RelentlessAgent.run``) is stubbed.
@@ -26,7 +24,6 @@ from typing import Any
 
 from kiss.agents.sorcar import persistence as _persistence
 from kiss.server import task_update
-from kiss.server.server import _is_side_channel_row
 from kiss.tests.server.test_run_agent_subagent_tab import DaemonLocalHarness
 
 PARENT_TAB_ID = "webtab-updated-1"
@@ -172,7 +169,7 @@ class TaskUpdateSubagentTabClosesTest(DaemonLocalHarness):
             what="the parent's replayed transcript",
         )
         # Only the replay is judged: a viewer that attached while the child
-        # still ran was rightly told to open its tab (``isDone`` false) and
+        # still ran was rightly told to open its tab and
         # then to close it, which a child that ends a few milliseconds
         # later (the clean-up of a sub-agent's processes) makes common.
         assert self._events_for_tab(
@@ -205,9 +202,9 @@ class TaskUpdateSubagentTabClosesTest(DaemonLocalHarness):
                 ),
                 what="subagentDone for the chat page's nested update tab",
             )
-            # The row is persisted under the parent as a side channel:
-            # the very predicate the daemon's replays key on.
-            child_row = self._wait_for(
+            # The row is persisted under the parent: a replay of the
+            # parent ends the child's tab from it.
+            self._wait_for(
                 lambda: next(
                     (
                         row for row in
@@ -219,9 +216,6 @@ class TaskUpdateSubagentTabClosesTest(DaemonLocalHarness):
                     None,
                 ),
                 what="the persisted task-update child row",
-            )
-            assert _is_side_channel_row(child_row), (
-                f"task-update child is not a side channel: {child_row!r}"
             )
             # Wait until the child is no longer registered as running;
             # ``_subagent_is_done`` is what decides the replay branch.

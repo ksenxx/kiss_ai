@@ -27,11 +27,19 @@ counts processes and threads alike, so a value low enough to fail
 ``Thread.start`` also fails the ``fork`` in ``_spawn`` that has to
 succeed first, and a value tuned to the live process count is racy on
 a shared host.  The injected exception takes the identical code path.
+
+Audit 2026-11-21 (FX44b): the stop the server really injects can also
+land where a wait of the standard library has just taken its lock (the
+wait that ends ``Thread.start()``, a slice of ``Queue.get``): the lock
+stayed held, so the started thread never ran and the output's reader
+never got out of its ``put``.  ``Bash`` now makes those calls with the
+Stop held back until they have returned.
 """
 
 from __future__ import annotations
 
 import inspect
+import queue
 import subprocess
 import sys
 import threading
@@ -47,6 +55,7 @@ from kiss.agents.sorcar import useful_tools
 from kiss.agents.sorcar.useful_tools import UsefulTools
 from kiss.core import tool_interrupt
 from kiss.core.processes import kill_process_tree, popen_process_group
+from kiss.tests.lock_injection import stop_as_it_takes_its_lock, stranded_threads
 from kiss.tests.server.pause import Pause
 
 _WAIT_LINE = [
@@ -160,7 +169,12 @@ def _run_with_injection_after_spawn(
     (``useful_tools``, ``tool_interrupt``): the check-point delivery of
     the server's injected Stop, made deterministic (a trace event comes
     BEFORE its line runs, so the stdlib's lock-restoring ``finally``
-    bodies, which a real injection lands after, are left alone).
+    bodies, which a real injection lands after, are left alone).  A
+    line run with the Stop held back
+    (``tool_interrupt.call_without_injection``) is no check point and
+    is not counted: raised at the first line of that call's ``finally``,
+    the exception left the thread marked as holding Stops back for the
+    rest of the process, and no later test's Stop reached it.
     *stop_event* is set first when given, as ``_stop_task`` sets the
     task's event before it injects.
 
@@ -182,6 +196,7 @@ def _run_with_injection_after_spawn(
             and not outcome["injected"]
             and threading.get_ident() == task_tid
             and frame.f_code.co_filename in tool_files
+            and task_tid not in tool_interrupt._HELD
         ):
             state["lines"] += 1
             if state["lines"] == nth_line:
@@ -422,6 +437,67 @@ def test_a_status_read_does_not_reap_a_job_shell_under_a_pending_stop(tmp_path: 
         _assert_no_survivor(tag, tools)
     finally:
         stop_event.set()
+        subprocess.run(["pkill", "-f", tag], check=False)
+
+
+def _bash_under_profile(
+    tools: UsefulTools, command: str, profile: Any, raised: list[BaseException],
+) -> None:
+    """Thread body: run ``tools.Bash(command)`` under the profile hook, noting what it raises."""
+    sys.setprofile(profile)
+    try:
+        tools.Bash(command, "tagged sleep", timeout_seconds=30)
+    except BaseException as exc:  # noqa: BLE001 — the injected Stop is expected
+        raised.append(exc)
+    finally:
+        sys.setprofile(None)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups")
+@pytest.mark.parametrize(
+    "program,profile",
+    [
+        (
+            "sleep 30",
+            stop_as_it_takes_its_lock(
+                threading.Event.wait, threading.Thread.start, useful_tools._spawn_owned,
+            ),
+        ),
+        (
+            "yes",
+            stop_as_it_takes_its_lock(queue.Queue.get, UsefulTools._consume_stream, settle=1),
+        ),
+    ],
+    ids=["owner-start", "output-wait"],
+)
+def test_a_stop_as_a_wait_of_bash_takes_its_lock_strands_nothing(
+    program: str, profile: Any,
+) -> None:
+    """The server's Stop landing where a stdlib wait of ``Bash`` has taken its lock strands nothing.
+
+    The start of the shell's owner ends in a wait for the thread to come
+    up, and the output is waited for in slices of ``Queue.get``: each
+    enters a ``threading.Condition``, whose lock stays held when the
+    Stop is raised as ``__enter__`` returns (gh-74174).  The owner then
+    never ran, and the reader of a command that keeps printing never got
+    out of its ``put``: a thread and the command's pipe, kept for good.
+    """
+    tag = f"concaudit-f2-lock-{uuid.uuid4().hex}"
+    tools = UsefulTools(stop_event=threading.Event())
+    raised: list[BaseException] = []
+    before = threading.enumerate()
+    worker = threading.Thread(
+        target=_bash_under_profile, args=(tools, f"exec -a {tag} {program}", profile, raised),
+        daemon=True,
+    )
+    try:
+        worker.start()
+        worker.join(20)
+        assert not worker.is_alive(), "Bash waits for a lock the Stop left held"
+        assert [type(exc) for exc in raised] == [KeyboardInterrupt]
+        _assert_no_survivor(tag, tools)
+        assert stranded_threads(before) == []
+    finally:
         subprocess.run(["pkill", "-f", tag], check=False)
 
 

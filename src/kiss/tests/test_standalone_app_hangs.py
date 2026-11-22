@@ -11,6 +11,10 @@ a stale brand bundle.  Each call is bounded by a timeout and answers
 that sleeps stands in for the stuck command.  "Cannot tell" from ``ps``
 is not "nothing runs": the bundle replacement, which deletes the
 executables a running window may still use, is refused then.
+
+Neither can a peer that trickles its answer hang ``kiss-app``'s probes
+of the daemon's URL: a loopback socket that sends a byte every few
+milliseconds stands in for it.
 """
 
 from __future__ import annotations
@@ -18,10 +22,13 @@ from __future__ import annotations
 import json
 import os
 import signal
+import socket
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Callable
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +43,9 @@ pytestmark = posix_only("stub commands are sh scripts")
 
 TIMEOUT = 0.5
 """How long each probe gets before it gives up on its stuck stub."""
+
+TRICKLE_SECS = 8.0
+"""How long a trickling peer keeps sending when the probe does not hang up on it."""
 
 
 def _hanging_commands(bin_dir: Path, *names: str) -> None:
@@ -93,6 +103,58 @@ def test_stuck_probes_time_out(stuck_bin: Path, tmp_path: Path) -> None:
         stuck_bin, "open", standalone_app.macos_activate_running, bundle, timeout=TIMEOUT
     )
     assert activated is False
+
+
+def _trickle(server: socket.socket, head: bytes, drip: bytes, hung_up: threading.Event) -> None:
+    """Peer thread: answer one request with *head*, then send *drip* every 10 ms.
+
+    Until the probe hangs up (*hung_up* is set then), and for
+    :data:`TRICKLE_SECS` at most: a probe that waits the peer out fails
+    its test instead of hanging it.
+    """
+    with server, server.accept()[0] as conn:
+        conn.recv(65536)
+        conn.sendall(head)
+        give_up = time.monotonic() + TRICKLE_SECS
+        while time.monotonic() < give_up:
+            try:
+                conn.sendall(drip)
+            except OSError:
+                hung_up.set()
+                return
+            time.sleep(0.01)
+
+
+def test_a_trickled_answer_ends_at_the_probes_deadline() -> None:
+    """A peer trickling its headers or its body holds no daemon probe past its timeout.
+
+    ``urlopen``'s timeout bounds each socket read, not the exchange: a
+    byte every 10 ms kept ``daemon_answers`` (asked before ``kiss-app``
+    opens its window) and ``ask_app_window_open`` (asked before the 12 s
+    deadline of ``app_window_closed`` is looked at) waiting for as long
+    as the peer sent.  Each gives up at its timeout with its "no answer"
+    value, the body's state having arrived or not, and hangs up.
+    """
+    cases: tuple[tuple[bytes, bytes, Callable[[str], Any], Any, float], ...] = (
+        (b"HTTP/1.1 200 OK\r\nX-Trickle: ", b"x", standalone_app.daemon_answers, False, 2.0),
+        (
+            b'HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n{"open":false}', b" ",
+            partial(standalone_app.ask_app_window_open, timeout=TIMEOUT), None, TIMEOUT,
+        ),
+    )
+    for head, drip, probe, no_answer, timeout in cases:
+        server = socket.create_server(("127.0.0.1", 0))
+        server.settimeout(30)  # the accept, should the probe never connect
+        hung_up = threading.Event()
+        peer = threading.Thread(target=_trickle, args=(server, head, drip, hung_up), daemon=True)
+        peer.start()
+        started = time.monotonic()
+        answer = probe(f"http://127.0.0.1:{server.getsockname()[1]}/")
+        elapsed = time.monotonic() - started
+        peer.join(TRICKLE_SECS + 30)
+        assert answer is no_answer, f"{head!r}: answered {answer!r} after {elapsed:.2f}s"
+        assert timeout <= elapsed < timeout + 3.0, f"waited {elapsed:.2f}s for a {timeout}s timeout"
+        assert hung_up.is_set() and not peer.is_alive(), "the probe left its connection open"
 
 
 def test_unanswering_ps_is_not_nothing_running(

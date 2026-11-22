@@ -9,15 +9,15 @@ These tests render the REAL page returned by
 ``main.css``, ``remote-codex.css``, the inlined palettes and
 ``brand.css``) in headless Chromium and read what the browser computes:
 
-* The Machine filter field ships ``hidden`` (chat.html) and stays
-  hidden until a remote machine is registered; the field's own
-  ``display`` must not undo the attribute.
+* The Machine row of the Filter and group menu ships ``hidden``
+  (chat.html) and stays hidden until a remote machine is registered;
+  the row's own ``display`` must not undo the attribute.
 * The sign-in window's box wears the same frame as the password dialog
   and the server-reset dialog.
 * The icons of a history row's menu read in the theme's secondary text
-  step at rest (the ids line's copy button in its faintest one) and in
-  its foreground under the pointer, a favourite in the theme's
-  favourite colour and a copied button in the theme's ok colour.
+  step at rest and in its foreground under the pointer, a favourite in
+  the theme's favourite colour and a copied button in the theme's ok
+  colour.
 * The settings dialog carries the theme's widget-border hairline and
   the large elevation.
 * The Schedule / Machines inline form's Save button is the form's
@@ -25,12 +25,12 @@ These tests render the REAL page returned by
   shares a class with.
 * The elements whose classes meet in main.js (a promptlet row, the
   prompt toast's field, a strip tab, the Stop button, the folder
-  picker's buttons, a history row's ids copy button) render as the
-  winning rules say.
+  picker's buttons) render as the winning rules say.
 * The states the remote skin restyles still show: the composer's
   pending question and dragged file, the voice button's recording and
-  transcribing colours, the History flat-list switch's hover and
-  selected fills, the Stop button's hover and a focused settings field.
+  transcribing colours, the Filter and group button's fill under the
+  pointer and while its menu is open and its dot while a filter is on,
+  the Stop button's hover and a focused settings field.
 
 The static server never answers the websocket, so main.js keeps the
 page in its shipped state (no machine registered).  No mocks, patches
@@ -80,13 +80,18 @@ _FRAME_JS = """
 }
 """
 
-# A history row as renderHistory builds it (a `.sidebar-item
-# .running-item` with its "…" button, that button's menu of action
-# buttons, each holding its 12px icon, and the ids line), its menu
-# open.
+# A chat's header with its fold button and a history row as
+# renderHistory builds them (the row a `.sidebar-item .running-item`
+# with its "…" button and that button's menu of action buttons, each
+# holding its 12px icon), the row's menu open.
 _ROW_BUILD_JS = """
 () => {
   const icon = '<svg width="12" height="12"></svg>';
+  const header = document.createElement('div');
+  header.id = 'probe-header';
+  header.className = 'history-chat-header';
+  header.innerHTML =
+    '<button class="sidebar-item-collapse history-chat-collapse">' + icon + '</button>';
   const row = document.createElement('div');
   row.id = 'probe-row';
   row.className = 'sidebar-item running-item';
@@ -95,20 +100,18 @@ _ROW_BUILD_JS = """
     '<div class="sidebar-item-actions" popover="auto">' +
     '<button class="sidebar-item-favorite">' + icon + '</button>' +
     '<button class="sidebar-item-favorite favorited">' + icon + '</button>' +
+    '<button class="sidebar-item-pin">' + icon + '</button>' +
+    '<button class="sidebar-item-pin pinned">' + icon + '</button>' +
     '<button class="sidebar-item-copy">' + icon + '</button>' +
     '<button class="sidebar-item-copy copied">' + icon + '</button>' +
-    '<button class="sidebar-item-collapse">' + icon + '</button>' +
-    '</div>' +
-    '<div class="running-item-info"><span class="running-item-ids">ids' +
-    '<button class="ids-copy-btn">' + icon + '</button>' +
-    '<button class="ids-copy-btn copied">' + icon + '</button></span></div>';
-  document.getElementById('history-list').appendChild(row);
+    '</div>';
+  document.getElementById('history-list').append(header, row);
   row.querySelector('.sidebar-item-actions').showPopover();
 }
 """
 
-# The colours of that row's buttons, next to the palette names resolved
-# in the same place.
+# The colours of that row's buttons and of the header's fold button,
+# next to the palette names resolved in the same place.
 _ROW_COLOURS_JS = """
 () => {
   const row = document.getElementById('probe-row');
@@ -129,11 +132,12 @@ _ROW_COLOURS_JS = """
     ok: probe('var(--status-ok)'),
     favoriteBtn: colour('.sidebar-item-favorite:not(.favorited)'),
     favorited: colour('.sidebar-item-favorite.favorited'),
+    pinBtn: colour('.sidebar-item-pin:not(.pinned)'),
+    pinned: colour('.sidebar-item-pin.pinned'),
     copyBtn: colour('.sidebar-item-copy:not(.copied)'),
     copied: colour('.sidebar-item-copy.copied'),
-    collapseBtn: colour('.sidebar-item-collapse'),
-    idsCopyBtn: colour('.ids-copy-btn:not(.copied)'),
-    idsCopied: colour('.ids-copy-btn.copied'),
+    collapseBtn: getComputedStyle(
+      document.querySelector('#probe-header > .sidebar-item-collapse')).color,
   };
 }
 """
@@ -205,44 +209,51 @@ def page(browser: Browser, remote_url: str) -> Iterator[Page]:
     pg = context.new_page()
     try:
         goto_retrying_network_change(pg, remote_url, wait_until="load")
-        pg.wait_for_selector("#history-filters-toggle", state="attached")
+        pg.wait_for_selector("#history-filter-btn", state="attached")
         pg.evaluate(_PREPARE_JS)
         yield pg
     finally:
         context.close()
 
 
-def _machine_field(page: Page) -> dict[str, Any]:
-    """The Machine filter field's ``hidden`` flag, display and box."""
-    field: dict[str, Any] = page.evaluate(
-        """() => {
-          const field = document.getElementById('hf-machine').parentElement;
-          const r = field.getBoundingClientRect();
-          return {hidden: field.hidden, display: getComputedStyle(field).display,
-                  width: r.width, height: r.height};
-        }"""
-    )
-    return field
+# The rows of the Filter and group menu, by the setting they open.
+_FILTER_ROW = '#history-filter-menu > .fg-row[data-fg="{}"]'.format
+
+_MACHINE_ROW_JS = """
+(sel) => {
+  const row = document.querySelector(sel);
+  const r = row.getBoundingClientRect();
+  return {hidden: row.hidden, display: getComputedStyle(row).display,
+          width: r.width, height: r.height};
+}
+"""
+
+
+def _machine_row(page: Page) -> dict[str, Any]:
+    """The Machine row's ``hidden`` flag, display and box."""
+    row: dict[str, Any] = page.evaluate(_MACHINE_ROW_JS, _FILTER_ROW("machine"))
+    return row
 
 
 def test_machine_filter_stays_hidden_until_a_machine_is_registered(page: Page) -> None:
-    """With the Filters drawer open and no remote machine registered,
-    the Machine field takes no room; once main.js clears ``hidden`` (a
-    machine was registered) it lays out like the SEA field beside it."""
-    page.click("#history-filters-toggle")
-    page.wait_for_selector("#history-filters-body", state="visible")
-    sea = page.locator("#hf-sea").locator("..").bounding_box()
+    """With the Filter and group menu open and no remote machine
+    registered, the Machine row takes no room; once main.js clears
+    ``hidden`` (a machine was registered) it lays out like the SEA row
+    of the same menu."""
+    page.click("#history-filter-btn")
+    page.wait_for_selector("#history-filter-menu", state="visible")
+    sea = page.locator(_FILTER_ROW("sea")).bounding_box()
     assert sea and sea["width"] > 0 and sea["height"] > 0, sea
 
-    field = _machine_field(page)
-    assert field["hidden"] is True, field
-    assert field["display"] == "none", field
-    assert field["width"] == 0 and field["height"] == 0, field
+    row = _machine_row(page)
+    assert row["hidden"] is True, row
+    assert row["display"] == "none", row
+    assert row["width"] == 0 and row["height"] == 0, row
 
-    page.evaluate("() => { document.getElementById('hf-machine').parentElement.hidden = false; }")
-    field = _machine_field(page)
-    assert field["display"] != "none", field
-    assert field["width"] > 0 and field["height"] == pytest.approx(sea["height"]), field
+    page.locator(_FILTER_ROW("machine")).evaluate("row => { row.hidden = false; }")
+    row = _machine_row(page)
+    assert row["display"] != "none", row
+    assert row["width"] > 0 and row["height"] == pytest.approx(sea["height"]), row
 
 
 @pytest.mark.parametrize("theme", ["light", "dark"])
@@ -260,21 +271,70 @@ def test_sign_in_box_matches_the_other_dialogs(page: Page, theme: str) -> None:
     assert password["shadow"] != "none", password
 
 
+# A frame of the daemon, handed to main.js the way transport.js does.
+_DAEMON_SAYS_JS = "(ev) => window.dispatchEvent(new MessageEvent('message', {data: ev}))"
+
+# Of the controls `sels` name, those that scrolling cannot bring inside
+# the window and under the pointer.
+_UNREACHABLE_JS = """
+(sels) => sels.filter((sel) => {
+  const el = document.querySelector(sel);
+  el.scrollIntoView({block: 'nearest'});
+  const r = el.getBoundingClientRect();
+  const hit = document.elementFromPoint((r.left + r.right) / 2, (r.top + r.bottom) / 2);
+  return r.top < 0 || r.bottom > innerHeight || !el.contains(hit);
+})
+"""
+
+
+def test_sign_in_window_taller_than_the_screen_scrolls_to_its_buttons(
+    page: Page, remote_url: str
+) -> None:
+    """With its paste row open the sign-in window is taller than a phone
+    held sideways (568x320, the text three steps up at 16px).  Its box
+    stays on screen and scrolls: the provider button at its top and
+    "Not now" at its bottom can both be brought under the pointer, and
+    "Not now" closes the window."""
+    for _ in range(3):
+        page.click('[data-font-step="1"]')
+    page.set_viewport_size({"width": 568, "height": 320})
+    page.evaluate(_DAEMON_SAYS_JS, {
+        "type": "signin", "title": "Sign in",
+        "providers": [{"id": "google", "label": "Login with Google"}],
+    })
+    with page.expect_popup():
+        page.click("#signin-modal-buttons button")
+    # The page to sign in on: one this server has.
+    page.evaluate(_DAEMON_SAYS_JS, {
+        "type": "signinUrl", "provider": "google",
+        "url": remote_url.replace("index.html", "media/brand.css"),
+    })
+    page.wait_for_selector("#signin-modal-paste", state="visible")
+    box = page.locator("#signin-modal .auth-modal-content").bounding_box()
+    assert box and box["y"] >= 0 and box["y"] + box["height"] <= 320, box
+    assert page.evaluate(_UNREACHABLE_JS, [
+        "#signin-modal-buttons button", "#signin-modal-paste-input",
+        "#signin-modal-paste-btn", "#signin-modal-later",
+    ]) == []
+    page.click("#signin-modal-later")
+    page.wait_for_selector("#signin-modal", state="hidden")
+
+
 @pytest.mark.parametrize("theme", ["light", "dark"])
 def test_history_row_buttons_use_the_theme_colours(page: Page, theme: str) -> None:
-    """The icons of a history row's menu read in the theme's secondary
-    text step at rest and the ids line's ghost copy button in its
-    faintest one, each in the foreground under the pointer; a favourite
-    turns the favourite colour and a copied button the ok colour."""
+    """The fold button of a chat's header and the icons of a history
+    row's menu read in the theme's secondary text step at rest, an
+    icon in the foreground under the pointer; a favourite turns the
+    favourite colour, a set pin the foreground and a copied button the
+    ok colour."""
     _themed(page, theme)
     page.evaluate(_ROW_BUILD_JS)
     got = page.evaluate(_ROW_COLOURS_JS)
-    for key in ("favoriteBtn", "copyBtn", "collapseBtn"):
+    for key in ("favoriteBtn", "pinBtn", "copyBtn", "collapseBtn"):
         assert got[key] == got["dim"], (key, got)
-    assert got["idsCopyBtn"] == got["faint"], got
     assert got["favorited"] == got["favorite"], got
+    assert got["pinned"] == got["fg"], got
     assert got["copied"] == got["ok"], got
-    assert got["idsCopied"] == got["ok"], got
     assert len({got["fg"], got["dim"], got["faint"], got["favorite"], got["ok"]}) == 5, got
     page.hover("#probe-row .sidebar-item-copy:not(.copied)")
     hovered = page.evaluate(_ROW_COLOURS_JS)
@@ -378,10 +438,10 @@ def test_inline_form_save_is_the_primary_button_not_the_delete_red(
 
 
 # Elements whose classes meet in main.js, as computed: a promptlet row
-# (`sidebar-item tricks-item`, its editor `editing`), the prompt toast's
-# field (`kiss-notification-input explorer-input`), a tab of the strip,
-# the Stop button, the folder picker's buttons and a history row's ids
-# copy button next to a promptlet row's sidebar copy button.
+# (`sidebar-item tricks-item`, its editor `editing`) with its copy
+# button, the prompt toast's field (`kiss-notification-input
+# explorer-input`), a tab of the strip, the Stop button and the folder
+# picker's buttons.
 _MET_CLASSES_JS = """
 () => {
   const wrap = document.createElement('div');
@@ -395,9 +455,7 @@ _MET_CLASSES_JS = """
     '<div class="folder-picker-actions">' +
     '<button id="probe-cancel" class="folder-picker-cancel">Cancel</button>' +
     '<button id="probe-select" class="folder-picker-select">Select Folder</button>' +
-    '</div><div class="sidebar-item running-item">' +
-    '<div class="running-item-info"><span class="running-item-ids">ids' +
-    '<button id="probe-ids" class="ids-copy-btn"></button></span></div></div>' +
+    '</div>' +
     '<span id="probe-primary" style="background: var(--primary-bg)"></span>' +
     '<span id="probe-raised" style="background: var(--surface2)"></span>';
   document.getElementById('history-list').appendChild(wrap);
@@ -407,8 +465,6 @@ _MET_CLASSES_JS = """
   document.getElementById('tab-list').appendChild(tab);
   const cs = (sel) => getComputedStyle(document.querySelector(sel));
   const pick = (sel, props) => Object.fromEntries(props.map(p => [p, cs(sel)[p]]));
-  const shared = ['borderTopStyle', 'cursor', 'borderRadius', 'color', 'opacity',
-                  'backgroundColor', 'transitionProperty', 'transitionDuration'];
   const out = {
     trick: pick('#probe-trick', ['padding', 'cursor', 'borderRadius', 'whiteSpace', 'gap']),
     trickEditing: cs('#probe-trick-edit').cursor,
@@ -419,9 +475,7 @@ _MET_CLASSES_JS = """
     cancel: pick('#probe-cancel', ['borderTopColor', 'backgroundColor', 'padding']),
     primary: cs('#probe-primary').backgroundColor,
     raised: cs('#probe-raised').backgroundColor,
-    ids: pick('#probe-ids', ['display', 'verticalAlign', 'padding', 'margin']),
-    idsShared: pick('#probe-ids', shared),
-    copyShared: pick('#probe-copy', shared),
+    copyCursor: cs('#probe-copy').cursor,
   };
   tab.remove();
   wrap.remove();
@@ -436,7 +490,7 @@ def test_met_classes_render_as_the_winning_rules_say(page: Page) -> None:
     toast's field as an explorer input, the strip's tabs as the chat
     page's, the Stop button has no border, the folder picker's Select
     button takes the primary fill and its Cancel the raised secondary
-    one, and the ids copy button is the sidebar copy button inline."""
+    one, and a promptlet row's copy button keeps the pointer."""
     got = page.evaluate(_MET_CLASSES_JS)
     frame = page.evaluate(_PALETTE_JS, "var(--border-input)")
     assert got["trick"] == {
@@ -455,12 +509,7 @@ def test_met_classes_render_as_the_winning_rules_say(page: Page) -> None:
         "borderTopColor": frame, "backgroundColor": got["raised"], "padding": "6px 12px",
     }, got
     assert got["primary"] != got["raised"], got
-    assert got["ids"] == {
-        "display": "inline-flex", "verticalAlign": "middle", "padding": "0px 2px",
-        "margin": "0px 0px 0px 4px",
-    }, got
-    assert got["idsShared"] == got["copyShared"], got
-    assert got["copyShared"]["cursor"] == "pointer", got
+    assert got["copyCursor"] == "pointer", got
 
 
 # The settings dialog, open, with its restart confirmation open or not.
@@ -661,29 +710,49 @@ def test_voice_button_shows_recording_and_transcribing(page: Page, theme: str) -
         page.evaluate(_SET_CLASS_JS, ["#voice-btn", state, False])
 
 
+# The dot the Filter and group button wears while a filter is on.
+_DOT_JS = """
+(sel) => {
+  const cs = getComputedStyle(document.querySelector(sel), '::after');
+  return {content: cs.content, background: cs.backgroundColor, width: cs.width};
+}
+"""
+
+
 @pytest.mark.parametrize("theme", ["light", "dark"])
-def test_history_view_switch_fills_on_hover_and_when_selected(page: Page, theme: str) -> None:
-    """The flat-list switch is a ghost icon button: no fill at rest,
-    the icon-button wash under the pointer, and in the selected (flat
-    list) state the selection fill under the strongest text, pointer
-    or not."""
+def test_filter_button_fills_on_hover_and_while_open_and_wears_a_dot(
+    page: Page, theme: str
+) -> None:
+    """The Filter and group button is a ghost icon button: no fill at
+    rest, the icon-button wash under the pointer and, pointer or not,
+    while its menu is open.  Once an option of the menu narrows the list
+    it wears a dot in the accent colour, which stays when the menu is
+    closed and the button is back at rest."""
     _themed(page, theme)
-    switch = "#history-view-toggle"
-    rest = page.evaluate(_BUTTON_JS, switch)
+    button = "#history-filter-btn"
+    rest = page.evaluate(_BUTTON_JS, button)
     assert rest["background"] == "rgba(0, 0, 0, 0)", rest
     assert rest["color"] == _colour(page, "var(--dim)"), rest
-    page.hover(switch)
-    hovered = page.evaluate(_BUTTON_JS, switch)
+    assert page.evaluate(_DOT_JS, button)["content"] == "none"
+    page.hover(button)
+    hovered = page.evaluate(_BUTTON_JS, button)
     assert hovered["background"] == _colour(page, "var(--hover-strong)"), hovered
     assert hovered["color"] == _colour(page, "var(--fg)"), hovered
-    page.evaluate(_SET_CLASS_JS, [switch, "active", True])
-    strong = _colour(page, "var(--fg-strong)")
-    # The switch has no border, so its border colour is its text colour.
-    selected = {"color": strong, "border": strong, "background": _colour(page, "var(--selected)")}
-    assert selected["background"] != hovered["background"], (hovered, selected)
-    assert page.evaluate(_BUTTON_JS, switch) == selected
+
+    page.click(button)
+    page.wait_for_selector("#history-filter-menu", state="visible")
     page.mouse.move(0, 0)
-    assert page.evaluate(_BUTTON_JS, switch) == selected
+    assert page.evaluate(_BUTTON_JS, button) == hovered
+
+    page.click(_FILTER_ROW("status"))
+    page.click("#fg-status > .fg-option >> nth=0")
+    dot = page.evaluate(_DOT_JS, button)
+    assert dot == {"content": '""', "background": _colour(page, "var(--accent)"), "width": "6px"}
+    page.click(button)
+    page.wait_for_selector("#history-filter-menu", state="hidden")
+    page.mouse.move(0, 0)
+    assert page.evaluate(_BUTTON_JS, button) == rest
+    assert page.evaluate(_DOT_JS, button) == dot
 
 
 @pytest.mark.parametrize("theme", ["light", "dark"])

@@ -13,14 +13,16 @@ covers both sides of the lock check without a daemon or a thread.
 
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from kiss.agents.sorcar import agent_dispatch, daemon_client, fanout_guard, sea_apply, sea_commands
+from kiss.agents.sorcar.daemon_client import TaskResult
 from kiss.agents.sorcar.sea_settings import SeaError
+from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+from kiss.core.kiss_agent import KISSAgent
 
 
 def _command(plan: dict[str, Any], job: agent_dispatch.AgentJob | None = None) -> dict[str, Any]:
@@ -110,7 +112,7 @@ def test_dispatch_result_returns_an_error_string_when_the_caller_cannot_be_read(
 
 
 class _Caller:
-    """A calling agent with a budget remainder of $50 and nothing else to inherit."""
+    """A calling agent with $100 left, half of it one sub-task's share; nothing else to inherit."""
 
     model_name = "m"
     work_dir = ""
@@ -128,63 +130,109 @@ class _Caller:
         return {}
 
 
-def _git(repo: Path, *args: str) -> None:
-    subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
+class _CallerThatSpent(_Caller):
+    """A :class:`_Caller` whose task has spent *spent* so far, its sub-agents' spend included."""
+
+    def __init__(self, spent: float) -> None:
+        self.spent = spent
+
+    def _live_budget_used(self) -> float:
+        """The first number of the caller's ``Budget:`` line."""
+        return self.spent
 
 
-def _repo_with_a_diff(tmp_path: Path, changed_lines: int) -> Path:
-    """A git repo whose working tree differs from HEAD by *changed_lines* lines."""
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    _git(repo, "init", "-q")
-    identity = ["-c", "user.name=t", "-c", "user.email=t@t"]
-    _git(repo, *identity, "commit", "-q", "--allow-empty", "-m", "i")
-    (repo / "new.txt").write_text("x\n" * changed_lines)
-    return repo
+def test_review_without_a_budget_holds_an_eighth_of_the_task_spend(tmp_path: Path) -> None:
+    """A review child gets 1/8 of what the calling task spent, $10 at least, within its share."""
+    assert fanout_guard.review_budget(160.0) == 20.0
+    assert fanout_guard.review_budget(80.0) == 10.0
+    # An eighth under $10 is $10: of a small spend, of none, of one that is no number.
+    assert fanout_guard.review_budget(79.0) == 10.0
+    assert fanout_guard.review_budget(0.4) == 10.0
+    assert fanout_guard.review_budget(0.0) == 10.0
+    assert fanout_guard.review_budget(float("nan")) == 10.0
 
-
-def test_changed_lines_counts_deletions_and_untracked_files(tmp_path: Path) -> None:
-    """Both numstat columns count: a 300-line file cut to 100 is 200 changed lines."""
-    repo = _repo_with_a_diff(tmp_path, 50)
-    identity = ["-c", "user.name=t", "-c", "user.email=t@t"]
-    (repo / "old.txt").write_text("y\n" * 300)
-    _git(repo, "add", "new.txt", "old.txt")
-    _git(repo, *identity, "commit", "-q", "-m", "base")
-    assert fanout_guard.changed_lines(str(repo)) == 0
-    (repo / "old.txt").write_text("y\n" * 100)
-    (repo / "extra.txt").write_text("z\n" * 40)
-    assert fanout_guard.changed_lines(str(repo)) == 240
-
-
-def test_review_without_a_budget_holds_one_sized_by_the_diff(tmp_path: Path) -> None:
-    """A review child gets $5 + $5 per 1,000 changed lines, never more than the caller's share."""
-    repo = _repo_with_a_diff(tmp_path, 1200)
-    assert fanout_guard.changed_lines(str(repo)) == 1200
-    assert fanout_guard.changed_lines(str(tmp_path / "nowhere")) == 0
-
-    def budget(task: str, **kwargs: Any) -> float:
-        plan = agent_dispatch.plan_run_agent(str(repo), task, "", parent_agent=_Caller(), **kwargs)
+    def budget(task: str, caller: _Caller | None = None, **kwargs: Any) -> float:
+        plan = agent_dispatch.plan_run_agent(
+            str(tmp_path), task, "", parent_agent=caller or _CallerThatSpent(160.0), **kwargs,
+        )
         assert isinstance(plan, dict), plan
-        return float(_command(plan)["maxBudget"])
+        cmd = _command(plan)
+        if "max_budget" not in kwargs:
+            assert cmd["provenance"]["max_budget"] == "inherited", cmd["provenance"]
+        return float(cmd["maxBudget"])
 
-    assert budget("Verify the listed changes", tool_profile="review") == 11.0
-    assert budget("Review the diff for bugs") == 11.0  # inferred from the task text
+    assert budget("Verify the listed changes", tool_profile="review") == 20.0
+    assert budget("Review the diff for bugs") == 20.0  # inferred from the task text
     assert budget("Implement the feature") == 50.0
     # A task that reviews *and* changes code is implementation work: no review cap.
     assert budget("Review the diff and fix every bug you find") == 50.0
-    assert budget("Verify the listed changes", tool_profile="review", max_budget="20") == 20.0
+    # A budget the call names is not a share: it stands, under the $10 too.
+    assert budget("Verify the listed changes", tool_profile="review", max_budget="30") == 30.0
+    assert budget("Verify the listed changes", tool_profile="review", max_budget="4") == 4.0
     assert budget("Verify the listed changes", tool_profile="shell") == 50.0
-    # The cap never raises a small share.
-    assert budget("Review the diff", tool_profile="review", max_budget="3") == 3.0
-    # On another machine the work dir is a path there: this machine's diff of the same
-    # path does not size the review (nor does the $5 of no diff), which keeps the share.
-    for remote_dir in ("", str(repo), "/srv/only-on-the-machine"):
+    # The cap follows the spend, and never raises the caller's share.
+    assert budget("Review the diff", _CallerThatSpent(200.0)) == 25.0
+    assert budget("Review the diff", _CallerThatSpent(800.0)) == 50.0
+    # $10 at least: for a small spend, for none, for a caller that keeps no account of it.
+    assert budget("Review the diff", _CallerThatSpent(16.0)) == 10.0
+    assert budget("Review the diff", _CallerThatSpent(0.0)) == 10.0
+    assert budget("Review the diff", _Caller()) == 10.0
+    # The $10 is a cap like the eighth: a share under it stands ($100 among 14 and the caller).
+    plan = agent_dispatch.plan_run_agent(
+        str(tmp_path), "Review the diff", "", parent_agent=_CallerThatSpent(16.0), siblings=14,
+    )
+    assert isinstance(plan, dict), plan
+    assert float(_command(plan)["maxBudget"]) == pytest.approx(100.0 / 15)
+
+    def sent_budget(**kwargs: Any) -> float | None:
         sent = agent_dispatch.dispatch_command(
-            "Verify the listed changes", agent_dispatch.DEFAULT_AGENT_PATH, remote_dir, "", None,
-            60.0, _Caller(), options=agent_dispatch.RunOptions(tool_profile="review"),
-            inherit=True, machine="box",
+            "Verify the listed changes", agent_dispatch.DEFAULT_AGENT_PATH,
+            "/srv/only-on-the-machine", "", None, 60.0, _CallerThatSpent(160.0),
+            options=agent_dispatch.RunOptions(tool_profile="review"), **kwargs,
         )
-        assert sent["max_budget"] == 50.0, remote_dir
+        budget: float | None = sent["max_budget"]
+        return budget
+
+    # The spend is the caller's, so a review on another machine is capped like one here.
+    assert sent_budget(inherit=True, machine="box") == 20.0
+    # A review that inherits nothing has no share to cap: the daemon's default budget.
+    assert sent_budget(inherit=False) is None
+
+
+def test_a_review_is_sized_by_what_the_caller_and_its_sub_agents_spent(tmp_path: Path) -> None:
+    """The spend is the caller's ledger: its sessions, the one running and its sub-agents'.
+
+    A real caller with $1,000: $40 banked by earlier sessions, $30 in
+    the session that is running and the $90 of a sub-agent that ended,
+    folded in the way a dispatch folds it.  $160 spent, so a review
+    holds $20 where an implementation child holds half of the $840 left.
+    """
+    caller = SorcarAgent("review-caller")
+    caller.max_budget = 1000.0
+    caller.budget_used = 40.0
+    caller.task_description = _Caller.task_description
+    session = KISSAgent("review-caller-session")
+    session.budget_used = 30.0
+    caller._current_executor = session
+    assert agent_dispatch.task_spend(caller) == pytest.approx(70.0)
+
+    def budget(task: str, **kwargs: Any) -> float:
+        plan = agent_dispatch.plan_run_agent(str(tmp_path), task, "", parent_agent=caller, **kwargs)
+        assert isinstance(plan, dict), plan
+        return float(_command(plan)["maxBudget"])
+
+    # An eighth of $70 is under $10: the review holds $10.
+    assert budget("Verify the listed changes", tool_profile="review") == pytest.approx(10.0)
+    agent_dispatch._attribute_dispatch_usage(caller, TaskResult("done", True, 90.0, 10, 2))
+    assert agent_dispatch.task_spend(caller) == pytest.approx(160.0)
+    assert budget("Verify the listed changes", tool_profile="review") == pytest.approx(20.0)
+    assert budget("Implement the feature") == pytest.approx(420.0)
+    # Two reviews of one fan-out each hold the eighth, not a part of it.
+    plan = agent_dispatch.plan_run_agent(
+        str(tmp_path), "Review the diff", "", parent_agent=caller, siblings=2,
+    )
+    assert isinstance(plan, dict), plan
+    assert float(_command(plan)["maxBudget"]) == pytest.approx(20.0)
 
 
 _BUDGETED_SEA = """

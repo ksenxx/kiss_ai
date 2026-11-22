@@ -22,6 +22,7 @@ from pathlib import Path
 import pytest
 
 from kiss.agents.sorcar.edit_guards import HEREDOC_VERDICT, heredoc_guard, heredoc_targets
+from kiss.agents.sorcar.shell_guards import DESTRUCTIVE_VERDICT
 from kiss.agents.sorcar.shell_scan import (
     MAX_NESTING,
     TooDeepError,
@@ -98,13 +99,14 @@ def test_an_arithmetic_assignment_to_an_element_makes_the_variable_unknown() -> 
     """Audit 2026-11-10 S10-F5: ``((T[0]=1))`` makes ``T`` an array whose ``$T`` is its first
     element, as ``T[0]++`` and ``++T[0]`` do; the scanner knew scalar targets only (``T=1``,
     ``T++``) and kept the value assigned before.  An expression that only reads ``T``, or
-    assigns another variable, leaves it known."""
+    assigns another variable, leaves it known (``scratch``, the name its value reads, is a
+    number here: an operand the scan does not know may assign any variable)."""
     for arithmetic, value in (
         ("((T[0]=1))", "1"), ("((T[0]++))", "1"), ("((++T[1-1]))", "1"),
         (": $((T[0] += 2))", "2"), ("((T=1))", "1"), ("((T++))", "1"),
         ("((U=1))", "scratch"), ("((U = T + 1, V[0] = T))", "scratch"),
     ):
-        command = f'T=scratch; {arithmetic}; echo "$T"'
+        command = f'scratch=0; T=scratch; {arithmetic}; echo "$T"'
         printed = subprocess.run(["bash", "-c", command], capture_output=True, text=True).stdout
         assert printed == f"{value}\n", command
         assert simple_commands(command, None)[-1].words[-1].literal == (value == "scratch"), command
@@ -142,6 +144,9 @@ def test_nested_arithmetic_expansions_count_toward_the_nesting_limit() -> None:
 @posix_only("the host Bash tool runs bash")
 def test_the_bash_tool_refuses_the_rewrite_and_runs_plain_arithmetic(work: Path) -> None:
     tools = UsefulTools(work_dir=str(work))
-    assert tools.Bash(HEREDOCS[0], "rewrite") == HEREDOC_VERDICT.format(path=work / "notes.md")
+    # The guard against commands that end the task is asked first, and it refuses what it
+    # cannot bound: an expression that evaluates the output of a substitution reading a
+    # here-document.  The here-document guard's own verdict is the test above.
+    assert tools.Bash(HEREDOCS[0], "rewrite") == DESTRUCTIVE_VERDICT
     assert (work / "notes.md").read_text() == "old\n"
     assert tools.Bash("echo $(( $(echo 3) << 1 )) $(( `echo 2` * 5 ))", "arithmetic") == "6 10\n"

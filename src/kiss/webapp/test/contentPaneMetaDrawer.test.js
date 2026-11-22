@@ -25,9 +25,9 @@
 //     content tab closes;
 //   * the Explorer and Source Control sections catch up on task news
 //     that arrived while the panel was hidden;
-//   * a tool-call panel starts folded and is active (panel.panel-active,
-//     main.css pulses its header text) until its tool_result, a
-//     Question and a fan-out panel start open.
+//   * a tool-call panel (a fan-out's too) starts folded and is active
+//     (panel.panel-active, main.css pulses its header text) until its
+//     tool_result, a Question panel starts open.
 
 'use strict';
 
@@ -368,7 +368,7 @@ test('the Thoughts panel pulses while the model thinks and writes', () => {
   win.close();
 });
 
-test('Question and fan-out panels start open; the task end stops every pulse', () => {
+test('a Question panel starts open, a fan-out panel folded; the task end stops every pulse', () => {
   const {win} = makePage();
   const tab = win._testApi.getActiveTabId();
   send(win, {type: 'status', running: true, tabId: tab, startTs: 1000});
@@ -401,8 +401,8 @@ test('Question and fan-out panels start open; the task end stops every pulse', (
     'a Question is read, not folded',
   );
   assert.ok(
-    rp && !rp.classList.contains('collapsed'),
-    'a fan-out keeps its sub-agent tabs open',
+    rp && rp.classList.contains('collapsed'),
+    'a fan-out is folded like every tool call',
   );
   assert.ok(rp.classList.contains('panel-active'));
   assert.ok(

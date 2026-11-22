@@ -28,7 +28,9 @@ LLM/coding-assistant indexing") and verified live:
   named without its effort suffix (`claude-fable-5-1`,
   `openrouter/anthropic/claude-fable-5.1`) "through run_parallel", where
   the page now says the routers answer simple questions on
-  `claude-opus-5-5-medium` / `openrouter/anthropic/claude-opus-5.5-medium`
+  `claude-opus-5-5-medium` / `openrouter/anthropic/claude-opus-5.5-medium`,
+  write on `openrouter/google/gemini-4-carbon` /
+  `openrouter/google/gemini-4-neon` (a clause the copies lack)
   and run every other task on `claude-fable-5-2-max` /
   `openrouter/anthropic/claude-fable-5.2-max`, as `bestrouter_sea.py` and
   `orbestrouter_sea.py` do, "through a non-blocking run_agent", and name
@@ -37,7 +39,8 @@ LLM/coding-assistant indexing") and verified live:
   and `openrouter/openai/gpt-6-astra-xhigh`) (the `/sync`
   row, rewritten in the same window, is identical in both),
   the `/discover`, `/discover_viz`, `/devtools`, `/install`, `/sync_history_and_memory`,
-  `/ccxbestrouter`, `/brbestrouter` and `/gepa` rows are missing (the `/write_patent` and
+  `/ccxbestrouter`, `/brbestrouter`, `/gepa`, `/memory_consolidate` and `/memory_quiz`
+  rows are missing (the `/write_patent` and
   `/review_patent` rows are there), the `/rsi7d` row still says the SEA
   "applies and evaluates improvements to each SEA" where the page now
   says it "hands each SEA (its own included) to the /discover SEA" and the
@@ -69,12 +72,12 @@ LLM/coding-assistant indexing") and verified live:
   `assets/` holds only a PNG render of the first, `tb2-success-by-model.png`,
   which the root `README.md` embeds); `sea-commands.md`
   documents `src/kiss/agents/sorcar/sea_commands.py` and describes the
-  33 bundled commands `/ask`, `/autorouter`, `/bestrouter`, `/brbestrouter`,
+  34 bundled commands `/ask`, `/autorouter`, `/bestrouter`, `/brbestrouter`,
   `/ccxbestrouter`, `/devtools`, `/discover`, `/discover_viz`,
   `/forget`, `/gepa`, `/git_extract_knowledge`, `/good_morning`, `/install`, `/machine`, `/memory_consolidate`, `/memory_quiz`, `/merge`,
   `/orautorouter`, `/orbestrouter`, `/recommendations`, `/remember`,
   `/review_paper`, `/review_patent`, `/revise_and_review_paper`, `/rsi7d`, `/sh`,
-  `/skillopt`, `/sync`, `/sync_history_and_memory`, `/task_update`, `/write`,
+  `/skillopt`, `/sync`, `/sync_history_and_memory`, `/task_update`, `/timeline`, `/write`,
   `/write_paper` and `/write_patent`, plus `/cron` and the channel commands; its settings, base-class, channel, precedence, option and
   command tables sit between `<!-- sea-docs: … -->` markers and are generated
   by `uv run sea docs` (`src/kiss/agents/sorcar/sea_docs.py`, which also

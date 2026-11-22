@@ -15,6 +15,10 @@
   the child is the ``/ask`` agent (its system prompt, playbook and
   ``task_context`` tool), lands in the parent's chat as its sub-agent
   and has its spend charged to the parent.
+* The time-left estimate is followed through that real child, from the
+  answer it passes to ``finish`` to the panel's payload: the sentence
+  cut out of the answer however it is written, the three finish times
+  and the sooner refresh they bring.
 * ``getTaskUpdate`` is exercised over a live WSS connection and over
   the local channel of a real :class:`RemoteAccessServer`.
 """
@@ -25,6 +29,7 @@ import asyncio
 import concurrent.futures
 import json
 import os
+import random
 import tempfile
 import threading
 import time
@@ -195,7 +200,10 @@ class TestTaskUpdateRunner(unittest.TestCase):
             {
                 "exists": True, "content": "", "error": "", "running": True,
                 "cost": 0.0, "updatedAt": 0,
-                "dueAt": int(first.due_at * 1000), "sig": "0.000:1",
+                "dueAt": int(first.due_at * 1000),
+                # No answer yet, so no estimate of the time left.
+                "etaAt": 0, "etaLowAt": 0, "etaHighAt": 0,
+                "sig": "0.000:1",
             },
         )
         _wait_until(lambda: len(sea.calls) == 1)
@@ -413,6 +421,491 @@ def test_run_task_update_sea_runs_as_a_subagent_in_the_parents_chat(tmp_path: Pa
     digest = str(tool_results[0]["content"])
     assert f"Task id: {task_id}" in digest
     assert "Task prompt: Parent task prompt" in digest
+
+
+def _update_parent(tmp_path: Path) -> tuple[ChatSorcarAgent, str]:
+    """Return an agent as the task runner leaves it mid-run, and its task's id.
+
+    The task has a persisted row in a chat of its own, which the agent
+    exposes through ``last_task_id``; the agent's model is the scripted
+    local one, which the child of an update inherits.
+    """
+    parent = ChatSorcarAgent("task-update-eta-parent")
+    parent.work_dir = str(tmp_path)
+    task_id, chat_id = _add_task(
+        "Parent task prompt", chat_id="",
+        extra={"model": MODEL, "work_dir": str(tmp_path)},
+    )
+    parent.resume_chat_by_id(chat_id)
+    with parent._task_id_lock:
+        parent._last_task_id = task_id
+    parent.model_name = MODEL
+    return parent, task_id
+
+
+def _child_replies(task_id: str, answers: list[str]) -> list[bytes]:
+    """Return the model's replies to the ``/ask`` children of one update run per answer.
+
+    Each child reads the task (``task_context``), then passes its answer
+    to ``finish``: two replies a run.
+    """
+    script: list[bytes] = []
+    for answer in answers:
+        script.append(tool_call_body("task_context", {"task_id": task_id}, prompt_tokens=500))
+        script.append(finish_body(answer, prompt_tokens=800))
+    return script
+
+
+def _run_update(
+    runner: TaskUpdateRunner, task_id: str, parent: ChatSorcarAgent,
+) -> tuple[float, float, task_update.TaskUpdate]:
+    """Force one update run of *task_id* through the real child and wait for its end.
+
+    Returns:
+        ``(before, after, update)``: the run asked its question between
+        the ``time.time()`` values ``before`` and ``after``; ``update``
+        is the task's update once the run has ended.
+    """
+    before = time.time()
+    runner.poll(task_id, parent, force=True)
+    _wait_until(lambda: not runner.poll(task_id, parent).running, timeout=60.0)
+    return before, time.time(), runner.poll(task_id, parent)
+
+
+_SAID = "Time left: 5-10 min, most likely 7 min."
+_QUOTED = "<p>Updated the fallback to <code>Time left: unknown.</code> in task_update.py.</p>"
+_COMMENT = "<!-- Don't show > <a title=\" Time left: unknown. -->"
+# ``(answer, content, minutes)``: what the child passes to ``finish``, what
+# the panel must show, and the ``(low, best, high)`` minutes the answer's last
+# sentence states (``None``: no estimate, three zeros).
+_ESTIMATE_CASES: list[tuple[str, str, tuple[float, float, float] | None]] = [
+    # The sentence as it is asked for; a dash as an entity or a character
+    # (the em dash, the non-breaking hyphen).
+    (
+        "<p>Read parser.py; no results yet. Time left: 6&ndash;15 min, most likely 9 min.</p>",
+        "<p>Read parser.py; no results yet.</p>", (6, 9, 15),
+    ),
+    ("<p>A. Time left: 5\u201410 minutes, most likely 7 minutes.</p>", "<p>A.</p>", (5, 7, 10)),
+    ("<p>A. Time left: 5\u201110 min, most likely 7 min.</p>", "<p>A.</p>", (5, 7, 10)),
+    # Decimals; a unit of its own on <low>; "to"; seconds, minutes, hours and
+    # days in each of their spellings.
+    ("<p>A. Time left: 0.5-3 min, most likely 1 min.</p>", "<p>A.</p>", (0.5, 1, 3)),
+    ("<p>A. Time left: 45 min-2 h, most likely 1 h.</p>", "<p>A.</p>", (45, 60, 120)),
+    ("<p>A. Time left: 30-90 s, most likely 45 secs.</p>", "<p>A.</p>", (0.5, 0.75, 1.5)),
+    (
+        "<p>A. Time left: 30 sec-90 seconds, most likely 1 minute.</p>",
+        "<p>A.</p>", (0.5, 1, 1.5),
+    ),
+    ("<p>A. Time left: 6 second to 2 mins, most likely 1 m.</p>", "<p>A.</p>", (0.1, 1, 2)),
+    ("<p>A. Time left: 1 hr-2 hrs, most likely 1.5 h.</p>", "<p>A.</p>", (60, 90, 120)),
+    (
+        "<p>A. Time left: 12 hours to 2 d, most likely 1 day.</p>",
+        "<p>A.</p>", (720, 1440, 2880),
+    ),
+    (
+        "<p>A. Time left: 1 hour to 2 days, most likely 1.5 days.</p>",
+        "<p>A.</p>", (60, 2160, 2880),
+    ),
+    # Finishing right now is an estimate too: three equal, positive times.
+    ("<p>A. Time left: 0-0 min, most likely 0 min.</p>", "<p>A.</p>", (0, 0, 0)),
+    # Plain text (``finish`` renders it as a paragraph), another case, neither
+    # comma nor full stop; the long s, which Python reads as an "s" when it
+    # ignores case.
+    ("A. TIME LEFT: 5-10 MIN MOST LIKELY 7 MIN", "<p>A.</p>", (5, 7, 10)),
+    (
+        "<p>A. Time left: 30-90 \u017f, most likely 45 \u017fecs.</p>",
+        "<p>A.</p>", (0.5, 0.75, 1.5),
+    ),
+    # The sentence is read as it is displayed: white space, inline tags and
+    # character references between its words, with their semicolon or not,
+    # a stop written as a reference.
+    (
+        "<p>Done. Time&nbsp;left: 5-10&#160;min, most&#xa0;likely 7\u00a0min.</p>",
+        "<p>Done.</p>", (5, 7, 10),
+    ),
+    (
+        "<p>Done. Time <b>left:</b> 5-10 min, most likely <b>7</b> min.</p>",
+        "<p>Done.</p>", (5, 7, 10),
+    ),
+    (
+        "<p>Done. <font size=2>Time left: <time>5-10 min</time>, most likely 7 min.</font></p>",
+        "<p>Done.</p>", (5, 7, 10),
+    ),
+    ("<p>R&amp;D. Time&nbspleft&colon; unknown&excl;</p>", "<p>R&amp;D.</p>", None),
+    (
+        "<p>Done&period; Time left: 5-10 min, most likely 7 min&#46;</p>",
+        "<p>Done&period;</p>", (5, 7, 10),
+    ),
+    # What the agent adds to its sentence belongs to it, inline tags and a
+    # stop inside a number or a name included (a letter, a digit or an
+    # underscore right after it).
+    (
+        "<p>A. Time left: 900-2400 min, most likely 1500 min, counted from when you answer, "
+        "since a trial took about 1.6 h.</p>",
+        "<p>A.</p>", (900, 1500, 2400),
+    ),
+    (
+        "<p>E. Time left: unknown, <code>repair_chrome.sh</code> and run.<b>sh</b> wait...</p>",
+        "<p>E.</p>", None,
+    ),
+    ("<p>E. Time left: unknown, <code>self._lock</code> is held.</p>", "<p>E.</p>", None),
+    ("<p>E. Time left: unknown\u2014the user has to answer first.</p>", "<p>E.</p>", None),
+    (
+        "<ul><li>F. G.</li><li>E. Time left: unknown</li></ul>",
+        "<ul><li>F. G.</li><li>E.</li></ul>", None,
+    ),
+    # Unknown: nothing in that sentence is an estimate, numbers included.
+    ("<p>E. Time left: unknown.</p>", "<p>E.</p>", None),
+    (
+        "<p>E. Time left: unknown (previously 5-10 min, most likely 7 min).</p>",
+        "<p>E.</p>", None,
+    ),
+    # Numbers that are not low <= best <= high, or beyond a year, however
+    # long they are: the sentence goes, no estimate.
+    ("<p>A. Time left: 8-10 min, most likely 7 min.</p>", "<p>A.</p>", None),
+    ("<p>A. Time left: 5-10 min, most likely 12 min.</p>", "<p>A.</p>", None),
+    ("<p>D. Time left: 5-10 min, most likely 123456789 min.</p>", "<p>D.</p>", None),
+    ("<p>D. Time left: 1-366 d, most likely 2 d.</p>", "<p>D.</p>", None),
+    ("<p>D. Time left: 1-365 d, most likely 2 d.</p>", "<p>D.</p>", (1440, 2880, 525600)),
+    (f"<p>D. Time left: 5-{'9' * 400} min, most likely 7 min.</p>", "<p>D.</p>", None),
+    # Only the answer's last sentence is read: the sentences before it stay
+    # as they are, time-left sentences too (review round 1), a quoted one
+    # (round 2) and one in a comment (round 2: a comment is one unit,
+    # whatever it holds).
+    (
+        f"<p>Time left: unknown.</p><p>B.</p><p>Time left: 1-2 min, most likely 1 min. {_SAID}</p>",
+        "<p>Time left: unknown.</p><p>B.</p><p>Time left: 1-2 min, most likely 1 min.</p>",
+        (5, 7, 10),
+    ),
+    (f"<p>{_SAID}</p><p>C. Time left: unknown.</p>", f"<p>{_SAID}</p><p>C.</p>", None),
+    (f"{_QUOTED}<p>{_SAID}</p>", _QUOTED, (5, 7, 10)),
+    (f"<p>Done.</p>{_COMMENT}<p>{_SAID}</p>", f"<p>Done.</p>{_COMMENT}", (5, 7, 10)),
+    (
+        f'<p>The log printed "Time left: 3 min". B. {_SAID}</p>',
+        '<p>The log printed "Time left: 3 min". B.</p>', (5, 7, 10),
+    ),
+    # The sentence before it may end with closing quotes, brackets and
+    # inline tags.
+    (
+        f'<p>The review ended with "No demonstrated issues found." {_SAID}</p>',
+        '<p>The review ended with "No demonstrated issues found."</p>', (5, 7, 10),
+    ),
+    (
+        "<p>It said <i>\u201cstop.</i>\u201d) Time left: unknown.</p>",
+        "<p>It said <i>\u201cstop.</i>\u201d)</p>", None,
+    ),
+    # Markup is read as a browser reads it: an attribute value may hold ">",
+    # a quote outside a value is no quote, names are in any case, "<?...>"
+    # is a comment, the last tag need not be closed; a reference to no
+    # character and one with thousands of digits are read, a control
+    # character is text.
+    (f"<p>A.</p><p title=\"a > b\" class=it's>{_SAID}</p>", "<p>A.</p>", (5, 7, 10)),
+    ("<p>Done. Time left: unknown <a title=it's>x</a>.</p>", "<p>Done.</p>", None),
+    (
+        "<!DOCTYPE html><P>A.</P><DIV><B>Time left:</B> 5-10 min, most likely 7 min.</div>",
+        "<!DOCTYPE html><P>A.</P>", (5, 7, 10),
+    ),
+    (
+        "<p>Done.</p><?xml version='1.0'?>Time left: unknown.",
+        "<p>Done.</p><?xml version='1.0'?>", None,
+    ),
+    (f"<p>A. {_SAID}</p", "<p>A.</p", (5, 7, 10)),
+    (f"<p>A. Time left: unknown &#1;&#{'0' * 5000}46;</p>", "<p>A.</p>", None),
+    ("<p>A. Time left: unknown \x01.</p>", "<p>A.</p>", None),
+    # Only the sentence's text goes: the markup around it stays balanced, and
+    # the elements this leaves empty go with the white space before them
+    # (what a browser collapses, not a non-breaking space).
+    (f"<p>A.</p>\u00a0<p>{_SAID}</p>", "<p>A.</p>\u00a0", (5, 7, 10)),
+    (f"<p><em>Done. {_SAID}</em></p>", "<p><em>Done.</em></p>", (5, 7, 10)),
+    (f"<p>A.</p>\n<div><p><strong><em>{_SAID}</em></strong></p></div>", "<p>A.</p>", (5, 7, 10)),
+    (f"<ul><li>A.</li><li> {_SAID} </li></ul>", "<ul><li>A.</li></ul>", (5, 7, 10)),
+    (f"<div>\n<p>A.</p>\n<p>{_SAID}</p>\n</div>", "<div>\n<p>A.</p>\n</div>", (5, 7, 10)),
+    (f"<p>A.</p> <b><p>{_SAID}</p></b>", "<p>A.</p>", (5, 7, 10)),
+    (f"<p>{_SAID}</p>", "", (5, 7, 10)),
+    ("Time <b>left</b>: unknown.", "", None),
+    ("<p><b>Done. Time</b> left: <i>unknown</i>.</p>", "<p><b>Done.</b></p>", None),
+    ("<p>Done.<b> Time <i>left: unknown.</i></b></p>", "<p>Done.</p>", None),
+    # An element that was empty before stays, and so does markup that was
+    # not balanced.
+    (f"<div><p></p><p>{_SAID}</p></div>", "<div><p></p></div>", (5, 7, 10)),
+    ("<p><b>Time left: unknown.</i></i></p>", "<p><b></i></i></p>", None),
+    (f"<div><p>{_SAID}</div>", "<div><p></div>", (5, 7, 10)),
+    (f"<p>{_SAID}</p></div>", "</div>", (5, 7, 10)),
+]
+# Answers that do not end with the sentence: shown as they are, no estimate.
+_PROSE_CASES = [
+    "<p>A. There is little time left before the deadline.</p>",
+    # Text, an opening tag or a comment after the sentence (review round 1:
+    # nothing after it is deleted, no half of it is left; round 2: a comment
+    # after an estimate does not replace it).
+    f"<p>Done. {_SAID} Tests are still running.</p>",
+    "<p>E. Time left: unknown! The user has to answer first.</p>",
+    "<p>Done. Time left:<br>5-10 min, most likely 7 min.</p>",
+    f"<p>{_SAID}</p><p>C.</p>",
+    "<ul><li>E. Time left: unknown</li><li>F</li></ul>",
+    f"<p>Done. {_SAID}<br></p>",
+    f"<p>Done. {_SAID}<b></b></p>",
+    f"<p>Done. {_SAID}</p>{_COMMENT}",
+    "<p>(Done. Time left: unknown.)</p>",
+    # Review round 2: a comment does not end at an apostrophe, a tag or ">"
+    # inside it (one that is not closed runs to the end), and a stop written
+    # as a reference ends a sentence.
+    "<p>Done.</p><!-- Don't show: Time left: unknown --><p>Tests are still running.</p>",
+    "<p>Done.</p><!-- a > b. Time left: unknown.",
+    "<p>Done. Time left: 5-10 min, most likely 7 min&#46; Tests are still running.</p>",
+    "<p>Done. Time left: 5-10 min, most likely 7 min&period; Tests are still running.</p>",
+    # A sentence the answer quotes last, in the middle of a sentence of its own.
+    "<p>Updated the fallback to <code>Time left: unknown.</code></p>",
+    "<p>The log printed <tt>Time left: unknown.</tt></p>",
+    '<p>The log printed "Time left: unknown."</p>',
+    "<p>See run.<b>Time left: unknown.</b></p>",
+    # Another form after the label (review round 1: a sign, another unit).
+    # A word is the one the answer displays: a tag, a character reference or
+    # a character that displays nothing does not end it (owner round 1), and
+    # neither joins two words or the digits of a number.
+    "<p>D. Time left: unknowns.</p>",
+    "<p>D. Time left: unknow&#110;s.</p>",
+    "<p>D. Time left: 5-10 min, most likely 7 &#109;onths.</p>",
+    "<p>D. Time left: 5-10 min, most likely 7 m<b>onths</b>.</p>",
+    "<p>D. Time left: 5-10 min, most likely 7 m\u200bonths.</p>",
+    "<p>D. Time left: 1<b>5</b>-20 min, most likely 17 min.</p>",
+    "<p>D. Time<b></b>left: unknown.</p>",
+    "<p>D. Time left: 5-10 min, most<b></b>likely 7 min.</p>",
+    "<p>D. Time left: 5-10 min, most likely -7 min.</p>",
+    "<p>D. Time left: 5-10 min, most likely 7 weeks.</p>",
+    "<p>D. Time left: 5-10 min, most likely 7 months.</p>",
+    "<p>D. Time left: 1-2 days, most likely 1.5.</p>",
+    "<p>D. Time left: about 5-10 min, most likely 7 min.</p>",
+    "<p>D. Time left: 5 or 10 min, most likely 7 min.</p>",
+    # Inside a tag (review round 1), and after an element whose content is
+    # not the answer's text, nothing is read.
+    '<p title="Time left: unknown.">Done.</p>',
+    f'<p title="a < b. {_SAID}">Done. More.</p>',
+    f'<p>A.</p><script>var p = "</p>";</script><p>{_SAID}</p>',
+    f"<p>A. {_SAID}</p><template>Time left: unknown.</template>",
+    # A control character and a reference to none are text, not white space.
+    "<p>A.</p><p>B \x05 Time left: unknown.</p>",
+    "<p>A.</p><p>&#1;Time left: unknown.</p>",
+    "<p>D. Time\x1cleft: unknown.</p>",
+]
+# What the prefix of a generated answer is made of: whole and broken tags,
+# comments, character references with and without their semicolon, stops,
+# and time-left sentences in running text, quoted, in an attribute and in a
+# comment.
+_PREFIX_PIECES = [
+    "<p>", "</p>", "<b>", "</b>", "<div>", "</div>", "<ul><li>", "</li></ul>", "<br>", "<hr/>",
+    "<a href='x>y' title=it's>", "</a>", '<p title="Time left: unknown.">', "<i ", '<a x="',
+    "<p class='", "<", ">", "</", "<!", "<?", "<!--", "-->", "<!-->", '"', "'", "=", "/", "&",
+    "&amp;", "&lt;b&gt;", "&#46;", "&period;", "&nbsp;", "&ndash;", "&#x2e", "&bogus;", "&#0;",
+    " ", "\n", ". ", "! ", "? ", "A", "R&D", "1.6 h", "Tests pass", "\x01", "\u00a0",
+    _QUOTED, _COMMENT, f"<p>{_SAID}</p>", "Time left: 1-2 min, most likely 1 min. ",
+    "Time left: unknown", "<code>Time left: unknown.</code>", "<pre>Time left: unknown.\n</pre>",
+]
+# Ends whatever a prefix left open: a comment, a tag, a quoted attribute value.
+_PREFIX_END = "-->\">'>"
+_FINAL_SENTENCES: list[tuple[str, tuple[float, float, float] | None]] = [
+    (_SAID, (5, 7, 10)),
+    ("Time left: unknown.", None),
+    ("<b>Time left:</b> 20&ndash;40&nbsp;min, most likely <b>30</b> min&period;", (20, 30, 40)),
+]
+
+
+def _generated_answers(
+    count: int, seed: int,
+) -> list[tuple[str, str, tuple[float, float, float] | None]]:
+    """Return *count* ``(answer, content, minutes)`` with a random prefix each.
+
+    The prefix comes back unchanged in every one of them: with all that
+    follows it when the answer does not end with the sentence (no
+    sentence, text after it, a comment after it), else without the
+    sentence and the elements that held nothing else.
+    """
+    rng = random.Random(seed)
+    cases = []
+    for _ in range(count):
+        pieces = rng.choices(_PREFIX_PIECES, k=rng.randint(0, 12))
+        prefix = "<p>Partial results.</p>" + "".join(pieces) + _PREFIX_END
+        sentence, minutes = rng.choice(_FINAL_SENTENCES)
+        ending = rng.randrange(6)
+        if ending == 0:
+            answer, content, minutes = f"{prefix}<p>Done.</p>", f"{prefix}<p>Done.</p>", None
+        elif ending == 1:
+            answer, content = f"{prefix}<p>{sentence}</p>", prefix
+        elif ending == 2:
+            answer, content = f"{prefix}<p>Done. {sentence}</p>\n", f"{prefix}<p>Done.</p>\n"
+        elif ending == 3:
+            answer, content = f"{prefix}\n<div><p><em>{sentence}</em></p>\n</div>\n", prefix
+        elif ending == 4:
+            answer = content = f"{prefix}<p>{sentence} Tests are still running.</p>"
+            minutes = None
+        else:
+            answer = content = f"{prefix}<p>{sentence}</p><!-- end -->"
+            minutes = None
+        cases.append((answer, content, minutes))
+    return cases
+
+
+def _assert_published(
+    tmp_path: Path, subtests: pytest.Subtests,
+    cases: list[tuple[str, str, tuple[float, float, float] | None]],
+) -> list[dict[str, Any]]:
+    """Run one update per case through the real ``/ask`` child and check what it publishes.
+
+    The question asks for the time left, the child answers through
+    ``finish``, and the panel's payload carries the case's content and
+    three finish times: they count from the moment the question was
+    asked, the stated range widened by
+    :data:`task_update.ETA_RANGE_WIDENING`.
+
+    Returns:
+        The requests the model server received.
+    """
+    parent, task_id = _update_parent(tmp_path)
+    widening = task_update.ETA_RANGE_WIDENING
+    answers = [answer for answer, _content, _minutes in cases]
+    with serve(_child_replies(task_id, answers)) as (url, requests):
+        parent.model_config = {"base_url": url, "api_key": "local"}
+        for answer, content, minutes in cases:
+            # A runner of its own: no text and no estimate of the case before.
+            before, after, upd = _run_update(TaskUpdateRunner(), task_id, parent)
+            with subtests.test(answer=answer):
+                payload = upd.payload()
+                assert payload["error"] == ""
+                assert payload["content"] == content
+                times = (payload["etaLowAt"], payload["etaAt"], payload["etaHighAt"])
+                if minutes is None:
+                    assert times == (0, 0, 0)
+                    continue
+                low, best, high = (60.0 * m for m in minutes)
+                asked_at = upd.eta_at - best
+                assert before - 0.001 <= asked_at <= after + 0.001
+                assert upd.eta_low_at == pytest.approx(asked_at + low / widening, abs=0.001)
+                assert upd.eta_high_at == pytest.approx(asked_at + high * widening, abs=0.001)
+                # On the wire: whole milliseconds, positive and in order.
+                assert times == (
+                    int(upd.eta_low_at * 1000), int(upd.eta_at * 1000),
+                    int(upd.eta_high_at * 1000),
+                )
+                assert 0 < times[0] <= times[1] <= times[2]
+                if low:
+                    # The published range is wider than the one the child stated.
+                    assert upd.eta_low_at < asked_at + low
+                    assert upd.eta_high_at > asked_at + high
+    assert len(requests) == 2 * len(cases)
+    return requests
+
+
+def test_runner_publishes_the_estimate_of_the_real_child(
+    tmp_path: Path, subtests: pytest.Subtests,
+) -> None:
+    """The whole chain, however the child writes its estimate and whatever else it writes."""
+    cases = _ESTIMATE_CASES + [(answer, answer, None) for answer in _PROSE_CASES]
+    requests = _assert_published(tmp_path, subtests, cases)
+    # The model was asked for the sentence, in the two forms the parser reads.
+    asked = next(str(m["content"]) for m in requests[0]["messages"] if m["role"] == "user")
+    assert '"Time left: <low>-<high> min, most likely <best> min."' in asked
+    assert '"Time left: unknown."' in asked
+
+
+def test_estimate_is_the_last_sentence_of_the_answer_or_nothing(
+    tmp_path: Path, subtests: pytest.Subtests,
+) -> None:
+    """Whatever stands before an answer's last sentence comes back unchanged.
+
+    Generated answers: a prefix of random markup, then no sentence, the
+    sentence (in a paragraph of its own, sharing one, wrapped) or the
+    sentence with something after it.  The parser returns the answer as
+    it is, or without exactly its last sentence.
+    """
+    cases = _generated_answers(150, seed=20261120)
+    # Every ending is in the sample, and half of the answers keep their sentence.
+    assert 60 < sum(answer == content for answer, content, _minutes in cases) < 90
+    _assert_published(tmp_path, subtests, cases)
+
+
+def _due_in(upd: task_update.TaskUpdate) -> float:
+    """Return the seconds from the end of *upd*'s last run to its next unforced run."""
+    return upd.due_at - upd.finished_at
+
+
+def test_real_update_with_an_estimate_is_due_after_half_of_the_time_left(tmp_path: Path) -> None:
+    """Near the task's end the update is refreshed sooner than every 10 minutes.
+
+    One task's updates, each run through the real child; ``due_at`` is
+    the time before which no unforced poll starts the next run.
+    """
+    parent, task_id = _update_parent(tmp_path)
+    runner = TaskUpdateRunner()
+    interval = pytest.approx(task_update.UPDATE_INTERVAL_S, abs=0.001)
+    first_delay = pytest.approx(task_update.FIRST_UPDATE_DELAY_S, abs=0.001)
+    script = _child_replies(task_id, [
+        "<p>A.</p>",
+        "<p>A. Time left: 60-120 min, most likely 90 min.</p>",
+        "<p>B. Time left: 4-12 min, most likely 8 min.</p>",
+        "<p>C. Time left: 0-0 min, most likely 0 min.</p>",
+        "<p>Time left: 20-40 min, most likely 30 min.</p>",
+        "",
+    ])
+    with serve(script) as (url, requests):
+        parent.model_config = {"base_url": url, "api_key": "local"}
+        # No estimate, or one far away: the regular interval.
+        plain = _run_update(runner, task_id, parent)[2]
+        assert (plain.text, plain.error, plain.eta_at) == ("<p>A.</p>", "", 0.0)
+        assert _due_in(plain) == interval
+        far = _run_update(runner, task_id, parent)[2]
+        assert far.eta_at > far.finished_at + 89 * 60.0
+        assert _due_in(far) == interval
+
+        # Eight minutes left when the question was asked: the next run is
+        # due after half of what is left of them when the answer is in.
+        near = _run_update(runner, task_id, parent)[2]
+        assert _due_in(near) == pytest.approx((near.eta_at - near.finished_at) / 2, abs=0.001)
+        assert 180.0 < _due_in(near) < 240.0
+        assert near.payload()["dueAt"] == int(near.due_at * 1000)
+        # The fingerprint changed with the estimate.
+        assert near.eta_at != far.eta_at
+        assert near.sig != far.sig
+
+        # A failed run (the task was stopped under it, so its child asked
+        # the model nothing) keeps the answer and its estimate, but is not
+        # retried before the whole interval.
+        stop_event = threading.Event()
+        stop_event.set()
+        state = agent_state.AgentState(
+            task_id, agent=parent, tab_id="tab-update-eta", server_owned=True,
+            stop_event=stop_event, is_task_active=True,
+        )
+        agent_state.register(state)
+        try:
+            failed = _run_update(runner, task_id, parent)[2]
+        finally:
+            agent_state.unregister(task_id, state)
+        assert failed.error == "The task was stopped before this update finished."
+        assert failed.text == "<p>B.</p>"
+        assert (failed.eta_low_at, failed.eta_at, failed.eta_high_at) == (
+            near.eta_low_at, near.eta_at, near.eta_high_at,
+        )
+        assert _due_in(failed) == interval
+        assert failed.sig != near.sig
+
+        # About to finish: no sooner than the first update's delay.
+        ending = _run_update(runner, task_id, parent)[2]
+        assert (ending.text, ending.error) == ("<p>C.</p>", "")
+        assert 0.0 < ending.eta_low_at == ending.eta_at == ending.eta_high_at
+        assert _due_in(ending) == first_delay
+        # An answer that is nothing but the sentence keeps the text and
+        # brings its estimate ...
+        bare = _run_update(runner, task_id, parent)[2]
+        assert bare.text == "<p>C.</p>"
+        assert bare.eta_at > ending.eta_at + 29 * 60.0
+        assert _due_in(bare) == interval
+        # ... and an empty answer keeps the text too, but drops the
+        # estimate: it is always the last answer's.
+        empty = _run_update(runner, task_id, parent)[2]
+        assert (empty.text, empty.error) == ("<p>C.</p>", "")
+        assert (empty.eta_low_at, empty.eta_at, empty.eta_high_at) == (0.0, 0.0, 0.0)
+        assert _due_in(empty) == interval
+    assert len(requests) == 12
 
 
 def test_update_of_a_subagent_hangs_off_the_subagents_client_tab(
@@ -637,6 +1130,9 @@ class TestGetTaskUpdateOverWss(IsolatedAsyncioTestCase):
             self.assertEqual(reply["sig"], "")
             self.assertEqual(reply["taskId"], "")
             self.assertNotIn("unchanged", reply)
+            # No estimate for a task that is not running.
+            for key in ("etaAt", "etaLowAt", "etaHighAt"):
+                self.assertEqual(reply[key], 0)
         self.assertEqual(unknown["tabId"], "t-unknown")
         self.assertEqual(unknown["token"], "1")
         self.assertEqual(idle["token"], "2")
@@ -700,6 +1196,7 @@ class TestGetTaskUpdateOverWss(IsolatedAsyncioTestCase):
             self.assertEqual(first["token"], "7")
             self.assertEqual(first["tabId"], "t-run")
             self.assertEqual(first["sig"], "0.000:1")
+            self.assertEqual((first["etaLowAt"], first["etaAt"], first["etaHighAt"]), (0, 0, 0))
             await asyncio.to_thread(_wait_until, lambda: len(self.sea.calls) == 1)
             self.assertEqual(self.sea.calls[0][1], task_id)
             self.assertIs(self.sea.calls[0][0], self._agents[task_id])
@@ -711,7 +1208,10 @@ class TestGetTaskUpdateOverWss(IsolatedAsyncioTestCase):
             self.assertNotIn("content", same)
             self.assertEqual(same["sig"], first["sig"])
 
-            self.sea.release(("<h4>Progress</h4><p>read 3 files</p>", 0.07))
+            self.sea.release((
+                "<h4>Progress</h4><p>read 3 files</p>"
+                "<p>Time left: 4-12 min, most likely 8 min.</p>", 0.07,
+            ))
             await asyncio.to_thread(
                 _wait_until,
                 lambda: not self.server._task_updates.poll(
@@ -728,6 +1228,15 @@ class TestGetTaskUpdateOverWss(IsolatedAsyncioTestCase):
             self.assertEqual(done["cost"], 0.07)
             self.assertGreater(done["updatedAt"], 0)
             self.assertNotEqual(done["sig"], first["sig"])
+            # The answer's time-left sentence arrives as three finish times,
+            # about 8 minutes ahead, and brings the next run forward to half
+            # of that.
+            self.assertLess(done["etaLowAt"], done["etaAt"])
+            self.assertLess(done["etaAt"], done["etaHighAt"])
+            left_ms = done["etaAt"] - done["updatedAt"]
+            self.assertGreater(left_ms, 7 * 60_000)
+            self.assertLessEqual(left_ms, 8 * 60_000)
+            self.assertLessEqual(abs(done["dueAt"] - done["updatedAt"] - left_ms / 2), 1)
             # Still fresh: no new run.
             self.assertEqual(len(self.sea.calls), 1)
 
@@ -746,6 +1255,16 @@ class TestGetTaskUpdateOverWss(IsolatedAsyncioTestCase):
                     task_id, self._agents[task_id],
                 ).text.endswith("5 files</p>"),
             )
+            # The newer answer has no estimate: the times are zero again
+            # and the fingerprint changed with them.
+            last = await self._poll(
+                ws, {"tabId": "t-run", "knownSig": done["sig"], "token": "7"},
+            )
+            self.assertNotIn("unchanged", last)
+            self.assertEqual((last["etaLowAt"], last["etaAt"], last["etaHighAt"]), (0, 0, 0))
+            # ... and the next run waits the whole interval (whole milliseconds).
+            wait_ms = last["dueAt"] - last["updatedAt"]
+            self.assertLessEqual(abs(wait_ms - task_update.UPDATE_INTERVAL_S * 1000), 1)
         finally:
             await ws.close()
 

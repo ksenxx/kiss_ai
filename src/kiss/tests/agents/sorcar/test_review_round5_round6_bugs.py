@@ -14,6 +14,7 @@ against the pre-fix source fails.
 from __future__ import annotations
 
 from collections.abc import Generator
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -66,7 +67,7 @@ def test_bx_handles_falsy_string_literals_during_migration(
     import sqlite3
 
     legacy_db = tmp_path / "legacy.db"
-    with sqlite3.connect(legacy_db) as conn:
+    with closing(sqlite3.connect(legacy_db)) as conn, conn:
         conn.execute(
             "CREATE TABLE task_history ("
             "id INTEGER PRIMARY KEY AUTOINCREMENT, "

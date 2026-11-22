@@ -233,5 +233,3 @@ class TestReplaySessionSubscribesRunningSubagent:
 
         opens = [e for e in events if e.get("type") == "openSubagentTab"]
         assert len(opens) == 1
-        assert "isDone" in opens[0]
-        assert isinstance(opens[0]["isDone"], bool)

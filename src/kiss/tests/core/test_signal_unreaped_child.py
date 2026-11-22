@@ -19,19 +19,70 @@ the caller's to reap).
 
 from __future__ import annotations
 
+import contextlib
 import errno
 import json
 import os
 import signal
 import subprocess
 import sys
+import threading
 import time
+from collections.abc import Callable
+from types import FrameType
+from typing import Any
 
 import pytest
 
 from kiss.core.processes import exit_status_unreaped, signal_unreaped_child
+from kiss.core.tool_interrupt import inject_async_exception
 
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="POSIX wait semantics")
+
+
+def _open_pidfds() -> set[int]:
+    """The descriptors of this process that are pidfds (Linux)."""
+    found = set()
+    for name in os.listdir("/proc/self/fd"):
+        with contextlib.suppress(OSError):  # the listing's own descriptor is closed by now
+            if "pidfd" in os.readlink(f"/proc/self/fd/{name}"):
+                found.add(int(name))
+    return found
+
+
+class _StopAsAPidfdOpens:
+    """Profile hook: inject a Stop into this thread as the C call that opened a pidfd returns."""
+
+    def __init__(self) -> None:
+        self.before = _open_pidfds()
+        self.injected = False
+
+    def __call__(self, frame: FrameType, event: str, arg: Any) -> None:
+        if event == "c_return" and not self.injected and _open_pidfds() - self.before:
+            self.injected = True
+            inject_async_exception(threading.get_ident(), KeyboardInterrupt)
+
+
+def pidfds_left_by_a_stop(call: Callable[..., object], *args: Any) -> set[int]:
+    """Run ``call(*args)`` with a Stop injected as its first pidfd opens; the pidfds it left.
+
+    The Stop is injected as the C call that opened the descriptor
+    returns, so it is raised at the check that ends that call: the place
+    where a caller that has the descriptor in no name of its own yet
+    loses it.  The descriptors left open are closed here.  Fails when
+    *call* opens no pidfd (no Stop is raised then).
+    """
+    hook = _StopAsAPidfdOpens()
+    sys.setprofile(hook)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            call(*args)
+    finally:
+        sys.setprofile(None)
+        left = _open_pidfds() - hook.before
+        for descriptor in left:
+            os.close(descriptor)
+    return left
 
 
 def test_a_running_child_is_signalled_and_left_for_the_caller_to_reap() -> None:
@@ -76,6 +127,27 @@ def test_an_exited_unreaped_child_is_still_the_callers_to_reap() -> None:
     pid, status = os.waitpid(proc.pid, 0)
     assert pid == proc.pid and os.waitstatus_to_exitcode(status) == 3
     proc.returncode = 3  # reaped here, not through Popen
+
+
+_IGNORED_SIGCHLD = """
+import signal, subprocess, sys, time
+from kiss.core.processes import exit_status_unreaped
+signal.signal(signal.SIGCHLD, signal.SIG_IGN)
+proc = subprocess.Popen([sys.executable, "-c", "pass"])
+deadline = time.monotonic() + 10
+while exit_status_unreaped(proc) is None and time.monotonic() < deadline:
+    time.sleep(0.02)
+print(exit_status_unreaped(proc))
+"""
+
+
+def test_an_exited_child_reads_as_exited_where_sigchld_is_ignored() -> None:
+    """With SIGCHLD ignored the kernel reaps the child itself: it has exited, not run forever."""
+    run = subprocess.run(
+        [sys.executable, "-c", _IGNORED_SIGCHLD], capture_output=True, text=True, timeout=60
+    )
+    assert run.returncode == 0, run.stderr
+    assert run.stdout.strip() == "0"
 
 
 @pytest.mark.skipif(not hasattr(os, "pidfd_open"), reason="pidfds are Linux-only")
@@ -163,3 +235,19 @@ def test_a_reaped_child_is_not_signalled() -> None:
     proc = subprocess.Popen([sys.executable, "-c", "pass"])
     assert proc.wait(timeout=10) == 0
     assert signal_unreaped_child(proc.pid, signal.SIGKILL) is False
+
+
+@pytest.mark.skipif(not hasattr(os, "pidfd_open"), reason="pidfds are Linux-only")
+def test_a_stop_raised_as_the_pidfd_opens_leaves_no_descriptor_open() -> None:
+    """A Stop injected while the helper opens its pidfd is raised with the pidfd closed.
+
+    An injected exception is raised between two bytecodes.  Raised as
+    ``pidfd = os.pidfd_open(pid)`` returned, it found the descriptor bound
+    to no name yet: nothing closed it for the life of the daemon.
+    """
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        assert pidfds_left_by_a_stop(signal_unreaped_child, proc.pid, signal.SIGKILL) == set()
+    finally:
+        proc.kill()
+        proc.wait()

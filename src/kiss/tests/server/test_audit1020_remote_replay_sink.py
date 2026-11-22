@@ -31,6 +31,7 @@ import shutil
 import sqlite3
 import tempfile
 import time
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 from unittest import IsolatedAsyncioTestCase
@@ -87,7 +88,7 @@ class TestRemoteReplaySinkReleased(IsolatedAsyncioTestCase):
             ],
         )
         self.addCleanup(self.remote.stop)
-        with sqlite3.connect(remote_home / "history.db", timeout=10) as db:
+        with closing(sqlite3.connect(remote_home / "history.db", timeout=10)) as db, db:
             db.execute(
                 "UPDATE task_history SET parent_task_id = 'seeded-1', is_side_channel = 1"
                 " WHERE id = 'side-1'",

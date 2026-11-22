@@ -16,15 +16,22 @@ nothing mocked; ``DEFAULT_CONFIG.bash_detach_seconds`` is set with
 * F5: a command that writes its last output and exits between the
   wait's last read and its end keeps its job and log, so that output
   is not lost with the deleted log.
+
+Run 2026-11-22: a command that deletes its log before the wait reads it
+is reported as on an idle machine, where the wait had the log open by
+then.
 """
 
 from __future__ import annotations
 
 import os
+import shlex
 import signal
+import sys
 import threading
 import time
 from pathlib import Path
+from types import FrameType
 
 import pytest
 
@@ -297,3 +304,53 @@ def test_crlf_output_reads_as_the_foreground_pipe_reads_it(tmp_path: Path) -> No
     assert gate.released, "the wait never took the first piece"
     assert "".join(pieces) == "one\ntwo\n", pieces
     assert out == "one\ntwo\n", out
+
+
+# --- Run 2026-11-22: a command that deletes its log before the wait reads it ---
+
+
+class _WaitBeginsAfterTheCommand:
+    """Profile hook: the wait for a job begins once the job's command has deleted *folder*.
+
+    A busy machine did that: the task's thread got a core again only
+    after the shell it had started had run its first command.
+    ``deleted_first`` tells that the folder was gone when the wait
+    began: a shell that took longer than the hook holds the wait for
+    would otherwise pass for one that got there first.
+    """
+
+    def __init__(self, folder: Path) -> None:
+        self.folder = folder
+        self.deleted_first = False
+
+    def __call__(self, frame: FrameType, event: str, arg: object) -> None:
+        if event == "call" and frame.f_code is UsefulTools._follow_job.__code__:
+            deadline = time.monotonic() + 60
+            while self.folder.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.deleted_first = not self.folder.exists()
+
+
+def test_a_command_that_deletes_its_log_before_the_wait_reads_it_is_reported(
+    tmp_path: Path,
+) -> None:
+    """The wait reads the log it is given open, not one it opens by name once the shell runs.
+
+    ``rm -rf "$TMPDIR"`` deletes the scratch dir and the log of its own job in it.
+    On a busy machine it had done so before the wait opened the log: the call failed
+    with "No such file or directory" and the command was killed where it was, so that
+    what came after the ``rm`` did not run (a sub-agent's command was to leave a link
+    in place of its folder; the link was missing in a run of the whole suite).
+    """
+    scratch, after = tmp_path / "scratch", tmp_path / "after"
+    tools = UsefulTools(work_dir=str(tmp_path), scratch_dir=str(scratch))
+    hook = _WaitBeginsAfterTheCommand(scratch)
+    command = f"rm -rf {shlex.quote(str(scratch))} && echo deleted && touch after"
+    sys.setprofile(hook)
+    try:
+        out = tools.Bash(command, "delete the scratch dir")
+    finally:
+        sys.setprofile(None)
+    assert hook.deleted_first, "the wait began before the command had deleted its log"
+    assert out == "deleted\n", out
+    assert after.exists() and not tools._jobs

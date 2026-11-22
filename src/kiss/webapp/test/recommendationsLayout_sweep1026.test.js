@@ -5,11 +5,11 @@
 //
 // End-to-end (jsdom) test for the Recommendations subpanel renderer
 // (media/main.js renderRecommendations): like every other subpanel
-// renderer it re-measures the task-info panel after it changed the
-// status line (one line "Suggested 3h ago" vs. the two-to-three-line
-// "No recommendations yet" / error text), since --meta-body-share is
-// measured from the space left by the headers and status lines.  jsdom
-// has no layout, so the re-measured share is 0.00px (the same probe
+// renderer it re-measures the task-info panel after a reply.  The
+// section is its card alone and is hidden while it has no task, so a
+// reply brings it on show or takes it away, and --meta-body-share is
+// measured from the space the shown sections leave.  jsdom has no
+// layout, so the re-measured share is 0.00px (the same probe
 // metaPanelSections.test.js uses): a planted 99px is replaced only when
 // the renderer republished it.
 
@@ -44,15 +44,14 @@ function shareAfter(win, ev) {
 
 function main() {
   const {win} = makeMetaPage();
-  const status = win.document.getElementById('meta-recommendations-status');
-  assert.ok(status, 'the recommendations status line exists');
+  const section = win.document.getElementById('meta-recommendations');
 
   assert.strictEqual(
     shareAfter(win, {type: 'recommendations', tasks: [], generatedAt: 0}),
     '0.00px',
-    'the empty-state text changes the measured height: the share is republished',
+    'a reply without a task: the share is republished',
   );
-  assert.ok(/No recommendations yet/.test(status.textContent));
+  assert.ok(section.hidden, 'no task: the section stays hidden');
 
   assert.strictEqual(
     shareAfter(win, {
@@ -61,9 +60,9 @@ function main() {
       generatedAt: Date.now() - 3600000,
     }),
     '0.00px',
-    'a suggestion list changes the status line: the share is republished',
+    'a task brings the card on show: the share is republished',
   );
-  assert.ok(/^Suggested /.test(status.textContent));
+  assert.ok(!section.hidden);
   assert.strictEqual(
     win.document.querySelectorAll(
       '#meta-recommendations-list .recommendation-row',
@@ -74,9 +73,9 @@ function main() {
   assert.strictEqual(
     shareAfter(win, {type: 'recommendations', tasks: [], error: 'cron is off'}),
     '0.00px',
-    'an error line changes the measured height: the share is republished',
+    'an error reply takes the card away: the share is republished',
   );
-  assert.strictEqual(status.textContent, 'cron is off');
+  assert.ok(section.hidden);
   win.close();
   console.log('recommendationsLayout_sweep1026.test.js: all tests passed');
 }

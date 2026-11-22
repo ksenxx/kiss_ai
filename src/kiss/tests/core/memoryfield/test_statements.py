@@ -35,6 +35,7 @@ from kiss.core.memoryfield.index import (
     VectorIndex,
     hashed_embedding,
     serialize_float16,
+    serialize_float32,
 )
 from kiss.core.memoryfield.pages import MemoryDir
 from kiss.core.memoryfield.statements import (
@@ -45,6 +46,7 @@ from kiss.core.memoryfield.statements import (
     page_statements,
     statement_text,
 )
+from kiss.tests.core.memoryfield.test_fast_paths import CountingEmbedder
 
 PAGE = """\
 ---
@@ -313,6 +315,57 @@ def test_an_index_from_before_statement_vectors_is_migrated(tmp_path: Path) -> N
     with closing(sqlite3.connect(path)) as conn:
         version = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
     assert version[0] == SCHEMA_VERSION == "4"
+
+
+def as_last_release(index: VectorIndex, embedder: CountingEmbedder) -> None:
+    """Leave *index* as release 2026.11.4 wrote it and forget the requests *embedder* answered.
+
+    That release embedded under input format 2, in which a blank page was
+    the empty text, and knew no statement vectors (schema 3).
+    """
+    with closing(sqlite3.connect(index.path)) as conn, conn:
+        conn.execute("DROP TABLE statements")
+        conn.execute("UPDATE meta SET value = '3' WHERE key = 'schema_version'")
+        conn.execute("UPDATE pages SET input_format = '2'")
+        conn.execute(
+            "UPDATE pages SET embedding = ? WHERE filename = 'blank.md'",
+            (serialize_float32(hashed_embedding("")),),
+        )
+    embedder.batches.clear()
+
+
+def input_formats(index: VectorIndex) -> list[str]:
+    """The input formats of the rows of *index*, each once."""
+    with closing(sqlite3.connect(index.path)) as conn:
+        return [row[0] for row in conn.execute("SELECT DISTINCT input_format FROM pages")]
+
+
+def test_a_format_two_index_keeps_its_page_vectors_and_backfills_statements(
+    tmp_path: Path,
+) -> None:
+    memory = cooking_memory(tmp_path)
+    (tmp_path / "blank.md").write_bytes(b"")
+    embedder = CountingEmbedder()
+    by_page = VectorIndex(memory, embed=embedder, model_code="m", statements=False)
+    by_page.sync()
+    page_ranking = ranking(by_page)
+    as_last_release(by_page, embedder)
+    index = VectorIndex(memory, embed=embedder, model_code="m")
+    # No time for the backfill: one request with one input, the blank page, which format 3
+    # embeds as its name.  The other rows keep their vectors, and the search ranks by them.
+    assert index.sync(backfill_seconds=0) == SyncReport(0, 1, 0, 0)
+    assert embedder.batches == [1] and input_formats(index) == ["3"]
+    assert ranking(index) == page_ranking and index.search("blank", k=1)[0].name == "blank"
+    # Their statements are left to the backfill, as for any row that only lacks them.
+    assert index.sync() == SyncReport(added=0, updated=3, removed=0, unchanged=1)
+    assert [name for name, _ in ranking(index)] == ["kitchen", "saffron-shop"]
+    # An index without statements has nothing to add to such a row: it is unchanged.
+    # A page modified since that release is embedded again, as under any format.
+    as_last_release(index, embedder)
+    memory.write("garage", "# Tools\n- the garage holds a hammer and a saffron grinder\n")
+    assert by_page.sync() == SyncReport(added=0, updated=2, removed=0, unchanged=2)
+    assert embedder.batches == [2] and input_formats(by_page) == ["3"]
+    assert [name for name, _ in ranking(by_page)] == ["saffron-shop", "garage", "kitchen"]
 
 
 def test_sync_of_named_pages_leaves_the_others_alone(tmp_path: Path) -> None:

@@ -67,7 +67,19 @@ page is static, so it gets no wait; both are reported with the way out
 (:func:`block_advice`).  The same task also got a Cloudflare interstitial
 back from a ``click`` on a search result: only ``go_to_url`` settled
 challenges, so clicks, typed submissions and key presses that navigate
-now do too.  Three groups of helpers, all consumed by
+now do too.  On 22 Nov 2026 walmart.com's product page, which had loaded
+on most days, stayed behind HUMAN's press-and-hold page, for four
+reasons found one under the other.  The widget was its "Enhanced
+Accessibility Mode": a round 40 px "Accessible challenge" icon ahead of
+the bar, and the icon was held (:func:`press_and_hold_box` takes the
+largest button now).  The bar took up to 9.2 s to fill, more than the low
+end of the 8-10 s hold (:func:`press_and_hold_full` keeps it down until
+it says it is full).  Held properly, the completed holds were still not
+accepted: the site answers every page opened cold with the check and
+remembers the browser for it, and serves the same page to a browser that
+opened its front page first (:func:`front_page_url`) -- unless that
+browser reports UTC, a server's timezone, from an address in Iowa
+(:func:`browser_timezone`).  Four groups of helpers, all consumed by
 :mod:`kiss.agents.sorcar.web_use_tool`:
 
 * **Engine**: :func:`playwright_api` prefers Patchright, a patched
@@ -79,6 +91,8 @@ now do too.  Three groups of helpers, all consumed by
   so Chromium runs *headed* on a server without a screen.  Headless mode
   is the single strongest bot signal (benchmark: 100% -> 40% bypass for
   the same engine, https://github.com/techinz/browsers-benchmark).
+* **Timezone**: :func:`browser_timezone` gives Chromium on a machine that
+  keeps UTC the zone of the address it reaches the web from.
 * **Human input**: :func:`mouse_path` (Bezier pointer paths),
   :func:`typing_chunks` (uneven typing cadence), :func:`hold_tremor`
   (the resting hand on a held button) and :func:`challenge_vendor`
@@ -86,15 +100,21 @@ now do too.  Three groups of helpers, all consumed by
   press its widget, and report it plainly), with
   :func:`challenge_wait_secs` / :func:`press_hold_secs` /
   :func:`widget_presses` / :data:`PRESS_AND_HOLD_BOX_JS` /
-  :func:`press_and_hold_box` describing how each vendor's page is waited
-  on and pressed.
+  :func:`press_and_hold_box` / :func:`press_and_hold_full` describing
+  how each vendor's page is waited on and pressed, and
+  :func:`front_page_url` / :func:`perimeterx_cookies` /
+  :data:`FORGET_PERIMETERX_JS` how HUMAN's check is started over.
 """
 
 from __future__ import annotations
 
 import atexit
+import contextlib
+import http.client
+import json
 import logging
 import os
+import queue
 import random
 import re
 import selectors
@@ -103,15 +123,18 @@ import subprocess
 import sys
 import threading
 import time
-from concurrent.futures import Future
+import urllib.request
+import zoneinfo
+from collections.abc import Callable
 from importlib import import_module
+from pathlib import Path
 from types import ModuleType
 from typing import Any
 from urllib.parse import parse_qs, quote_plus, unquote, urlparse, urlsplit
 
 from kiss.core.locked import locked
-from kiss.core.processes import terminate_process_group
-from kiss.core.tool_interrupt import result_interruptible
+from kiss.core.processes import exited_unreaped, pid_handed_on, terminate_process_group
+from kiss.core.tool_interrupt import call_without_injection, raise_if_interrupted
 
 logger = logging.getLogger(__name__)
 
@@ -393,6 +416,165 @@ def user_agent_matches_version(user_agent: str, version: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Timezone
+# ---------------------------------------------------------------------------
+
+# Who tells the timezone of the address this machine reaches the web from.
+# Each answers an IANA zone name, bare or as the ``timezone`` member of a
+# JSON object; free, keyless, HTTPS.  The next is asked when one gives no
+# usable answer.
+TIMEZONE_SOURCES: tuple[str, ...] = (
+    "https://ipinfo.io/timezone",
+    "https://get.geojs.io/v1/ip/geo.json",
+)
+_TIMEZONE_LOOKUP_TIMEOUT_SECS = 3.0
+_TIMEZONE_LOOKUP_HEADERS = {"User-Agent": "kiss-sorcar", "Accept": "*/*"}
+# How long a looked-up zone is believed: a server keeps its address for
+# months, and every new process would otherwise ask again.
+_TIMEZONE_CACHE_SECS = 24 * 3600.0
+# How long "nobody could tell" is believed: the network may be back.
+_TIMEZONE_RETRY_SECS = 600.0
+_ZONE_NAME_RE = re.compile(r"[A-Za-z][A-Za-z0-9_+-]*(?:/[A-Za-z0-9_+-]+){1,2}")
+_TIMEZONE_LOCK = threading.Lock()
+# This process's answer (``None``: nobody could tell) and the
+# ``time.monotonic()`` until which it is believed; ``None`` before the
+# first one.
+_TIMEZONE: tuple[str | None, float] | None = None
+
+
+def machine_clock_is_utc() -> bool:
+    """Whether this machine keeps UTC, the default of a server image.
+
+    Returns:
+        ``True`` on Linux (where Chromium takes its zone from ``TZ``) when
+        the local zone is called UTC and has neither an offset nor summer
+        time.  Europe/London, Africa/Abidjan and the like are places where
+        people live ("GMT"), not this.
+    """
+    return (
+        sys.platform.startswith("linux")
+        and time.tzname[0] == "UTC"
+        and time.timezone == 0
+        and not time.daylight
+    )
+
+
+def _zone_name(answer: str) -> str | None:
+    """Return the IANA zone that *answer* names, if this machine knows that zone.
+
+    Args:
+        answer: A lookup service's answer: a bare zone name or a JSON
+            object with a ``timezone`` string.
+
+    Returns:
+        The zone name, or ``None`` for anything else (an error page, a
+        rate-limit notice, a zone the system's database does not have).
+    """
+    text = answer.strip()
+    if text.startswith("{"):
+        try:
+            fields = json.loads(text)
+        except ValueError:
+            return None
+        value = fields.get("timezone") if isinstance(fields, dict) else None
+        text = value.strip() if isinstance(value, str) else ""
+    if _ZONE_NAME_RE.fullmatch(text) is None:
+        return None
+    try:
+        zoneinfo.ZoneInfo(text)
+    except (KeyError, ValueError, OSError):  # unknown zone, or a directory of zones
+        return None
+    return text
+
+
+def _lookup_timezone() -> str | None:
+    """Ask :data:`TIMEZONE_SOURCES` for the zone of this machine's public address.
+
+    Returns:
+        The first usable answer, or ``None`` when no source gave one
+        within :data:`_TIMEZONE_LOOKUP_TIMEOUT_SECS` each.
+    """
+    for url in TIMEZONE_SOURCES:
+        request = urllib.request.Request(url, headers=_TIMEZONE_LOOKUP_HEADERS)
+        try:
+            with urllib.request.urlopen(request, timeout=_TIMEZONE_LOOKUP_TIMEOUT_SECS) as response:
+                zone = _zone_name(response.read(8192).decode("utf-8", "replace"))
+        except (OSError, ValueError, http.client.HTTPException) as exc:
+            logger.debug("timezone lookup at %s failed: %s", url, exc)
+            continue
+        if zone is not None:
+            return zone
+        logger.debug("timezone lookup at %s gave no zone", url)
+    return None
+
+
+def _cached_timezone(cache: Path) -> str | None:
+    """Return the zone *cache* remembers, if it was looked up within the last day."""
+    try:
+        fields = json.loads(cache.read_text(encoding="utf-8"))
+        age = time.time() - float(fields["at"])
+        zone = _zone_name(str(fields["zone"]))
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    return zone if 0 <= age <= _TIMEZONE_CACHE_SECS else None
+
+
+def _remember_timezone(cache: Path, zone: str) -> None:
+    """Write *zone* and the time to *cache*; a file that cannot be written is no cache."""
+    scratch = cache.with_name(f"{cache.name}.{os.getpid()}.tmp")
+    try:
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        scratch.write_text(json.dumps({"zone": zone, "at": time.time()}), encoding="utf-8")
+        os.replace(scratch, cache)
+    except OSError as exc:
+        logger.debug("timezone cache %s not written: %s", cache, exc)
+        # Where nothing can be written, what was staged may not be removable either.
+        with contextlib.suppress(OSError):
+            scratch.unlink(missing_ok=True)
+
+
+def browser_timezone(cache: Path | None = None) -> str | None:
+    """Return the timezone to launch Chromium in, or ``None`` for the machine's own.
+
+    A person's browser reports the zone the person lives in, which is
+    where their network address is.  A cloud VM keeps UTC, and Chromium
+    on it says so next to an address in Iowa.  On 22 Nov 2026 walmart.com
+    (HUMAN / PerimeterX) sent the product page of every such session to
+    its press-and-hold page (3 of 3 sessions that had opened the home
+    page first) and served it to the same browser, from the same address,
+    launched with ``TZ=America/Chicago`` (4 of 4), whether it reported 80
+    processors or 8.  So on a machine keeping UTC the zone of the address
+    it reaches the web from is looked up (:data:`TIMEZONE_SOURCES`),
+    remembered for a day (in *cache* and in this process; a failed lookup
+    for ten minutes) and given to Chromium through ``TZ``.  A machine with
+    a zone of its own keeps it: that is a person's setting.
+
+    Args:
+        cache: File remembering the answer between processes (JSON), or
+            ``None`` to remember it in this process only.
+
+    Returns:
+        An IANA zone name such as ``"America/Chicago"``, or ``None`` when
+        the machine's own zone is to be used: it is not UTC, or nobody
+        could tell the address's zone.
+    """
+    global _TIMEZONE
+    if not machine_clock_is_utc():
+        return None
+    with _TIMEZONE_LOCK:
+        now = time.monotonic()
+        if _TIMEZONE is None or now >= _TIMEZONE[1]:
+            zone = _cached_timezone(cache) if cache is not None else None
+            if zone is None:
+                zone = _lookup_timezone()
+                if zone is not None and cache is not None:
+                    _remember_timezone(cache, zone)
+            believed = _TIMEZONE_RETRY_SECS if zone is None else _TIMEZONE_CACHE_SECS
+            _TIMEZONE = (zone, now + believed)
+        return _TIMEZONE[0]
+
+
+# ---------------------------------------------------------------------------
 # Virtual display (Xvfb)
 # ---------------------------------------------------------------------------
 
@@ -400,6 +582,8 @@ _XVFB_LOCK = threading.RLock()
 _XVFB_PROC: subprocess.Popen[bytes] | None = None
 _XVFB_DISPLAY: str | None = None
 _XVFB_START_TIMEOUT_SECS = 15.0
+# One blocking slice of the caller's wait for the display: where its Stop lands.
+_XVFB_WAIT_SLICE_SECS = 0.1
 
 # The wrapper keeps Xvfb alive exactly as long as the Python process that
 # started it: if Python dies without running atexit (SIGKILL, hard
@@ -429,8 +613,9 @@ def virtual_display() -> str | None:
     wrapper or close its pipe (and a plain ``with`` leaks the lock,
     CPython gh-74174).  The display is therefore started and published
     by a thread of its own, which receives no injection
-    (:func:`_provide_display`); the caller only waits for it, and a
-    start-up whose caller was stopped ends published or terminated.
+    (:func:`_provide_display`); the caller only waits for it
+    (:func:`_await_display`), and a start-up whose caller was stopped
+    ends published or terminated.
 
     Returns:
         A display name such as ``":1"``, or ``None`` when this is not
@@ -442,20 +627,51 @@ def virtual_display() -> str | None:
             interrupted while the display was starting.
     """
     abandoned = threading.Event()
-    provided: Future[str | None] = Future()
+    provided: queue.SimpleQueue[str | BaseException | None] = queue.SimpleQueue()
+    provider = threading.Thread(target=_provide_display, args=(provided, abandoned), daemon=True)
     try:
-        threading.Thread(target=_provide_display, args=(provided, abandoned), daemon=True).start()
-        return result_interruptible(provided)
+        # The start waits on the one Python-level lock of this wait: a Stop
+        # raised as it takes that lock would leave the thread never run.
+        call_without_injection(provider.start)
+        display = _await_display(provided)
+        if isinstance(display, BaseException):
+            raise display
+        return display
     finally:
         abandoned.set()
 
 
-def _provide_display(provided: Future[str | None], abandoned: threading.Event) -> None:
-    """Thread body of :func:`virtual_display`: resolve *provided* with the shared display.
+def _await_display(
+    provided: queue.SimpleQueue[str | BaseException | None],
+) -> str | BaseException | None:
+    """Return what :func:`_provide_display` queued, waiting in short slices.
 
-    *provided* is resolved with the lock released: a caller stopped
-    inside ``Future.result`` may have leaked the future's own lock, and
-    a thread parked on that one must not hold the display's.
+    The caller waits on a ``queue.SimpleQueue``, whose ``get`` and
+    ``put`` take no Python-level lock.  It used to wait on a
+    ``Future``: a Stop raised right after ``Future.result`` acquired
+    the future's condition left that lock held for good (CPython
+    gh-74174), and the start-up thread, publishing under the same
+    lock, never ended.  Every slice that ends empty is a check point
+    for an injected Stop and honours the tool panel's.  The loop has a
+    frame of its own: a Stop raised anywhere in it reaches the
+    ``finally`` of :func:`virtual_display` through the call, however
+    the compiler covers a loop's jumps.
+
+    Raises:
+        ToolCallInterrupted: When the calling thread's tool call was
+            interrupted meanwhile.
+    """
+    while True:
+        try:
+            return provided.get(timeout=_XVFB_WAIT_SLICE_SECS)
+        except queue.Empty:
+            raise_if_interrupted()
+
+
+def _provide_display(
+    provided: queue.SimpleQueue[str | BaseException | None], abandoned: threading.Event
+) -> None:
+    """Thread body of :func:`virtual_display`: queue the shared display on *provided*.
 
     Args:
         provided: Receives the display, ``None``, or the error raised.
@@ -465,9 +681,9 @@ def _provide_display(provided: Future[str | None], abandoned: threading.Event) -
         with _XVFB_LOCK:
             display = _shared_display(abandoned)
     except BaseException as error:  # the caller's to report
-        provided.set_exception(error)
+        provided.put(error)
     else:
-        provided.set_result(display)
+        provided.put(display)
 
 
 def _shared_display(abandoned: threading.Event) -> str | None:
@@ -484,9 +700,14 @@ def _shared_display(abandoned: threading.Event) -> str | None:
         What :func:`virtual_display` returns.
     """
     global _XVFB_PROC, _XVFB_DISPLAY
-    if _XVFB_PROC is not None and _XVFB_PROC.poll() is None:
+    if _XVFB_PROC is not None and not exited_unreaped(_XVFB_PROC):
         return _XVFB_DISPLAY
-    _XVFB_PROC, _XVFB_DISPLAY = None, None
+    exited, _XVFB_PROC, _XVFB_DISPLAY = _XVFB_PROC, None, None
+    if exited is not None and not pid_handed_on(exited):
+        # A wrapper killed from outside could not take its Xvfb along.  Only
+        # watched here, it is not reaped yet, so its group id still names that
+        # group (one somebody else reaped is forgotten without a signal).
+        terminate_process_group(exited)
     if abandoned.is_set() or not sys.platform.startswith("linux") or shutil.which("Xvfb") is None:
         return None
     read_fd = write_fd = -1
@@ -522,13 +743,13 @@ def _shared_display(abandoned: threading.Event) -> str | None:
             os.close(write_fd)
         if read_fd >= 0:
             os.close(read_fd)
-        if proc is not None and _XVFB_PROC is not proc and proc.poll() is None:
-            # Timed out, abandoned or failed: the wrapper (and its Xvfb)
-            # must not outlive this call unowned, since ``_XVFB_PROC`` is
-            # still ``None`` and nothing could reap it.  A wrapper that
-            # ``_read_display_number`` already saw exit is reaped and its
-            # group gone (the wrapper kills Xvfb before it exits), so its
-            # pgid may belong to someone else by now: no signal.
+        if proc is not None and _XVFB_PROC is not proc and not pid_handed_on(proc):
+            # Timed out, abandoned, failed or exited: the wrapper (and its
+            # Xvfb) must not outlive this call unowned, since ``_XVFB_PROC``
+            # is still ``None`` and nothing could reap it.  A wrapper that
+            # ``_read_display_number`` saw exit was only watched, not reaped:
+            # its group id is still its own, and what it left running in the
+            # group (its Xvfb, when it was killed from outside) goes too.
             terminate_process_group(proc)
     if display is not None:
         logger.info("virtual display %s started for headed Chromium", display)
@@ -548,7 +769,8 @@ def _read_display_number(
 
     Args:
         read_fd: Read end of the ``-displayfd`` pipe.
-        proc: The wrapper process, polled so a crashed Xvfb is noticed.
+        proc: The wrapper process, watched so a crashed Xvfb is noticed
+            (not reaped: the caller still signals its group).
         abandoned: Set once the caller of :func:`virtual_display`
             stopped waiting: the start-up is given up.
 
@@ -563,7 +785,7 @@ def _read_display_number(
             if abandoned.is_set():
                 return None
             remaining = deadline - time.monotonic()
-            if remaining <= 0 or proc.poll() is not None:  # pragma: no cover — timing
+            if remaining <= 0 or exited_unreaped(proc):  # pragma: no cover — timing
                 return None
             if ready.select(min(remaining, 0.5)):
                 chunk = os.read(read_fd, 16)
@@ -926,7 +1148,8 @@ def press_hold_secs(vendor: str) -> float:
     "Press & Hold" bar fills over several seconds and the hold must
     outlast it (https://docs.humansecurity.com/applications/human-challenge:
     "clicking / tapping on it until the bar is full and then release
-    it"); 8 s cleared fiverr's widget from this machine.
+    it"); 8 s cleared fiverr's widget from this machine.  A bar that is
+    still filling by then is held on (:func:`press_and_hold_full`).
 
     Args:
         vendor: A label returned by :func:`challenge_vendor`.
@@ -1047,7 +1270,9 @@ PRESS_AND_HOLD_BOX_JS = f"""() => {{
   return [{{x: r.x, y: r.y, width: r.width, height: r.height}}];
 }}"""
 
-# Buttons looked at in the widget's visible frame (the real one has one).
+# Buttons looked at in the widget's visible frame (the real one has one,
+# or two in HUMAN's "Enhanced Accessibility Mode": a round "Accessible
+# challenge" icon ahead of the bar).
 _MAX_BAR_BUTTONS = 4
 
 
@@ -1071,8 +1296,13 @@ def _usable_box(box: dict[str, float], within: dict[str, float]) -> bool:
     )
 
 
-def press_and_hold_box(page: Any, widget: dict[str, float]) -> dict[str, float] | None:
-    """Return the box of the "Press & Hold" button inside HUMAN's widget.
+def _area(box: dict[str, float]) -> float:
+    """The area of *box* in square pixels."""
+    return box["width"] * box["height"]
+
+
+def _press_and_hold_bar(page: Any, widget: dict[str, float]) -> tuple[Any, dict[str, float]] | None:
+    """Return the visible frame of HUMAN's widget and the box to press in it.
 
     HUMAN renders the button in an iframe of ``#px-captcha``.  On fiverr
     (Oct 2026) that iframe sits in the element's closed shadow root next
@@ -1082,8 +1312,61 @@ def press_and_hold_box(page: Any, widget: dict[str, float]) -> dict[str, float] 
     left edge: holds at the middle of *widget* landed right of the button
     on empty frame, never reached the bar, and the page stayed blocked.
     The page's frame tree also lists frames in closed shadow roots, so the
-    widget's visible frame is found there (hidden copies have no box) and
-    the button in it by its ARIA role.
+    widget's visible frame is found there (a hidden copy has no box, or
+    with ``visibility: hidden`` one that does not show) and the button in
+    it by its ARIA role.
+
+    The frame can hold a second button.  walmart.com/blocked (22 Nov 2026)
+    serves the widget's "Enhanced Accessibility Mode" (same HUMAN page): a
+    round 40 px "Accessible challenge" icon, first in the frame, left of
+    the 238 px bar.  Taken for the bar, the icon was held instead, which
+    switched the widget to its accessible flow ("PLEASE WAIT", then
+    "PRESS AGAIN") and left the page blocked.  The bar is the largest
+    button of the frame, whatever language its label is in.
+
+    Args:
+        page: The Playwright page showing the check.
+        widget: The ``#px-captcha`` element's box
+            (:data:`PRESS_AND_HOLD_BOX_JS`), in main-frame viewport pixels.
+
+    Returns:
+        The frame and the button's box in main-frame viewport pixels (the
+        frame's own box when no button in it can be pressed), or ``None``
+        while no frame of the widget shows (still rendering, or the page
+        is reloading under the read).
+    """
+    error = playwright_api().Error
+    for frame in page.frames:
+        if frame.parent_frame is None:
+            continue
+        try:
+            owner = frame.frame_element()
+            try:
+                box: dict[str, float] | None = owner.bounding_box() if owner.is_visible() else None
+            finally:
+                owner.dispose()  # the widget is polled: a kept handle per frame adds up
+            if box is None or not _usable_box(box, widget):
+                continue  # a hidden copy, a collapsed frame, or one elsewhere
+            buttons = frame.get_by_role("button")
+            bar: dict[str, float] | None = None
+            for i in range(min(buttons.count(), _MAX_BAR_BUTTONS)):
+                button: dict[str, float] | None = buttons.nth(i).bounding_box(timeout=1500)
+                if button is None or not _usable_box(button, box):
+                    continue
+                if bar is None or _area(button) > _area(bar):
+                    bar = button
+            if bar is not None:
+                return frame, bar
+        except error:
+            # The frame detached or navigated under the read.
+            logger.debug("press-and-hold frame unreadable", exc_info=True)
+            continue
+        return frame, box
+    return None
+
+
+def press_and_hold_box(page: Any, widget: dict[str, float]) -> dict[str, float] | None:
+    """Return the box of the "Press & Hold" button inside HUMAN's widget.
 
     Args:
         page: The Playwright page showing the check.
@@ -1093,32 +1376,140 @@ def press_and_hold_box(page: Any, widget: dict[str, float]) -> dict[str, float] 
     Returns:
         The button's box in main-frame viewport pixels, or the visible
         frame's box when no button in it can be pressed, or ``None`` while
-        no frame of the widget shows (still rendering, or the page is
-        reloading under the read).
+        no frame of the widget shows (:func:`_press_and_hold_bar`).
     """
-    error = playwright_api().Error
-    for frame in page.frames:
-        if frame.parent_frame is None:
-            continue
-        try:
-            owner = frame.frame_element()
-            try:
-                box: dict[str, float] | None = owner.bounding_box()
-            finally:
-                owner.dispose()  # the widget is polled: a kept handle per frame adds up
-            if box is None or not _usable_box(box, widget):
-                continue  # a hidden copy, a collapsed frame, or one elsewhere
-            buttons = frame.get_by_role("button")
-            for i in range(min(buttons.count(), _MAX_BAR_BUTTONS)):
-                button: dict[str, float] | None = buttons.nth(i).bounding_box(timeout=1500)
-                if button is not None and _usable_box(button, box):
-                    return button
-        except error:
-            # The frame detached or navigated under the read.
-            logger.debug("press-and-hold frame unreadable", exc_info=True)
-            continue
-        return box
-    return None
+    found = _press_and_hold_bar(page, widget)
+    return None if found is None else found[1]
+
+
+# How much longer than the drawn hold the bar is kept down while it still
+# shows what it showed before the press.  walmart.com's bar took 8.5 s and
+# 9.2 s to fill on the first challenge of a page (22 Nov 2026; 2.8-4.7 s
+# on the one served after it): more than the low end of the 8-10 s hold,
+# and a bar let go before it is full is a failed attempt.
+BAR_FILL_EXTRA_SECS = 6.0
+_BAR_TEXT_TIMEOUT_MS = 1000
+
+
+def _frame_text(frame: Any) -> str | None:
+    """The text *frame* shows, or ``None`` when it cannot be read (detached, hung)."""
+    try:
+        return str(frame.locator("body").inner_text(timeout=_BAR_TEXT_TIMEOUT_MS))
+    except playwright_api().Error:
+        logger.debug("press-and-hold frame text unreadable", exc_info=True)
+        return None
+
+
+def press_and_hold_full(page: Any, widget: dict[str, float]) -> Callable[[], bool] | None:
+    """Return a check telling, while HUMAN's bar is held, whether it has stopped filling.
+
+    The bar fills while it is held ("Solve the challenge by clicking /
+    tapping on it until the bar is full and then release it",
+    https://docs.humansecurity.com/applications/human-challenge) and how
+    long that takes is the widget's to say.  Its frame's text stays as it
+    was until the bar is full ("PRESS & HOLD ... UNTIL VERIFIED") and then
+    reads "HUMAN CHALLENGE COMPLETED, PLEASE WAIT" (walmart 22 Nov 2026,
+    fiverr Oct 2026), so the bar is still filling for as long as the text
+    is what it was before the press, in whatever language.
+
+    Args:
+        page: The Playwright page showing the check, before the press.
+        widget: The ``#px-captcha`` element's box
+            (:data:`PRESS_AND_HOLD_BOX_JS`), in main-frame viewport pixels.
+
+    Returns:
+        A function answering ``False`` while the widget's frame still
+        shows its text of now, ``True`` once it shows another or cannot be
+        read (nothing is known to be filling then); ``None`` when the
+        frame or its text cannot be read to begin with.
+    """
+    found = _press_and_hold_bar(page, widget)
+    if found is None:
+        return None
+    frame = found[0]
+    before = _frame_text(frame)
+    if before is None:
+        return None
+    return lambda: _frame_text(frame) != before
+
+
+# What HUMAN / PerimeterX keeps about a visitor in the browser, by name:
+# the cookies ``_px3`` (its rating), ``_pxvid``, ``_pxhd``, ``_pxde`` and
+# ``pxcts``, and the storage keys ``PX<app id>_px_hvd`` / ``_px_fp`` /
+# ``_px-ff``, ``_px_acp`` and ``pxsid`` (walmart.com, 22 Nov 2026).
+_PERIMETERX_ID_PATTERN = "^_?px"
+_PERIMETERX_ID_RE = re.compile(_PERIMETERX_ID_PATTERN, re.I)
+
+# Removes those keys from the page's local and session storage and answers
+# how many went, as a one-element list (a page without storage: none).
+FORGET_PERIMETERX_JS = f"""() => {{
+  let gone = 0;
+  try {{
+    for (const store of [localStorage, sessionStorage])
+      for (const key of Object.keys(store))
+        if (/{_PERIMETERX_ID_PATTERN}/i.test(key)) {{ store.removeItem(key); gone++; }}
+  }} catch (e) {{}}
+  return [gone];
+}}"""
+
+
+def perimeterx_cookies(host: str) -> dict[str, re.Pattern[str]]:
+    """Return the ``clear_cookies`` filter for what HUMAN keeps on *host*'s pages.
+
+    Args:
+        host: The host name of the page showing HUMAN's check.
+
+    Returns:
+        ``name`` and ``domain`` patterns selecting HUMAN's cookies set for
+        *host* or a parent domain of it; the site's own cookies (a login,
+        a cart) and other sites' are not matched.
+    """
+    labels = host.lower().strip(".").split(".")
+    domains = [".".join(labels[i:]) for i in range(max(len(labels) - 1, 1))]
+    domain = re.compile(rf"^\.?(?:{'|'.join(map(re.escape, domains))})$", re.I)
+    return {"name": _PERIMETERX_ID_RE, "domain": domain}
+
+
+def front_page_url(blocked: str, wanted: str) -> str | None:
+    """Return the front page of the site whose check page is at *blocked*.
+
+    HUMAN rates a visitor from what its script sees on the first page a
+    site serves them.  A deep link opened cold has no rating: on 22 Nov
+    2026 walmart.com answered every product page opened first in a
+    browser with its press-and-hold page (HTTP 307 to ``/blocked``), did
+    not accept the completed holds, and from then on kept that browser on
+    the check page, across restarts, by the cookies and storage keys
+    :func:`perimeterx_cookies` and :data:`FORGET_PERIMETERX_JS` name.  The
+    same browser was served the product page when it had opened the
+    site's front page first (4 of 4 sessions), and after the check too,
+    once those names were removed and the front page opened (23 of 27;
+    never with the names kept, 4 of 4, with the cookies alone removed, 3
+    of 3, or without the front page, 1 of 1).  So the check is answered
+    by starting over there.
+
+    Args:
+        blocked: URL of the page showing the check (the wanted page, or
+            the check page the site redirected to).
+        wanted: The URL that was asked for.
+
+    Returns:
+        ``scheme://host/`` of *blocked*, or ``None`` when there is no
+        other page to start from: *blocked* is no web page, or *wanted*
+        is the front page itself.
+    """
+    parts = urlsplit(blocked)
+    if parts.scheme not in ("http", "https") or not parts.netloc:
+        return None
+    front = f"{parts.scheme}://{parts.netloc}/"
+    asked = urlsplit(wanted)
+    if (
+        asked.scheme == parts.scheme
+        and asked.netloc.lower() == parts.netloc.lower()
+        and asked.path in ("", "/")
+        and not asked.query
+    ):
+        return None
+    return front
 
 
 _GOOGLE_SEARCH_HOST_RE = re.compile(r"^(www\.)?google\.[a-z.]+$", re.I)

@@ -306,6 +306,26 @@ def test_sequential_embeddings_share_one_connection(endpoint: type[_WholeEmbeddi
     assert endpoint.seen[-1] == ("g", "other"), "sent with the replaced key"
 
 
+def test_a_dropped_model_closes_the_connection_its_embeddings_left_open(
+    endpoint: type[_WholeEmbeddings],
+) -> None:
+    """The idle embedding client goes with its model, not at a later collection (audit C5/F3).
+
+    httpx binds a reply and its stream to each other, and that cycle holds
+    the pool: its connection stayed open until the cyclic collector ran,
+    which is off here.
+    """
+    model = GeminiModel("gemini-embedding-001", api_key="test")
+    model.initialize("")  # as the memory tools' ModelEmbedder does
+    assert model.get_embedding("kept") == [0.1, 0.2]
+    gc.disable()
+    try:
+        del model
+        assert endpoint.closed.acquire(timeout=5), "the idle client's connection stayed open"
+    finally:
+        gc.enable()
+
+
 @pytest.mark.parametrize("already_set", [True, False])
 def test_an_embedding_ends_at_a_stop_set_before_it_or_just_before_its_reply(
     endpoint: type[_WholeEmbeddings], already_set: bool

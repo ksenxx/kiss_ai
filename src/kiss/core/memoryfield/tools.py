@@ -19,6 +19,7 @@ agent works in.  Page names carry the memory: ``<page>`` is a page of the
 general memory, ``<memory>/<page>`` a page of that domain memory.
 """
 
+import hashlib
 import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -38,6 +39,7 @@ from kiss.core.memoryfield.pages import (
     is_valid_page_name,
 )
 from kiss.core.memoryfield.statements import statement_text
+from kiss.core.utils import read_bytes_waiting_for_writer
 
 MEMORY_PROTOCOL = """\
 ## Memory
@@ -339,8 +341,12 @@ class MemoryTools:
         cancel = threading.Event()
         pool = ThreadPoolExecutor(max_workers=len(selected))
         try:
+            # ``submit`` starts a thread and takes the pool's semaphore:
+            # a Stop raised as either takes its lock would strand a worker.
             futures = [
-                pool.submit(self._search_one, index, query, k, cancel)
+                tool_interrupt.call_without_injection(
+                    pool.submit, self._search_one, index, query, k, cancel,
+                )
                 for index in selected.values()
             ]
             found = [tool_interrupt.result_interruptible(future) for future in futures]
@@ -371,14 +377,22 @@ class MemoryTools:
         return "\n".join(lines)
 
     def _statement(self, hit: SearchHit) -> str:
-        """The statement of *hit*'s page that matched the query, on one line, or ``""``."""
+        """The statement of *hit*'s page that matched the query, on one line, or ``""``.
+
+        ``""`` too for a page rewritten since it was indexed: the hit's
+        position is one in the indexed text, and another sentence, or
+        none, in the page as it is now.
+        """
         if hit.statement is None:
             return ""
         _, memory_dir, page = self._locate(hit.name)
         try:
-            raw = memory_dir.read(page).raw
+            data = read_bytes_waiting_for_writer(memory_dir.page_path(page))
         except FileNotFoundError:
             return ""  # deleted by another process since the search
+        if hashlib.sha256(data).digest() != hit.digest:
+            return ""  # rewritten by another process since it was indexed
+        raw = data.decode("utf-8", errors="replace")
         text = " ".join(statement_text(raw, hit.statement).split())
         return text if len(text) <= STATEMENT_CHARS else text[: STATEMENT_CHARS - 3] + "..."
 
@@ -588,7 +602,9 @@ class MemoryTools:
         """
         pool = ThreadPoolExecutor(max_workers=1)
         try:
-            future = pool.submit(_index_and_compare, self.indexes[memory], name)
+            future = tool_interrupt.call_without_injection(
+                pool.submit, _index_and_compare, self.indexes[memory], name,
+            )
             return tool_interrupt.result_interruptible(future, WRITE_INDEX_SECONDS)
         except Exception:
             return []
@@ -751,7 +767,7 @@ class MemoryTools:
         "fix" pages that may be fresh.
         """
         cutoff = datetime.now(UTC) - timedelta(days=stale_days)
-        stale: list[tuple[str, str, str]] = []
+        stale: list[tuple[datetime, str, str, str]] = []
         for name, frontmatter in index.frontmatters().items():
             key, raw_time = evidence_time(frontmatter)
             try:
@@ -761,9 +777,11 @@ class MemoryTools:
             if moment.tzinfo is None:
                 moment = moment.replace(tzinfo=UTC)
             if moment < cutoff:
-                stale.append((name, key, raw_time))
-        stale.sort(key=lambda entry: entry[2])
-        return stale
+                stale.append((moment, name, key, raw_time))
+        # By the instant, then the name: the text of a time does not order
+        # times written with different offsets.
+        stale.sort()
+        return [entry[1:] for entry in stale]
 
     def memory_delete(self, name: str) -> str:
         """Delete a memory page that is wrong or obsolete.

@@ -790,6 +790,147 @@ def test_wrapper_merges_allof_and_resolves_the_root_schema() -> None:
     }
 
 
+#: A stdio server (low-level SDK) of the tools whose input schemas its first
+#: argument lists (JSON, by name).  The SDK validates a call's arguments against
+#: the tool's schema; the tool answers them.
+_SCHEMA_SERVER_SCRIPT = '''
+import json, sys
+
+import anyio
+import mcp.types as types
+from mcp.server.lowlevel import Server
+from mcp.server.stdio import stdio_server
+
+SCHEMAS = json.loads(sys.argv[1])
+server = Server("unions")
+
+
+@server.list_tools()
+async def list_tools() -> list[types.Tool]:
+    return [types.Tool(name=name, inputSchema=schema) for name, schema in SCHEMAS.items()]
+
+
+@server.call_tool()
+async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
+    return [types.TextContent(type="text", text=json.dumps(arguments))]
+
+
+async def main() -> None:
+    async with stdio_server() as (read, write):
+        await server.run(read, write, server.create_initialization_options())
+
+
+anyio.run(main)
+'''
+
+
+def test_wrapper_declares_the_arguments_of_a_root_union(
+    isolated_homes: Path, tmp_path: Path,
+) -> None:
+    """The arguments a root ``oneOf`` / ``anyOf`` declares in its alternatives are parameters.
+
+    A tool is declared with one object, whose properties are the
+    wrapper's parameters: the root's union was dropped with every
+    argument its alternatives declare, and a tool that takes a document
+    by its text or by its URL was offered with no arguments, a call no
+    alternative accepts.  The alternatives' properties are declared with
+    the root's own (whose declaration of a property stands; alternatives
+    that declare one differently give a union), required when the root
+    requires them or every alternative does.  The real server validates
+    each call against the tool's own schema and answers its arguments.
+    """
+    from kiss.core.tool_schema import declared_schema
+
+    by_text = {
+        "properties": {
+            "text": {"type": "string"}, "depth": {"type": "integer"}, "id": {"type": "number"},
+        },
+        "required": ["text", "id"],
+    }
+    by_url = {
+        "properties": {
+            "source-url": {"type": "string", "description": "Where it is"},
+            "depth": {"type": "string"},
+        },
+        "required": ["source-url", "id"],
+    }
+    by_tag = {"properties": {"tag": {"type": "string"}}, "required": ["tag"]}
+    by_ids = {
+        "properties": {"ids": {"type": "array", "items": {"type": "integer"}}}, "required": ["ids"],
+    }
+    scope = {"scope": {"type": "string"}}
+    schemas = {
+        "import": {
+            "$defs": {"ByUrl": by_url},
+            "type": "object",
+            "properties": {"id": {"type": "integer"}},
+            "oneOf": [by_text, {"$ref": "#/$defs/ByUrl"}],
+        },
+        # ``anyOf`` alike; an alternative may be a union itself, and the
+        # root may require what only its alternatives declare.
+        "find": {
+            "type": "object",
+            "required": ["scope"],
+            "anyOf": [
+                {"properties": {**scope, "query": {"type": "string"}}, "required": ["query"]},
+                {"properties": scope, "oneOf": [by_tag, by_ids]},
+            ],
+        },
+        # Never called (an empty union accepts nothing): each union of the
+        # root's parts is joined, and a malformed one declares nothing.
+        "sweep": {
+            "type": "object",
+            "required": [7, "tag"],
+            "oneOf": [],
+            "anyOf": "not a union",
+            "allOf": [{"anyOf": [by_tag, "not a schema"]}, {"oneOf": [by_ids]}],
+        },
+    }
+    script = tmp_path / "unions.py"
+    script.write_text(_SCHEMA_SERVER_SCRIPT, encoding="utf-8")
+    project = isolated_homes / "project"
+    config = MCPServerConfig(
+        name="unions", transport="stdio", command=sys.executable,
+        args=(str(script), json.dumps(schemas)),
+    )
+    save_mcp_server(config, "user", str(project))
+    tools = {tool.__name__: tool for tool in make_mcp_tools(str(project))}
+    import_, find, sweep = tools["unions_import"], tools["unions_find"], tools["unions_sweep"]
+    declared = declared_schema(import_)
+    assert declared is not None
+    assert declared["parameters"] == {
+        "type": "object",
+        "properties": {
+            "id": {"type": "integer"},
+            "text": {"type": "string"},
+            "depth": {"anyOf": [{"type": "integer"}, {"type": "string"}]},
+            "source_url": {"type": "string", "description": "Where it is"},
+        },
+        "required": ["id"],
+    }
+    assert str(inspect.signature(import_)) == (
+        "(id: int, text: str = None, depth: int = None, source_url: str = None) -> str"
+    )
+    by_its_url = import_(id=7, source_url="https://x.test/doc", depth="deep", text=None)
+    assert json.loads(by_its_url) == {"id": 7, "source-url": "https://x.test/doc", "depth": "deep"}
+    by_its_text = import_(id=7, text="hello", depth=2)
+    assert json.loads(by_its_text) == {"id": 7, "text": "hello", "depth": 2}
+    declared = declared_schema(find)
+    assert declared is not None
+    assert declared["parameters"] == {
+        "type": "object",
+        "properties": {
+            "scope": {"type": "string"},
+            "query": {"type": "string"},
+            "tag": {"type": "string"},
+            "ids": {"type": "array", "items": {"type": "integer"}},
+        },
+        "required": ["scope"],
+    }
+    assert json.loads(find(scope="all", ids=[1, 2])) == {"scope": "all", "ids": [1, 2]}
+    assert str(inspect.signature(sweep)) == "(tag: str, ids: list) -> str"
+
+
 def test_a_large_declaration_stops_following_references() -> None:
     """Definitions shared down a chain of models do not multiply without bound.
 

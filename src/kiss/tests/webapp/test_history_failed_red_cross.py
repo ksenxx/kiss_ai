@@ -724,14 +724,12 @@ def test_failed_cross_is_centered_middle_left_in_history_task_panel(
     _browser,
 ) -> None:
     """At a narrow viewport the failed marker must remain at the
-    middle-left of the task panel's first text line.
+    middle-left of the task panel's line of text.
 
-    The History sidebar renders each task as a multi-line panel with
-    title, metrics, and workspace metadata.  The red failed marker
-    should stay on the left edge, vertically centered on the first line
-    of the task title.  The action buttons occupy a line of their own
-    below the title, so centering on the whole panel would drop the
-    marker away from the text it belongs to.
+    The History sidebar renders each task as one line: its status
+    marker, then its title, cut with an ellipsis.  The red failed
+    marker should stay on the left edge, vertically centered on that
+    line.
     """
     context, page = _open_history_page(_browser, width=180, height=900)
     try:

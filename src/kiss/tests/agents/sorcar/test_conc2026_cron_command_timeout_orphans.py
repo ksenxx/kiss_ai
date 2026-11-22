@@ -17,8 +17,9 @@ surviving descendant that escaped the group by calling ``setsid`` or
 daemonizing, and — by the mark the run puts in the command's
 environment — one whose shell has exited by then
 (``cron_agent._kill_command_tree``).  A Stop of the run kills the
-same tree, by the mark alone once ``Popen.communicate`` has reaped a
-shell that had exited.
+same tree, the group of a shell that had exited included: the wait
+does not reap that shell (``cron_agent._communicate``), whose pid
+stays the group's id until the kill is over.
 
 End-to-end: real shell commands spawn real background children (one
 ordinary, one ``setsid``-detached) that record their pids; after the
@@ -27,12 +28,12 @@ environment/config values (``KISS_HOME``, the timeout constant), never
 for test doubles.
 
 Branches of the kill not covered here, and why (unreachable without
-test doubles): ``_kill_marked`` on a system without ``/proc`` (macOS,
-BSD), its signal failing because the process died between the read of
-its environment and the signal, and ``_kill_command_tree`` giving up on
-a marked process that outlives its bound (one stuck in the kernel).
-Its skip of a descendant reaped since the snapshot is a matter of
-timing: taken in some runs, never forced.
+test doubles): ``_kill_pinned`` where there is no ``pidfd_send_signal``
+(a Python built without it, a kernel before Linux 5.1), which signals
+the pid its descriptor has just vouched for.  A descendant whose parent
+is reaped between the read of that parent's pid and the look at the
+parent's descriptor is left to the mark: a matter of timing, never
+forced.
 """
 
 import contextlib
@@ -52,14 +53,20 @@ import pytest
 
 from kiss.agents.sorcar import cron_agent
 from kiss.core.processes import pid_alive, start_process_group
+from kiss.core.tool_interrupt import inject_async_exception
 from kiss.tests.conftest import IS_WINDOWS, posix_only
-from kiss.tests.lock_injection import inject
 
 # The pid the tests record and probe must be an OS pid.  Under Git bash on
 # Windows ``$!`` is the MSYS-internal pid, which differs from the Windows
 # pid; ``/proc/<pid>/winpid`` maps it.  Probing (or killing) an MSYS pid
 # as if it were a Windows pid targets an unrelated process.
 _BG_PID = "$(cat /proc/$!/winpid)" if IS_WINDOWS else "$!"
+# Runs a command in a session of its own, as ``setsid(1)`` does: stock macOS has no such
+# program, and ``os.setsid`` is POSIX itself.
+_SETSID = (
+    f"{shlex.quote(sys.executable)} -c "
+    f"{shlex.quote('import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])')}"
+)
 # The job timeout that must fire while the command sits in ``sleep 300``.
 # Git bash on Windows needs well over a second to start and fork its
 # subshells on a loaded machine, so 1 s expired before ``echo`` ran there.
@@ -86,14 +93,20 @@ def _wait_pid_dead(pid: int, timeout_s: float = 5.0) -> bool:
 
 
 def _is_zombie(pid: int) -> bool:
-    """Whether *pid* is a zombie (dead but not yet reaped by init).
+    """Whether *pid* is a zombie (dead but not yet reaped by its parent).
 
-    Without ``/proc`` (Windows, macOS) nothing can be a zombie here and
-    ``pid_alive`` alone decides; a missing ``/proc/<pid>`` where ``/proc``
-    exists means the process is gone.
+    On Windows nothing is a zombie and ``pid_alive`` alone decides.  A
+    POSIX system without ``/proc`` (macOS) is asked through ``ps``; a
+    missing ``/proc/<pid>`` where ``/proc`` exists means the process is
+    gone.
     """
-    if not os.path.isdir("/proc"):
+    if IS_WINDOWS:
         return False
+    if not os.path.isdir("/proc"):
+        state = subprocess.run(
+            ["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True, timeout=60,
+        )
+        return state.stdout.startswith("Z")
     try:
         with open(f"/proc/{pid}/stat", encoding="ascii", errors="replace") as f:
             fields = f.read().rpartition(")")[2].split()
@@ -171,6 +184,19 @@ def test_command_job_success_and_failure_paths(tmp_path: Path) -> None:
     assert "exited 3" in err_text
     assert "out" in err_text and "err" in err_text
 
+    # The output is decoded as ``communicate`` decoded it: a byte that is not
+    # UTF-8 is replaced and every line end is a newline.
+    assert cron_agent._run_command_job(
+        {"id": "t7", "command": r"printf 'a\r\nb\rc\377\n'"}, tmp_path, 5.0,
+    ) == ("ok", "a\nb\nc\ufffd")
+    # A shell that closed its pipes is waited for until it exits, or the timeout.
+    assert cron_agent._run_command_job(
+        {"id": "t8", "command": "exec >&- 2>&-; sleep 0.3; exit 3"}, tmp_path, 5.0,
+    ) == ("error", "command exited 3: ")
+    assert cron_agent._run_command_job(
+        {"id": "t9", "command": "exec >&- 2>&-; sleep 300"}, tmp_path, _JOB_TIMEOUT,
+    ) == ("error", f"command timed out after {_JOB_TIMEOUT:g}s")
+
     # A command that cannot even start (its directory is gone) raises to
     # the caller, which records the failure: there is nothing to kill.
     # So does one that is never spawned (a NUL byte in the command).
@@ -178,6 +204,26 @@ def test_command_job_success_and_failure_paths(tmp_path: Path) -> None:
         cron_agent._run_command_job({"id": "t5", "command": "true"}, tmp_path / "gone", 5.0)
     with pytest.raises(ValueError):
         cron_agent._run_command_job({"id": "t6", "command": "true \0"}, tmp_path, 5.0)
+
+
+@posix_only("SIGCHLD, and a kernel that reaps the children of a process ignoring it, are POSIX")
+def test_a_command_job_ends_in_a_host_that_ignores_sigchld(tmp_path: Path) -> None:
+    """A host whose children the kernel reaps still sees its command jobs end.
+
+    A process that ignores ``SIGCHLD``, a disposition it inherits from
+    whatever launched it, never has a zombie child: the kernel reaps the
+    shell as it exits.  The wait watches for the exit without reaping
+    and then finds no child to ask about, which is an exit and not a
+    shell that runs until the job's timeout.
+    """
+    previous = signal.signal(signal.SIGCHLD, signal.SIG_IGN)
+    try:
+        outcome = cron_agent._run_command_job(
+            {"id": "t-ign", "command": "echo hi"}, tmp_path, _JOB_TIMEOUT,
+        )
+    finally:
+        signal.signal(signal.SIGCHLD, previous)
+    assert outcome == ("ok", "hi")
 
 
 def test_command_job_does_not_read_the_schedulers_stdin(tmp_path: Path) -> None:
@@ -346,13 +392,127 @@ def test_proc_descendants_sees_multi_level_tree() -> None:
         proc.wait(timeout=10)
 
 
+# Runs a program as init of a pid namespace of its own, with a /proc of that namespace.
+_PID_NAMESPACE = [
+    "unshare", "--user", "--map-root-user", "--pid", "--fork", "--kill-child", "--mount-proc",
+]
+# Holds ``_kill_command_tree`` at the entry of the function named by its argument, ends a
+# descendant there, lets the shell reap it and starts a stranger under the pid that freed.
+_PID_REUSE_DRIVER = r"""
+import os, subprocess, sys, threading, time
+from pathlib import Path
+
+from kiss.agents.sorcar import cron_agent
+from kiss.tests.server.pause import Pause
+
+mark = "KISS_CRON_RUN_pid_reuse"
+
+
+def state(pid):
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().rpartition(")")[2].split()[0]
+    except OSError:
+        return ""
+
+
+def recorded(name):
+    return [int(pid) for pid in Path(name).read_text().split()] if Path(name).exists() else []
+
+
+def until(condition):
+    deadline = time.monotonic() + 30
+    while not condition() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    return condition()
+
+
+# Descendants that left the shell's group: the one whose pid is reused, and a shell with
+# a child, both without the run's mark, which only the parent chain leads to.
+shell = subprocess.Popen(
+    "setsid sh -c 'echo $$ > reused; exec sleep 300' & "
+    "setsid env -i sh -c 'sleep 300 & echo $$ $! > unmarked; wait' & wait",
+    shell=True, start_new_session=True, env={**os.environ, mark: "1"},
+)
+assert until(lambda: len(recorded("reused")) == 1 and len(recorded("unmarked")) == 2)
+victim, unmarked = recorded("reused")[0], recorded("unmarked")
+with Pause(getattr(cron_agent, sys.argv[1]).__code__, lambda frame_locals: True) as held:
+    killer = threading.Thread(target=cron_agent._kill_command_tree, args=(shell, mark))
+    killer.start()
+    assert held.paused.wait(30), "the kill never reached the gate"
+    os.kill(victim, 9)
+    assert until(lambda: not state(victim)), "the shell never reaped its child"
+    for _ in range(20):
+        Path("/proc/sys/kernel/ns_last_pid").write_text(str(victim - 1))
+        stranger = subprocess.Popen(["sleep", "300"], start_new_session=True)
+        if stranger.pid == victim:
+            break
+        stranger.kill()
+        stranger.wait()
+    held.release()
+    killer.join(30)
+escapees_dead = until(lambda: all(state(pid) in ("", "Z") for pid in unmarked))
+try:
+    stranger.wait(timeout=1)
+    stranger_alive = False
+except subprocess.TimeoutExpired:
+    stranger_alive = True
+print(f"reused={stranger.pid == victim} escapees_dead={escapees_dead} alive={stranger_alive}")
+"""
+
+
+@posix_only("pid namespaces and the /proc parent-chain walk are Linux's")
+@pytest.mark.parametrize(
+    "gate", ["_pin_descendants", "_parent_pid", "kill_process_group"],
+    ids=["before-the-pin", "pinned-unchecked", "after-the-pin"],
+)
+def test_the_tree_kill_spares_a_stranger_under_a_dead_descendants_pid(
+    tmp_path: Path, gate: str,
+) -> None:
+    """The tree kill signals the descendants it found, not whoever has their pids by then.
+
+    The descendants were a snapshot of pids, signalled after the kill of the
+    shell's group, each with the group ``getpgid`` then named for its pid.  A
+    descendant that ended and was reaped in between left its pid to the next
+    process: a stranger under that pid was killed, and its whole process group
+    with it (audit 2026-11-21, S3 F3).  Each descendant is held by its open
+    ``/proc`` directory, through which it is checked and signalled.  The pid is
+    reused for real, in a pid namespace of the driver's own (nothing of the host
+    can get the pid or the signal), before the descendants are pinned, before
+    their parents are read and after: the stranger lives, and the descendants
+    that left the group and dropped the run's mark, which only the parent chain
+    leads to, are killed all the same.
+    """
+    try:
+        can_set_pid = subprocess.run(
+            [*_PID_NAMESPACE, "sh", "-c", "echo 1 > /proc/sys/kernel/ns_last_pid"],
+            capture_output=True, timeout=60,
+        ).returncode == 0
+    except OSError:
+        can_set_pid = False
+    if not can_set_pid:
+        pytest.skip("no pid namespace of its own for this user (unshare, user namespaces)")
+    driver = subprocess.run(
+        [*_PID_NAMESPACE, sys.executable, "-c", _PID_REUSE_DRIVER, gate],
+        cwd=tmp_path, capture_output=True, text=True, timeout=180,
+    )
+    assert driver.returncode == 0, driver.stderr
+    assert driver.stdout.strip() == "reused=True escapees_dead=True alive=True"
+
+
 @posix_only("the shell's $$/$! are OS pids and the kill is a POSIX killpg")
 @pytest.mark.parametrize(
-    "tail",
-    ["while true; do echo tick; sleep 0.05; done", "wait", "exit"],
-    ids=["chatty", "quiet", "shell-exited"],
+    ("tail", "stop"),
+    [
+        ("while true; do echo tick; sleep 0.05; done", KeyboardInterrupt),
+        ("wait", KeyboardInterrupt),
+        ("exit", KeyboardInterrupt),
+        ("exit", cron_agent._HostStopping),
+    ],
+    ids=["chatty", "quiet", "shell-exited", "shell-exited-as-the-host-stops"],
 )
-def test_interrupted_command_job_kills_tree(tmp_path: Path, tail: str) -> None:
+def test_interrupted_command_job_kills_tree(
+    tmp_path: Path, tail: str, stop: type[KeyboardInterrupt],
+) -> None:
     """A Stop landing in ``_run_command_job``'s wait must kill the command tree.
 
     ``cron_job("run_now")`` runs ``_execute_job`` on the cron agent's
@@ -368,14 +528,14 @@ def test_interrupted_command_job_kills_tree(tmp_path: Path, tail: str) -> None:
     in its selector for the whole job timeout and the Stop stayed
     pending until then, so the wait must be taken in short slices.
     Or the shell exits at once and leaves the child the output pipes
-    that keep the run open: ``communicate`` reaps that shell as the
-    interrupt passes through it, and the tree of a reaped shell was left
-    alone.  It is found by the run's mark, which needs ``/proc``.
+    that keep the run open: ``communicate`` reaped that shell as the
+    interrupt passed through it, and the group of a reaped shell was
+    left alone.  The child, started without the run's mark (``env -i``),
+    is in that group and nowhere else to be found; the stop of the
+    scheduler's host looks nowhere else in any case.
     """
-    if tail == "exit" and not Path("/proc").exists():
-        pytest.skip("/proc required")
     pid_file = tmp_path / "pids"
-    command = f"sleep 300 & echo $$ $! > {pid_file.as_posix()}; {tail}"
+    command = f"env -i sleep 300 & echo $$ $! > {pid_file.as_posix()}; {tail}"
     outcome: dict[str, Any] = {}
 
     def run() -> None:
@@ -400,10 +560,11 @@ def test_interrupted_command_job_kills_tree(tmp_path: Path, tail: str) -> None:
         while tail == "exit" and not _is_zombie(shell_pid):
             assert time.monotonic() < deadline, "the shell never exited"
             time.sleep(0.02)
-        assert inject(worker) == 1
+        assert worker.ident is not None
+        assert inject_async_exception(worker.ident, stop) == 1
         worker.join(timeout=10)
         assert not worker.is_alive(), "the interrupt never ended the wait"
-        assert isinstance(outcome.get("exc"), KeyboardInterrupt), outcome
+        assert isinstance(outcome.get("exc"), stop), outcome
         for pid in (shell_pid, child_pid):
             assert _wait_pid_dead(pid), (
                 f"process {pid} of the interrupted cron command survived (orphaned tree)"
@@ -415,18 +576,136 @@ def test_interrupted_command_job_kills_tree(tmp_path: Path, tail: str) -> None:
                     os.kill(pid, 9)
 
 
+# Hosts the scheduler as the kiss-web daemon does: starts it and, once its tick has the
+# due job running, runs another on a thread of its own (as the cron agent's task does);
+# stops the scheduler when the commands have recorded their pids in the files named.
+_SCHEDULER_HOST = """
+import contextlib, sys, threading, time
+from pathlib import Path
+
+from kiss.agents.sorcar import cron_agent
+from kiss.core.processes import waitid_exited
+from kiss.core.tool_interrupt import inject_async_exception
+
+
+def run_now():
+    with contextlib.suppress(KeyboardInterrupt):
+        cron_agent.cron_job("run_now", job_id="t-called")
+
+
+def recorded(names):
+    while not all(Path(name).exists() and Path(name).read_text().split() for name in names):
+        time.sleep(0.02)
+
+
+group, called, session, shell = sys.argv[1:]
+stop = cron_agent.start_scheduler_thread(interval=3600)
+recorded([group, session])
+caller = threading.Thread(target=run_now, daemon=True)
+caller.start()
+recorded([called])
+# The shell that exits has exited (the host's child, not reaped) when the Stop arrives.
+while shell == "exits" and waitid_exited(int(Path(group).read_text().split()[0])) is None:
+    time.sleep(0.02)
+cron_agent.stop_scheduler_thread(stop)
+print(sorted(cron_agent.running_job_ids()))
+inject_async_exception(caller.ident, KeyboardInterrupt)
+caller.join(30)
+"""
+
+
+@posix_only("the shell's $$/$! are OS pids and the kill is a POSIX killpg")
+@pytest.mark.parametrize(
+    ("command", "shell"),
+    [
+        (
+            "sleep 300 & echo $$ $! > {group}; {setsid} sh -c {inner} >/dev/null 2>&1 & wait",
+            "waits",
+        ),
+        ("{setsid} sh -c {inner} & echo $$ > {group}", "exits"),
+        ("sleep 300 & echo $$ $! > {group}; {setsid} sh -c {inner} >/dev/null 2>&1 &", "exits"),
+    ],
+    ids=["shell-waits", "shell-exited", "shell-exited-child-in-its-group"],
+)
+def test_a_stopped_scheduler_ends_the_command_jobs_it_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command: str, shell: str,
+) -> None:
+    """The command jobs a scheduler has running end with it, not after its daemon.
+
+    ``stop_scheduler_thread``, all the kiss-web daemon does about cron as it
+    shuts down, ended the loop and left the runs to their daemon threads.  The
+    daemon exited, and a command went on in its own session, with no timeout
+    left to end it and no run lock to keep the next daemon from starting the
+    job beside it (audit 2026-11-21, S3 F1).  The runs are stopped, without a
+    traceback in the host's log: the command's process group is gone when the
+    host has exited, and so is the run of a shell that had exited, kept open
+    by the pipes its descendant holds.  So is the child such a shell left in
+    its group: ``Popen.communicate`` reaped the shell as the Stop passed
+    through it, the group of a reaped shell is not signalled (its id may be a
+    stranger's), and the child ran on with the run over and its lock free
+    (review of that fix).  What moved to a session of its own is
+    left to carry on, unlike under a timeout or a Stop of the run:
+    ``install.sh`` run by a job restarts this very daemon from one, and must
+    outlive the daemon it stops.  A ``run_now`` is its caller's to stop, under
+    the daemon the cron agent's task, which the daemon stops with its tasks: it
+    is still running after the scheduler's stop, and ends on its caller's.
+    """
+    monkeypatch.setenv("KISS_HOME", str(tmp_path))
+    group, called, session = tmp_path / "group", tmp_path / "called", tmp_path / "session"
+    inner = shlex.quote(f"echo $$ > {session.as_posix()}; exec sleep 300")
+    job = {"deliver": "local", "enabled": True, "schedule": "every 1h"}
+    cron_agent.save_jobs([
+        {
+            **job, "id": "t-stop", "name": "outlives-its-daemon", "next_run_at": time.time(),
+            "command": command.format(group=group.as_posix(), inner=inner, setsid=_SETSID),
+        },
+        {
+            **job, "id": "t-called", "name": "run-now", "next_run_at": time.time() + 3600,
+            "command": f"echo $$ > {called.as_posix()}; exec sleep 300",
+        },
+    ])
+    names = (group, called, session)
+    try:
+        host = subprocess.run(
+            [sys.executable, "-c", _SCHEDULER_HOST, *map(str, names), shell],
+            capture_output=True, text=True, timeout=120,
+        )
+        pids = [int(pid) for name in names for pid in name.read_text().split()]
+        assert host.returncode == 0 and "Traceback" not in host.stderr, host.stderr
+        assert host.stdout.strip() == "['t-called']", "only the scheduler's own run is stopped"
+        for pid in pids[:-1]:
+            assert _wait_pid_dead(pid), f"process {pid} of a command outlived its daemon"
+        assert pid_alive(pids[-1]), "what left the command's session was killed with it"
+    finally:
+        for name in names:
+            for pid in map(int, name.read_text().split() if name.exists() else ()):
+                if pid_alive(pid):
+                    with contextlib.suppress(OSError):
+                        os.kill(pid, 9)
+
+
+# Returns inside ``Popen.__init__`` once the child is forked.  What a handler does after a
+# Stop raised there is in no coverage report: a trace function that raises ends the tracing.
+_FORK = subprocess.Popen._execute_child  # type: ignore[attr-defined]
+
+
 @posix_only("the command's pid is probed and killed as an OS process group")
 @pytest.mark.parametrize(
-    ("where", "when", "timeout"),
+    ("where", "when", "timeout", "stop"),
     [
-        (start_process_group, "return", 300.0),
-        (subprocess.Popen._communicate, "call", 300.0),  # type: ignore[attr-defined]
-        (cron_agent._kill_command_tree, "call", _JOB_TIMEOUT),
+        (start_process_group, "return", 300.0, KeyboardInterrupt),
+        (_FORK, "return", 300.0, KeyboardInterrupt),
+        (_FORK, "return", 300.0, cron_agent._HostStopping),
+        (cron_agent._communicate, "call", 300.0, KeyboardInterrupt),
+        (cron_agent._kill_command_tree, "call", _JOB_TIMEOUT, KeyboardInterrupt),
     ],
-    ids=["as-the-spawn-returns", "as-the-wait-begins", "as-the-timeout-kill-begins"],
+    ids=[
+        "as-the-spawn-returns", "inside-the-spawn", "inside-the-spawn-as-the-host-stops",
+        "as-the-wait-begins", "as-the-timeout-kill-begins",
+    ],
 )
 def test_a_stop_at_the_edges_of_the_wait_kills_the_command(
-    tmp_path: Path, where: Any, when: str, timeout: float,
+    tmp_path: Path, where: Any, when: str, timeout: float, stop: type[KeyboardInterrupt],
 ) -> None:
     """A Stop raised just before, at the start of or after the wait must end the command.
 
@@ -436,15 +715,18 @@ def test_a_stop_at_the_edges_of_the_wait_kills_the_command(
     there skipped the handler that kills the tree: the command, in its
     own session, ran on with nobody to stop it, from a scratch directory
     ``_execute_job`` then removed.  The trace function raises the
-    interrupt on the return of the spawn itself.  Or as the first
-    ``communicate`` begins: the ``Popen`` is then marked as
-    communicating before it has set that up, a later ``communicate``
-    fails on it, and the reap, which called one, raised that failure in
-    place of the interrupt, so the Stop was lost.  Or as the kill of a
-    timed-out command begins: that kill and the reap take seconds in
-    the timeout's handler, and an interrupt raised there was not caught
-    by the handler that kills an interrupted command, its sibling, so
-    whatever was not killed yet ran on.
+    interrupt on the return of the spawn itself.  Or inside the spawn,
+    once the child is forked: the spawn kills and reaps the command
+    itself, and the handlers of the run's Stop and of its host's find a
+    shell whose pid is no longer theirs to signal.  Or as the wait
+    begins: ``Popen.communicate``, which read the output then, marked
+    the ``Popen`` as communicating before it had set that up, a later
+    ``communicate`` failed on it, and the reap, which called one, raised
+    that failure in place of the interrupt, so the Stop was lost.  Or as
+    the kill of a timed-out command begins: that kill and the reap take
+    seconds in the timeout's handler, and an interrupt raised there was
+    not caught by the handler that kills an interrupted command, its
+    sibling, so whatever was not killed yet ran on.
     """
     spawned: list[int] = []
 
@@ -454,12 +736,12 @@ def test_a_stop_at_the_edges_of_the_wait_kills_the_command(
         if event == when:
             sys.settrace(None)
             spawned.append((frame.f_locals.get("proc") or frame.f_locals["self"]).pid)
-            raise KeyboardInterrupt
+            raise stop
         return stop_there
 
     sys.settrace(stop_there)
     try:
-        with pytest.raises(KeyboardInterrupt):
+        with pytest.raises(stop):
             cron_agent._run_command_job(
                 {"id": "t-spawn", "command": "sleep 300"}, tmp_path, timeout,
             )

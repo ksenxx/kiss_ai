@@ -442,7 +442,7 @@ def test_two_threads_re_reading_one_imported_parent_re_execute_it_once(
             time.sleep(0.01)
         assert ready.exists(), "the first thread never got into the parent's re-execution"
         second.start()
-        key = sea_settings._module_name(parent)
+        key = f"{sea_settings._module_name(parent)}__{sea_settings.file_revision(parent)}"
         while sea_settings._waited_module(second.ident) != key and time.monotonic() < deadline:
             time.sleep(0.01)
         assert sea_settings._waited_module(second.ident) == key, "the second thread did not wait"
@@ -454,6 +454,60 @@ def test_two_threads_re_reading_one_imported_parent_re_execute_it_once(
     assert not first.is_alive() and not second.is_alive()
     assert verdicts == {name: folder / name / f"{name}_sea.py" for name in names}
     assert runs.read_text(encoding="utf-8").count("run") == before + 1, "re-executed twice"
+
+
+class _SourceSnapshotPause:
+    """Hold one real refresh after its snapshot is captured, before the caller receives it."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.paused = threading.Event()
+        self.release = threading.Event()
+
+    def __call__(self, frame: types.FrameType, event: str, arg: object) -> _SourceSnapshotPause:
+        if (
+            event == "return"
+            and frame.f_code is getattr(sea_settings._source_execution, "__wrapped__").__code__
+            and isinstance(arg, tuple)
+            and frame.f_locals.get("path") == self.path
+            and not self.paused.is_set()
+        ):
+            self.paused.set()
+            assert self.release.wait(10), "the snapshot's caller was never released"
+        return self
+
+
+def test_an_imported_parent_snapshot_keeps_the_stamp_from_before_its_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An edit between snapshot capture and stamp use cannot cache old code as current."""
+    name = f"snapshot_parent_{uuid.uuid4().hex}"
+    parent, child = tmp_path / f"{name}.py", tmp_path / "snapshot_child_sea.py"
+    monkeypatch.syspath_prepend(str(tmp_path))
+    child.write_text(f"from {name} import Parent\nclass Child(Parent):\n    pass\n")
+    _write_parent(parent, False)
+    assert not sea_commands._listed_as_model(child)
+    _write_parent(parent, "False  # a new revision")
+    paused = _SourceSnapshotPause(parent)
+    previous_trace = threading.gettrace()
+    threading.settrace(paused)
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            result = pool.submit(sea_commands._listed_as_model, child)
+            try:
+                assert paused.paused.wait(10), "the refresh never captured its source"
+                _write_parent(parent, True)
+            finally:
+                paused.release.set()
+            result.result(10)
+        # No further edit: the old snapshot must not poison unchanged future listings.
+        assert sea_commands._listed_as_model(child)
+        assert sea_commands._listed_as_model(child)
+        assert sys.modules[name].Parent().register_as_model() is True
+    finally:
+        paused.release.set()
+        threading.settrace(previous_trace)
+        sys.modules.pop(name, None)
 
 
 def test_a_named_parent_registered_or_rebound_later_is_re_read(tmp_path: Path) -> None:

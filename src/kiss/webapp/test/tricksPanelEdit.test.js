@@ -11,8 +11,9 @@
 // Save / Cancel, and saving posts `editTrick` {text, newText} while
 // showing the new text at once.  Also covers the keyboard (Enter saves,
 // Shift+Enter breaks a line, Escape cancels), the no-op paths (unchanged
-// or emptied text), the resync after a rejected edit, and that an open
-// editor is closed when the list changes under it.
+// or emptied text), the resync after a rejected edit, that an open
+// editor is closed when the list changes under it, and the daemon's
+// answer to each edit (`trickResult`, which echoes the edit's stamp).
 
 const assert = require('assert');
 const {
@@ -35,8 +36,16 @@ function editor(row) {
   return row.querySelector('.tricks-edit-input');
 }
 
+// The edits posted, without the stamp each carries for the daemon to
+// echo in its answer.
 function editsPosted(posted) {
-  return JSON.parse(JSON.stringify(posted.filter(m => m.type === 'editTrick')));
+  return posted
+    .filter(m => m.type === 'editTrick')
+    .map(m => {
+      const frame = JSON.parse(JSON.stringify(m));
+      delete frame.generation;
+      return frame;
+    });
 }
 
 function runPanel() {
@@ -185,6 +194,11 @@ function runPanel() {
   assert.deepStrictEqual(editsPosted(posted).slice(1), [
     {type: 'editTrick', text: 'Mine one', newText: 'Mine one, by Enter'},
   ]);
+  assert.deepStrictEqual(
+    posted.filter(m => m.type === 'editTrick').map(m => m.generation),
+    [1, 2],
+    'each edit carries a stamp of its own',
+  );
   assert.deepStrictEqual(texts(doc)[0], 'Mine one, by Enter');
   assert.strictEqual(list.querySelectorAll('.tricks-edit-input').length, 0);
   send(win, {
@@ -339,8 +353,14 @@ function runPanel() {
   assert.strictEqual(texts(doc)[0], '変換中');
   assert.strictEqual(editsPosted(posted).length, 3, 'one edit at a time');
   // The daemon answers each edit in order (the two-line one, then the
-  // composed one); another window then puts the two-line text back.
-  for (const first of ['Line one\nLine two', '変換中', 'Line one\nLine two']) {
+  // composed one), with its result and then the list; another window
+  // then puts the two-line text back.
+  for (const [first, generation] of [
+    ['Line one\nLine two', 3],
+    ['変換中', 4],
+    ['Line one\nLine two', 0],
+  ]) {
+    if (generation) send(win, {type: 'trickResult', generation, error: ''});
     send(win, {
       type: 'tricksData',
       tricks: [first, 'Mine two, edited', 'Bundled alpha', 'Bundled beta'],
@@ -826,7 +846,8 @@ function runPanel() {
 // its rename is not named by the text it shows: the daemon may refuse
 // that rename as a duplicate of ANOTHER row, which the follow-up would
 // then change instead.  The follow-up waits for the answer and names
-// the text the row holds on disk.
+// the text the row holds on disk, which the edit's result tells: a
+// list reads the same whichever window made it so.
 function runRowChangedBeforeItsAnswer() {
   const editors = p => p.doc.querySelectorAll('.tricks-edit-input').length;
   for (const followUp of ['edit', 'delete']) {
@@ -851,12 +872,224 @@ function runRowChangedBeforeItsAnswer() {
     // The row shows the follow-up again, before and after its answer;
     // the refused text, which the other row reads, is offered nowhere.
     assert.deepStrictEqual(texts(p.doc), answer);
-    p.list(answer);
+    if (followUp === 'edit') p.accept(answer);
+    else p.list(answer);
     assert.deepStrictEqual(texts(p.doc), answer, 'the other row is untouched');
     assert.strictEqual(editors(p), 0);
     assert.strictEqual(p.doc.getElementById('tricks-add-input').value, '');
     p.win.close();
   }
+
+  // The renamed row deleted from another window meanwhile: the list
+  // then holds the new text and not the old one, as if the rename had
+  // been made.  The text is another row's: one this window listed as
+  // the rename was saved (`known`), or one added from the other window
+  // since.  The follow-up is still not for that row, whether the list
+  // comes after the refusal or (the other window's change) before it:
+  // a delete has nothing left to delete, an edit goes out under the
+  // old text for the daemon to refuse, and an editor still open closes
+  // with its promptlet.
+  for (const followUp of ['edit', 'delete', 'typing']) {
+    for (const [listFirst, known] of [
+      [false, false],
+      [false, true],
+      [true, false],
+      [true, true],
+    ]) {
+      const other = known ? 'Existing B' : 'Added X';
+      const p = panelOf(known ? ['Original A', other] : ['Original A']);
+      p.save(0, other);
+      if (followUp === 'edit') p.save(0, 'Replacement C');
+      else if (followUp === 'delete') p.del(0);
+      else {
+        click(p.win, rows(p.doc)[0].querySelector('.sidebar-item-edit'));
+        input(p.win, editor(rows(p.doc)[0]), 'Replacement C');
+      }
+      if (listFirst) p.list([other]);
+      p.refuse([other]);
+      const what =
+        followUp + (listFirst ? ', the list first' : '') + (known ? ', known' : '');
+      assert.deepStrictEqual(
+        p.sent().slice(1),
+        followUp === 'edit' ? ['Original A > Replacement C'] : [],
+        what + ': BUG: the follow-up changed another row',
+      );
+      assert.strictEqual(editors(p), 0, what + ': BUG: the editor is on another row');
+      // The edit sent under the old text is refused: its draft is back.
+      if (followUp === 'edit') p.refuse([other]);
+      assert.deepStrictEqual(texts(p.doc), [other], what);
+      assert.strictEqual(
+        p.doc.getElementById('tricks-add-input').value,
+        followUp === 'edit' ? 'Replacement C' : '',
+        what,
+      );
+      p.win.close();
+    }
+  }
+  // A bundled promptlet reading the new text is no reason for the
+  // daemon to refuse: made, the follow-up is for the renamed row.
+  const q = panelOf(['A']);
+  q.list(['A', 'Bundled'], 1);
+  q.save(0, 'Bundled');
+  q.del(0);
+  q.accept(['Bundled', 'Bundled'], 1);
+  assert.deepStrictEqual(q.sent(), ['A > Bundled', 'delete Bundled']);
+  assert.deepStrictEqual(texts(q.doc), ['Bundled']);
+  q.win.close();
+  // Made, a rename stands whatever the next list reads (the row was
+  // renamed again from another window): the follow-up names the text
+  // the rename left, for the daemon to refuse.
+  let p = panelOf(['A', 'B']);
+  p.save(0, 'X');
+  p.save(0, 'Y');
+  p.accept(['Z', 'B']);
+  assert.deepStrictEqual(p.sent(), ['A > X', 'X > Y']);
+  p.win.close();
+  // A result is its own edit's: one that comes when a list has settled
+  // its edit already is not the answer of the next edit.
+  p = panelOf(['A', 'B']);
+  p.save(0, 'X');
+  p.save(1, 'Y');
+  p.list(['X', 'B']);
+  p.refuse(['X', 'B']);
+  assert.strictEqual(editors(p), 0, 'BUG: the result of another edit refused this one');
+  p.accept(['X', 'Y']);
+  assert.deepStrictEqual(texts(p.doc), ['X', 'Y']);
+  p.win.close();
+
+  // A result that came before the connection dropped stands, and so
+  // does one that comes after it (the transport still owed the edit).
+  const drop = q => send(q.win, {type: 'daemonStatus', connected: false, reconnecting: true});
+  const reconnect = q => send(q.win, {type: 'daemonStatus', connected: true});
+  const addBox = q => q.doc.getElementById('tricks-add-input').value;
+  for (const [stored, saved, result, late, after, sent] of [
+    [['A', 'B'], 'B', null, null, ['B'], ['A > B']],
+    [['A'], 'X', 'Refused', null, ['X'], ['A > X']],
+    [['A', 'B'], 'B', '', null, ['B', 'B2'], ['A > B', 'delete B']],
+    [['A'], 'X', null, '', ['X'], ['A > X', 'delete X']],
+  ]) {
+    const p = panelOf(stored);
+    p.save(0, saved);
+    p.del(0);
+    if (result !== null) p.result(result);
+    drop(p);
+    reconnect(p);
+    if (late !== null) p.result(late);
+    p.list(after);
+    assert.deepStrictEqual(p.sent(), sent, 'BUG: the delete took another row');
+    p.win.close();
+  }
+
+  // An answer that went with the connection never comes, and the list
+  // after the reconnect reads the same whichever window made it so
+  // (the new text alone: this window's rename, or another window's
+  // promptlet once it deleted this row).  Nothing is sent for the row
+  // on that guess, under either text, whether it was changed before
+  // the drop or during the outage (`offline`): a delete is dropped
+  // with its edit, a text is back as a draft (in the editor of the row
+  // still stored under the old text, else in the Add box, with the
+  // reason), and an editor still open follows the old text or closes.
+  const C = 'Replacement C';
+  for (const [followUp, offline, after, shown, box, draft] of [
+    ['delete', false, ['Added X'], ['Added X'], '', false],
+    ['edit', false, ['Added X'], ['Added X'], C, false],
+    ['typing', false, ['Added X'], ['Added X'], '', false],
+    ['delete', true, ['Added X'], ['Added X'], '', false],
+    ['edit', true, ['Added X'], ['Added X'], C, false],
+    ['delete', false, ['Original A', 'Added X'], ['Original A', 'Added X'], '', false],
+    ['edit', false, ['Original A', 'Added X'], [C, 'Added X'], '', true],
+    ['typing', false, ['Original A'], [C], '', true],
+  ]) {
+    const p = panelOf(['Original A']);
+    p.save(0, 'Added X');
+    if (offline) drop(p);
+    if (followUp === 'edit') p.save(0, C);
+    else if (followUp === 'delete') p.del(0);
+    else {
+      click(p.win, rows(p.doc)[0].querySelector('.sidebar-item-edit'));
+      input(p.win, editor(rows(p.doc)[0]), C);
+    }
+    if (!offline) drop(p);
+    reconnect(p);
+    p.list(after);
+    const what = followUp + (offline ? ' during the outage' : '') + ', then ' + after.join(' + ');
+    assert.deepStrictEqual(
+      p.sent(),
+      ['Original A > Added X'],
+      what + ': BUG: a change was sent for a row the list cannot tell',
+    );
+    assert.deepStrictEqual(texts(p.doc), shown, what);
+    assert.strictEqual(addBox(p), box, what + ': the Add box');
+    assert.strictEqual(editors(p), draft ? 1 : 0, what + ': the editor');
+    const reason = p.doc.getElementById(box ? 'tricks-add-error' : 'tricks-list').textContent;
+    assert.strictEqual(
+      reason.includes('connection dropped'),
+      followUp === 'edit',
+      what + ': the reason shows with the draft handed back: ' + reason,
+    );
+    // The draft is the user's to save: it names the text its row holds.
+    if (draft) {
+      key(p.win, editor(rows(p.doc)[0]), 'Enter');
+      assert.deepStrictEqual(p.sent().slice(1), ['Original A > ' + C], what);
+    }
+    p.win.close();
+  }
+  // The draft handed back awaits no answer: a result that comes late
+  // for the lost edit (the transport still owed it) is not its answer.
+  p = panelOf(['Original A', 'Other']);
+  p.save(0, 'Added X');
+  p.save(0, C);
+  click(p.win, rows(p.doc)[1].querySelector('.sidebar-item-edit'));
+  drop(p);
+  reconnect(p);
+  p.list(['Original A', 'Other']);
+  assert.strictEqual(editors(p), 1, 'the draft waits for the editor');
+  p.accept(['Added X', 'Other']);
+  assert.deepStrictEqual(p.sent(), ['Original A > Added X']);
+  assert.strictEqual(addBox(p), C, 'BUG: the draft went with the answer of another edit');
+  p.win.close();
+
+  // An editor closing gives the drafts that wait their place.  An edit
+  // whose list has not come is no draft yet: its row shows a text the
+  // daemon may not hold and stays named by the edit, lost with the
+  // connection ...
+  const cancelOther = q => {
+    click(q.win, rows(q.doc)[1].querySelector('.sidebar-item-edit'));
+    key(q.win, editor(rows(q.doc)[1]), 'Escape');
+  };
+  p = panelOf(['Original A', 'Other', 'Third']);
+  p.save(0, 'Added X');
+  p.save(0, C);
+  drop(p);
+  cancelOther(p);
+  assert.strictEqual(addBox(p), '', 'BUG: a draft was handed back before its list');
+  p.del(0);
+  cancelOther(p);
+  assert.strictEqual(addBox(p), '', 'BUG: the edit of a row deleted since was handed back');
+  reconnect(p);
+  p.list(['Other', 'Third', 'Added X', C]);
+  assert.deepStrictEqual(
+    p.sent(),
+    ['Original A > Added X'],
+    'BUG: the row was named by a text it never held',
+  );
+  assert.deepStrictEqual(texts(p.doc), ['Other', 'Third', 'Added X', C]);
+  p.win.close();
+  // ... or refused, its list still on the way: the newer text is the
+  // row's to get.
+  p = panelOf(['Original A', 'Other', 'Added X']);
+  p.save(0, 'Added X');
+  p.save(0, C);
+  p.result('Refused');
+  cancelOther(p);
+  p.list(['Original A', 'Other', 'Added X']);
+  assert.deepStrictEqual(
+    p.sent(),
+    ['Original A > Added X', 'Original A > ' + C],
+    'BUG: the newer text was lost',
+  );
+  assert.strictEqual(addBox(p), '', 'the refused draft gave way to the newer text');
+  p.win.close();
 
   // A follow-up still being typed when the answer arrives stays in the
   // editor of its own row, and is saved for it.  Refused, that row
@@ -871,7 +1104,7 @@ function runRowChangedBeforeItsAnswer() {
     click(p.win, rows(p.doc)[0].querySelector('.sidebar-item-edit'));
     input(p.win, editor(rows(p.doc)[0]), 'Replacement C');
     if (refused) p.refuse(['Original A', 'Existing B']);
-    else p.list(['Added elsewhere', 'Renamed A', 'Existing B']);
+    else p.accept(['Added elsewhere', 'Renamed A', 'Existing B']);
     const followed = editor(rows(p.doc)[at]);
     assert.ok(followed, 'BUG: the open editor moved to another row');
     key(p.win, followed, 'Enter');
@@ -884,7 +1117,7 @@ function runRowChangedBeforeItsAnswer() {
   // An edit awaiting its answer stays with its row while the rows
   // around it are deleted, and leaves with it: the row saved or deleted
   // next is still the one named, and the row moving up is not it.
-  let p = panelOf(['A', 'B', 'C', 'D']);
+  p = panelOf(['A', 'B', 'C', 'D']);
   p.save(1, 'B2');
   p.del(0);
   p.del(2);
@@ -892,8 +1125,9 @@ function runRowChangedBeforeItsAnswer() {
   p.del(0);
   p.save(0, 'C2');
   assert.deepStrictEqual(p.sent(), ['B > B2', 'delete A', 'delete D', 'C > C2']);
-  p.list(['B2', 'C2']);
+  p.accept(['A', 'B2', 'C', 'D']);
   assert.deepStrictEqual(p.sent().slice(4), ['delete B2']);
+  p.accept(['C2']);
   assert.deepStrictEqual(texts(p.doc), ['C2']);
   p.win.close();
 
@@ -905,7 +1139,7 @@ function runRowChangedBeforeItsAnswer() {
   p.refuse(['A', 'B']);
   p.save(0, 'U');
   p.del(0);
-  p.list(['U', 'B']);
+  p.accept(['U', 'B']);
   assert.deepStrictEqual(p.sent().slice(1), ['A > U', 'delete U']);
   assert.deepStrictEqual(texts(p.doc), ['B']);
   assert.strictEqual(editors(p), 0, 'BUG: the draft is on another row');
@@ -915,13 +1149,12 @@ function runRowChangedBeforeItsAnswer() {
   // nowhere (W3 audit 2026-11-12): saved from a reopened editor, it
   // would overwrite the row's newer text.  The row saved again before
   // the answer: the newer text goes out in its place, once ...
-  const addBox = q => q.doc.getElementById('tricks-add-input').value;
   p = panelOf(['A', 'B']);
   p.save(0, 'X');
   p.save(0, 'Y');
   p.refuse(['A', 'B']);
   assert.strictEqual(editors(p), 0, 'BUG: the replaced draft is back');
-  p.list(['Y', 'B']);
+  p.accept(['Y', 'B']);
   assert.deepStrictEqual(p.sent(), ['A > X', 'A > Y']);
   assert.deepStrictEqual(texts(p.doc), ['Y', 'B']);
   p.win.close();
@@ -932,7 +1165,7 @@ function runRowChangedBeforeItsAnswer() {
   input(p.win, editor(rows(p.doc)[0]), 'Z');
   p.refuse(['A', 'B']);
   key(p.win, editor(rows(p.doc)[0]), 'Enter');
-  p.list(['Z', 'B']);
+  p.accept(['Z', 'B']);
   assert.deepStrictEqual(texts(p.doc), ['Z', 'B'], 'BUG: the replaced draft is back');
   p.win.close();
   // ... or the row deleted while the draft waited for another row's editor.
@@ -944,6 +1177,16 @@ function runRowChangedBeforeItsAnswer() {
   key(p.win, editor(rows(p.doc)[0]), 'Escape');
   assert.deepStrictEqual(texts(p.doc), ['B']);
   assert.strictEqual(addBox(p), '', 'BUG: the draft of a deleted promptlet is back');
+  p.win.close();
+  // An error is no answer to an edit whose result said it was made:
+  // its text is not a draft to hand back when an editor closes.
+  p = panelOf(['A', 'B']);
+  p.save(0, 'X');
+  p.result('');
+  send(p.win, {type: 'error', text: 'Update failed'});
+  click(p.win, rows(p.doc)[1].querySelector('.sidebar-item-edit'));
+  key(p.win, editor(rows(p.doc)[1]), 'Escape');
+  assert.strictEqual(addBox(p), '', 'BUG: a saved text is back as a draft');
   p.win.close();
 
   // The row gone from the answer's list (deleted from another window):
@@ -974,20 +1217,33 @@ function runRowChangedBeforeItsAnswer() {
  * A promptlets sheet listing *stored* (all the user's own), with the
  * user's and the daemon's moves as one-liners; `sent` lists the edits
  * and deletes posted so far, as "text > newText" and "delete text".
+ * The daemon answers the edits in order: `result` is its answer to
+ * the oldest one not answered yet (refused with *error*), which
+ * `accept` and `refuse` send before the list on disk.
  */
 function panelOf(stored) {
   const {win, posted} = makePage();
   const doc = win.document;
-  const list = tricks =>
-    send(win, {type: 'tricksData', tricks: tricks.slice(), userCount: tricks.length});
+  const list = (tricks, userCount = tricks.length) =>
+    send(win, {type: 'tricksData', tricks: tricks.slice(), userCount});
+  let answered = 0;
+  const result = error => {
+    const edit = posted.filter(m => m.type === 'editTrick')[answered++];
+    send(win, {type: 'trickResult', generation: edit.generation, error});
+  };
   list(stored);
   doc.getElementById('tricks-btn').click();
   return {
     win,
     doc,
     list,
+    result,
+    accept(tricks, userCount) {
+      result('');
+      list(tricks, userCount);
+    },
     refuse(tricks) {
-      send(win, {type: 'error', command: 'editTrick', text: 'Refused'});
+      result('Refused');
       list(tricks);
     },
     save(row, text) {

@@ -8,7 +8,9 @@
 The CHATS panel's ``setChatFavorite`` command stores the star on the
 chat's ``chat_summaries`` row, where it stays through every recompute
 of that row, and ``_get_history`` stamps it on each row of the chat as
-``chat_is_favorite``.
+``chat_is_favorite``.  The chat's pin (``is_pinned``) is stored and
+kept the same way; its command and its place in the list are covered
+with real daemons in ``test_machine_history.py``.
 """
 
 from __future__ import annotations
@@ -78,12 +80,33 @@ class TestChatFavorite:
         assert th._set_chat_favorite(chat_id, True) is True
         assert th._chat_summaries([chat_id])[chat_id] == {
             "summary": "", "last_launched": 0, "last_finished": 0, "is_favorite": True,
+            "is_pinned": False,
         }
         # The title typed over the chat leaves its star alone.
         assert th._set_chat_summary(chat_id, "Named") is True
         assert th._chat_summaries([chat_id])[chat_id] == {
             "summary": "Named", "last_launched": 0, "last_finished": 0, "is_favorite": True,
+            "is_pinned": False,
         }
+
+    def test_a_pin_is_the_chats_own_and_stays_like_the_star(self) -> None:
+        first_id, chat_id = th._add_task("write the intro", extra={"startTs": 1_000})
+        # No task of the chat has finished: the pin makes the chat's row.
+        assert th._set_chat_pinned(chat_id, True) is True
+        assert th._chat_summaries([chat_id])[chat_id] == {
+            "summary": "", "last_launched": 0, "last_finished": 0, "is_favorite": False,
+            "is_pinned": True,
+        }
+        # The task finishing recomputes the row; the pin stays and gives no star.
+        th._save_task_extra({"endTs": 2_000}, task_id=first_id)
+        row = th._chat_summaries([chat_id])[chat_id]
+        assert (row["is_pinned"], row["is_favorite"], row["last_launched"]) == (True, False, 1_000)
+        # So does it when the chat's last task is deleted.
+        assert th._delete_task(first_id) == 1
+        assert th._chat_summaries([chat_id])[chat_id]["is_pinned"] is True
+        assert th._set_chat_pinned(chat_id, False) is True
+        assert th._chat_summaries([chat_id])[chat_id]["is_pinned"] is False
+        assert th._set_chat_pinned("", True) is False
 
     def test_a_command_naming_no_chat_changes_nothing(self) -> None:
         server, events = make_capturing_server()

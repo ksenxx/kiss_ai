@@ -271,6 +271,26 @@ def test_a_configured_timeout_object_is_sent_as_is(timeout: httpx.Timeout | None
         assert model.get_embedding("x") == [0.5, 0.0]
 
 
+def _silent_bound_socket() -> socket.socket:
+    """Return a socket that is bound and never listens, whose port drops the SYNs sent to it.
+
+    That is what macOS does with them (Linux refuses them).  A connect
+    is tried first: the test skips where it is answered.
+    """
+    bound = socket.socket()
+    bound.bind(("127.0.0.1", 0))
+    with socket.socket() as probe:
+        probe.settimeout(0.5)
+        try:
+            probe.connect(bound.getsockname())
+        except TimeoutError:
+            return bound
+        except OSError:
+            pass
+    bound.close()
+    pytest.skip("this kernel answers every connection it does not accept")
+
+
 def _syn_dropping_listener() -> tuple[socket.socket, list[socket.socket]]:
     """Return a listener whose accept queue is full, and the connections filling it.
 
@@ -282,6 +302,8 @@ def _syn_dropping_listener() -> tuple[socket.socket, list[socket.socket]]:
     never reach.  A queue of 1 is full after one connection on macOS and
     two on Linux (which admits ``backlog + 1``).  Windows answers a full
     queue with a reset instead of silence, so the test skips there.
+    macOS 27 resets the connection too (``ECONNRESET``, where Windows
+    refuses): the black hole there is :func:`_silent_bound_socket`.
 
     Returns:
         ``(listener, fillers)``; the caller closes all of them.
@@ -298,6 +320,11 @@ def _syn_dropping_listener() -> tuple[socket.socket, list[socket.socket]]:
         except TimeoutError:
             probe.close()
             return listener, fillers
+        except ConnectionResetError:
+            probe.close()
+            for sock in [*fillers, listener]:
+                sock.close()
+            return _silent_bound_socket(), []
         except ConnectionRefusedError:
             probe.close()
             for sock in [*fillers, listener]:

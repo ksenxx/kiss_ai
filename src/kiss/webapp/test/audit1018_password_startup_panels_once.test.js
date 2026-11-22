@@ -25,6 +25,7 @@ const PANEL_COMMANDS = [
   'getCronJobs',
   'getMachines',
   'getAppsStatus',
+  'getSkills',
   'getSpendReport',
   'getRecommendations',
 ];

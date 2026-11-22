@@ -458,6 +458,11 @@ def test_existing_entry_follows_the_twin_level(tmp_path: Path, monkeypatch) -> N
     current[_US_OPUS]["thinking"] = "high"
     assert _changes(current, bedrock) == ([], [])
 
+    # Nor for a listed id that is neither in the catalog nor a candidate of this run.
+    updates = []
+    _sync_bedrock_thinking(_listing(_GLOBAL_OPUS), current, updates, [])
+    assert updates == []
+
     # Applying the resync materializes the siblings on disk.
     target = tmp_path / "MODEL_INFO.json"
     on_disk = {_US_OPUS: {k: v for k, v in _claude_entry(5.5, 27.5).items() if v is not None}}

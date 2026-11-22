@@ -53,6 +53,7 @@ from kiss.server.web_server import _get_local_ips
 from kiss.tests.agents.sorcar.test_machine_link_no_resend_wave2 import _Daemon
 from kiss.tests.conftest import nproc_limit_lowered_to_one, posix_only, thread_start_can_be_starved
 from kiss.tests.local_ws import make_test_tls
+from kiss.tests.lock_injection import stop_as_it_takes_its_lock, stranded_threads
 from kiss.tests.remote_daemon import RemoteDaemon, start_remote_daemon
 from kiss.tests.server.pause import Pause
 from kiss.tests.ssh_server import SSHD, SshServer, start_sshd
@@ -398,6 +399,209 @@ def test_host_names_noted_at_once_all_survive(tmp_path: Path) -> None:
         noted.set()
         for machine in machines:
             mach._hosts.pop(machine.name, None)
+
+
+def _noting_the_late_host(frame_locals: dict[str, Any]) -> bool:
+    """A :class:`Pause` matcher on ``note_host``: the call that notes ``late-old-host``."""
+    return bool(frame_locals.get("host") == "late-old-host")
+
+
+def _old_cache_pair(frame_locals: dict[str, Any]) -> bool:
+    """Match the legacy reader's delayed cache publication."""
+    return bool(frame_locals["records"].get("cache-pair") == (
+        "old-host", "https://old.example:8787",
+    ))
+
+
+class _HostOfStep:
+    """Hold routing before one instruction of ``_host_of``, counted from the function's entry."""
+
+    def __init__(self, step: int) -> None:
+        """Create the gates of the hold before instruction number *step* (0 is the first)."""
+        self.step = step
+        self.seen = 0  # the instructions _host_of has started
+        self.held = threading.Event()  # routing is held, or over without reaching the step
+        self.route = threading.Event()
+
+    def __call__(self, frame: FrameType, event: str, arg: Any) -> Any:
+        """Trace ``_host_of`` by instruction and hold its thread before number ``step``."""
+        if frame.f_code is not mach._host_of.__code__:
+            return None
+        frame.f_trace_opcodes = True
+        if event == "opcode":
+            if self.seen == self.step:
+                self.held.set()
+                self.route.wait(30)
+            self.seen += 1
+        return self
+
+
+def _label_held_at_step(
+    rows: list[dict[str, Any]], machines: list[mach.Machine], boundary: _HostOfStep,
+) -> None:
+    """Run production row attribution, held before the instruction *boundary* names."""
+    previous = sys.gettrace()
+    sys.settrace(boundary)
+    try:
+        mach.label_synced_rows(rows, machines)
+    finally:
+        sys.settrace(previous)
+        boundary.held.set()
+
+
+def _routed_across_a_stale_refresh(
+    home: Path, old: mach.Machine, new: mach.Machine, step: int,
+) -> list[dict[str, Any]] | None:
+    """Route *old*'s host for *new* while *old*'s delayed refresh lands inside ``_host_of``.
+
+    The reader of *old*'s registration has loaded the legacy pair and
+    is held before publishing it; *new* replaces the registration and
+    its daemon is heard; routing for *new* is held before instruction
+    *step* of ``_host_of`` while the reader publishes its stale pair.
+
+    Returns:
+        The row as routed for *new*, or None when ``_host_of`` ended
+        before that instruction (nothing was interleaved).
+    """
+    mach.save_machines([old])
+    (home / mach.HOSTS_FILE).write_text('{"cache-pair": "old-host"}')
+    mach._hosts.pop(old.name, None)
+    old_rows: list[dict[str, Any]] = [{"origin": "old-host"}]
+    new_rows: list[dict[str, Any]] = [{"origin": "old-host"}]
+    boundary = _HostOfStep(step)
+    reader = threading.Thread(target=mach.label_synced_rows, args=(old_rows, [old]))
+    router = threading.Thread(target=_label_held_at_step, args=(new_rows, [new], boundary))
+    try:
+        with Pause(mach._remember_hosts.__code__, _old_cache_pair) as loaded:
+            reader.start()
+            assert loaded.paused.wait(30), "legacy refresh was not reached"
+            mach.save_machines([new])
+            mach.note_host(new, "new-host")
+            router.start()
+            assert boundary.held.wait(30), "routing neither reached the step nor ended"
+            loaded.release()
+            reader.join(30)
+            assert not reader.is_alive()
+            boundary.route.set()
+            router.join(30)
+            assert not router.is_alive()
+        assert mach._saved_records() == {new.name: ("new-host", new.url)}
+        return new_rows if boundary.seen > step else None
+    finally:
+        boundary.route.set()
+        if reader.ident is not None:
+            reader.join(30)
+        if router.ident is not None:
+            router.join(30)
+        mach._hosts.pop(old.name, None)
+
+
+def test_host_and_address_come_from_one_cache_generation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A delayed legacy refresh cannot mix its host with a replacement's validated address.
+
+    The refresh lands before each instruction of ``_host_of`` in turn,
+    so wherever a reader takes the host apart from the address it
+    validated, one of the schedules falls in between: a reader that
+    checked the replacement's address and then loaded the host routed
+    the previous daemon's history to the replacement.
+    """
+    monkeypatch.setenv("KISS_HOME", str(tmp_path))
+    old = mach.Machine("cache-pair", "https://old.example:8787")
+    new = mach.Machine("cache-pair", "https://new.example:8787")
+    step = 0
+    while (rows := _routed_across_a_stale_refresh(tmp_path, old, new, step)) is not None:
+        assert rows == [{}], (
+            f"old-host history was routed to the replacement daemon (refresh before step {step})"
+        )
+        step += 1
+    assert step, "routing was never held inside _host_of"
+
+
+def test_a_name_registered_again_does_not_inherit_the_previous_daemons_host(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A host name belongs to the registration that gave it, not to the machine's name.
+
+    Remembered by name alone, the host of the daemon a name was
+    registered for before sent that daemon's synced rows to the name's
+    new daemon, and a history reply of the old registration that
+    landed after the new daemon's first put the old host name back
+    (audit 2026-11-21, S7 F4).  The late reply is a thread held as it
+    enters ``note_host``; the new daemon is heard by another process,
+    whose saved name replaces the one this process remembers.
+    """
+    monkeypatch.setenv("KISS_HOME", str(tmp_path))
+    old = mach.Machine("lab", "https://old.example.org:8787")
+    new = mach.Machine("lab", "https://lab.example.org:8787")
+    by_ip = mach.Machine("10.0.0.7", "https://10.0.0.7:8787")
+    moved = mach.Machine("10.0.0.7", "https://10.0.0.7:9000")
+    late = threading.Thread(target=mach.note_host, args=(old, "late-old-host"))
+    try:
+        mach.save_machines([old])
+        mach.note_host(old, "old-host")
+        assert mach.machine_on_host("old-host", [old]) is old
+        with Pause(mach.note_host.__code__, _noting_the_late_host) as held:
+            late.start()
+            assert held.paused.wait(30), "the late reply never reached note_host"
+            mach.save_machines([new])
+            rows: list[dict[str, Any]] = [{"origin": "old-host"}]
+            mach.label_synced_rows(rows, [new])
+            assert rows == [{}], "the old daemon's row was sent to the new daemon"
+            go = tmp_path / "go"
+            go.touch()
+            script = [sys.executable, "-c", _NOTE_HOST_IN_A_PROCESS, "lab", "new-host", str(go)]
+            subprocess.run(script, check=True, capture_output=True, timeout=60)
+            rows = [{"origin": "new-host"}, {"origin": "old-host"}]
+            mach.label_synced_rows(rows, [new])
+            assert rows == [{"machine": "lab", "machine_url": new.url}, {}]
+        late.join(30)
+        assert not late.is_alive()
+        assert mach._saved_hosts() == {"lab": "new-host"}
+        assert mach.machine_on_host("new-host", [new]) is new
+        assert mach.machine_on_host("late-old-host", [new]) is None
+        # Restarted, the name is still the new registration's alone; the
+        # machine's own label follows the same rule.
+        mach._hosts.clear()
+        rows = [{"origin": "new-host"}]
+        mach.label_synced_rows(rows, [old])
+        assert rows == [{}]
+        mach.note_host(by_ip, "gpu-box")
+        assert (mach.machine_label(by_ip), mach.machine_label(moved)) == ("gpu-box", "10.0.0.7")
+        # A legacy observation is bound to the registration under which it loads.
+        (tmp_path / mach.HOSTS_FILE).write_text('{"lab": "bare-host", "odd": 7, "pair": [1, 2]}')
+        mach._hosts.clear()
+        rows = [{"origin": "bare-host"}]
+        mach.label_synced_rows(rows, [new])
+        assert rows == [{"machine": "lab", "machine_url": new.url}]
+        assert json.loads((tmp_path / mach.HOSTS_FILE).read_text()) == {
+            "lab": ["bare-host", new.url],
+        }, "the first legacy observation must persist its provenance, not rebind on each read"
+        mach.save_machines([old])
+        rows = [{"origin": "bare-host"}]
+        mach.label_synced_rows(rows, [old])
+        assert rows == [{}], "a legacy observation was rebound to the replacement daemon"
+        # The binding must survive a fresh interpreter, not just an in-memory cache.
+        check = subprocess.run(
+            [sys.executable, "-c",
+             "from kiss.agents.sorcar import machines as m; "
+             "rows = [{'origin': 'bare-host'}]; m.label_synced_rows(rows, m.load_machines()); "
+             "assert rows == [{}], rows"],
+            check=False, capture_output=True, text=True, timeout=60,
+        )
+        assert check.returncode == 0, check.stderr
+        (tmp_path / mach.HOSTS_FILE).write_text('{"orphan": "unknown-host"}')
+        orphan = mach.Machine("orphan", "https://new.example.org:8787")
+        mach.save_machines([orphan])
+        rows = [{"origin": "unknown-host"}]
+        mach.label_synced_rows(rows, [orphan])
+        assert rows == [{}], "an unregistered legacy observation cannot bind to a new machine"
+    finally:
+        if late.is_alive():
+            late.join(30)
+        for name in ("lab", "10.0.0.7"):
+            mach._hosts.pop(name, None)
 
 
 def test_add_machine_pins_the_ca_checks_the_password_and_saves(remote: RemoteDaemon) -> None:
@@ -2463,6 +2667,61 @@ def test_an_interrupted_tunnel_opening_does_not_vouch_for_its_port(
         tunnel.close()
         stranger.close()
         daemon.stop()
+
+
+def _open_under_profile(
+    tunnel: mach.SshTunnel, profile: Any, raised: list[BaseException],
+) -> None:
+    """Open *tunnel* on this thread under the *profile* hook; record what the opening raised."""
+    sys.setprofile(profile)
+    try:
+        tunnel.open(timeout=30.0)
+    except BaseException as exc:  # noqa: BLE001 — the injected Stop is expected
+        raised.append(exc)
+    finally:
+        sys.setprofile(None)
+
+
+@fake_ssh_only
+@pytest.mark.parametrize(
+    "under",
+    [(threading.Thread.start, mach.SshTunnel._forward), (mach.SshTunnel._forward,)],
+    ids=["reader-start", "wait-slice"],
+)
+def test_a_stop_as_the_tunnel_opening_takes_a_lock_strands_no_reader(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, under: tuple[Any, ...],
+) -> None:
+    """The runner's Stop landing where the opening has taken a lock strands no reader.
+
+    The start of the thread that reads ssh's output waits for it to come
+    up, and the wait for ssh's word waits on an event that thread sets:
+    each enters a ``threading.Condition``, whose lock stays held when
+    the Stop is raised as ``__enter__`` returns (gh-74174).  The reader
+    then blocked on that lock for good, coming up or saying the forward
+    is up: ssh's word was never heard, and the thread outlived the
+    tunnel's close.
+    """
+    _install_fake_ssh(tmp_path, monkeypatch, tmp_path)
+    tunnel = mach.SshTunnel("ksen@far.example.org", 9)
+    raised: list[BaseException] = []
+    before = threading.enumerate()
+    opener = threading.Thread(
+        target=_open_under_profile,
+        args=(tunnel, stop_as_it_takes_its_lock(threading.Event.wait, *under), raised),
+        daemon=True,
+    )
+    opener.start()
+    opener.join(30)
+    try:
+        assert not opener.is_alive()
+        assert [type(exc) for exc in raised] == [KeyboardInterrupt]
+        deadline = time.monotonic() + 30.0
+        while not tunnel.alive() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert tunnel.alive(), "ssh's word that the forward is up was never read"
+    finally:
+        tunnel.close()
+    assert stranded_threads(before) == []
 
 
 @fake_ssh_only

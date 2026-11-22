@@ -32,6 +32,7 @@ from websockets.asyncio.client import ClientConnection, connect
 from websockets.asyncio.server import Server, ServerConnection, serve
 
 import kiss.agents.sorcar.persistence as th
+from kiss.server import agent_state
 from kiss.server.server import AgentServer
 from kiss.server.web_server import WebPrinter
 from kiss.tests.server.conftest import redirect_persistence, restore_persistence
@@ -212,16 +213,25 @@ class TestReplayCoalescing:
             task_id=sub_id,
         )
 
+        # Only a sub-agent that runs has a tab to fetch a transcript into.
+        running = agent_state.AgentState(
+            sub_id, chat_id=chat_id, tab_id=f"owner-{sub_id}", parent_task_id=parent_id,
+            server_owned=True, is_task_active=True,
+        )
+        agent_state.register(running)
         server, events = _make_server()
-        server._open_persisted_subagent_tabs(
-            parent_task_id=parent_id, parent_tab_id="tab-parent",
-        )
-        # The announcement only offers the transcript; the tab's own
-        # fetch delivers it.
-        offer = next(e for e in events if e.get("type") == "replay_deferred")
-        server._replay_session(
-            chat_id=offer["chatId"], tab_id=offer["tabId"], task_id=offer["taskId"],
-        )
+        try:
+            server._open_persisted_subagent_tabs(
+                parent_task_id=parent_id, parent_tab_id="tab-parent",
+            )
+            # The announcement only offers the transcript; the tab's own
+            # fetch delivers it.
+            offer = next(e for e in events if e.get("type") == "replay_deferred")
+            server._replay_session(
+                chat_id=offer["chatId"], tab_id=offer["tabId"], task_id=offer["taskId"],
+            )
+        finally:
+            agent_state.unregister(sub_id, running)
 
         sub_replays = [e for e in events if e.get("type") == "task_events"]
         assert len(sub_replays) == 1

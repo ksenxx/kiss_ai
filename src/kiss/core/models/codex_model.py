@@ -54,10 +54,12 @@ import time
 from collections.abc import Callable, Iterable, Iterator
 from typing import IO, TYPE_CHECKING, Any
 
+from kiss.core import stop_signal
 from kiss.core.kiss_error import KISSError
 from kiss.core.locked import locked
 from kiss.core.models.codex_mcp_bridge import ToolBridge, toml_value
 from kiss.core.models.model import (
+    _STOP_POLL_SECONDS,
     Attachment,
     CLITextModel,
     ThinkingCallback,
@@ -67,11 +69,13 @@ from kiss.core.models.model import (
     render_tool_call,
     text_call_id,
 )
+from kiss.core.models.stream_abort import stop_error
 from kiss.core.processes import (
     kill_process_tree,
     popen_process_group,
     run_process_group,
 )
+from kiss.core.tool_interrupt import call_without_injection
 
 if TYPE_CHECKING:
     import tiktoken
@@ -605,6 +609,10 @@ def codex_default_model(env: dict[str, str], timeout: float = 15.0) -> str | Non
     Returns:
         The default model's id, or ``None`` when the CLI is missing,
         fails, answers garbage, names no default or misses the deadline.
+
+    Raises:
+        KeyboardInterrupt: The task was stopped during the exchange; the
+            server is killed and nothing is cached.
     """
     path = find_codex_executable()
     if path is None:
@@ -664,9 +672,10 @@ def _query_default_model(path: str, env: dict[str, str], timeout: float) -> str 
     try:
         # Started inside the try: a reader that cannot start (no thread
         # left) must not leave the server running.
-        threading.Thread(
+        reader = threading.Thread(
             target=_queue_lines, args=(proc.stdout, lines), name="codex-app-server", daemon=True
-        ).start()
+        )
+        call_without_injection(reader.start)
         _send_rpc(proc.stdin, {"id": 1, "method": "initialize", "params": initialize})
         if _await_rpc_result(lines, 1, deadline) is None:
             return None
@@ -710,17 +719,23 @@ def _await_rpc_result(lines: "queue.Queue[str | None]", rpc_id: int, deadline: f
 
     Returns:
         The result, or ``None`` on an error response, EOF or the deadline.
+
+    Raises:
+        KeyboardInterrupt: The task was stopped while the server was silent.
     """
     while True:
+        if stop_signal.stop_requested():
+            raise stop_error()
         # Checked on every line, so a backlog of notifications cannot
         # outlast the deadline, and a reply after it is ignored.
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             return None
         try:
-            line = lines.get(timeout=remaining)
+            # In slices: one wait to the deadline is deaf to a Stop.
+            line = call_without_injection(lines.get, timeout=min(remaining, _STOP_POLL_SECONDS))
         except queue.Empty:
-            return None
+            continue
         if line is None:
             return None
         try:
@@ -926,6 +941,12 @@ class CodexModel(CLITextModel):
                     yield
                 finally:
                     self._tool_bridge = None
+        except BaseException as e:
+            # A Stop landing as the bridge's exit is entered skips it whole,
+            # before its first step, and the listener would go on serving
+            # calls: exit again (nothing is left to do after a complete exit).
+            bridge.__exit__(type(e), e, e.__traceback__)
+            raise
         finally:
             self._replay_served_calls(bridge)
 

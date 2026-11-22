@@ -22,7 +22,6 @@ from __future__ import annotations
 import logging
 import queue
 import threading
-import uuid
 from typing import TYPE_CHECKING
 
 from kiss.core.locked import locked_call
@@ -125,7 +124,6 @@ class AgentState:
         "use_parallel",
         "last_user_prompt",
         "client_run_token",
-        "run_id",
     )
 
     def __init__(
@@ -225,13 +223,6 @@ class AgentState:
         # kill a NEWER run that reused the same synthetic ``api-…``
         # tab after the original run finished.
         self.client_run_token: str = ""
-        # Names this run on the wire: the running statuses the server
-        # builds from a state carry it as ``runId``, so that a client
-        # can say which run its ``stop`` is for (a UI stop names only
-        # its tab, and one a dead link held back reaches whatever run
-        # owns the tab by then).  Unlike ``task_id`` it survives
-        # :func:`rekey`.
-        self.run_id: str = uuid.uuid4().hex
 
     @property
     def is_subagent(self) -> bool:

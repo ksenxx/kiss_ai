@@ -50,6 +50,8 @@ ADDED_TASK_COLUMNS: tuple[tuple[str, str], ...] = (
     ("model_costs", "TEXT DEFAULT ''"),
     ("machine", "TEXT DEFAULT ''"),
     ("chat_parent_id", "TEXT DEFAULT ''"),
+    ("is_pinned", "INTEGER DEFAULT 0"),
+    ("tags_edited", "INTEGER DEFAULT 0"),
 )
 """Columns of ``task_history`` added after the first release, oldest first.
 
@@ -64,13 +66,16 @@ ADDED_SUMMARY_COLUMNS: tuple[tuple[str, str], ...] = (
     ("user_summary", "TEXT DEFAULT ''"),
     ("last_finished", "INTEGER DEFAULT 0"),
     ("is_favorite", "INTEGER DEFAULT 0"),
+    ("is_pinned", "INTEGER DEFAULT 0"),
+    ("project_id", "TEXT DEFAULT ''"),
 )
 """Columns of ``chat_summaries`` added after the first release, oldest first.
 
 Same shape and rules as :data:`ADDED_TASK_COLUMNS`.  The rows a column
 extends read its default until their chat's next recompute
 (``last_finished`` 0: unknown) or until the user types one
-(``user_summary``) or stars the chat (``is_favorite``).
+(``user_summary``), stars the chat (``is_favorite``), pins it
+(``is_pinned``) or puts it in a project (``project_id``).
 """
 
 CRON_TASK_MARKER = "You are running as an unattended scheduled automation (cron job)."

@@ -23,6 +23,7 @@ const {
   ofType,
   fakeMatchMedia,
   queueRaf,
+  stubClipboard,
 } = require('./simplify2_harness');
 
 function makePage() {
@@ -75,10 +76,14 @@ function startBash() {
   return {win, posted, tabId};
 }
 
-function endBash(win, tabId) {
+/**
+ * The call ends.  *content* is what its result still holds: nothing
+ * when its output was streamed whole (json_printer.py blanks it).
+ */
+function endBash(win, tabId, content) {
   send(win, {
     type: 'tool_result',
-    content: 'ok',
+    content: content || '',
     tabId,
     ts: Date.now(),
     callId: 1,
@@ -312,7 +317,43 @@ function testExtendedPathUnregistersTheUnwrappedSpan() {
   console.log('  ok - an extended path unregisters the unwrapped span');
 }
 
+// Audit 2026-11-21 (W9 F1): a result that still has text was not
+// streamed whole: the start of a background job, a refusal, the head
+// and tail of a stream cut at its cap.  It is the call's output, shown
+// where the streamed text is, its paths linked and its text copied.
+function testResultThatWasNotStreamedIsTheOutput() {
+  const {win, posted, tabId} = startBash();
+  const panel = win.document.querySelector('#output .bash-panel-content');
+  const started =
+    'Started background job bg-123 (pid 123).\nLog: /ws/proj/out/bg-123.log';
+  endBash(win, tabId, started);
+  assert.strictEqual(
+    panel.textContent,
+    started,
+    'BUG - the result of a call that streamed nothing is not shown',
+  );
+  const check = checks(posted).pop();
+  assert.deepStrictEqual([...check.paths], ['/ws/proj/out/bg-123.log']);
+  answer(win, check, tabId);
+  assert.strictEqual(links(win), 1, 'and its paths are links');
+  win.close();
+
+  // The stream was cut: the result follows it, on a line of its own,
+  // and Copy takes both.
+  const cut = startBash();
+  const copied = stubClipboard(cut.win).writes;
+  send(cut.win, {type: 'system_output', text: 'one\n[cut]', tabId: cut.tabId});
+  endBash(cut.win, cut.tabId, 'one\nnine');
+  const whole = cut.win.document.querySelector('#output .bash-panel-content');
+  assert.strictEqual(whole.textContent, 'one\n[cut]\none\nnine');
+  whole.parentNode.querySelector('.panel-copy-btn').click();
+  assert.deepStrictEqual(copied, ['one\n[cut]\none\nnine']);
+  cut.win.close();
+  console.log('  ok - a result that was not streamed is the output');
+}
+
 testFlushKeepsLinksAndAsksEachPathOnce();
 testCloseFlushRejoinsPunctuationSplit();
 testExtendedPathUnregistersTheUnwrappedSpan();
+testResultThatWasNotStreamedIsTheOutput();
 console.log('audit1016b_bash_relink.test.js: all tests passed');

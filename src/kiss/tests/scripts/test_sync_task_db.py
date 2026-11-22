@@ -231,15 +231,18 @@ class SyncTaskDbPushTest(unittest.TestCase):
         local_db = self.local_home / "history.db"
         _make_db(local_db, 10)
         writer = sqlite3.connect(local_db)
-        writer.execute("PRAGMA journal_mode=WAL")
-        writer.executemany(
-            "INSERT INTO task_history(id, task) VALUES (?, ?)",
-            [(1000 + i, f"wal-only {i}") for i in range(90)],
-        )
-        writer.commit()
-        self.assertTrue((self.local_home / "history.db-wal").exists())
+        try:  # open during the push: closing it would fold the -wal into the database
+            writer.execute("PRAGMA journal_mode=WAL")
+            writer.executemany(
+                "INSERT INTO task_history(id, task) VALUES (?, ?)",
+                [(1000 + i, f"wal-only {i}") for i in range(90)],
+            )
+            writer.commit()
+            self.assertTrue((self.local_home / "history.db-wal").exists())
 
-        self.assertEqual(self._push().returncode, 0)
+            self.assertEqual(self._push().returncode, 0)
+        finally:
+            writer.close()
         self.assertEqual(_count(self.remote_home / ".kiss" / "history.db"), 100)
 
     def test_no_wal_or_shm_is_left_on_the_remote(self) -> None:

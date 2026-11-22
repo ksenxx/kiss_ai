@@ -41,9 +41,20 @@ from dataclasses import dataclass
 from typing import Any
 
 from kiss.agents.sorcar.chat_summary import end_ms, launch_ms
-from kiss.agents.sorcar.edit_guards import heredoc_copy
+from kiss.agents.sorcar.edit_guards import HeredocCopy, _home_path, heredoc_copy
 from kiss.agents.sorcar.edit_matching import reindent, tolerant_matches
-from kiss.agents.sorcar.useful_tools import _crlf_edit, _edit_pairs
+from kiss.agents.sorcar.shell_scan import (
+    Group,
+    SimpleCommand,
+    TooDeepError,
+    Word,
+    bash_path,
+    host_path,
+    inherited_cdpath,
+    resolve,
+    simple_commands,
+)
+from kiss.agents.sorcar.useful_tools import _absolutize, _crlf_edit, _edit_pairs
 
 # Per-kind clip limits (characters) applied when an entry is rendered.
 _CLIP: dict[str, int] = {
@@ -86,6 +97,106 @@ _PROGRESS_LOG_NAMES = frozenset({"PROGRESS.md", "PROGRESS_LOG.md"})
 # (:meth:`~kiss.agents.sorcar.docker_tools.DockerTools.Edit` writes edit by
 # edit; the host one writes all or nothing): group 1 counts the edits applied.
 _PARTIAL_BATCH = re.compile(r"Error: edit \d+: edits 1-(\d+) applied; ")
+# How the result of a ``Write`` / ``Edit`` that changed nothing opens: an error, a refusal.
+_UNMADE_RESULT = ("Error", "REFUSED")
+# How the ``Bash`` tools say that a command did not run to an exit status 0.
+# The host tool opens such a result with words of its own: a failed command's
+# exit code, an error or a timeout, a refusal, a job started in the background
+# or left to it, a rewrite that was not applied.  The container tool closes a
+# failed command's output with its exit code, and only its own notes come
+# after that line (a poll's verdict, a long sleep's; the note of a sleep spent
+# on a job starts a line of its own, and was glued to the line before it in
+# the records of older tasks).  The words are exact (output that opens "Error
+# recovery plan" or "REFUSED" is a command's own), and a daemon's record of a
+# call whose output was streamed holds nothing but them
+# (``kiss.core.printer.bash_status_lines``).
+_NOT_PASSED = re.compile(
+    r"\A(?:Error: |Error \(exit code -?\d+\):|REFUSED: |Not applied: "
+    r"|Started background job \S.* \(pid \d+\)"
+    r"|Still running after \S+ left running as background job )"
+    r"|^\[exit code: -?\d+\]"
+    r"(?:\n\[until [^\n]*|\n\[note: the sleep of [^\n]*|\n?Waited on job [^\n]*)*\n?\Z",
+    re.MULTILINE,
+)
+# How the result of a ``Bash`` call opens whose command the tool made as a
+# ``Write`` / ``Edit`` (group 1) that left no events of its own (a run without
+# redirects).  The rest of the command ran after it: its status is further
+# down in the result, and does not open it.  A command may print the same
+# words itself and exit 0, so such a result proves what both readings do;
+# one that printed them and failed is a :data:`_NOT_PASSED` result, read first.
+_REWRITTEN = re.compile(r"(?:Applied as|Appended through) (Write|Edit)\(")
+# The keyword ``coproc`` as a command spells it: a line the shell joins counts.
+_COPROC = re.compile(r"(?:\\\n)*".join("coproc"))
+# The most spellings of it :func:`_runs_coproc` reads, at one scan each: no log
+# names the word that often, and a text that does is not worth the time.
+_COPROC_PROBES = 1000
+# The most places :func:`_without_bodies` asks the scan about, at one scan each.
+_BODY_PROBES = 50
+_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+# The variables that the shell, the loader or a locale gives a meaning
+# (bash(1), "Shell Variables"; ld.so(8)), but ``IFS`` and ``CDPATH``, which
+# the scan follows: assigning one may change what a later word runs or names,
+# and the value of one that is an integer is evaluated as an expression
+# (``RANDOM=PATH=1`` assigns ``PATH``).
+_SHELL_NAME = re.compile(
+    r"(?:BASH|COMP|HIST|LC_|LD_|DYLD_|PS\d|POSIX|READLINE)\w*|"
+    + "|".join(
+        "CHILD_MAX COLUMNS COPROC DIRSTACK EMACS ENV EPOCHREALTIME EPOCHSECONDS EUID EXECIGNORE "
+        "FCEDIT FIGNORE FUNCNAME FUNCNEST GLOBIGNORE GROUPS HOME HOSTFILE HOSTNAME HOSTTYPE "
+        "IGNOREEOF INPUTRC INSIDE_EMACS LANG LANGUAGE LINENO LINES MACHTYPE MAIL MAILCHECK "
+        "MAILPATH MAPFILE OLDPWD OPTARG OPTERR OPTIND OSTYPE PATH PIPESTATUS PPID PROMPT_COMMAND "
+        "PROMPT_DIRTRIM PWD RANDOM REPLY SECONDS SHELL SHELLOPTS SHLVL SRANDOM TIMEFORMAT TMOUT "
+        "TMPDIR UID _ auto_resume histchars".split()
+    )
+)
+# Every builtin of bash (``compgen -b``): a literal command word that is none
+# of them runs a program or a function, and a program cannot change the shell.
+_BUILTINS = frozenset(
+    ". : [ alias bg bind break builtin caller cd command compgen complete compopt continue "
+    "declare dirs disown echo enable eval exec exit export false fc fg getopts hash help history "
+    "jobs kill let local logout mapfile popd printf pushd pwd read readarray readonly return set "
+    "shift shopt source suspend test times trap true type typeset ulimit umask unalias unset "
+    "wait".split()
+)
+# Those that assign no variable and end nothing, whatever their operands are.
+_ANY_OPERANDS = frozenset(
+    ": true false echo cd pwd kill umask break continue shift unalias".split()
+)
+# Those that do neither with exactly these operands (no login shell to log
+# out of; a shell that ``suspend`` stops returns no status).
+_OPERANDS = {"hash": ["-r"], "logout": [], "suspend": []}
+# The operands of a ``set`` that leaves the shell running the text as the scan
+# reads it, each ended by a NUL: not ``-n`` (nothing more runs), ``-k``, ``-t``
+# or ``-o posix``.
+_SET = re.compile(
+    r"(?:(?:[-+][euxvCf]+|[-+][euxvCf]*o\0(?:errexit|nounset|xtrace|verbose|noclobber|noglob"
+    r"|pipefail))\0)*(?:--\0.*)?",
+    re.DOTALL,
+)
+# A conversion of a ``printf`` format that assigns: ``printf 'x%n' PATH`` sets ``PATH`` to 1.
+_PRINTF_ASSIGNS = re.compile(r"%[^%A-Za-z]*[hjlLtz]*n")
+# An operand of ``export`` by its name: no brace makes two of it (``PA{TH=1,}``).
+_EXPORTED = re.compile(rf"({_NAME.pattern})(?:\+?=[^{{}}]*)?", re.DOTALL)
+# An assignment word by its name: not an element's (a subscript is an expression).
+_ASSIGNED = re.compile(rf"({_NAME.pattern})\+?=")
+# The variable that a loop names.
+_NAMED = re.compile(rf"\b(?:for|select)\s+({_NAME.pattern})")
+# Syntax in which bash may assign a variable, or evaluate an expression that
+# assigns one, where the scan reads no command: arithmetic (``((PATH=1))``,
+# ``$[...]``, ``[[ t -eq 1 ]]``), an array (``a=([k]=v)``), the variable of a
+# descriptor (``{PATH}>f``), a backtick, and every expansion but ``$name``,
+# ``${name}``, ``${name-word}`` (with ``:``, ``+`` or ``?``), a positional
+# or special parameter and ``$(command)``: a subscript, an offset (``${x:t}``:
+# the value of ``t`` is evaluated too), a reference (``${!x}``), ``${x@P}``.
+# And the directory as a ``cd`` left it (``$PWD``, ``$OLDPWD``): one that
+# failed left it as it was, and the scan reads it as changed.  And
+# ``${name=word}``: in a here-document body that a builtin reads, bash assigns
+# before it expands the words after it, which the scan read first.
+_UNPROVEN = re.compile(
+    r"\(\(|\[\[|=\(|`|\}[<>]|\$\{?(?:OLD)?PWD\b"
+    rf"|\$(?![A-Za-z_0-9@*#?$!-]|\((?!\()|\{{(?:{_NAME.pattern}|\d+)(?:\}}|:?[-+?])"
+    r"|[\s/.,:=%^+~\])}|&;<>]|\Z)"
+)
 
 # Events that carry no progress information (UI signalling, streaming
 # markers): the digest drops them without a trace.
@@ -597,11 +708,13 @@ def _tail(text: str, limit: int, marker: str) -> str:
     return marker + "\n" + tail
 
 
-def _replay(text: str, ev: dict[str, Any], shell: str, applied: int | None = None) -> str:
+def _replay(
+    text: str, ev: dict[str, Any], copy: HeredocCopy | None, applied: int | None = None,
+) -> str:
     """Return the log *text* after the task's successful ``Write`` / ``Edit`` call *ev*.
 
     A ``Write`` puts its content, unless it stands for the here-document
-    append *shell* (the ``Bash`` command it was made for, ``""``: none):
+    append *copy* (of the ``Bash`` command it was made for, ``None``: none):
     its content then opens with the text the file held, other tasks'
     included, and only the here-document's body is added.  An edit
     replaces its old text (each occurrence with ``replace_all``) as the
@@ -616,8 +729,7 @@ def _replay(text: str, ev: dict[str, Any], shell: str, applied: int | None = Non
     only the first *applied* edits are replayed (``None``: all of them).
     """
     args = _tool_call_args(ev)
-    if ev.get("name") == "Write":
-        copy = heredoc_copy(shell, None)
+    if ev.get("name") != "Edit":
         if copy is not None and copy.append:
             return text + copy.body
         return str(args.get("content") or "")
@@ -643,6 +755,276 @@ def _replay(text: str, ev: dict[str, Any], shell: str, applied: int | None = Non
     return text
 
 
+def _copy_target(command: SimpleCommand) -> tuple[Word, bool] | None:
+    """Return the file the simple *command* copies its here-document into, and whether it appends.
+
+    ``None`` unless an exit status 0 of *command* means the file took the
+    here-document's text: ``cat`` with no operand and its standard output
+    redirected to one file, or ``tee [-a] FILE`` with its standard output
+    left alone or discarded.  The scan knows the text
+    (:attr:`SimpleCommand.heredoc_body`: nothing in it for the shell to
+    expand) and the program (the word as written: no wrapper, expansion,
+    alias or function), and the command redirects nothing else but its
+    standard error into ``/dev/null``.
+    """
+    if command.heredoc_body is None or command.unknown or command.script is not None:
+        return None
+    outputs: list[tuple[str, Word]] = []
+    heredocs = 0
+    for descriptor, operator, operand in command.redirections:
+        if descriptor in ("", "1") and operator in (">", ">>", ">|"):
+            outputs.append((operator, operand))
+        elif descriptor in ("", "0") and operator in ("<<", "<<-"):
+            heredocs += 1
+        elif descriptor != "2" or operator not in (">", ">>") or operand.text != "/dev/null":
+            return None
+    if heredocs != 1 or len(outputs) > 1:
+        return None
+    words = [word.text for word in command.words]
+    if words == ["cat"]:
+        return (outputs[0][1], outputs[0][0] == ">>") if outputs else None
+    options = words[1:-1]
+    if (
+        len(words) < 2 or words[0] != "tee" or words[-1].startswith("-")
+        or any(option not in ("-a", "--append") for option in options)
+        or any(operand.text != "/dev/null" for _, operand in outputs)
+    ):
+        return None
+    return command.words[-1], bool(options)
+
+
+def _top_level(node: SimpleCommand | Group) -> SimpleCommand | Group:
+    """Return the command or group of the top level that *node* is in (itself there)."""
+    while node.group is not None:
+        node = node.group
+    return node
+
+
+def _free(name: str) -> bool:
+    """Whether assigning the variable *name* changes nothing the shell or the scan goes by."""
+    return _SHELL_NAME.fullmatch(name) is None
+
+
+def _vetted(name: str, operands: list[Word]) -> bool:
+    """Whether the builtin *name* with these *operands* assigns only free variables, ends nothing.
+
+    A builtin that is not named here does not: ``exit``, ``exec``, ``trap``,
+    ``source``, ``shopt``, ``declare``, ``let``, ``enable``, ``fc``...
+    """
+    texts = [word.text for word in operands]
+    if name in _ANY_OPERANDS:
+        return True
+    if name == "printf":  # no ``-v NAME`` or ``%n`` (both assign), nor a word that may be one
+        return (
+            bool(operands) and operands[0].literal and not texts[0].startswith("-")
+            and not _PRINTF_ASSIGNS.search(texts[0])
+        )
+    if not all(word.literal for word in operands):  # bash may split another into more operands
+        return False
+    if name == "export":
+        return all((found := _EXPORTED.fullmatch(text)) and _free(found[1]) for text in texts)
+    if name in ("unset", "read"):
+        flags = ("-f", "-v") if name == "unset" else ("-r",)
+        names = texts[1:] if texts[:1] and texts[0] in flags else texts
+        return all(_NAME.fullmatch(text) and (texts[0] == "-f" or _free(text)) for text in names)
+    if name == "set":
+        return _SET.fullmatch("".join(f"{text}\0" for text in texts)) is not None
+    if name == "eval":  # the scan reads the text's commands; this, what is no command
+        return not _unproven(" ".join(texts))
+    if name in ("test", "["):  # ``-v 'a[PATH=1]'`` evaluates the subscript
+        return not {"-v", "-R"} & set(texts)
+    if name == "wait":  # no ``-p NAME``
+        return not any(text.startswith("-") for text in texts)
+    return texts == _OPERANDS.get(name)
+
+
+def _harmless(command: SimpleCommand) -> bool:
+    """Whether the shell runs the text after the simple *command* as the scan reads it.
+
+    True of the commands known to leave the shell alone, false of every
+    other: an assignment of free variables (:func:`_free`), a program (a
+    path, or a literal word that is no builtin's: wrappers, functions and
+    the headers of loops read as one, and a function's commands are
+    commands of the scan themselves) and a builtin with operands that
+    :func:`_vetted` knows.  Not a command only the shell knows, a function
+    that bears a builtin's name, a word that may be an assignment the scan
+    does not read as one (``a["k"]=v``) or an option of ``command``, which
+    runs the builtin after it (``command -p exec true``).
+    """
+    if command.unknown:
+        return False
+    words = list(command.words)
+    while words and words[0].assignment:
+        assigned = _ASSIGNED.match(words.pop(0).text)
+        if assigned is None or not _free(assigned[1]):
+            return False
+    while words and words[0].literal and words[0].text in ("command", "builtin"):
+        del words[0]
+    if not words:
+        return True
+    name = words[0].text
+    if not words[0].literal:
+        return words[0].path
+    if name in _BUILTINS:
+        return (command.script is None or name == "eval") and _vetted(name, words[1:])
+    return "=" not in name and "[" not in name and not name.startswith("-")
+
+
+def _runs_coproc(command: str, cwd: str | None) -> bool:
+    """Whether a ``coproc`` in the text of *command* may be the keyword.
+
+    The scan reads ``coproc cat > f`` as the ``cat`` it starts, whose
+    status the shell does not wait for.  Each spelling of the word
+    (:data:`_COPROC`) is replaced, one at a time, by a word the text
+    does not hold, its joined lines included: where it was the keyword,
+    that word is now the name of a command.  Text (a file name, a
+    delimiter, a here-document's body, a comment) stays text, and
+    nothing of a body becomes that command: the new word is nowhere else.
+    A text with more spellings than :data:`_COPROC_PROBES` is not read:
+    it may run one.
+    """
+    runs = re.findall("x+", command.replace("\\\n", ""))
+    word = "x" * (max(map(len, runs), default=0) + 1)
+    for probed, found in enumerate(_COPROC.finditer(command)):
+        other = command[:found.start()] + word + command[found.end():]
+        if probed == _COPROC_PROBES or any(
+            simple.words and simple.words[0].text == word for simple in simple_commands(other, cwd)
+        ):
+            return True
+    return False
+
+
+def _unproven(text: str) -> bool:
+    """Whether *text* holds syntax of :data:`_UNPROVEN` or names a variable that is not free.
+
+    As written, or with the lines joined that the shell joins: quoting is
+    not read, so a spelling in a quoted string or a comment counts too.
+    """
+    return any(
+        _UNPROVEN.search(form) or not all(_free(n[1]) for n in _NAMED.finditer(form))
+        for form in (text, text.replace("\\\n", ""))
+    )
+
+
+def _shape(simple: SimpleCommand) -> tuple[Any, ...]:
+    """Return what the scan read of the command *simple*, its here-document's text last."""
+    return (
+        [(word.text, word.literal, word.assignment, word.path) for word in simple.words],
+        [(fd, operator, operand.text) for fd, operator, operand in simple.redirections],
+        simple.cwd, simple.unknown, simple.script is None, simple.group is None, simple.piped,
+        simple.conditional, simple.after_and, simple.background, simple.negated,
+        simple.heredoc_body,
+    )
+
+
+def _without_bodies(command: str, cwd: str | None, commands: list[SimpleCommand]) -> str:
+    """Return *command* with one new word for each here-document body it holds as written.
+
+    The scan hands on a body's text, not its place, and the same lines may
+    stand elsewhere (in another body, among the commands).  So the place
+    is the scan's to tell: whole lines that are the body, before the line
+    that is its delimiter, are replaced by a word the text does not hold,
+    and they were the body where the scan then reads the same *commands*,
+    with that word for the body of the same one.  A body it reads in no
+    such place (an unquoted delimiter joins lines), or after more than
+    :data:`_BODY_PROBES` scans, stays in the text.
+    """
+    lines = command.split("\n")
+    word = "x" * (max(map(len, re.findall("x+", command)), default=0) + 1)
+    shapes = [_shape(simple) for simple in commands]
+    start = scans = 0
+    for at, simple in enumerate(commands):
+        heredocs = [
+            (operator, operand.text) for fd, operator, operand in simple.redirections
+            if fd in ("", "0") and operator in ("<<", "<<-")
+        ]
+        if simple.heredoc_body is None or not heredocs:
+            continue
+        strip = "\t" if heredocs[-1][0] == "<<-" else ""
+        body = [*simple.heredoc_body.split("\n")[:-1], heredocs[-1][1]]
+        expected = [*shapes[:at], (*shapes[at][:-1], f"{word}{at}\n"), *shapes[at + 1:]]
+        for first in range(start, len(lines) - len(body) + 1):
+            end = first + len(body) - 1
+            if lines[end].lstrip(strip) != body[-1] or scans == _BODY_PROBES or (
+                [line.lstrip(strip) for line in lines[first:end]] != body[:-1]
+            ):
+                continue
+            scans += 1
+            marked = [*lines[:first], f"{word}{at}", *lines[end:]]
+            scanned = simple_commands("\n".join(marked), cwd, cdpath=inherited_cdpath)
+            if [_shape(s) for s in scanned] == expected:
+                lines, shapes, start = marked, expected, first + 2
+                break
+    return "\n".join(lines)
+
+
+def _made_copies(command: str, cwd: str | None) -> list[tuple[str, bool, str]]:
+    """Return the progress-log copies that an exit status 0 of the ``Bash`` *command* proves made.
+
+    Each is ``(file, appended, text)``, in the order they ran: a
+    here-document copy (:func:`_copy_target`) into a
+    :data:`_PROGRESS_LOG_NAMES` file whose failure the status of the
+    whole command shows, as
+    :func:`~kiss.agents.seas.coding.gate_readers.verifier_decides` reads
+    a verifier's.  So the copy stands at the top level, not negated,
+    piped, in the background or after ``||``; every command before it,
+    a function's at each call too, is one known to leave the shell alone
+    (:func:`_harmless`); the command runs no ``coproc``
+    (:func:`_runs_coproc`) and, outside the here-document bodies the scan
+    places in it (:func:`_without_bodies`), holds no syntax that assigns
+    behind the scan (:func:`_unproven`); and
+    everything after it follows ``&&``: ``copy && echo ok`` fails when the copy
+    fails, while ``copy; echo ok`` exits 0 whatever the copy did and
+    proves nothing.  The file is an absolute path as the scan reads it
+    (literal, or through the command's own assignments), one in the
+    home directory (``~/x``), or a relative one when the command up to
+    the copy is one ``&&`` list of such plain commands: a ``cd`` that
+    failed then kept the copy from running elsewhere.  A ``cd`` is read
+    with the ``CDPATH`` a shell of this process inherits
+    (:func:`~kiss.agents.sorcar.shell_scan.inherited_cdpath`), as the
+    host tool's guards read it: with one, bash looks for ``cd dir``
+    there first, and a relative file after it is only the shell's to name.
+
+    Args:
+        command: The command text of a ``Bash`` call.
+        cwd: The absolute POSIX directory it started in; ``None`` when unknown.
+
+    Raises:
+        TooDeepError: The command nests deeper than the scan reads.
+    """
+    everything = simple_commands(command, cwd, derived=True, cdpath=inherited_cdpath)
+    commands = [simple for simple in everything if not simple.derived]
+    if _runs_coproc(command, cwd) or _unproven(_without_bodies(command, cwd, commands)):
+        return []
+    plain = [
+        simple.group is None and simple.reader is None
+        and not (simple.piped or simple.conditional or simple.background or simple.negated)
+        for simple in commands
+    ]
+    # The status shows a copy from the last command on that does not follow ``&&`` ...
+    start = max(
+        (at for at, simple in enumerate(commands)
+         if not _top_level(simple).after_and or _top_level(simple).background),
+        default=0,
+    )
+    # ... and before the first one that may keep the rest from running as the scan reads it.
+    stop = next((at for at, simple in enumerate(everything) if not _harmless(simple)), None)
+    end = sum(not simple.derived for simple in everything[:stop])
+    home = bash_path(os.path.expanduser("~"))
+    made: list[tuple[str, bool, str]] = []
+    for at in range(start, end):
+        simple = commands[at]
+        target = _copy_target(simple) if plain[at] else None
+        if target is None:
+            continue
+        path = resolve(None, target[0]) or _home_path(target[0], home)
+        if path is None and all(plain[:at]) and all(c.after_and for c in commands[1:at + 1]):
+            path = resolve(simple.cwd, target[0])
+        if path is not None and os.path.basename(path) in _PROGRESS_LOG_NAMES:
+            made.append((os.path.normpath(host_path(path)), target[1], simple.heredoc_body or ""))
+    return made
+
+
 def _progress_log_text(task: dict[str, Any]) -> str:
     """Return the progress log as the task's own successful writes left it (``""``: none).
 
@@ -653,16 +1035,40 @@ def _progress_log_text(task: dict[str, Any]) -> str:
     stopped (``interrupted``, which says nothing of what it wrote) wrote
     nothing, except that a container's batch ``Edit`` whose error names
     the edits it applied before the failed one (:data:`_PARTIAL_BATCH`)
-    wrote those.  A relative path is taken from the task's work dir; the
-    log is the file of the newest successful call.  A call that follows
-    a ``Bash`` call before any result is the ``Write`` / ``Edit`` that
-    command was applied as (a here-document, a ``sed -i``).
+    wrote those.  A path is taken as the file tools take it
+    (:func:`_absolutize`: ``~`` is the home directory, a relative path
+    is in the task's work dir), so two spellings of a file are one log;
+    the log is the file of the newest successful call.  A call that
+    follows a ``Bash`` call before any result is the ``Write`` / ``Edit``
+    that command was applied as (a here-document, a ``sed -i``).
+
+    A ``Bash`` call no such call follows ran in the shell, as a
+    here-document copy that creates its file does.  Its result says how
+    the command ended in the tool's own words, apart from the output:
+    unless it is a :data:`_NOT_PASSED` one, the command exited 0, and the
+    copies that proves (:func:`_made_copies`) are replayed.  The output
+    is not read: a ``tee`` prints its text, which may open like anything
+    and reaches the result cut and with its line ends changed.  A call
+    that polls its command (``until``: an unknown number of runs) or
+    hands it to a background job (whose end is no part of the result)
+    proves nothing.  A result that states no such end and opens like
+    the ``Write`` / ``Edit`` the tool made of the command itself
+    (:data:`_REWRITTEN`: no call follows the ``Bash`` call in a run
+    without redirects) is the tool's words, with the status of the rest
+    further down, or the output of a command that exited 0: it proves
+    the one copy both readings do, the tool's own ``Write`` (the
+    here-document copy as :func:`heredoc_copy` reads it) when an exit
+    status 0 proves that copy too.
     """
     work_dir = str(task.get("work_dir") or "")
+    cwd = bash_path(os.path.abspath(work_dir)) if work_dir else None
     logs: dict[str, str] = {}
     newest = ""
-    pending: tuple[str, dict[str, Any], str] | None = None
-    shell = ""
+    pending: tuple[str, dict[str, Any], HeredocCopy | None] | None = None
+    # Of the ``Bash`` call awaiting its result: the copy the tool makes as a
+    # ``Write`` when the file exists, and the copies an exit status 0 proves.
+    copy: HeredocCopy | None = None
+    made: list[tuple[str, bool, str]] = []
     for ev in task.get("events") or []:
         if ev.get("type") == "tool_call":
             path = str(ev.get("path") or "")
@@ -671,23 +1077,49 @@ def _progress_log_text(task: dict[str, Any]) -> str:
                 ev.get("name") in ("Write", "Edit")
                 and os.path.basename(path) in _PROGRESS_LOG_NAMES
             ):
-                pending = (os.path.normpath(os.path.join(work_dir, path)), ev, shell)
-            shell = str(ev.get("command") or "") if ev.get("name") == "Bash" else ""
+                pending = (os.path.normpath(_absolutize(path, work_dir)), ev, copy)
+            command = str(ev.get("command") or "") if ev.get("name") == "Bash" else ""
+            copy, made = None, []
+            if "<<" in command:  # only a command with a here-document is scanned
+                try:
+                    # The tool makes a ``Write`` only of a copy that no inherited ``CDPATH``
+                    # moves (it refuses the others): its record is read without this process's.
+                    copy = heredoc_copy(command, cwd, cdpath=str)
+                    made = _made_copies(command, cwd)
+                except TooDeepError:  # nested past what the scan reads: the tools refuse it
+                    pass
+            args = _tool_call_args(ev)
+            if (
+                args.get("until") or str(args.get("background")).lower() == "true"
+                or args.get("on_timeout") == "background"
+            ):
+                made = []
         elif ev.get("type") == "tool_result":
             content = str(ev.get("content") or "")
             partial = _PARTIAL_BATCH.match(content)
-            failed = (
-                ev.get("is_error") or ev.get("interrupted")
-                or (content.startswith("Error") and not partial)
-            )
-            if pending is not None and not failed:
-                newest = pending[0]
-                logs[newest] = _replay(
-                    logs.get(newest, ""), pending[1], pending[2],
-                    int(partial[1]) if partial else None,
+            if ev.get("is_error") or ev.get("interrupted"):
+                made = []
+            elif pending is not None:
+                if partial or not content.startswith(_UNMADE_RESULT):
+                    newest = pending[0]
+                    logs[newest] = _replay(
+                        logs.get(newest, ""), pending[1], pending[2],
+                        int(partial[1]) if partial else None,
+                    )
+            elif _NOT_PASSED.search(content):
+                made = []
+            elif rewritten := _REWRITTEN.match(content):
+                own = (
+                    (os.path.normpath(host_path(copy.path)), copy.append, copy.body)
+                    if rewritten[1] == "Write" and copy is not None and copy.path is not None
+                    else None
                 )
-            pending = None
-            shell = ""
+                made = [own] if own is not None and own in made else []
+            for file, appended, text in made:
+                newest = file
+                logs[file] = (logs.get(file, "") if appended else "") + text
+            pending = copy = None
+            made = []
     return logs.get(newest, "")
 
 

@@ -195,6 +195,42 @@ def test_pinning_daemon_refuses_another_model_or_model_config(
     assert isinstance(plan, str) and "slash command /sh" in plan and "pins" in plan
 
 
+def test_pinning_daemon_refuses_a_sub_task_that_does_not_inherit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Audit 2026-11-21 S1/F2: a host caller's ``inherit: false`` sub-task took neither the
+    caller's model nor its model configuration, so under the pin it ran on the daemon's
+    defaults, the caller's own model named or not; so did a channel, which never inherits."""
+    monkeypatch.setenv(PIN_TASK_MODEL_ENV, "1")
+    caller = _Caller()
+    for model in ("", "trial-model"):
+        plan = plan_run_agent(str(tmp_path), "review this", "", model=model,
+                              options='{"inherit": false}', parent_agent=caller)
+        assert isinstance(plan, str), plan
+        assert "pins every task to its model, trial-model" in plan, plan
+        assert "options['inherit'] = false" in plan, plan
+    plan = plan_run_agent(str(tmp_path), "list the jobs", "cron", parent_agent=caller)
+    assert isinstance(plan, str), plan
+    assert "pins every task to its model, trial-model" in plan and "a channel" in plan, plan
+    # the tools return the refusal alone: nothing is dispatched
+    run_agent = agent_dispatch.make_run_agent_tool(str(tmp_path), caller)
+    result = run_agent("review this", options='{"inherit": false}')
+    assert result.startswith("Error: ") and "options['inherit'] = false" in result, result
+    result = run_agents_parallel(str(tmp_path), ["review one", "review two"],
+                                 options='{"inherit": false}', parent_agent=caller)
+    assert result.startswith("Error: ") and "options['inherit'] = false" in result, result
+    assert agent_dispatch.agent_jobs_of(caller) == {}
+    # a standalone call has no caller whose model to keep; without the pin both still plan
+    plan = plan_run_agent(str(tmp_path), "review this", "", options='{"inherit": false}')
+    assert isinstance(plan, dict) and plan["inherit"] is False
+    monkeypatch.delenv(PIN_TASK_MODEL_ENV)
+    plan = plan_run_agent(str(tmp_path), "list the jobs", "cron", parent_agent=caller)
+    assert isinstance(plan, dict) and plan["inherit"] is False
+    plan = plan_run_agent(str(tmp_path), "review this", "", options='{"inherit": false}',
+                          parent_agent=caller)
+    assert isinstance(plan, dict) and plan["inherit"] is False
+
+
 def test_without_the_pin_another_model_is_allowed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

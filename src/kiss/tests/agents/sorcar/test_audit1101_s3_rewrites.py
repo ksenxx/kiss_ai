@@ -32,7 +32,7 @@ from pathlib import Path
 
 import pytest
 
-from kiss.agents.sorcar.useful_tools import UsefulTools, _without_sleep
+from kiss.agents.sorcar.useful_tools import UsefulTools
 from kiss.core.config import DEFAULT_CONFIG
 from kiss.core.kiss_tmp import kiss_tmp_dir
 from kiss.core.tool_verdict import ToolRedirect
@@ -189,23 +189,12 @@ def test_sleep_in_quoted_data_is_kept_and_the_real_sleep_is_waited_on(
 ) -> None:
     job = _job_id(tools.Bash("sleep 0.5", "quick", background=True))
     before = time.monotonic()
-    command = "printf '%s\\n' 'sleep 60'; timeout 1 sleep 60; echo ran"
+    # only the sleep the command begins with is given no time (S16/F3): the data stays
+    command = "sleep 60; printf '%s\\n' 'sleep 60'; timeout 1 sleep 60; echo ran"
     out = tools.Bash(command, "poll", timeout_seconds=100)
-    waited = f"Waited on job {job} for up to 60 s instead of sleeping (exited with code 0).\n"
+    waited = f"\nWaited on job {job} for up to 60 s instead of sleeping (exited with code 0).\n"
     assert out == "sleep 60\nran\n" + waited
-    assert time.monotonic() - before < 10
-    # the text search skips the words of a quoted argument and a here-document body
-    assert _without_sleep("printf '%s\\n' 'sleep 60'; sleep 60", ["60"]) == (
-        "printf '%s\\n' 'sleep 60'; true"
-    )
-    assert _without_sleep('echo "sleep 60"; sleep 60', ["60"]) == 'echo "sleep 60"; true'
-    assert _without_sleep("cat <<'EOF'\nsleep 60\nEOF\nsleep 60", ["60"]) == (
-        "cat <<'EOF'\nsleep 60\nEOF\ntrue"
-    )
-    assert _without_sleep("sleep 60; sleep 60", ["60"]) == "true; sleep 60"
-    assert _without_sleep("echo $(sleep 60); sleep 60", ["60"]) == "echo $(true); sleep 60"
-    # a sleep the text search finds nowhere but in data is not taken out at all
-    assert _without_sleep("echo 'sleep 60'; sleep 6'0'", ["60"]) is None
+    assert 0.9 < time.monotonic() - before < 10  # ...and so does the sleep after it
 
 
 # --- F7: a sed -i on a link -----------------------------------------------------

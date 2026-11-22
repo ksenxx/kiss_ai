@@ -173,3 +173,33 @@ def test_a_bare_browser_name_is_the_one_popen_runs_not_a_file_of_the_cwd(
     monkeypatch.setenv("USERPROFILE", str(home))
     assert _resolved(default_browser._which("~/ff")) == _resolved(str(ff))
     assert default_browser._which(str(home / "missing")) is None
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="an executable reached through symlinks")
+def test_an_alias_of_a_chromium_browser_is_the_streamable_default(
+    stand_ins: dict[str, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A link named for no browser is the browser it leads to, launched by the link's path.
+
+    Debian's ``x-www-browser`` links through ``/etc/alternatives`` to the
+    browser the administrator chose.  Judged by its own name, a link to
+    Chrome was reported as a browser without a DevTools protocol, and the
+    browser tab opened another browser.
+    """
+    bin_dir = tmp_path / "bin"
+    alternatives = tmp_path / "alternatives"
+    alternatives.mkdir()
+    (alternatives / "x-www-browser").symlink_to(bin_dir / "chromium")
+    (bin_dir / "x-www-browser").symlink_to(alternatives / "x-www-browser")
+    (bin_dir / "www-browser").symlink_to(bin_dir / "firefox")
+    _set_browser(monkeypatch, "x-www-browser")
+    assert default_browser.resolve_browser() == default_browser.ResolvedBrowser(
+        "Chromium", str(bin_dir / "x-www-browser"), True
+    )
+    # A link to a browser without the protocol is still not streamed.
+    _set_browser(monkeypatch, "www-browser")
+    resolved = default_browser.resolve_browser()
+    assert resolved.is_default is False
+    assert resolved.note == (
+        "The default browser (www-browser) has no DevTools protocol and cannot be streamed."
+    )

@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import json
 import os
-import posixpath
 import re
 import threading
 import time
@@ -38,6 +37,7 @@ from kiss.agents.sorcar.shell_scan import (
     Group,
     SimpleCommand,
     TooDeepError,
+    Word,
     bash_path,
     host_path,
     resolve,
@@ -127,26 +127,166 @@ FOLLOWUP_NOT_MADE = re.compile(r"^.* was not made: the \w+ did not go through\.$
 #: switch that takes no value and keeps the first operand the script (``-x``,
 #: ``-e``, ``--posix``).  Not ``-n`` or ``-D`` (nothing runs), ``-s`` (the
 #: script comes from stdin, ``v.sh`` is ``$1``), ``-c`` (the operand is shell
-#: text), ``-o`` / ``-O`` / ``--rcfile`` (the next word is their value).
-SHELL_SWITCH = re.compile(r"-[xeuvlpET]+|--?|--(?:posix|norc|noprofile|login|verbose)")
+#: text), ``-o`` / ``-O`` / ``--rcfile`` (the next word is their value), ``-l``
+#: / ``--login`` (the shell reads its profiles first, and one may end it).
+SHELL_SWITCH = re.compile(r"-[xeuvpET]+|--?|--(?:posix|norc|noprofile|verbose)")
+#: Where a program named by a path is the system's: ``tmp/bash`` and ``/usrbash`` are others.
+_SYSTEM = r"(?:(?:/usr)?/bin/)?"
+#: The verifier's shell, by its word or at :data:`_SYSTEM`: one that reads no file before
+#: the script it is given (``zsh`` reads ``.zshenv``).
+_SHELL = re.compile(_SYSTEM + "(?:" + "|".join(SHELLS - {"zsh"}) + ")")
+#: The words in front of a command word under which that word is the program run and an
+#: exit 0 is that program's, each ended by a NUL (:func:`_wrapped` takes no word that
+#: holds one): wrappers at :data:`_SYSTEM` with no option but ``timeout``'s for its
+#: signals and its messages (it exits 0 only when the program does, ``--preserve-status``
+#: or not), then its duration, and ``env``'s that take variables out of the environment,
+#: then the variables it sets, as ``sudo`` does.  Another option may keep the wrapper
+#: from running the word (``timeout --help``, abbreviated too: ``--h``; ``command -v``)
+#: or run it elsewhere (``env -C dir``); ``xargs`` runs it once for each line of its input.
+_WRAPPERS = re.compile("(?:" + _SYSTEM + r"""(?:
+      (?:doas|command|builtin|exec|nohup|nice)\0
+    | timeout\0 (?: (?: --foreground | --preserve-status | --verbose | -v
+                      | (?: -[ks]\0? | --(?:kill-after|signal)[=\0] ) [^\0]+ ) \0 )*
+      [0-9]+(?:\.[0-9]+)?[smhd]?\0
+    | (?: sudo\0 | env\0 (?: (?: -i | -u\0?[^\0]+ ) \0 )* (?:--\0)? ) (?: [A-Za-z_]\w*=[^\0]*\0 )*
+    ))*""", re.VERBOSE)
+#: A word in front of ``exec`` under which the shell still runs its own: ``command``
+#: (``-p``) and ``builtin``, ``--`` ending their options, and the ``-p`` the scan keeps
+#: of ``time -p``.  Not ``command -v`` or ``-V``, which only describe the word.  Each
+#: word is read alone: a front bash refuses (``builtin -p exec true``) counts as well.
+_RUNS_BUILTIN = re.compile(r"command|builtin|-p+|--")
+#: An option of ``exec`` whose ``-a`` takes the next word as the program's name (``-a``,
+#: ``-cla``); attached (``-aname``), the name is in the option.
+_EXEC_NAME_NEXT = re.compile(r"-[^-a]*a")
+#: A name through which a command makes the word ``bash`` another program or starts the
+#: verifier's shell otherwise: where bash looks a command up (``PATH``, its tables
+#: ``BASH_CMDS`` and ``BASH_ALIASES``, the files ``EXECIGNORE`` skips), what a starting
+#: shell reads (``BASH_ENV``, ``BASHOPTS``, ``SHELLOPTS``) and the loader's variables.
+_LOOKUP_NAME = re.compile(
+    r"(?<![A-Za-z0-9_])(?:PATH|BASH_CMDS|BASH_ALIASES|EXECIGNORE|BASH_ENV|BASHOPTS|SHELLOPTS"
+    r"|LD_[A-Z_]+)(?![A-Za-z0-9_])")
+#: ``PATH`` given directories after the value it had, where a command starts (``export``
+#: too): bash still finds the ``bash`` it found before.  Group 1 is what precedes the
+#: name, group 2 the quote that opens the value.
+_APPENDED_PATH = re.compile(r'\A(\s*(?:export\s+)?)PATH=("?)\$(?:PATH|\{PATH\})(?="?:)')
+#: What the shell takes out of a text before it reads a name in it (``P\ATH``, ``P''ATH``).
+_QUOTING = re.compile(r"\\\n|[\\'\"]")
+#: What the scan returns no command for: an arithmetic command, a ``time`` that times
+#: nothing and a ``!`` that negates nothing.  ``v.sh; ((1))``, ``v.sh; time`` and
+#: ``v.sh; ! !`` exit 0.
+_UNSCANNED = re.compile(
+    r"(?<!\$)\(\(|\btime\s*(?:-p\s*)?(?:[;&|\n)}#<>]|\Z)|(?<![^\s;&|({])!\s*(?:[;&|\n)}]|\Z)")
+#: The builtins that assign the variables their operands name.
+_NAMING = frozenset(
+    "export declare typeset local readonly read unset printf mapfile readarray getopts wait "
+    "let".split())
+#: What bash expands to several words or matches against file names: ``{x,$N}``, ``P[A]TH``.
+_SEVERAL = re.compile(r"(?<!\$)\{|[*?\[]")
 
 
 def leaves_shell(command: SimpleCommand) -> bool:
     """Whether the simple *command* may keep the commands after it from running.
 
-    ``exit`` and ``return`` end the shell; so does ``exec`` of a program
-    (the shell becomes it), unlike a bare ``exec 2>&1``; after ``set -n``
-    (``set -o noexec``) the shell reads the rest without running it.
+    ``exit``, ``return`` and ``logout`` end the shell; so does ``exec`` of
+    a program (the shell becomes it, :func:`_execs_program`), unlike a
+    bare ``exec 2>&1``; so may text the scan does not read (a sourced
+    file, what ``eval`` is given by an expansion); after ``set -n``
+    (``set -o noexec``, ``shopt -so noexec``) the shell reads the rest
+    without running it.
 
     Args:
         command: A scanned simple command.
     """
     program = command.program()
-    if program in ("exit", "return"):
+    if program in ("exit", "return", "logout", "source", "."):
         return True
+    if program == "eval":
+        return command.script is None
+    args = [word.text for word in command.argv()[1:]]
     if program == "set":
-        return _sets_noexec([word.text for word in command.argv()[1:]])
-    return bool(command.words) and command.words[0].text == "exec" and bool(command.argv())
+        return _sets_noexec(args)
+    if program == "shopt":  # ``-o`` names the options of ``set``, ``-s`` turns them on
+        options = "".join(arg[1:] for arg in args if arg.startswith("-"))
+        return "noexec" in args and {"o", "s"} <= set(options)
+    return _execs_program(command)
+
+
+def _hides_exit(command: SimpleCommand) -> bool:
+    """Whether the scanned *command*, run before the verifier, may decide the exit instead.
+
+    One that may leave the shell (:func:`leaves_shell`), one only the
+    shell knows (it may be any builtin: ``$X 0`` is an ``exit``), and a
+    builtin of :data:`_NAMING` with an operand bash expands by its
+    braces or as a pattern, which may name any variable (``export
+    P{ATH,}=dir``).  The commands of an ``EXIT`` trap's action stand
+    among them (:attr:`SimpleCommand.derived`), each marked as one only
+    the shell knows: there the command word tells.
+    """
+    argv = command.argv()
+    if command.derived and command.words:
+        unknown = any(not (word.literal or word.path) for word in argv[:1])
+    else:
+        unknown = command.unknown
+    return leaves_shell(command) or unknown or (command.program() in _NAMING and any(
+        not word.literal and (_SEVERAL.search(word.text) or not set("$`") & set(word.text))
+        for word in argv[1:]))
+
+
+def _wrapped(prefix: list[Word]) -> bool:
+    """Whether the words *prefix* in front of a command word leave it the command bash runs.
+
+    The shell's own assignments, then wrappers as :data:`_WRAPPERS`
+    reads them, every word of theirs literal: one the shell expands may
+    be an option or hold another command (``timeout ${T:-60 true} bash
+    v.sh`` runs ``true``).  Nor may one hold a NUL, which would read as
+    the end of a word there (bash's own text holds none).
+    """
+    at = 0
+    while at < len(prefix) and prefix[at].assignment:
+        at += 1
+    return all(word.literal and "\0" not in word.text for word in prefix[at:]) and (
+        _WRAPPERS.fullmatch("".join(word.text + "\0" for word in prefix[at:])) is not None)
+
+
+def _found_before(simple: SimpleCommand) -> bool:
+    """Whether bash finds the program of the verifier's command *simple* where it did
+    before directories were appended to ``PATH``.
+
+    ``bash`` and ``sh`` it does (the tool's own shell is found there),
+    and a program named by a path it does not look up.  Any other name
+    may be a program of an appended directory: a shell no earlier one
+    has (``ksh``), a script named by a bare word, and what a wrapper in
+    front asks for (``env exec bash v.sh``: ``exec`` is no program).
+    """
+    argv = simple.argv()
+    return all(word.assignment for word in simple.words[:len(simple.words) - len(argv)]) and (
+        "/" in argv[0].text or argv[0].text in ("bash", "sh"))
+
+
+def _execs_program(command: SimpleCommand) -> bool:
+    """Return whether *command* is an ``exec`` that turns the shell into a program.
+
+    The shell's own ``exec`` is the command word after the assignments,
+    also where ``command`` (``-p``) or ``builtin`` runs it
+    (:data:`_RUNS_BUILTIN`): not the word ``command -v exec`` describes,
+    nor the program of that name a wrapper asks for (``env exec true``).
+    The shell becomes the program the first word after its options names
+    (``-c``, ``-l``, ``-a name``; ``--`` ends them), a wrapper too (``exec
+    env``); ``exec 2>&1`` and ``exec -a name`` name none.
+    """
+    words = [word.text for word in command.words]
+    at = 0
+    while at < len(words) and (
+            command.words[at].assignment or _RUNS_BUILTIN.fullmatch(words[at])):
+        at += 1
+    if words[at:at + 1] != ["exec"]:
+        return False
+    at += 1
+    while at < len(words) and words[at].startswith("-") and words[at] not in ("-", "--"):
+        at += 2 if _EXEC_NAME_NEXT.fullmatch(words[at]) else 1
+    if words[at:at + 1] == ["--"]:
+        at += 1
+    return at < len(words)
 
 
 def _sets_noexec(args: list[str]) -> bool:
@@ -181,7 +321,9 @@ def verifier_command(commands: list[SimpleCommand], verifier_path: str) -> Simpl
 
     ``bash <scratch dir>/verify.sh`` (``sh``, with no option but the
     switches of :data:`SHELL_SWITCH`: ``bash -n`` parses the script
-    without running it, ``bash -s`` reads one from stdin instead),
+    without running it, ``bash -s`` reads one from stdin instead; the
+    shell one of :data:`_SHELL`, not another program of its name:
+    ``tmp/bash``),
     or the script itself as the command, named by its absolute path
     (a verifier kept in the scratch dir, a folder of ``kiss-tmp`` in
     the system's temp directory, is outside the work dir) or by a
@@ -193,7 +335,12 @@ def verifier_command(commands: list[SimpleCommand], verifier_path: str) -> Simpl
     link).  ``--`` or ``-`` ends the options:
     the word after it is the script whatever it starts with (``bash
     -- -x verify.sh`` runs a file named ``-x`` with the verifier as
-    its argument).
+    its argument).  Not a command that runs something else: a call of
+    a function with its name or its wrapper's (``bash() { :; }``), one
+    only the shell knows (after an ``alias``, a trap on a signal), one
+    behind words under which a wrapper may run something else or
+    nothing (:func:`_wrapped`: ``command -v``, ``timeout --help``,
+    ``xargs``, ``tmp/env``; ``timeout -k 5 60`` and ``env -i`` run it).
 
     Args:
         commands: The simple commands of a shell command
@@ -203,9 +350,10 @@ def verifier_command(commands: list[SimpleCommand], verifier_path: str) -> Simpl
     verifier = os.path.realpath(verifier_path)
     for simple in commands:
         argv = simple.argv()
-        if not argv:
+        prefix = simple.words[:len(simple.words) - len(argv)]
+        if not argv or simple.unknown or simple.script is not None or not _wrapped(prefix):
             continue
-        words = argv[1:] if posixpath.basename(argv[0].text) in SHELLS else argv[:1]
+        words = argv[1:] if _SHELL.fullmatch(argv[0].text) else argv[:1]
         at = 0  # the words before the first operand are the shell's options
         while at < len(words) and words[at].text.startswith("-"):
             at += 1
@@ -224,29 +372,45 @@ def verifier_decides(command: str, work_dir: str, verifier_path: str) -> bool:
 
     So when the verifier's command is at the top level, not negated,
     its output not piped, not after ``||``, not in the background,
-    nothing before it leaves the shell (``exit``, ``return``, an
-    ``exec`` of a program) and everything after it follows ``&&``
-    (``bash v.sh && echo ok`` fails when the verifier fails): ``bash
-    v.sh || true``, ``bash v.sh | cat``, ``true || bash v.sh``,
+    nothing before it may decide the exit instead (:func:`_hides_exit`:
+    ``exit``, ``return``, an ``exec`` of a program, the action of a
+    trap, read where the trap is set) and everything after it follows
+    ``&&`` (``bash v.sh && echo ok`` fails when the verifier fails):
+    ``bash v.sh || true``, ``bash v.sh | cat``, ``true || bash v.sh``,
     ``bash v.sh; echo done``, ``bash v.sh &``, ``! bash v.sh`` and
     ``exit 0; bash v.sh`` all exit 0 whatever the verifier did, so
-    their exit shows nothing about it.
+    their exit shows nothing about it.  Nor does the exit of a command
+    that names a variable of :data:`_LOOKUP_NAME`, as written or as the
+    scan reads its words (``N=PA; export ${N}TH=dir``): ``bash`` may be
+    another program then; nor that of one with a command the scan
+    does not return (:data:`_UNSCANNED`).  One assignment is read as harmless, the
+    command's first, when it appends to ``PATH`` (:data:`_APPENDED_PATH`):
+    the gate reads the command without it, where the verifier's program
+    is one bash finds before the appended directories
+    (:func:`_found_before`).  A prepended directory may
+    hold another ``bash``, which no reading of the text rules out.
 
     Args:
         command: The command as the agent ran it.
         work_dir: The directory the command started in.
         verifier_path: The verifier's absolute path.
     """
+    command, appended = _APPENDED_PATH.subn(r"\1_=\2", command)
     try:
-        commands = simple_commands(command, bash_path(os.path.abspath(work_dir)))
+        commands = simple_commands(command, bash_path(os.path.abspath(work_dir)), derived=True)
     except TooDeepError:  # the commands past the nesting are unread: they may decide the exit
         return False
     simple = verifier_command(commands, verifier_path)
     if (simple is None or simple.group is not None or simple.reader is not None
-            or simple.conditional or simple.background or simple.negated):
+            or simple.conditional or simple.background or simple.negated
+            or appended and not _found_before(simple)):
+        return False
+    written = _QUOTING.sub("", command)
+    if _UNSCANNED.search(written) or _LOOKUP_NAME.search(written) or any(
+            _LOOKUP_NAME.search(word.text) for scanned in commands for word in scanned.words):
         return False
     at = next(index for index, candidate in enumerate(commands) if candidate is simple)
-    if any(leaves_shell(earlier) for earlier in commands[:at]):
+    if any(_hides_exit(earlier) for earlier in commands[:at]):
         return False
     for later in commands[at + 1:]:
         top: SimpleCommand | Group = later

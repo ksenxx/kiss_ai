@@ -238,9 +238,9 @@ def test_meta_values_render_as_a_bulleted_list(
     """The panel lists the live status values (Tokens / Cost / Steps /
     Time), the Machine row, Workdir / Max budget, then the task's own
     settings (Date / Base model / Chat id / Task id / Parent task /
-    Agent) as real ``<ul>`` bullet items, with no Parallel mode row.
-    The Parent-task row starts hidden until a parent id arrives; the
-    Agent row stays hidden for a plain run."""
+    Agent / Tags) as real ``<ul>`` bullet items, with no Parallel mode
+    row.  The Parent-task row starts hidden until a parent id arrives;
+    the Agent row stays hidden for a plain run."""
     page = _open_desktop_page(browser, remote_url, 1280)
     try:
         listing = page.evaluate(_META_LIST_JS)
@@ -251,7 +251,9 @@ def test_meta_values_render_as_a_bulleted_list(
         )
         # Every row bar the initially-hidden Parent-task and Agent rows
         # renders as a bullet; the hidden rows collapse to display:none.
-        assert listing["displays"] == ["list-item"] * 11 + ["none"] * 2, listing
+        assert listing["displays"] == (
+            ["list-item"] * 11 + ["none"] * 2 + ["list-item"]
+        ), listing
         assert listing["labels"] == [
             "Tokens:",
             "Cost:",
@@ -266,6 +268,7 @@ def test_meta_values_render_as_a_bulleted_list(
             "Task id:",
             "Parent task:",
             "Agent:",
+            "Tags:",
         ], listing
         # Before any task ran the numeric values show the em-dash
         # placeholder and the time mirrors the "Ready" status.
@@ -276,6 +279,8 @@ def test_meta_values_render_as_a_bulleted_list(
         # daemon's replies); this static page gets no reply, so it
         # shows the placeholder.
         assert listing["values"][4] == "\u2014", listing
+        # And so does the Tags row while the panel shows no task.
+        assert listing["values"][-1] == "\u2014", listing
         # No value is bold.
         assert set(listing["weights"]) == {"400"}, listing
     finally:

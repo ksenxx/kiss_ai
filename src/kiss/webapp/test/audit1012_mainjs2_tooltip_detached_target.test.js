@@ -18,6 +18,7 @@
 
 const assert = require('assert');
 const harness = require('./simplify2_harness');
+const {loadHistory, makeSession, chatHeader} = require('./history_helpers');
 
 // The 400 ms hover timer is recorded and fired by hand, never waited for.
 function prepare(win) {
@@ -150,15 +151,45 @@ function testCrossingAChildOfTheAnchorKeepsTheTooltip() {
   console.log('  ok - crossing a child of the anchor keeps the tooltip');
 }
 
+// A control that renames itself as it acts must not leave its old name
+// in an open tooltip.  The fold button of a chat panel sits on the
+// header's line: a press focuses it, which opens its tooltip ("Show
+// details"), and then unfolds the panel, after which the button's next
+// press hides the chat's tasks.
+async function testOpenTooltipFollowsItsAnchorsNewName() {
+  const win = makePage();
+  const session = makeSession();
+  loadHistory(win, [session]);
+  const fold = chatHeader(win, session.id).querySelector(
+    ':scope > .history-chat-collapse',
+  );
+  const tip = win.document.getElementById('custom-tooltip');
+  fold.focus();
+  assert.ok(tip.classList.contains('visible'), 'focus opens the tooltip');
+  assert.strictEqual(tip.textContent, 'Show details');
+  fold.click();
+  // The anchor watch is a MutationObserver: one turn for it to deliver.
+  await harness.sleep(0);
+  assert.ok(tip.classList.contains('visible'), 'the tooltip stays open');
+  assert.strictEqual(
+    tip.textContent,
+    'Hide details',
+    'the open tooltip names what the next press does',
+  );
+  win.close();
+  console.log('  ok - an open tooltip follows its anchor\'s new name');
+}
+
 async function runTests() {
   testRemovedTargetShowsNoTooltip();
   await testOpenTooltipClosesWhenItsAnchorIsReRendered();
   testCrossingAChildOfTheAnchorKeepsTheTooltip();
+  await testOpenTooltipFollowsItsAnchorsNewName();
 }
 
 runTests().then(
   () => {
-    console.log('\n3 passed, 0 failed');
+    console.log('\n4 passed, 0 failed');
     process.exit(0);
   },
   err => {

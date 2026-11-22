@@ -52,7 +52,11 @@ from kiss.agents.sorcar.git_worktree import (
     GitWorktreeOps,
     MergeResult,
 )
-from kiss.agents.sorcar.merge_conflict_resolver import resolve_merge_conflict
+from kiss.agents.sorcar.merge_conflict_resolver import (
+    MergeAgentRunner,
+    resolve_merge_conflict,
+    run_merge_sea,
+)
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -126,14 +130,21 @@ class _StopAt:
             raise KeyboardInterrupt("Stop")
 
 
-def _resolve_with_stop_at(code: CodeType, wt: GitWorktree) -> None:
+def _no_merge_agent(parent_agent: Any, prompt: str, repo: Path) -> None:
+    """The merge agent of a test whose Stop lands before the agent is started."""
+    pytest.fail("the Stop landed too late: the merge agent was started")
+
+
+def _resolve_with_stop_at(
+    code: CodeType, wt: GitWorktree, run_agent: MergeAgentRunner = run_merge_sea,
+) -> None:
     """Run ``resolve_merge_conflict`` with a Stop landing at the entry of *code*."""
     stop = _StopAt(code)
     previous = sys.gettrace()  # coverage's tracer, when measuring
     sys.settrace(stop)
     try:
         with pytest.raises(KeyboardInterrupt):
-            resolve_merge_conflict(None, wt, "change line b", "changed line b")
+            resolve_merge_conflict(None, wt, "change line b", "changed line b", run_agent)
     finally:
         sys.settrace(previous)
     assert stop.fired, "the Stop never landed"
@@ -147,9 +158,9 @@ def test_stop_inside_begin_conflicted_merge_restores_the_checkout(repo: Path) ->
     wt = _conflicting_worktree(repo)
     head = GitWorktreeOps.head_sha(repo)
 
-    # ``unresolved_paths`` is first called inside ``begin_conflicted_merge``,
-    # right after the cherry-pick wrote the conflict into the tree.
-    _resolve_with_stop_at(GitWorktreeOps.unresolved_paths.__code__, wt)
+    # ``_written_tree`` is first called inside ``begin_conflicted_merge``,
+    # right after the merge wrote the conflict into the tree and the index.
+    _resolve_with_stop_at(GitWorktreeOps._written_tree.__code__, wt, _no_merge_agent)
 
     assert GitWorktreeOps.status_porcelain(repo) == ""
     assert (repo / "f.txt").read_text() == "a\nB-user\nc\n"

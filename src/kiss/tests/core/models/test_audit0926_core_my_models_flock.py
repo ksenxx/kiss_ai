@@ -14,7 +14,8 @@ processes sharing one home directory:
 * two processes adding models concurrently never drop each other's entry;
 * the sidecar lock is released after each edit, so a later edit in the
   same process (and a delete) still goes through;
-* the sidecar lives next to the registry, never on the registry itself.
+* the sidecar lives next to the registry, never on the registry itself;
+* two homes whose registries are links to one file edit it under one lock.
 """
 
 from __future__ import annotations
@@ -26,6 +27,8 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+
+from kiss.tests.conftest import posix_only
 
 _WORKER = r"""
 import os, sys, time
@@ -44,24 +47,25 @@ for i in range(n):
 """
 
 
-def _run_workers(home: Path, n: int, tags: list[str]) -> None:
-    """Start one ``save_custom_model`` worker per tag with ``HOME=home`` and wait.
+def _run_workers(homes: dict[str, Path], n: int) -> None:
+    """Start one ``save_custom_model`` worker per tag with ``HOME`` its home and wait.
 
     The registry lives in ``$KISS_HOME`` (``~/.kiss`` by default), so the
     test runner's own ``KISS_HOME`` is dropped: ``HOME`` alone decides.
     """
-    env = dict(os.environ, HOME=str(home), USERPROFILE=str(home))
-    env.pop("KISS_HOME", None)
-    start_file = home / "start"
-    procs = [
-        subprocess.Popen(
-            [sys.executable, "-c", _WORKER, tag, str(start_file), str(n)],
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+    start_file = next(iter(homes.values())) / "start"
+    procs = []
+    for tag, home in homes.items():
+        env = dict(os.environ, HOME=str(home), USERPROFILE=str(home))
+        env.pop("KISS_HOME", None)
+        procs.append(
+            subprocess.Popen(
+                [sys.executable, "-c", _WORKER, tag, str(start_file), str(n)],
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
         )
-        for tag in tags
-    ]
     time.sleep(1.0)  # let the interpreters import before releasing them together
     start_file.write_text("go")
     for proc in procs:
@@ -73,12 +77,34 @@ def test_concurrent_processes_never_drop_a_custom_model() -> None:
     """Every model added by either process survives in ``MY_MODELS.json``."""
     with tempfile.TemporaryDirectory() as tmp_dir:
         home = Path(tmp_dir)
-        _run_workers(home, n=25, tags=["a", "b"])
+        _run_workers({"a": home, "b": home}, n=25)
         registry = home / ".kiss" / "MY_MODELS.json"
         names = set(json.loads(registry.read_text(encoding="utf-8")))
         expected = {f"audit-{tag}-{i}" for tag in ("a", "b") for i in range(25)}
         assert expected <= names
         assert (home / ".kiss" / ".MY_MODELS.json.kiss.lock").is_file()
+
+
+@posix_only("symlinks need no privilege")
+def test_two_homes_linking_one_registry_never_drop_a_custom_model() -> None:
+    """Two homes whose ``MY_MODELS.json`` link one file edit that file under one lock.
+
+    An edit is written through the link, and each home's writer locked the
+    sidecar of its own link: both read the same snapshot of the linked file
+    and the later write dropped the other's model.
+    """
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        shared = Path(tmp_dir) / "shared.json"
+        shared.write_text("{}\n", encoding="utf-8")
+        homes = {tag: Path(tmp_dir) / tag for tag in ("a", "b")}
+        links = [home / ".kiss" / "MY_MODELS.json" for home in homes.values()]
+        for link in links:
+            link.parent.mkdir(parents=True)
+            link.symlink_to(shared)
+        _run_workers(homes, n=25)
+        names = set(json.loads(shared.read_text(encoding="utf-8")))
+        assert {f"audit-{tag}-{i}" for tag in homes for i in range(25)} <= names
+        assert all(link.is_symlink() for link in links)
 
 
 _SEQUENTIAL = r"""

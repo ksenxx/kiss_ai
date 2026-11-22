@@ -576,7 +576,7 @@ class TestTabMirroring(TabMirroringBase):
 
 
 class TestTabMirroringReviewFixes(TabMirroringBase):
-    """Pins for the five defects found by the read-only review."""
+    """Pins for the defects found by the read-only review."""
 
     async def test_ready_replay_preserves_selected_task(self) -> None:
         """[1] A tab resumed to an OLD task must survive any ``ready``.
@@ -702,31 +702,6 @@ class TestTabMirroringReviewFixes(TabMirroringBase):
         self.assertIsNotNone(unpinned, "the other surface still has the tab pinned to task A")
         assert clicked is not None, "the click was not answered"
         self.assertEqual(clicked["task_id"], task_b, "a click replayed a finished task")
-
-    async def test_subagent_close_broadcasts_to_all_clients(self) -> None:
-        """[2] Closing a sub-agent tab must mirror to every client.
-
-        Sub-agent tabs are not in the registry, so their close cannot
-        mirror via ``tabs_state``; the daemon must broadcast a
-        canonical ``closeSubagentTab`` event instead.
-        """
-        ws_a = await self._connect_ok()
-        ws_b = await self._connect_ok()
-        await self._ready(ws_a)
-        await self._ready(ws_b)
-
-        await self._send(ws_a, {
-            "type": "closeTab", "tabId": "tab-parent__sub_9",
-        })
-        closed_b = await self._wait_for_event(
-            ws_b, "closeSubagentTab",
-            pred=lambda ev: ev.get("tab_id") == "tab-parent__sub_9",
-        )
-        self.assertIsNotNone(
-            closed_b,
-            "one client closing a sub-agent tab never reached the "
-            "other clients — the tab sets diverge",
-        )
 
     async def test_run_broadcasts_task_text_to_all_clients(self) -> None:
         """[3] A run from ANY origin mirrors the task-panel text.

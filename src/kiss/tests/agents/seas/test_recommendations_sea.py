@@ -44,7 +44,7 @@ from kiss.tests.agents.sorcar.local_model_server import (
     tool_call_body,
 )
 
-TEN = [
+TWENTY = [
     "Fix the failing parser test in parser.py",
     "Add a changelog entry for the new /recommendations command",
     "Run the full test suite in /home/me/proj",
@@ -55,6 +55,16 @@ TEN = [
     "Export the Gmail receipts of October into a Google Sheets ledger",
     "Profile the slow history query in persistence.py",
     "Add a smoke test for the Bedrock settings subpanel",
+    "Rename the stale branches merged into main last month",
+    "Write release notes for the next tagged version",
+    "Turn the Slack thread about flaky tests into a GitHub issue",
+    "Clean up the unused imports reported by ruff",
+    "Benchmark the daemon start-up time on the remote machine",
+    "Add type hints to the cron scheduler helpers",
+    "Move the Gmail newsletters of this week into a reading list in Notion",
+    "Check the spend report for the dearest model this week",
+    "Back up the memory pages to the shared drive",
+    "Update the README screenshots of the sidebar",
 ]
 
 TOOL_NAMES = {
@@ -102,12 +112,12 @@ def test_sea_methods_and_prompt_follow_the_contract() -> None:
     assert agent.system_prompt("ASSEMBLED") == sea.SYSTEM_PROMPT
     for name in ("recent_tasks", "connected_apps", "memory_pull", "save_recommendations"):
         assert name in sea.SYSTEM_PROMPT
-    assert "Suggested next" in sea.SYSTEM_PROMPT and "at least 3 of the 10" in sea.SYSTEM_PROMPT
+    assert "Suggested next" in sea.SYSTEM_PROMPT and "at least 3 of the 20" in sea.SYSTEM_PROMPT
     assert "when only one is" in sea.SYSTEM_PROMPT  # one connected app has nothing to combine
     assert (
         agent.prompt("now")
         == agent.prompt("anything else")
-        == ("Suggest 10 tasks from my recent work and my connected apps.")
+        == ("Suggest 20 tasks from my recent work and my connected apps.")
     )
     assert _tool_names(agent.tools([])) == [
         "recent_tasks",
@@ -123,7 +133,7 @@ def test_sea_methods_and_prompt_follow_the_contract() -> None:
         agent,
         {"tool_profile": "none", "max_budget": 2.0, "timeout": 900, "locked": ["tool_profile"]},
     )
-    assert "RECOMMENDATIONS" in agent.description() and "ten" in agent.description()
+    assert "RECOMMENDATIONS" in agent.description() and "twenty" in agent.description()
 
 
 def test_recent_tasks_lists_the_last_day_and_twenty_completed_tasks(
@@ -298,36 +308,38 @@ def test_memory_read_tools_follow_the_memory_toggle(monkeypatch: pytest.MonkeyPa
 
 
 def test_save_and_load_recommendations(recommendations_path: Path) -> None:
-    """Exactly ten non-empty sentences are stored atomically; anything else is refused."""
+    """Exactly twenty non-empty sentences are stored atomically; anything else is refused."""
     path = recommendations_path
     assert sea.load_recommendations() == {"generatedAt": 0.0, "tasks": []}
     assert sidebar_panels.recommendations_report() == {"generatedAt": 0, "tasks": []}
     # The model may hand the tool anything: a bare string or non-string
     # items are refused before they could be coerced into "tasks".
-    assert sea.save_recommendations("abcde") == "Error: pass a list of 10 strings."  # type: ignore[arg-type]
+    assert sea.save_recommendations("abcde") == "Error: pass a list of 20 strings."  # type: ignore[arg-type]
     assert sea.save_recommendations([None, False, 0, {}, []]) == (  # type: ignore[list-item]
-        "Error: pass a list of 10 strings."
+        "Error: pass a list of 20 strings."
     )
-    assert sea.save_recommendations(TEN[:5]) == ("Error: pass exactly 10 non-empty tasks (got 5).")
-    assert sea.save_recommendations([*TEN[:9], "  "]) == (
-        "Error: pass exactly 10 non-empty tasks (got 10)."
+    assert sea.save_recommendations(TWENTY[:10]) == (
+        "Error: pass exactly 20 non-empty tasks (got 10)."
+    )
+    assert sea.save_recommendations([*TWENTY[:19], "  "]) == (
+        "Error: pass exactly 20 non-empty tasks (got 20)."
     )
     assert not path.exists()
     before = time.time()
-    assert sea.save_recommendations([" " + TEN[0] + "\n", *TEN[1:]]) == (
-        "Saved 10 recommendations."
+    assert sea.save_recommendations([" " + TWENTY[0] + "\n", *TWENTY[1:]]) == (
+        "Saved 20 recommendations."
     )
     # Staged in a per-writer temp file (atomic_write_text), none left behind.
     assert [p.name for p in path.parent.glob(".recommendations.json-*")] == []
     stored = json.loads(path.read_text())
-    assert stored["tasks"] == TEN
+    assert stored["tasks"] == TWENTY
     assert before <= stored["generatedAt"] <= time.time()
     assert sea.load_recommendations() == {
         "generatedAt": stored["generatedAt"],
-        "tasks": TEN,
+        "tasks": TWENTY,
     }
     report = sidebar_panels.recommendations_report()
-    assert report == {"generatedAt": int(stored["generatedAt"] * 1000), "tasks": TEN}
+    assert report == {"generatedAt": int(stored["generatedAt"] * 1000), "tasks": TWENTY}
     json.dumps(report)
     # A corrupt, foreign or half-typed file reads as "nothing yet".
     path.write_text("{not json")
@@ -340,7 +352,7 @@ def test_save_and_load_recommendations(recommendations_path: Path) -> None:
     assert sea.load_recommendations() == {"generatedAt": 0.0, "tasks": ["x", "3"]}
 
 
-def test_agent_reads_the_history_and_apps_and_stores_ten_suggestions(
+def test_agent_reads_the_history_and_apps_and_stores_twenty_suggestions(
     tmp_path: Path,
     empty_history: None,
     recommendations_path: Path,
@@ -349,26 +361,26 @@ def test_agent_reads_the_history_and_apps_and_stores_ten_suggestions(
     """With the SEA's configuration the model gets its six tools and finish.
 
     The scripted model reads the history and the connected apps, stores
-    ten sentences and finishes; the test checks the tools offered, the
+    twenty sentences and finishes; the test checks the tools offered, the
     system prompt, the real history and probe answer in the tool-result
     messages, and the file the sidebar reads.
     """
     _persist("Fix the parser", 3 * 3600, result="Fixed parser.py", success=True)
-    summary = "<ul>" + "".join(f"<li>{t}</li>" for t in TEN) + "</ul>"
+    summary = "<ul>" + "".join(f"<li>{t}</li>" for t in TWENTY) + "</ul>"
     script = [
         tool_call_body("recent_tasks", {}, prompt_tokens=500),
         tool_call_body("connected_apps", {}, prompt_tokens=550),
-        tool_call_body("save_recommendations", {"tasks": TEN}, prompt_tokens=600),
+        tool_call_body("save_recommendations", {"tasks": TWENTY}, prompt_tokens=600),
         finish_body(summary, prompt_tokens=700),
     ]
     run = sea_commands.evaluate_sea([RecommendationsSea()], "now")
-    assert run.prompt == "Suggest 10 tasks from my recent work and my connected apps."
+    assert run.prompt == "Suggest 20 tasks from my recent work and my connected apps."
     assert run.tools_hook is not None and run.system_prompt_hook is not None
     parsed, agentic = run_sea(run, script, tmp_path, max_steps=6)
     assert parsed["success"] is True
     assert parsed["summary"] == summary
-    assert sea.load_recommendations()["tasks"] == TEN
-    assert sidebar_panels.recommendations_report()["tasks"] == TEN
+    assert sea.load_recommendations()["tasks"] == TWENTY
+    assert sidebar_panels.recommendations_report()["tasks"] == TWENTY
 
     assert len(agentic) == 4
     for request in agentic:
@@ -377,4 +389,4 @@ def test_agent_reads_the_history_and_apps_and_stores_ten_suggestions(
     (listed,) = tool_results(agentic[1])
     assert listed.startswith("- 3h ago | /home/me/proj | ok | Fix the parser -> Fixed parser.py")
     assert tool_results(agentic[2])[-1].startswith("No third-party app is connected.")
-    assert tool_results(agentic[3])[-1].startswith("Saved 10 recommendations.")
+    assert tool_results(agentic[3])[-1].startswith("Saved 20 recommendations.")

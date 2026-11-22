@@ -148,6 +148,62 @@ function rowFor(win, p) {
   );
 }
 
+/**
+ * Whether the view *id* keeps the rows of the machine or folder the
+ * chat left, out of reach, while the next one answers.
+ */
+function held(win, id) {
+  const view = byId(win, id);
+  return view.hasAttribute('inert') && view.classList.contains('is-held');
+}
+
+/**
+ * The texts under *scope* (the whole task-info panel by default) that
+ * say a view is waiting for its data.
+ */
+function waitingTexts(win, scope = '#meta-panel') {
+  return all(win, `${scope} .sidebar-empty, ${scope} .explorer-note`)
+    .map(el => el.textContent)
+    .filter(text => /Loading|Checking/.test(text));
+}
+
+/** Answer the Source Control requests in *posted* for *branch*. */
+function answerScm(win, posted, machine, branch, subject) {
+  const status = msgs(posted, 'gitStatus').pop();
+  const log = msgs(posted, 'gitLog').pop();
+  const stamp = machine ? {machine: machine} : {};
+  send(win, {
+    type: 'gitStatus',
+    token: status.token,
+    branch: branch,
+    repo: status.workDir,
+    changes: [
+      {
+        path: branch + '.txt',
+        absPath: status.workDir + '/' + branch + '.txt',
+        status: 'M',
+        group: 'changes',
+      },
+    ],
+    ...stamp,
+  });
+  send(win, {
+    type: 'gitLog',
+    token: log.token,
+    commits: [
+      {
+        sha: 'c0ffee1',
+        subject: subject,
+        author: 'a',
+        date: 1,
+        parents: [],
+        refs: [],
+      },
+    ],
+    ...stamp,
+  });
+}
+
 /** The Save button of the content tab on screen (each tab's view has its own). */
 function saveButton(win) {
   const view = all(win, '.content-tab-view').find(
@@ -160,21 +216,30 @@ function saveButton(win) {
 function testTheExplorerShowsTheMachinesFolder() {
   const {win, posted} = boot();
   pickMachine(win, 'gpu-box');
-  // Until the machine's directories arrive there is nothing to show;
-  // this daemon's tree (and its added folder) is gone.
-  assert.deepStrictEqual(rootPaths(win), []);
-  assert.ok(
-    win.document.querySelector('#explorer-tree .sidebar-empty'),
-    'No workspace folder',
-  );
+  // Until the machine has answered, this daemon's tree stays on
+  // screen, out of reach: nothing of it can be clicked for the
+  // machine, and the panel does not blink to "Loading...".
+  assert.deepStrictEqual(rootPaths(win), ['/work/ws', '/extra']);
+  assert.ok(held(win, 'explorer-tree'), 'the tree is kept, out of reach');
+  assert.deepStrictEqual(waitingTexts(win, '#explorer-tree'), []);
   assert.strictEqual(msgs(posted, 'listDir').length, 0);
+  // The machine's folder is listed ahead of the tree that shows it.
   send(win, BOX_DIRS);
+  assert.deepStrictEqual(rootPaths(win), ['/work/ws', '/extra']);
+  assert.ok(held(win, 'explorer-tree'));
+  const req = answerListing(win, posted, '/srv/proj', 'gpu-box', [DIR, FILE]);
   assert.deepStrictEqual(
     rootPaths(win),
     ['/srv/proj'],
     "the machine's working directory alone",
   );
-  const req = answerListing(win, posted, '/srv/proj', 'gpu-box', [DIR, FILE]);
+  assert.ok(!held(win, 'explorer-tree'), 'the tree is back in reach');
+  assert.deepStrictEqual(waitingTexts(win, '#explorer-tree'), []);
+  assert.strictEqual(
+    msgs(posted, 'listDir').length,
+    1,
+    'the folder is listed once, not again by the rebuilt tree',
+  );
   assert.strictEqual(
     req.workDir,
     '/srv/proj',
@@ -236,8 +301,10 @@ function testTheExplorerShowsTheMachinesFolder() {
   // Home again: this daemon's folders, unstamped, "Add Folder" back.
   posted.length = 0;
   pickMachine(win, '');
-  assert.deepStrictEqual(rootPaths(win), ['/work/ws', '/extra']);
+  assert.deepStrictEqual(rootPaths(win), ['/srv/proj'], 'kept until home answers');
+  assert.ok(held(win, 'explorer-tree'));
   const home = answerListing(win, posted, '/work/ws', '', []);
+  assert.deepStrictEqual(rootPaths(win), ['/work/ws', '/extra']);
   assert.strictEqual(home.machine, undefined);
   assert.ok(!byId(win, 'explorer-add-folder').hidden);
 }
@@ -278,6 +345,7 @@ function testSourceControlShowsTheMachinesRepository() {
   send(win, {...BOX_DIRS, workDir: '/srv/other', set: true});
   assert.strictEqual(msgs(posted, 'gitStatus')[0].workDir, '/srv/other');
   assert.strictEqual(msgs(posted, 'gitStatus')[0].machine, 'gpu-box');
+  answerListing(win, posted, '/srv/other', 'gpu-box', []);
   assert.deepStrictEqual(rootPaths(win), ['/srv/other']);
   assert.strictEqual(msgs(posted, 'listDir')[0].machine, 'gpu-box');
   // Home: this daemon's repository, unstamped.
@@ -292,15 +360,17 @@ function testTheDaemonsBindingMovesTheViews() {
   const tab = win._testApi.getActiveTabId();
   send(win, {type: 'tabMachine', tabId: tab, machine: 'gpu-box'});
   assert.strictEqual(msgs(posted, 'getMachineWorkDirs').length, 1);
-  assert.deepStrictEqual(rootPaths(win), []);
+  assert.ok(held(win, 'explorer-tree'), 'kept until the machine answers');
   send(win, BOX_DIRS);
+  answerListing(win, posted, '/srv/proj', 'gpu-box', []);
   assert.deepStrictEqual(rootPaths(win), ['/srv/proj']);
   assert.strictEqual(msgs(posted, 'listDir')[0].machine, 'gpu-box');
   assert.strictEqual(msgs(posted, 'gitStatus')[0].machine, 'gpu-box');
   // A machine that cannot be asked leaves the views empty, not on
-  // this daemon's folders.
+  // this daemon's folders, and not waiting on gpu-box's for ever.
   posted.length = 0;
   send(win, {type: 'tabMachine', tabId: tab, machine: 'office'});
+  assert.ok(held(win, 'explorer-tree'), 'kept while office is asked');
   send(win, {
     type: 'machineWorkDirs',
     machine: 'office',
@@ -309,10 +379,119 @@ function testTheDaemonsBindingMovesTheViews() {
     error: 'office: down',
   });
   assert.deepStrictEqual(rootPaths(win), []);
+  assert.ok(!held(win, 'explorer-tree'), 'nothing left to wait for');
   assert.strictEqual(msgs(posted, 'listDir').length, 0);
   assert.strictEqual(msgs(posted, 'gitStatus').length, 0);
   send(win, {type: 'tabMachine', tabId: tab, machine: ''});
   assert.deepStrictEqual(rootPaths(win), ['/work/ws', '/extra']);
+}
+
+/**
+ * The reported flicker: the views of a chat on a machine blinked to
+ * "Loading..." whenever something made them look again -- a folder
+ * picked for this machine on any surface, the chat's binding dropping
+ * out and coming back with the machine's connection, a reconnect.
+ * None of these changes what the views show.
+ */
+function testAnUnchangedWorkspaceIsNeverBlanked() {
+  const {win, posted} = boot();
+  const tab = win._testApi.getActiveTabId();
+  send(win, {type: 'tabMachine', tabId: tab, machine: 'gpu-box'});
+  send(win, BOX_DIRS);
+  answerListing(win, posted, '/srv/proj', 'gpu-box', [DIR, FILE]);
+  answerScm(win, posted, 'gpu-box', 'box-main', 'box commit');
+  const fileRow = rowFor(win, '/srv/proj/main.py');
+  const commitRow = byId(win, 'scm-graph').firstElementChild;
+  assert.ok(fileRow && commitRow, 'both views show the machine');
+
+  // Another surface picks a folder for THIS machine: the chat browses
+  // gpu-box, whose folder did not change.
+  posted.length = 0;
+  send(win, {type: 'workDirChanged', workDir: '/work/elsewhere'});
+  assert.strictEqual(rowFor(win, '/srv/proj/main.py'), fileRow, 'same row');
+  assert.strictEqual(byId(win, 'scm-graph').firstElementChild, commitRow);
+  assert.ok(!held(win, 'explorer-tree') && !held(win, 'scm-graph'));
+  assert.deepStrictEqual(waitingTexts(win), []);
+  assert.strictEqual(
+    msgs(posted, 'listDir')[0].path,
+    '/srv/proj',
+    'refreshed in place, on the machine',
+  );
+
+  // The binding drops out (the machine's connection was lost) and is
+  // announced again: the rows wait, out of reach, and are the same
+  // rows afterwards -- nothing was fetched or rebuilt for the gap.
+  answerListing(win, posted, '/srv/proj', 'gpu-box', [DIR, FILE]);
+  posted.length = 0;
+  send(win, {type: 'tabMachines', machines: {}});
+  assert.strictEqual(rowFor(win, '/srv/proj/main.py'), fileRow, 'kept');
+  assert.strictEqual(byId(win, 'scm-graph').firstElementChild, commitRow);
+  assert.ok(held(win, 'explorer-tree'), 'the tree is out of reach');
+  assert.ok(held(win, 'scm-graph') && held(win, 'scm-changes'));
+  assert.deepStrictEqual(waitingTexts(win), []);
+  send(win, {type: 'tabMachines', machines: {[tab]: 'gpu-box'}});
+  assert.strictEqual(rowFor(win, '/srv/proj/main.py'), fileRow, 'same row');
+  assert.ok(!held(win, 'explorer-tree'), 'back in reach');
+  answerScm(win, posted, 'gpu-box', 'box-main', 'box commit');
+  assert.ok(!held(win, 'scm-graph') && !held(win, 'scm-changes'));
+  assert.deepStrictEqual(waitingTexts(win), []);
+  assert.strictEqual(byId(win, 'scm-branch').textContent, 'box-main');
+}
+
+function testAListingAskedAheadIsNotShownOnceTheChatMovedOn() {
+  const {win, posted} = boot();
+  const tab = win._testApi.getActiveTabId();
+  send(win, {type: 'tabMachine', tabId: tab, machine: 'gpu-box'});
+  send(win, BOX_DIRS);
+  assert.ok(held(win, 'explorer-tree'), "waiting for the machine's folder");
+  // The Explorer is folded away and the chat comes back to this daemon:
+  // a folded view follows nothing, so the listing is still awaited.
+  click(win, byId(win, 'meta-explorer').querySelector('.meta-section-toggle'));
+  send(win, {type: 'tabMachine', tabId: tab, machine: ''});
+  answerListing(win, posted, '/srv/proj', 'gpu-box', [DIR, FILE]);
+  showSection(win, 'meta-explorer');
+  assert.deepStrictEqual(rootPaths(win), ['/work/ws', '/extra']);
+  assert.strictEqual(rowFor(win, '/srv/proj/main.py'), undefined);
+  assert.ok(!held(win, 'explorer-tree'), 'the tree is back in reach');
+}
+
+function testSourceControlKeepsItsRowsUntilTheNextWorkspaceAnswers() {
+  const {win, posted} = boot();
+  // A list that has shown nothing yet has nothing to keep: it says
+  // it is loading.
+  assert.deepStrictEqual(waitingTexts(win, '#scm-graph'), ['Loading...']);
+  click(win, byId(win, 'scm-refresh'));
+  answerScm(win, posted, '', 'home-main', 'home commit');
+  assert.ok(byId(win, 'scm-graph').textContent.includes('home commit'));
+  posted.length = 0;
+  goToBox(win);
+  // gpu-box has not answered: this daemon's commits stay, out of reach.
+  assert.ok(byId(win, 'scm-graph').textContent.includes('home commit'));
+  assert.ok(held(win, 'scm-graph') && held(win, 'scm-changes'));
+  assert.deepStrictEqual(waitingTexts(win), []);
+  answerScm(win, posted, 'gpu-box', 'box-main', 'box commit');
+  assert.ok(!held(win, 'scm-graph') && !held(win, 'scm-changes'));
+  assert.ok(byId(win, 'scm-graph').textContent.includes('box commit'));
+  assert.ok(!byId(win, 'scm-graph').textContent.includes('home commit'));
+  assert.ok(byId(win, 'scm-changes').textContent.includes('box-main.txt'));
+  // A repository that fails to answer says so instead of keeping the
+  // previous one's rows.
+  posted.length = 0;
+  send(win, {...BOX_DIRS, workDir: '/srv/other', set: true});
+  assert.ok(held(win, 'scm-graph') && held(win, 'scm-changes'));
+  for (const type of ['gitStatus', 'gitLog']) {
+    send(win, {
+      type: type,
+      token: msgs(posted, type)[0].token,
+      machine: 'gpu-box',
+      error: 'not a git repository',
+    });
+  }
+  for (const id of ['scm-graph', 'scm-changes']) {
+    assert.ok(!held(win, id), id + ' is back in reach');
+    assert.ok(byId(win, id).textContent.includes('not a git repository'));
+    assert.ok(!byId(win, id).textContent.includes('box'));
+  }
 }
 
 async function testAFileOfTheMachineIsSavedAndReloadedThere() {
@@ -565,6 +744,18 @@ const tests = [
     testSourceControlShowsTheMachinesRepository,
   ],
   ["the daemon's binding moves the views", testTheDaemonsBindingMovesTheViews],
+  [
+    'an unchanged workspace is never blanked',
+    testAnUnchangedWorkspaceIsNeverBlanked,
+  ],
+  [
+    'a listing asked ahead is not shown once the chat moved on',
+    testAListingAskedAheadIsNotShownOnceTheChatMovedOn,
+  ],
+  [
+    'Source Control keeps its rows until the next workspace answers',
+    testSourceControlKeepsItsRowsUntilTheNextWorkspaceAnswers,
+  ],
   [
     'a file of the machine is saved and reloaded there',
     testAFileOfTheMachineIsSavedAndReloadedThere,

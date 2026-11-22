@@ -13,6 +13,7 @@ bundled tree is clean: that is the gate ``uv run check`` runs.
 
 from __future__ import annotations
 
+import ast
 import json
 import os
 import sys
@@ -25,6 +26,7 @@ import pytest
 
 from kiss.agents.seas.base.base_sea import ALLOW
 from kiss.agents.sorcar import sea_commands
+from kiss.agents.sorcar.decide_tool import DEFAULT_DECISIONS_MODEL
 from kiss.agents.sorcar.sea_cli import main
 from kiss.agents.sorcar.sea_commands import bundled_commands, load_sea, own_settings
 from kiss.agents.sorcar.sea_commands import sea_settings as sea_settings_of
@@ -39,7 +41,14 @@ from kiss.agents.sorcar.sea_lint import (
     lint_sea,
     registered_commands,
 )
-from kiss.agents.sorcar.sea_settings import SeaError, declares_channel, declares_hidden
+from kiss.agents.sorcar.sea_settings import (
+    SeaError,
+    _settings_entries,
+    declares_channel,
+    declares_hidden,
+    settings_dicts,
+)
+from kiss.core.models.model_info import model
 from kiss.core.utils import replace_waiting_for_readers
 from kiss.tests.agents.sorcar.conftest import reset_sea_registry
 
@@ -330,6 +339,49 @@ def test_settings_dicts_are_those_that_reach_the_return(tmp_path: Path) -> None:
     assert 'config = config | {"auto_classify": False}' in text
     assert lint_all([reassigned]) == []
     assert sea_settings_of(reassigned)["model"] == "gpt-5"
+
+
+def test_a_dict_the_settings_reach_again_is_not_tracked_again_each_time(tmp_path: Path) -> None:
+    """Statements that lay a settings dict over itself do not multiply what the reader tracks.
+
+    ``mine.update(mine)``, ``mine |= mine`` and ``mine = mine | {**mine}`` leave the dict as it
+    was, but each doubled the entries tracked for ``mine``: a few dozen such lines made the
+    registry's ``hidden`` check of the folder (which executes no script) run until memory ran
+    out (audit 2026-11-21, S12/F3).  An entry is tracked where it is first reached and where
+    it is written last, which is all that is read of it: the dicts are listed in the order
+    they are first reached, a literal ``hidden`` laid again over a computed one still hides
+    the command, and one a computed value is laid over again does not.
+    """
+    doubling = "        mine.update(mine)\n        mine |= mine\n        mine = mine | {**mine}\n"
+    repeated = write_sea(
+        tmp_path,
+        DESCRIPTION
+        + '    def settings(self, settings):\n        mine = {"hidden": True, "timeout": 5}\n'
+        + doubling * 5
+        + "        alias = mine\n        alias.update(mine)\n"
+        "        if settings:\n            mine = mine | alias\n"
+        "        return settings | mine | alias\n",
+        "repeated",
+    )
+    assert len(_settings_entries(ast.parse(repeated.read_bytes()))) <= 4  # was 2 ** 19
+    assert declares_hidden(repeated)
+    assert sea_settings_of(repeated) == {"hidden": True, "timeout": 5}
+    literal, computed = "{'hidden': True}", "{'hidden': bool(settings)}"
+    for name, returned, hidden, dicts in (
+        ("relaid", "literal | computed | literal", True, [literal, computed]),
+        ("overlaid", "computed | literal | computed", False, [computed, literal]),
+    ):
+        path = write_sea(
+            tmp_path,
+            DESCRIPTION
+            + '    def settings(self, settings):\n        literal = {"hidden": True}\n'
+            '        computed = {"hidden": bool(settings)}\n'
+            f"        return {returned}\n",
+            name,
+        )
+        assert declares_hidden(path) is hidden, name
+        tree = ast.parse(path.read_bytes())
+        assert [ast.unparse(sub) for sub in settings_dicts(tree)] == dicts, name
 
 
 def test_a_function_named_settings_that_is_no_method_is_not_read(tmp_path: Path) -> None:
@@ -702,6 +754,52 @@ import os  # a legal trailing import must not pull the base's import after the c
     ]
     assert "return settings | {}" in adjacent.read_text(encoding="utf-8")
     assert lint_all([adjacent]) == []
+
+
+def test_fix_keeps_the_import_of_a_base_a_string_names(tmp_path: Path) -> None:
+    """A quoted annotation naming the old base keeps its import (the new base gets its own
+    line), so the tool's annotations still resolve and its ``int`` parameter stays an integer
+    in the model's schema (audit 2026-11-21, S12/F2); a docstring naming it is no use."""
+    quoted = write_sea(tmp_path, '''from __future__ import annotations
+
+from kiss.agents.seas.base.base_sea import BaseSea
+
+
+def tool(count: int) -> "BaseSea":
+    """Return the SEA after count steps."""
+    return Sea()
+
+
+class Sea(BaseSea):
+    def description(self):
+        return "quoted"
+
+    def settings(self, settings):
+        return settings | {"kind": "worker"}
+
+    def tools(self, tools):
+        return [tool]
+''', "quoted")
+    assert [line.split(": ", 1)[1] for line in fix_sea(quoted)] == [
+        "import WorkerSea", "class base BaseSea -> WorkerSea", "drop 'kind'",
+    ]
+    assert (
+        "from kiss.agents.seas.base.base_sea import BaseSea\n"
+        "from kiss.agents.seas.base.base_sea import WorkerSea\n"
+    ) in quoted.read_text(encoding="utf-8")
+    assert lint_all([quoted]) == []
+    (tool,) = load_sea(quoted).tools([])
+    schema = model(DEFAULT_DECISIONS_MODEL)._function_to_openai_tool(tool)["function"]
+    assert schema["parameters"]["properties"] == {"count": {"type": "integer"}}
+
+    prose = write_sea(tmp_path, DESCRIPTION + '''
+    def settings(self, settings):
+        """Lay the worker's settings over BaseSea's."""
+        return settings | {"kind": "worker"}
+''', "prose")
+    assert [line.split(": ", 1)[1] for line in fix_sea(prose)] == [
+        "import BaseSea -> WorkerSea", "class base BaseSea -> WorkerSea", "drop 'kind'",
+    ]
 
 
 def test_declares_channel_sees_an_import_alias(tmp_path: Path) -> None:

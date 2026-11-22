@@ -4,7 +4,7 @@
 # add your name here
 """Review 1, R2 finding 3: the bounded file reads stay bounded while the file grows.
 
-``_read_end`` (job-log tails and ``until=`` scans) and ``edit_guards._file_ends``
+``_read_end_bytes`` (job-log tails and ``until=`` scans) and ``edit_guards._file_ends``
 (the file a ``cat``/``tail`` showed) measured the file, seeked to a bounded
 window and then read to EOF, so bytes a writer appended in between (a job
 log does grow) were all read.  A real writer appends 2 MB right before the
@@ -21,7 +21,7 @@ from types import FrameType
 from typing import Any
 
 from kiss.agents.sorcar import edit_guards
-from kiss.agents.sorcar.useful_tools import _read_end, _tail_lines
+from kiss.agents.sorcar.useful_tools import _read_end_bytes, _tail_lines
 
 GROWTH = b"x" * 2_000_000 + b"\n"
 
@@ -66,8 +66,8 @@ def _log(path: Path) -> Path:
 def test_read_end_reads_no_more_than_its_window(tmp_path: Path) -> None:
     log = _log(tmp_path / "job.log")
     # The last 1,200 bytes measured are the last 100 whole lines.
-    text = _call_while_growing(log, 1, _read_end, log, 1200)
-    assert text == "".join(f"line {i:06d}\n" for i in range(900, 1000))
+    end = _call_while_growing(log, 1, _read_end_bytes, log, 1200)[1]
+    assert end == b"".join(b"line %06d\n" % i for i in range(900, 1000))
     log = _log(tmp_path / "other.log")
     assert _call_while_growing(log, 1, _tail_lines, log, 2, 1200) == (
         "line 000998\nline 000999\n")

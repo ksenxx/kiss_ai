@@ -28,6 +28,8 @@ const {
   pickMachine,
   withTeardown,
   statusMetrics,
+  recordTimers,
+  fireTimers,
 } = require('./simplify2_harness');
 
 const {makeRunner} = require('./ui_antipattern_harness');
@@ -431,9 +433,9 @@ async function run() {
     assert.strictEqual(again.chatId, 'new-chat-B');
     // Audit 2026-11-08 (W7 F1): the chat is bound to remote-host, whose
     // history holds its persisted tasks: the daemon is asked to fetch
-    // them THERE, whatever machine the user has picked for the next
-    // task; a reply that did not come from there (this daemon's own
-    // empty history) exports nothing, visibly.
+    // them THERE, whatever machine the user has picked for new chats;
+    // a reply that did not come from there (this daemon's own empty
+    // history) exports nothing, visibly.
     assert.strictEqual(
       again.machine,
       'remote-host',
@@ -459,7 +461,13 @@ async function run() {
     const option = win.document.createElement('option');
     option.value = option.textContent = 'other-host';
     select.appendChild(option);
+    // The pick opens a new chat for other-host; the chat left, whose
+    // task still runs, stays open and the user comes back to it.
+    send(win, {type: 'status', running: true, tabId: TAB});
     pickMachine(win, 'other-host');
+    assert.notStrictEqual(win._testApi.getActiveTabId(), TAB, 'a new chat');
+    win._testApi.switchToTab(TAB);
+    assert.strictEqual(select.value, 'remote-host', 'the chat left is unmoved');
     click(win.document.getElementById('share-btn'));
     const picked = wv.posted.filter(m => m.type === 'shareChatTasks').pop();
     assert.notStrictEqual(picked, again, 'Share works again');
@@ -476,6 +484,139 @@ async function run() {
     assert.ok(exported, 'the machine\'s reply exports');
     assert.ok(exported.html.includes('older remote task'), 'with its history');
   });
+
+  await test('2026-11-21 W11 F1: an export in flight takes its own answer, once', () => {
+    // A machine's history is forwarded in the background and can come
+    // after the failsafe gave its export up.
+    const wv = makePage();
+    const win = wv.win;
+    const shareBtn = win.document.getElementById('share-btn');
+    const asked = () => wv.posted.filter(m => m.type === 'shareChatTasks');
+    const exported = () => wv.posted.filter(m => m.type === 'shareChat');
+    const TAB = runSmallTask(wv, 'chat-given-up', 'task-given-up');
+    send(win, {type: 'status', running: false, tabId: TAB});
+    const late = {
+      type: 'share_tasks',
+      tabId: TAB,
+      chatId: 'chat-given-up',
+      tasks: [],
+      truncated: false,
+    };
+    const failsafe = recordTimers(win, 120000);
+    click(shareBtn);
+    fireTimers(failsafe);
+    // With no other export in flight the late answer still writes the page.
+    send(win, late);
+    assert.strictEqual(
+      exported().length,
+      1,
+      'the late answer of the only export',
+    );
+    // Given up once more.  By the time this answer comes the tab shows
+    // another chat, whose own export is in flight: the late answer, a
+    // failure here, is not that export's and ends nothing.
+    click(shareBtn);
+    fireTimers(failsafe);
+    send(win, {type: 'setTaskText', text: 'the chat shown now', tabId: TAB});
+    send(win, {type: 'clear', chat_id: 'chat-now', tabId: TAB});
+    send(win, {
+      type: 'tool_call',
+      name: 'Bash',
+      command: 'printf CHAT_NOW',
+      tabId: TAB,
+      taskId: 'task-now',
+      ts: Date.now(),
+    });
+    click(shareBtn);
+    assert.deepStrictEqual(
+      asked().map(m => m.chatId),
+      ['chat-given-up', 'chat-given-up', 'chat-now'],
+    );
+    send(win, {...late, error: 'box is unreachable'});
+    assert.ok(
+      !shareBtn.classList.contains('share-err'),
+      "BUG - the failure of the export given up on is shown as this one's",
+    );
+    click(shareBtn);
+    assert.strictEqual(
+      asked().length,
+      3,
+      'BUG - the late answer released the button under the export in flight',
+    );
+    const answer = {...late, chatId: 'chat-now'};
+    send(win, answer);
+    assert.strictEqual(exported().length, 2, 'its own answer exports');
+    assert.strictEqual(exported()[1].chatId, 'chat-now');
+    assert.ok(exported()[1].html.includes('CHAT_NOW'), 'the chat on screen');
+    // An export takes one answer: a second finds its page written.
+    send(win, answer);
+    assert.strictEqual(exported().length, 2, 'BUG - the page is written twice');
+  });
+
+  for (const lateError of [true, false]) {
+    const what = lateError ? 'failure' : 'task list';
+    await test(`2026-11-21 W11 F1: the late ${what} of an export given up on is not its retry's`, () => {
+      // The retry asks for the same tab and chat: the daemon echoes
+      // the token of each click, which tells their answers apart.
+      const wv = makePage();
+      const win = wv.win;
+      const shareBtn = win.document.getElementById('share-btn');
+      const asked = () => wv.posted.filter(m => m.type === 'shareChatTasks');
+      const exported = () => wv.posted.filter(m => m.type === 'shareChat');
+      const TAB = readyTabId(wv.posted);
+      send(win, {type: 'tabMachine', machine: 'box', tabId: TAB});
+      runSmallTask(wv, 'chat-retried', 'task-retried');
+      send(win, {type: 'status', running: false, tabId: TAB});
+      const failsafe = recordTimers(win, 120000);
+      click(shareBtn);
+      fireTimers(failsafe);
+      click(shareBtn);
+      const [givenUp, retry] = asked();
+      assert.deepStrictEqual(
+        [retry.tabId, retry.chatId, retry.machine],
+        [givenUp.tabId, 'chat-retried', 'box'],
+      );
+      const answer = (req, fields) => ({
+        type: 'share_tasks',
+        tabId: req.tabId,
+        chatId: req.chatId,
+        token: req.token,
+        machine: req.machine,
+        truncated: false,
+        ...fields,
+      });
+      const old = {task: 'list the files', task_id: 'task-retried', events: []};
+      const since = {task: 'PERSISTED_SINCE', task_id: 'task-new', events: []};
+      send(
+        win,
+        answer(
+          givenUp,
+          lateError ? {tasks: [], error: 'box is unreachable'} : {tasks: [old]},
+        ),
+      );
+      assert.ok(
+        !shareBtn.classList.contains('share-err'),
+        "BUG - the failure of the export given up on is shown as the retry's",
+      );
+      assert.strictEqual(
+        exported().length,
+        0,
+        "BUG - the tasks of the export given up on are written as the retry's",
+      );
+      click(shareBtn);
+      assert.strictEqual(
+        asked().length,
+        2,
+        'BUG - the late answer released the button under the retry',
+      );
+      send(win, answer(retry, {tasks: [old, since]}));
+      assert.strictEqual(exported().length, 1, 'its own answer exports');
+      assert.ok(
+        exported()[0].html.includes('PERSISTED_SINCE'),
+        'with the tasks the retry was answered',
+      );
+    });
+  }
 
   await test('2026-11-04 W5 F2: a queued follow-up echo does not split the task in two', () => {
     // The daemon echoes a follow-up typed into the running task with
@@ -889,7 +1030,7 @@ async function run() {
     );
     assert.ok(
       !nested.classList.contains('user-pinned'),
-      'the fan-out loses its pin, exactly like the live page',
+      'the fan-out loses its pin',
     );
   });
 

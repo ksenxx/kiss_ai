@@ -21,7 +21,7 @@ const {
   clickTab,
   answering,
 } = require('./simplify2_harness');
-const {tabEl} = require('./subagent_tab_helpers');
+const {spawnSubagent, finishFanOut} = require('./subagent_tab_helpers');
 const {key} = require('./ui_antipattern_harness');
 const {typeAndSend} = require('./attachment_helpers');
 
@@ -136,17 +136,17 @@ function testNewQuestionSwitchesTabWithoutToast() {
 // An answer accepted (askUserDone) or the task ending retires the
 // question without a toast too: askClearedOnTaskEnd.test.js.
 
+// A sub-agent that ends while its question waits takes its tab along,
+// and the question with it.
 function testClosingTheAskingTabPostsNothingExtra() {
-  const {win} = makePage();
+  const page = makePage();
+  const {win} = page;
   const api = win._testApi;
-  const askTab = api.getActiveTabId();
-  api.createNewTab();
+  const askTab = spawnSubagent(page, api.getActiveTabId(), 'sub-1', 'sub', 0);
   send(win, {type: 'askUser', question: 'Close me?', tabId: askTab});
   assert.strictEqual(api.getActiveTabId(), askTab);
 
-  const closeBtn = tabEl(win, askTab).querySelector('.chat-tab-close');
-  assert.ok(closeBtn, 'the tab has a close button');
-  closeBtn.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  finishFanOut(win, [askTab]);
   assert.strictEqual(tabRecord(win, askTab), null, 'the tab is gone');
   assert.ok(!answering(win));
   assertNoToast(win, 'after closing the asking tab');

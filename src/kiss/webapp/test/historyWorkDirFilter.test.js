@@ -22,6 +22,10 @@ const {
   finishedSession,
   sendHistory,
   selectFilter,
+  filterRow,
+  filterRowValue,
+  filterOptions,
+  pressFilterOption,
 } = require('./history_helpers');
 
 function makePage() {
@@ -62,11 +66,23 @@ function selectWorkDir(win, value) {
   selectFilter(win, 'hf-workdir', value);
 }
 
+/**
+ * What the closed and the open menu say of the WORKDIR filter: whether
+ * the button marks a filter as on, and the value its row shows.
+ */
+function shown(win) {
+  const button = win.document.getElementById('history-filter-btn');
+  return [
+    button.classList.contains('is-filtered'),
+    filterRowValue(win, 'workdir'),
+  ];
+}
+
 function testOptionsComeFromTheReply() {
   const {win, posted} = makePage();
   const sel = win.document.getElementById('hf-workdir');
   assert.ok(sel && sel.tagName === 'SELECT', 'hf-workdir select must exist');
-  assert.ok(!sel.parentElement.hidden, 'the WORKDIR filter is always shown');
+  assert.ok(!filterRow(win, 'workdir').hidden, 'the WORKDIR filter is always offered');
   assert.deepStrictEqual(options(win), [['', 'All']]);
   sendReply(win, posted, SESSIONS, WORK_DIRS);
   assert.deepStrictEqual(options(win), [
@@ -112,14 +128,15 @@ function testSelectingADirectoryFiltersRowsAndRefetches() {
     'rows carry data-work-dir',
   );
   assert.strictEqual(visibleTitles(win).length, 4, 'All shows every row');
-  const pill = win.document.getElementById('hf-workdir').parentElement;
-  assert.ok(!pill.classList.contains('active'));
+  assert.deepStrictEqual(shown(win), [false, 'All']);
+  assert.deepStrictEqual(filterOptions(win, 'workdir'), ['All', KISS, PAPER]);
   assert.strictEqual(lastGetHistory(posted), undefined, 'no request yet');
 
-  selectWorkDir(win, KISS);
+  pressFilterOption(win, 'workdir', KISS);
   // The rows of other directories vanish at once, before the refetch.
   assert.deepStrictEqual(visibleTitles(win), ['kiss one', 'kiss two']);
-  assert.ok(pill.classList.contains('active'), 'pill takes the accent');
+  // The row names the folder by its last segment.
+  assert.deepStrictEqual(shown(win), [true, 'kiss']);
   // The daemon applies the directory too (a project's rows live beyond
   // the loaded page): the change refetches page one with workDir.
   const request = lastGetHistory(posted);
@@ -133,7 +150,7 @@ function testSelectingADirectoryFiltersRowsAndRefetches() {
 
   selectWorkDir(win, '');
   assert.strictEqual(visibleTitles(win).length, 4, 'All restores every row');
-  assert.ok(!pill.classList.contains('active'));
+  assert.deepStrictEqual(shown(win), [false, 'All']);
   assert.strictEqual(lastGetHistory(posted).workDir, '');
 
   // The directory combines with the other client-side filters (SEA).
@@ -156,11 +173,11 @@ function testSelectionSurvivesRefreshesAndRemoval() {
   selectWorkDir(win, PAPER);
   const requestsBefore = posted.filter(m => m.type === 'getHistory').length;
   // A refresh listing the same directories keeps the selection, the
-  // filter and the accent, and does not refetch.
+  // filter and what the menu shows of it, and does not refetch.
   sendReply(win, posted, SESSIONS, WORK_DIRS);
   const sel = win.document.getElementById('hf-workdir');
   assert.strictEqual(sel.value, PAPER);
-  assert.ok(sel.parentElement.classList.contains('active'));
+  assert.deepStrictEqual(shown(win), [true, 'paper']);
   assert.deepStrictEqual(visibleTitles(win), ['paper one']);
   assert.strictEqual(
     posted.filter(m => m.type === 'getHistory').length,
@@ -171,7 +188,8 @@ function testSelectionSurvivesRefreshesAndRemoval() {
   // deleted) falls back to All and refetches for All.
   sendReply(win, posted, SESSIONS.filter(s => s.work_dir !== PAPER), [KISS]);
   assert.strictEqual(sel.value, '');
-  assert.ok(!sel.parentElement.classList.contains('active'));
+  assert.deepStrictEqual(shown(win), [false, 'All']);
+  assert.deepStrictEqual(filterOptions(win, 'workdir'), ['All', KISS]);
   assert.strictEqual(visibleTitles(win).length, 3, 'all rows after fallback');
   assert.strictEqual(
     lastGetHistory(posted).workDir,
@@ -272,6 +290,7 @@ function testADirectoryResetsAndLocksTheMachineFilter() {
     machine.disabled,
     'machine filter locked while a directory is chosen',
   );
+  assert.ok(filterRow(win, 'machine').disabled, 'its menu row cannot be opened');
   const request = lastGetHistory(posted);
   assert.strictEqual(request.workDir, KISS);
   assert.strictEqual(request.machine, '');
@@ -282,6 +301,7 @@ function testADirectoryResetsAndLocksTheMachineFilter() {
   // Back to every directory: the machine filter is usable again.
   selectWorkDir(win, '');
   assert.ok(!machine.disabled);
+  assert.ok(!filterRow(win, 'machine').disabled);
   win.close();
   console.log('  ok - a chosen directory resets and locks the machine filter');
 }
@@ -331,7 +351,7 @@ function testAnAdoptedDirectoryJoinsTheOptionsAtOnce() {
     'the header follows',
   );
   assert.strictEqual(sel.value, PAPER, 'the selection survives the pick');
-  assert.ok(sel.parentElement.classList.contains('active'));
+  assert.deepStrictEqual(shown(win), [true, 'paper']);
   const requestsAfter = posted.filter(m => m.type === 'getHistory').length;
   assert.strictEqual(
     posted

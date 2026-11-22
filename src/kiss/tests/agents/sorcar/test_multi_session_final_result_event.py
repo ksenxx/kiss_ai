@@ -437,8 +437,8 @@ class TestEmptyTerminalSummaryStillSplittable:
     """When the terminal session returns an empty summary AFTER prior
     continuations, the merged payload MUST still contain the
     ``\\n\\n---\\n\\n`` separator (a "<h3>Final Session</h3>\\n(no summary)"
-    placeholder) so the front-end ``splitMultiSessionSummary`` can split
-    into "Previous Sessions" + "Result" panels."""
+    placeholder) so the front-end ``finalSessionSummary`` can split
+    off the final session and show it alone as the "Result" panel."""
 
     def test_empty_final_summary_uses_placeholder(self) -> None:
         resp_continue = _make_tool_call_response(

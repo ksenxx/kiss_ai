@@ -51,6 +51,10 @@ _KILL_GRACE_SECONDS = 2.0
 _LISTED_PATHS = 10
 _GITLINK = "160000"
 """The tree-entry mode of a submodule (or an embedded repository)."""
+_ATTRIBUTES = ".gitattributes"
+"""The file of a directory by which git converts the files it writes there and below."""
+_CONVERSIONS = ("text", "eol", "crlf", "ident", "filter", "working-tree-encoding")
+"""The attributes of a path by which git converts the file it writes there."""
 _REFS = "refs/kiss-checkpoints"
 """Where the refs that keep saved snapshots from ``git gc`` are, a directory per task."""
 _DIR_FD = (
@@ -303,7 +307,9 @@ def plan_restore(
     left alone: a snapshot holds only the commit they point at (nothing
     of one that has no commit yet), not their files.  A file to write
     back where something neither snapshot holds is in its way (see
-    :func:`_obstacle`) stops the plan.
+    :func:`_obstacle`) stops the plan.  A file the snapshots hold alike
+    is rewritten too where *target*'s attributes make another working
+    file of it (see :func:`_converted_otherwise`).
 
     Args:
         target: The snapshot to return to.
@@ -354,7 +360,44 @@ def plan_restore(
         raise CheckpointError(
             f"nothing was changed: {'; '.join(reasons)}. A rollback replaces only files "
             "a checkpoint holds: move these away first.")
+    rewrite += _converted_otherwise(target, current, {path for _, path in changes}, stop_event)
     return rewrite, missing, delete
+
+
+def _converted_otherwise(
+    target: Snapshot, current: Snapshot, changed: set[str], stop_event: threading.Event | None,
+) -> list[str]:
+    """Return the files the snapshots hold alike that *target*'s attributes convert otherwise.
+
+    A snapshot holds a file as git stores it (its line endings
+    normalised, its clean filter applied), and the working file is that
+    content converted by the attributes of its path: with an
+    :data:`_ATTRIBUTES` file among *changed*, the paths that differ
+    between the snapshots, a file below it can be the same in both and
+    another one in the working tree.  Only regular files are converted
+    (no symbolic link, and a submodule is left alone).
+    """
+    below = tuple(path.removesuffix(_ATTRIBUTES) for path in changed
+                  if path.rpartition("/")[2] == _ATTRIBUTES)
+    if not below:
+        return []
+    root = target.root
+    entries = _git(root, "ls-tree", "-r", "-z", target.tree, stop_event=stop_event).split("\0")
+    # Each entry is "<mode> <type> <sha>\t<path>"; a regular file's mode is 100644 or 100755.
+    alike = [path for meta, _, path in (entry.partition("\t") for entry in entries)
+             if meta.startswith("100") and path not in changed and path.startswith(below)]
+    attributes: list[list[str]] = []
+    with tempfile.TemporaryDirectory(prefix="kiss-rollback-") as scratch:
+        index = Path(scratch) / "index"
+        for tree in (target.tree, current.tree):
+            _git(root, "read-tree", tree, index=index, stop_event=stop_event)
+            # "--cached": by the attribute files of the index (the tree's), not the working ones.
+            out = _git(root, "check-attr", "--cached", "-z", "--stdin", *_CONVERSIONS, index=index,
+                       stdin="".join(f"{path}\0" for path in alike), stop_event=stop_event)
+            attributes.append(out.split("\0"))  # "<path>", "<attribute>", "<value>", ...
+    was, now = attributes
+    otherwise = {path for path, old, new in zip(was[0::3], was[2::3], now[2::3]) if old != new}
+    return [path for path in alike if path in otherwise]
 
 
 def apply_restore(
@@ -373,7 +416,10 @@ def apply_restore(
     (see :func:`_replace`), and empty directories.  Git never writes
     with ``--force``, which clears a directory with all it holds: what
     came into a file's way after the plan (an ignored file a build
-    wrote meanwhile) stays and fails the restore.  A Stop ends the
+    wrote meanwhile) stays and fails the restore.  Git converts a file
+    it writes (a smudge filter, line endings) by the
+    :data:`_ATTRIBUTES` files of the working tree, so *target*'s are
+    put in place before any other file is written.  A Stop ends the
     restore before its next deletion, replacement or git command.
 
     Args:
@@ -399,6 +445,10 @@ def apply_restore(
             index = Path(scratch) / "index"
             _git(root, "read-tree", target.tree, index=index, stop_event=stop_event)
             held = [path for path in rewrite if path not in absent]
+            # The attribute files first, then every file as they have it, themselves
+            # included.  One that could not be moved is gone, and git reads the index's.
+            _replace(root, [path for path in held if path.rpartition("/")[2] == _ATTRIBUTES],
+                     index, stop_event)
             write = missing + _replace(root, held, index, stop_event)
             for path in missing:
                 _remove_empty_directories(root, path, stop_event)

@@ -177,3 +177,87 @@ class TestResultLsListingFileLinks:
             assert [f["path"] for f in opens] == [notes], json.dumps(opens)
         finally:
             context.close()
+
+
+def _deliver(page, *events: dict) -> None:
+    """Deliver *events* of the chat on screen the way the remote shim does."""
+    page.evaluate(
+        """(events) => {
+             const tabId = window._testApi.getActiveTabId();
+             for (const event of events) {
+               window.dispatchEvent(new MessageEvent('message', {data: {...event, tabId}}));
+             }
+           }""",
+        list(events),
+    )
+
+
+class TestPanelFileLinks:
+    """Browser E2E: what is done to a panel later leaves its file links whole.
+
+    As above, the page is the real one in Chromium, and the daemon
+    (over ``wss://``) says which of the paths are files.
+    """
+
+    def test_summary_call_leaves_a_highlighted_blocks_link_alone(self, browser, harness) -> None:
+        """A ``summary`` tool call adopts the panels of the steps it
+        recounts and has the code of its panel highlighted.  A block
+        that is highlighted already is left as it is: its file link is
+        still the element the daemon's verdict made a link of, the
+        daemon is not asked about the file again, and highlight.js is
+        not handed the block a second time (it would say so)."""
+        context, page, sent = _open_page(browser, harness)
+        try:
+            logged: list[str] = []
+            page.on("console", lambda message: logged.append(message.text))
+            sample = str(harness.work_dir / "sample.py")
+            notes = str(harness.work_dir / "notes.md")
+            _deliver(
+                page,
+                {"type": "status", "running": True},
+                {"type": "text_delta", "text": f"see\n\n```\ncat {sample}\n```\n"},
+                {"type": "text_end"},
+            )
+            link = page.wait_for_selector(
+                f"#output pre code[data-highlighted] [data-path={json.dumps(sample)}]",
+                timeout=30000,
+            )
+            _deliver(page, {"type": "tool_call", "name": "summary", "description": "- read it"})
+            assert page.locator("#output .summary-sub pre code[data-highlighted]").count() == 1
+            # The daemon's verdict on a second file: whatever the page asked before is sent by now.
+            _deliver(page, {"type": "text_delta", "text": f"and {notes}"}, {"type": "text_end"})
+            page.wait_for_selector(f"#output [data-path={json.dumps(notes)}]", timeout=30000)
+
+            assert link.evaluate("el => el.isConnected && el.dataset.path") == sample
+            asked = [f for f in sent if f.get("type") == "checkPaths" and sample in f["paths"]]
+            assert len(asked) == 1, json.dumps(asked)
+            assert not [text for text in logged if "previously highlighted" in text]
+        finally:
+            context.close()
+
+    def test_copy_keeps_a_streamed_file_path_on_its_line(self, browser, harness) -> None:
+        """The Copy button of a Bash call's output puts the line the
+        command streamed on the clipboard as it is shown: the path of a
+        file, a link once the daemon has found the file, stays on the
+        line it is in."""
+        context, page, _ = _open_page(browser, harness)
+        try:
+            context.grant_permissions(["clipboard-read", "clipboard-write"])
+            sample = str(harness.work_dir / "sample.py")
+            _deliver(
+                page,
+                {"type": "status", "running": True},
+                {"type": "tool_call", "name": "Bash", "command": "make", "description": "build"},
+                {"type": "system_output", "text": f"Log: {sample} done\n"},
+            )
+            output = "#output .tc-bash > .bash-panel"
+            page.wait_for_selector(
+                f"{output} [data-path={json.dumps(sample)}]", state="attached", timeout=30000,
+            )
+            # The call's panel is folded to its description: the reader unfolds it.
+            page.click("#output .tc-bash.collapsed > .collapse-header")
+            page.click(f"{output} > .panel-copy-btn")
+            page.wait_for_selector(f"{output} > .panel-copy-btn.copied", timeout=30000)
+            assert page.evaluate("() => navigator.clipboard.readText()") == f"Log: {sample} done"
+        finally:
+            context.close()

@@ -73,3 +73,51 @@ def test_hammer_injects_only_inside_call() -> None:
         capture_output=True, text=True, timeout=120, check=False,
     )
     assert proc.returncode == 0, proc.stderr[-3000:]
+
+
+class _MomentaryHolder(threading.Thread):
+    """A thread the hammer does not stop: it holds *lock* until a second after the last call.
+
+    The MCP manager's loop was such a thread in the Linux full run of 2026-11-22 (load
+    average 85): it was still running the ``_forget_orphan`` callbacks the hammered
+    ``_reap_straggler`` had queued, each under ``MCPManager._lock``, when the hammer read
+    that lock once and reported it leaked, though the hammered path never takes it.
+    """
+
+    def __init__(self, lock: threading.RLock) -> None:
+        super().__init__(daemon=True)
+        self.lock = lock
+        self.last_call = time.monotonic()
+
+    def call(self) -> None:
+        """The hammered path: it tells the holder that the hammer still runs.
+
+        The sleep keeps the worker inside *call* for most slices, so the hammer is over in
+        about as many slices as it has interrupts to deliver.
+        """
+        self.last_call = time.monotonic()
+        time.sleep(0.001)
+
+    def run(self) -> None:
+        with self.lock:
+            while time.monotonic() - self.last_call < 1.0:
+                time.sleep(0.01)
+
+
+def run_momentary_holder() -> None:
+    """Child-process body: a lock another thread holds for a moment at the check is no leak."""
+    lock = threading.RLock()
+    holder = _MomentaryHolder(lock)
+    holder.start()
+    hammer(holder.call, {"held for a moment": lock})
+    holder.join(5.0)
+    assert not holder.is_alive()
+
+
+def test_a_lock_another_thread_holds_for_a_moment_is_not_leaked() -> None:
+    """The hammer waits for a lock that a thread it does not stop still holds for a moment."""
+    proc = subprocess.run(
+        [sys.executable, "-c", f"import {__name__} as m; m.run_momentary_holder()"],
+        capture_output=True, text=True, timeout=120, check=False,
+    )
+    assert proc.returncode == 0, proc.stderr[-3000:]

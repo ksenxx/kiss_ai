@@ -37,12 +37,16 @@ import json
 import math
 import os
 import shutil
+import subprocess
+import sys
 import tempfile
 import threading
 import time
 import unittest
 from pathlib import Path
 from typing import Any
+
+import pytest
 
 from kiss.agents.sorcar import cron_agent
 from kiss.agents.sorcar import persistence as th
@@ -51,6 +55,13 @@ from kiss.agents.third_party_agents import auth_status
 from kiss.core.config import kiss_home
 from kiss.server import sidebar_panels
 from kiss.server.web_server import RemoteAccessServer
+from kiss.tests.agents.sorcar.skill_registry_server import (
+    JUDGE,
+    register_judge,
+    serve_registry,
+    skill_md,
+    tarball,
+)
 from kiss.tests.agents.sorcar.test_history_date_range import (
     _redirect,
     _restore,
@@ -67,11 +78,9 @@ def _expire_apps_cache() -> None:
     """Forget the apps-status probe cache so the next call probes again.
 
     Any earlier test in the process that opened a webapp sidebar may have
-    probed within the TTL; resetting only ``_apps_checked_at`` would then
-    serve that cached answer stamped ``checked_at == 0``.
+    probed within the TTL, and its answer would be served.
     """
     sidebar_panels._apps_attempted_at = -math.inf
-    sidebar_panels._apps_checked_at = 0.0
     sidebar_panels._apps_cache = []
 
 
@@ -169,6 +178,23 @@ class TestCronJobsReport(_StoreTestCase):
     def test_empty_store(self) -> None:
         cron_agent.save_jobs([])
         self.assertEqual(sidebar_panels.cron_jobs_report(), [])
+
+
+class TestImportOrder(unittest.TestCase):
+    def test_the_server_modules_import_whichever_comes_first(self) -> None:
+        """``commands`` imports this module (through ``pr_flow``), so
+        this module importing ``commands`` back was a cycle: the daemon,
+        which imports ``kiss.server.server`` first, did not start, while
+        a process that imported ``sidebar_panels`` first did.  Each
+        order runs in an interpreter of its own, where nothing is
+        imported yet."""
+        for first in ("kiss.server.server", "kiss.server.sidebar_panels"):
+            with self.subTest(first=first):
+                done = subprocess.run(
+                    [sys.executable, "-c", f"import {first}, kiss.server.server"],
+                    capture_output=True, text=True, timeout=300, check=False,
+                )
+                self.assertEqual(done.returncode, 0, done.stderr[-2000:])
 
 
 class TestResolveIp(unittest.TestCase):
@@ -403,32 +429,31 @@ class TestAuthStatusProbe(_StoreTestCase):
 class TestAppsStatus(_StoreTestCase):
     def test_probe_subprocess_and_cache(self) -> None:
         self.write_brave_key()
-        apps, checked_at = sidebar_panels.apps_status()
-        self.assertGreater(checked_at, (time.time() - 60) * 1000)
+        apps = sidebar_panels.apps_status()
         by_name = {a["name"]: a for a in apps}
         self.assertIs(by_name["brave"]["authenticated"], True)
         self.assertIs(by_name["slack"]["authenticated"], False)
-        first = sidebar_panels._apps_checked_at
+        first = sidebar_panels._apps_attempted_at
 
         # Within the TTL the cached answer is served, even though the
         # store changed.
         _brave_config().unlink()
-        apps, _ = sidebar_panels.apps_status()
-        self.assertEqual(sidebar_panels._apps_checked_at, first)
+        apps = sidebar_panels.apps_status()
+        self.assertEqual(sidebar_panels._apps_attempted_at, first)
         self.assertIs({a["name"]: a for a in apps}["brave"]["authenticated"], True)
 
         # A refresh probes again and sees the removed key.
-        apps, _ = sidebar_panels.apps_status(refresh=True)
-        self.assertGreater(sidebar_panels._apps_checked_at, first)
+        apps = sidebar_panels.apps_status(refresh=True)
+        self.assertGreater(sidebar_panels._apps_attempted_at, first)
         self.assertIs({a["name"]: a for a in apps}["brave"]["authenticated"], False)
 
         # So does one after the wall clock stepped back, which leaves
-        # that probe an hour in the future: the key that came back shows.
+        # any wall-clock time kept for that probe an hour in the future:
+        # the key that came back shows.
         self.write_brave_key()
         _step_wall_clock_back(3600.0)
-        apps, checked_at = sidebar_panels.apps_status(refresh=True)
+        apps = sidebar_panels.apps_status(refresh=True)
         self.assertIs({a["name"]: a for a in apps}["brave"]["authenticated"], True)
-        self.assertLess(checked_at, (time.time() + 60) * 1000)
 
 
 class TestSidebarPanelCommandsOverLocal(_StoreTestCase):
@@ -463,8 +488,8 @@ class TestSidebarPanelCommandsOverLocal(_StoreTestCase):
         self.tmp.cleanup()
         super().tearDown()
 
-    def _ask(self, *commands: dict[str, Any]) -> list[dict[str, Any]]:
-        """Send *commands* on one connection; return one reply per command."""
+    def _ask(self, *commands: dict[str, Any], replies: int = 0) -> list[dict[str, Any]]:
+        """Send *commands* on one connection; return one reply per command, or *replies* of them."""
 
         async def _talk() -> list[dict[str, Any]]:
             reader, writer = await open_local_connection(self.server)
@@ -473,7 +498,7 @@ class TestSidebarPanelCommandsOverLocal(_StoreTestCase):
                     writer.write(json.dumps(command).encode() + b"\n")
                 await writer.drain()
                 events = []
-                for _ in commands:
+                for _ in range(replies or len(commands)):
                     line = await asyncio.wait_for(reader.readline(), timeout=60)
                     events.append(json.loads(line))
                 return events
@@ -495,9 +520,88 @@ class TestSidebarPanelCommandsOverLocal(_StoreTestCase):
         self.write_brave_key()
         (event,) = self._ask({"type": "getAppsStatus", "refresh": True})
         self.assertEqual(event["type"], "appsStatus")
-        self.assertGreater(sidebar_panels._apps_checked_at, 0)
         by_name = {a["name"]: a for a in event["apps"]}
         self.assertIs(by_name["brave"]["authenticated"], True)
+
+    def test_skills_are_searched_checked_installed_and_listed(self) -> None:
+        """The three Skills commands against a local registry, archive host and judge."""
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            pytest.MonkeyPatch.context() as patch,
+            serve_registry() as registry,
+        ):
+            # A home without skills, and the two hosts and the judge served locally.
+            patch.setenv("HOME", tmp)
+            patch.setenv("KISS_HOME", os.path.join(tmp, "kiss-home"))
+            patch.setenv("KISS_SKILLS_REGISTRY_URL", registry.url)
+            patch.setenv("KISS_SKILLS_ARCHIVE_URL", registry.url)
+            patch.setenv("KISS_SKILL_JUDGE_MODEL", JUDGE)
+            registry.searches["hello"] = [
+                {"source": "acme/tools", "skillId": "hello", "name": "hello", "installs": 7},
+            ]
+            registry.archives["acme/tools"] = tarball(
+                {"skills/hello/SKILL.md": skill_md("hello", "Greet the user by name.\n")},
+            )
+            project = Path(tmp, "project")
+            notes = project / ".claude" / "skills" / "local-notes"
+            notes.mkdir(parents=True)
+            (notes / "SKILL.md").write_bytes(skill_md("local-notes", description="Keeps notes."))
+            here = {"workDir": str(project)}
+            with register_judge(registry):
+                (found,) = self._ask(
+                    {"type": "searchSkills", "query": "hello", "generation": 7, **here},
+                )
+                # An install answers with its outcome, then with the folder's fresh list.
+                done, listed = self._ask(
+                    {"type": "installSkill", "id": "acme/tools/hello", **here}, replies=2,
+                )
+                (again,) = self._ask({"type": "searchSkills", "query": "hello", **here})
+                (taken,) = self._ask({"type": "installSkill", "id": "acme/tools/hello", **here})
+                (elsewhere,) = self._ask({"type": "getSkills", "workDir": tmp})
+                (invalid,) = self._ask({"type": "installSkill"})
+                # Text no URL carries (half a surrogate pair) is answered all the same.
+                (odd,) = self._ask(
+                    {"type": "searchSkills", "query": "\ud800hello", "generation": 9, **here},
+                )
+        row = {
+            "id": "acme/tools/hello", "name": "hello", "source": "acme/tools", "installs": 7,
+            "url": registry.url + "/acme/tools/hello", "installed": False,
+        }
+        # The reply names the search it answers: the page shows the newest one's only.
+        self.assertEqual(
+            found,
+            {"type": "skillSearch", "query": "hello", "results": [row], "error": "",
+             "generation": 7},
+        )
+        self.assertEqual(
+            (done["type"], done["id"], done["status"], done["name"]),
+            ("skillInstall", "acme/tools/hello", "installed", "hello"),
+        )
+        hello = {"name": "hello", "description": "Says hello to the user.", "source": "user"}
+        notes_row = {
+            "name": "local-notes", "description": "Keeps notes.", "source": "claude-project",
+        }
+        # The list names the folder its command did: the page drops another folder's.
+        self.assertEqual(
+            listed,
+            {"type": "skills", "error": "", "skills": [hello, notes_row], "workDir": str(project)},
+        )
+        self.assertIs(again["results"][0]["installed"], True)
+        self.assertEqual(again["generation"], 0, "an unstamped search is answered with 0")
+        self.assertEqual(
+            (taken["status"], taken["message"]),
+            ("error", "A skill named hello is already installed."),
+        )
+        # The list is the named folder's: another one has the user's skill only.
+        self.assertEqual((elsewhere["skills"], elsewhere["workDir"]), ([hello], tmp))
+        # A command without the skill's id is refused before anything is fetched.
+        self.assertEqual(invalid["type"], "error")
+        self.assertIn("id", invalid["text"])
+        self.assertEqual(
+            odd,
+            {"type": "skillSearch", "query": "\ud800hello", "results": [], "error": "",
+             "generation": 9},
+        )
 
     def test_get_spend_report(self) -> None:
         db_dir = tempfile.mkdtemp()
@@ -532,8 +636,10 @@ class TestSidebarPanelCommandsOverLocal(_StoreTestCase):
         try:
             path.unlink(missing_ok=True)
             (empty,) = self._ask({"type": "getRecommendations"})
-            ten = [f"Task {i}" for i in range(10)]
-            assert recommendations_sea.save_recommendations(ten) == "Saved 10 recommendations."
+            twenty = [f"Task {i}" for i in range(20)]
+            assert recommendations_sea.save_recommendations(twenty) == (
+                "Saved 20 recommendations."
+            )
             generated = json.loads(path.read_text())["generatedAt"]
             (event,) = self._ask({"type": "getRecommendations"})
         finally:
@@ -545,7 +651,7 @@ class TestSidebarPanelCommandsOverLocal(_StoreTestCase):
         self.assertEqual(event, {
             "type": "recommendations",
             "generatedAt": int(generated * 1000),
-            "tasks": ten,
+            "tasks": twenty,
         })
 
     def test_an_apps_probe_does_not_hold_up_later_commands(self) -> None:

@@ -163,7 +163,6 @@ function testActiveSubagentTabFetchesItsOwnOffer() {
     description: 'child',
     task_id: 's1',
     isSubagentTab: true,
-    isDone: false,
   });
   win._testApi.switchToTab('tab-b__sub_1');
   assert.strictEqual(win._testApi.getActiveTabId(), 'tab-b__sub_1');

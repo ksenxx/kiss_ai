@@ -36,6 +36,7 @@ import http.server
 import inspect
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -57,6 +58,81 @@ from kiss.server import web_server as ws
 ws._CLOUDFLARED_PIDFILE = Path(sys.argv[1])
 print("publishing", flush=True)
 ws._save_cloudflared_pidfile(222, 2222, "https://successor.trycloudflare.com")
+"""
+
+# Run as pid 1 of a pid namespace of its own, where the next pid can be chosen
+# (``ns_last_pid``).  A tunnel, the ``cloudflared`` named by argv[1], is retired, and as its
+# identity check number *check* returns it ends and a stranger takes its pid: before the
+# SIGTERM, then (the tunnel deaf to SIGTERM) before the SIGKILL.  A tunnel that obeys
+# SIGTERM and is reaped (here by a thread, an adopted one by its parent) ends the wait for
+# it.  Last, a seccomp filter refuses ``pidfd_open`` (system call 434) with ``ENOSYS``, as
+# a kernel older than the call or a sandbox does, and a deaf tunnel is retired by its pid.
+# Prints, for each retirement with a stranger, whether the stranger got the pid and its
+# exit status (``None``: it runs), the obedient tunnel's exit status and whether its
+# retirement returned well within the grace period, and the exit status of the tunnel
+# retired without a pidfd.
+_RETIRE_WHILE_THE_PID_PASSES_ON = """
+import ctypes, json, struct, subprocess, sys, threading, time
+from kiss.server import web_server as ws
+
+UP = "import time; print('up', flush=True); time.sleep(60)"
+DEAF = "import signal; signal.signal(signal.SIGTERM, signal.SIG_IGN); " + UP
+
+
+def started(executable, code):
+    process = subprocess.Popen([executable, "-c", code], stdout=subprocess.PIPE)
+    process.stdout.readline()
+    return process
+
+
+def retire(code, grace_s, check):
+    tunnel = started(sys.argv[1], code)
+    strangers = []
+
+    def pass_the_pid_on(frame, event, arg):
+        nonlocal check
+        if event == "return" and frame.f_code is ws._looks_like_cloudflared.__code__ and arg:
+            check -= 1
+            if not check:
+                sys.setprofile(None)
+                tunnel.kill()
+                tunnel.wait()
+                with open("/proc/sys/kernel/ns_last_pid", "w") as last:
+                    last.write(str(tunnel.pid - 1))
+                strangers.append(started(sys.executable, UP))
+
+    sys.setprofile(pass_the_pid_on)
+    try:
+        ws._terminate_cloudflared_pid(tunnel.pid, grace_s)
+    finally:
+        sys.setprofile(None)
+    stranger = strangers[0]
+    try:
+        status = stranger.wait(timeout=0.5)
+    except subprocess.TimeoutExpired:
+        status = None
+    stranger.kill()
+    stranger.wait()
+    return {"reused": stranger.pid == tunnel.pid, "stranger": status}
+
+
+report = {"SIGTERM": retire(UP, 0, 1), "SIGKILL": retire(DEAF, 0.2, 2)}
+tunnel = started(sys.argv[1], UP)
+threading.Thread(target=tunnel.wait).start()
+began = time.monotonic()
+ws._terminate_cloudflared_pid(tunnel.pid, 20)
+report["obeyed"] = [tunnel.wait(), time.monotonic() - began < 10]
+code = b"".join(struct.pack("HBBI", *instruction) for instruction in (
+    (0x20, 0, 0, 0), (0x15, 0, 1, 434), (0x06, 0, 0, 0x00050000 | 38),
+    (0x06, 0, 0, 0x7FFF0000)))
+filter_ = ctypes.create_string_buffer(code)
+program = ctypes.create_string_buffer(struct.pack("HP", 4, ctypes.addressof(filter_)))
+libc = ctypes.CDLL(None, use_errno=True)
+assert libc.prctl(38, 1, 0, 0, 0) == 0 and libc.prctl(22, 2, program) == 0
+tunnel = started(sys.argv[1], DEAF)
+ws._terminate_cloudflared_pid(tunnel.pid, 0.2)
+report["no pidfd"] = tunnel.wait(timeout=30)
+print(json.dumps(report))
 """
 
 
@@ -194,6 +270,42 @@ class TestAdoptDeclineStalePid(unittest.TestCase):
         record = ws._load_cloudflared_pidfile()
         self.assertEqual(
             (record or {}).get("pid"), 222, f"the successor's record was deleted: {record}",
+        )
+
+    def test_a_stranger_that_took_the_tunnels_pid_after_a_check_is_not_signalled(self) -> None:
+        """V13-F1 (audit 2026-11-21): a signal reaches the process that was checked, or none.
+
+        The identity check and the signal are two steps.  A tunnel that ended in
+        between (an adopted one is reaped at once) and whose pid the kernel handed
+        on had the stranger terminated, or killed after the grace period: the
+        retirement now holds the tunnel by a pidfd from before its first check.
+        Without pidfds the pid is signalled right after its check, as before, and
+        a tunnel is still retired.  Run in a pid namespace of its own, where the
+        next pid can be chosen, so the reuse is forced for sure.  A pid nobody
+        holds any more is not even checked (nor logged as recycled).
+        """
+        unshare = ["unshare", "--user", "--map-root-user", "--pid", "--fork", "--kill-child",
+                   "--mount-proc"]
+        pidfd = [sys.executable, "-c", "import os; os.close(os.pidfd_open(os.getpid()))"]
+        if shutil.which("unshare") is None or subprocess.run(
+                [*unshare, *pidfd], capture_output=True, check=False, timeout=30).returncode != 0:
+            self.skipTest("needs pidfds and a pid namespace of its own (unshare, user namespaces)")
+        gone = subprocess.Popen([sys.executable, "-c", "pass"])
+        gone.wait()
+        with self.assertNoLogs(ws.logger, level="INFO"):
+            ws._terminate_cloudflared_pid(gone.pid, 0)
+        link = Path(self._tmp.name) / "cloudflared"
+        os.symlink(sys.executable, link)
+        done = subprocess.run(
+            [*unshare, sys.executable, "-c", _RETIRE_WHILE_THE_PID_PASSES_ON, str(link)],
+            capture_output=True, text=True, check=False, timeout=120,
+            env={**os.environ, "PYTHONPATH": os.pathsep.join(filter(None, sys.path))},
+        )
+        self.assertEqual(done.returncode, 0, done.stderr)
+        spared = {"reused": True, "stranger": None}
+        self.assertEqual(
+            json.loads(done.stdout),
+            {"SIGTERM": spared, "SIGKILL": spared, "obeyed": [-15, True], "no pidfd": -9},
         )
 
     def _start_retirement_held_at_unlink(

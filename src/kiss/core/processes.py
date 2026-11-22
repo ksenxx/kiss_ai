@@ -28,9 +28,11 @@ import threading
 import time
 from collections.abc import Callable
 from functools import cache, partial
+from types import FrameType
 from typing import IO, Any
 
 from kiss.core.locked import locked_call
+from kiss.core.tool_interrupt import call_without_injection
 
 logger = logging.getLogger(__name__)
 
@@ -128,6 +130,7 @@ SIGKILL: int = getattr(signal, "SIGKILL", signal.SIGTERM)
 _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 _STILL_ACTIVE = 259
 _ERROR_ACCESS_DENIED = 5
+_MAX_WINDOWS_PID = 0xFFFFFFFF  # a Windows pid is a DWORD
 
 
 def _windows_pid_alive(pid: int) -> bool:  # pragma: no cover — Windows-only branch
@@ -161,7 +164,9 @@ def pid_alive(pid: int) -> bool:
         pid: The process id to probe.  ``pid <= 0`` never names a single
             process (``0`` is the caller's own process group, negative
             values address whole groups), so it is reported dead without
-            signalling anything.
+            signalling anything; so is a number beyond the OS's pid
+            type (a corrupt pidfile's), which the probes refuse with
+            an error that is no ``OSError``.
 
     Returns:
         True when the process exists (even if it belongs to another
@@ -170,10 +175,10 @@ def pid_alive(pid: int) -> bool:
     if pid <= 0:
         return False
     if IS_WINDOWS:  # pragma: no cover — Windows-only branch
-        return _windows_pid_alive(pid)
+        return pid <= _MAX_WINDOWS_PID and _windows_pid_alive(pid)
     try:
         os.kill(pid, 0)
-    except ProcessLookupError:
+    except (ProcessLookupError, OverflowError):  # OverflowError: beyond ``pid_t``
         return False
     except PermissionError:
         return True
@@ -194,6 +199,7 @@ _WINDOWS_JOBS: dict[int, int] = {}
 # lock for every later child of the daemon.
 _WINDOWS_JOBS_LOCK = threading.RLock()
 _JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION = 1
+_CREATE_SUSPENDED = 0x00000004
 
 
 def _windows_job_active_processes(job: int) -> int:  # pragma: no cover — Windows-only branch
@@ -226,6 +232,13 @@ def _windows_job_active_processes(job: int) -> int:  # pragma: no cover — Wind
 
 
 def _windows_enrol_in_job(proc: subprocess.Popen[Any]) -> None:  # pragma: no cover — Windows-only
+    """Put the suspended child *proc* in a Job Object of its own, registered under its pid.
+
+    A child whose job could not be created, or that could not be put in
+    it, runs without one (a kill of its group then goes through
+    ``taskkill``).  The job's handle is closed on the way out unless it
+    was registered, whatever is raised once it exists.
+    """
     import ctypes
 
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
@@ -233,14 +246,43 @@ def _windows_enrol_in_job(proc: subprocess.Popen[Any]) -> None:  # pragma: no co
     handle = getattr(proc, "_handle", None)
     if handle is None:
         return
-    job = kernel32.CreateJobObjectW(None, None)
-    if not job:
+    jobs: list[int | None] = []  # the new job's handle (None: not created), until registered
+    try:
+        # One C call creates and stores it, so that an exception raised as that
+        # call returns finds it in the list (see :func:`_env_marked_pids`).
+        jobs.extend(map(kernel32.CreateJobObjectW, (None,), (None,)))
+        job = jobs[0]
+        if job and kernel32.AssignProcessToJobObject(
+            ctypes.c_void_p(job), ctypes.c_void_p(int(handle))
+        ):
+            locked_call(_WINDOWS_JOBS_LOCK, _windows_record_job, kernel32, proc.pid, job)
+            jobs.clear()
+    finally:
+        # Still listed: not registered, unless what was raised came after
+        # the registration.  A registered job is the registry's to close.
+        for job in jobs:
+            if job and _WINDOWS_JOBS.get(proc.pid) != job:
+                kernel32.CloseHandle(ctypes.c_void_p(job))
+
+
+def _windows_resume(proc: subprocess.Popen[Any]) -> None:  # pragma: no cover — Windows-only
+    """Let the child that :func:`start_process_group` created suspended run.
+
+    ``Popen`` has closed the handle of the child's one thread, so the
+    process is resumed as a whole (``NtResumeProcess``).
+
+    Raises:
+        OSError: The child is alive and could not be resumed: it would never run.
+    """
+    import ctypes
+
+    handle = getattr(proc, "_handle", None)
+    if handle is None:
         return
-    process_handle = ctypes.c_void_p(int(handle))
-    if not kernel32.AssignProcessToJobObject(ctypes.c_void_p(job), process_handle):
-        kernel32.CloseHandle(ctypes.c_void_p(job))
-        return
-    locked_call(_WINDOWS_JOBS_LOCK, _windows_record_job, kernel32, proc.pid, job)
+    ntdll = ctypes.WinDLL("ntdll")  # type: ignore[attr-defined]
+    status = ntdll.NtResumeProcess(ctypes.c_void_p(int(handle)))
+    if status < 0 and proc.poll() is None:
+        raise OSError(f"could not resume pid {proc.pid} (NTSTATUS {status & 0xFFFFFFFF:#010x})")
 
 
 def _windows_record_job(kernel32: Any, pid: int, job: int) -> None:  # pragma: no cover — Windows
@@ -271,9 +313,11 @@ def popen_process_group(*args: Any, **kwargs: Any) -> subprocess.Popen[Any]:
 
     ``subprocess.Popen`` with the child in its own group
     (``start_new_session=True`` on POSIX, ``CREATE_NEW_PROCESS_GROUP`` on
-    Windows); on Windows the child is additionally placed in its own Job
-    Object right after it starts (descendants inherit the job
-    automatically).
+    Windows); on Windows the child is additionally created suspended,
+    placed in its own Job Object and only then resumed, so every
+    descendant it starts is in the job (a child that ran before it was
+    in the job could start one outside it, which no kill of the job
+    reached).
 
     A caller whose cleanup must also cover an exception raised as this
     call itself returns to it (a Stop injected into its thread) makes
@@ -308,12 +352,22 @@ def start_process_group(proc: subprocess.Popen[Any], *args: Any, **kwargs: Any) 
     ``Popen.__init__`` has the same gap inside, where no handler
     reaches: it stores the pid in the bytecode after the call that
     forks, and that call blocks until the child execs.  An exception
-    set meanwhile was raised before the pid existed anywhere.  This
-    thread is therefore marked in ``_spawning`` for the length of
-    ``Popen.__init__``: the Stop's injector leaves the exception for a
-    marked thread with the mark (:func:`inject_outside_spawn`), and
-    this thread sets it itself once ``Popen.__init__`` has returned, so
-    it is raised here, where the child is killed.
+    set meanwhile was raised before the pid existed anywhere.  The
+    spawn therefore runs through
+    :func:`~kiss.core.tool_interrupt.call_without_injection`: the
+    Stop's injector leaves the exception with this thread, which
+    raises it once ``Popen.__init__`` has returned, here, where the
+    child is killed.  On Windows the hold also covers the child's
+    enrolment in its Job Object: an exception raised in there lost the
+    handle of a job that no registry held yet.
+
+    The hold keeps back the Stop alone.  The ``KeyboardInterrupt`` of a
+    ``SIGINT`` is raised by the signal's handler, which Python calls on
+    the main thread at its next check, in the same gap as anywhere
+    else (on Windows, where the child is created suspended, the child
+    it lost never ran and never ended).  On that thread the handler is
+    therefore kept from running for the length of the spawn and called
+    once it has ended (:func:`_spawn_holding_sigint`).
 
     Args:
         proc: ``object.__new__(subprocess.Popen)``, not yet initialised.
@@ -321,26 +375,22 @@ def start_process_group(proc: subprocess.Popen[Any], *args: Any, **kwargs: Any) 
         **kwargs: Keyword arguments for :class:`subprocess.Popen`.
     """
     if IS_WINDOWS:  # pragma: no cover — Windows-only branch
-        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
+        # Suspended until it is in its Job Object (see :func:`popen_process_group`).
+        kwargs["creationflags"] = (
+            subprocess.CREATE_NEW_PROCESS_GROUP | _CREATE_SUSPENDED  # type: ignore[attr-defined]
+        )
     else:
         kwargs["start_new_session"] = True
-    ident = threading.get_ident()
-    held: list[Callable[[], int] | None] = [None]
+    # Python calls signal handlers on the main thread only.
+    on_main = threading.get_ident() == threading.main_thread().ident
+    sigint = signal.getsignal(signal.SIGINT) if on_main else None
     try:
-        try:
-            locked_call(_spawning_lock, _spawning.__setitem__, ident, held)
-            subprocess.Popen.__init__(proc, *args, **kwargs)
-        finally:
-            # A C call, first in the block: no check point precedes it,
-            # so the mark never outlives the spawn.  An injector that
-            # found the mark fills ``held`` before it releases the
-            # lock, so the take under that lock misses nothing.
-            _spawning.pop(ident, None)
-            inject = locked_call(_spawning_lock, held.pop)
-            if inject is not None:
-                inject()  # raised as this call returns, the child in hand
-        if IS_WINDOWS:  # pragma: no cover — Windows-only branch
-            _windows_enrol_in_job(proc)
+        # A Stop held back for the spawn is raised as this call ends,
+        # inside the ``try``: the child in hand.
+        if callable(sigint):
+            call_without_injection(_spawn_holding_sigint, proc, sigint, args, kwargs)
+        else:
+            call_without_injection(_spawn, proc, args, kwargs)
     except BaseException:
         if getattr(proc, "pid", None) is not None and proc.returncode is None:
             kill_process_tree(proc)
@@ -354,42 +404,70 @@ def start_process_group(proc: subprocess.Popen[Any], *args: Any, **kwargs: Any) 
         raise
 
 
-#: Ident of each thread inside ``Popen.__init__`` (:func:`start_process_group`) ->
-#: its one-item list: the injection held back for that spawn, or None.
-_spawning: dict[int, list[Callable[[], int] | None]] = {}
-_spawning_lock = threading.RLock()
+def _spawn(proc: subprocess.Popen[Any], args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
+    """Start the child of *proc*; on Windows, put it in its Job Object and let it run."""
+    subprocess.Popen.__init__(proc, *args, **kwargs)
+    if IS_WINDOWS:  # pragma: no cover — Windows-only branch
+        _windows_enrol_in_job(proc)
+        _windows_resume(proc)
 
 
-def inject_outside_spawn(tid: int, inject: Callable[[], int]) -> int:
-    """Call *inject*, which sets an asynchronous exception for thread *tid*, outside a spawn.
+def _spawn_holding_sigint(
+    proc: subprocess.Popen[Any],
+    handler: Callable[[int, FrameType | None], Any],
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+) -> None:
+    """:func:`_spawn` on the main thread, a ``SIGINT`` that arrives meanwhile handled as it ends.
 
-    An exception set while *tid* is inside ``Popen.__init__`` is raised
-    there, possibly between the fork and the statement that stores the
-    child's pid, and then nobody can kill or reap that child (see
-    :func:`start_process_group`).  For a thread that is spawning,
-    *inject* is therefore not called here: it is left to that thread,
-    which calls it as its spawn ends, however long the spawn takes (a
-    blocked fork could not be interrupted anyway).  This call does not
-    wait for the spawn.  One left for a spawn replaces one left earlier,
-    as an exception set for a thread replaces one it has not raised yet.
-
-    Args:
-        tid: The target thread's ``ident``.
-        inject: Sets the exception and returns the number of threads it was set in.
-
-    Returns:
-        What *inject* returned, or ``1`` when it was left to the spawning thread.
+    *handler*, the signal's handler, is replaced for the length of the
+    spawn by one that only notes the signal (:class:`_HeldSigint`), and
+    called for a noted one once the spawn has ended: what it raises
+    (``KeyboardInterrupt``, unless the program installed another
+    handler) then finds the child where the caller can kill it, however
+    long the spawn took.  ``SIGINT`` alone is held: it is the one signal
+    whose handler Python installs by itself, and that handler raises.
     """
-    return locked_call(_spawning_lock, _inject_or_hold, tid, inject)
+    held = _HeldSigint(handler)
+    try:
+        signal.signal(signal.SIGINT, held)
+        _spawn(proc, args, kwargs)
+    finally:
+        # A store, first in the block: no check point precedes it, so the
+        # hold never outlives the spawn, whatever keeps *handler* from being
+        # put back.  (``signal.signal`` runs Python code of its own and the
+        # handlers of pending signals before it installs anything: what one
+        # of them raises ends it there.  Once more, then.)
+        held.holding = False
+        try:
+            signal.signal(signal.SIGINT, handler)
+        except BaseException:
+            signal.signal(signal.SIGINT, handler)
+            raise
+        finally:
+            if held.noted:  # taken out first: the frame it holds refers back to this one
+                handler(*held.noted.popitem())
 
 
-def _inject_or_hold(tid: int, inject: Callable[[], int]) -> int:
-    """Under ``_spawning_lock``: leave *inject* to the spawn thread *tid* is in, else call it."""
-    held = _spawning.get(tid)
-    if held is None:
-        return inject()
-    held[0] = inject
-    return 1
+class _HeldSigint:
+    """The ``SIGINT`` handler for the length of a spawn: it notes the signal instead of handling it.
+
+    Once ``holding`` is cleared it hands the signal on to the handler it
+    stands in for, which so loses nothing where this one is still
+    installed (see :func:`_spawn_holding_sigint`).
+    """
+
+    def __init__(self, handler: Callable[[int, FrameType | None], Any]) -> None:
+        self.handler = handler
+        self.holding = True
+        self.noted: dict[int, FrameType | None] = {}  # the signal -> the frame it interrupted
+
+    def __call__(self, signum: int, frame: FrameType | None) -> None:
+        """Note the signal while the spawn lasts; hand it on afterwards."""
+        if self.holding:
+            self.noted[signum] = frame
+        else:
+            self.handler(signum, frame)
 
 
 def kill_process_group(pid: int, sig: int = signal.SIGTERM) -> None:
@@ -417,7 +495,8 @@ def kill_process_group(pid: int, sig: int = signal.SIGTERM) -> None:
     Raises:
         ProcessLookupError: When the group no longer exists, or *pid* is
             not a positive pid (``os.killpg(0, ...)`` would signal the
-            caller's own group, i.e. the daemon and every test runner).
+            caller's own group, i.e. the daemon and every test runner)
+            or is beyond the OS's pid type (see :func:`pid_alive`).
         OSError: When Windows could not terminate the tree (``taskkill``
             missing, timed out, or refused) and *pid* is still alive, so
             callers fall back to ``proc.kill()`` exactly as after a
@@ -455,7 +534,10 @@ def kill_process_group(pid: int, sig: int = signal.SIGTERM) -> None:
                 f"{result.stderr.decode(errors='replace').strip()}",
             )
         return
-    os.killpg(pid, sig)
+    try:
+        os.killpg(pid, sig)
+    except OverflowError:
+        raise ProcessLookupError(pid) from None
 
 
 def kill_process_tree(proc: subprocess.Popen[Any]) -> None:
@@ -644,27 +726,33 @@ def _env_marked_pids(mark: str) -> list[int]:
         for name in os.listdir("/proc"):
             if not name.isdigit() or int(name) == own:
                 continue
-            pid, pidfd = int(name), -1
-            if pidfd_open is not None:
-                try:
-                    pidfd = pidfd_open(pid)
-                except ProcessLookupError:  # it ended meanwhile
-                    continue
-                except OSError:  # no pidfd: the pid is signalled below
-                    pass
+            pid = int(name)
+            pidfds: list[int] = []  # the pidfd of *pid* once it is open, closed below
             try:
+                if pidfd_open is not None:
+                    try:
+                        # Opened and stored by one C call (``extend`` runs the ``map``): no
+                        # bytecode runs while the descriptor is in no list.  A Stop injected
+                        # into this thread is raised between two bytecodes; raised as
+                        # ``pidfd = pidfd_open(pid)`` returned, it found the descriptor
+                        # bound to no name, and it stayed open for the life of the daemon.
+                        pidfds.extend(map(pidfd_open, (pid,)))
+                    except ProcessLookupError:  # it ended meanwhile
+                        continue
+                    except OSError:  # no pidfd: the pid is signalled below
+                        pass
                 with open(f"/proc/{name}/environ", "rb") as environ:
                     entries = environ.read().split(b"\0")
                 if any(e == entry or e.startswith(entry + b"/") for e in entries):
                     pids.append(pid)
-                    if pidfd >= 0 and sys.platform == "linux":
-                        signal.pidfd_send_signal(pidfd, SIGKILL)
+                    if pidfds and sys.platform == "linux":
+                        signal.pidfd_send_signal(pidfds[0], SIGKILL)
                     else:
                         os.kill(pid, SIGKILL)
             except OSError:  # another user's process, or one that ended meanwhile
                 continue
             finally:
-                if pidfd >= 0:
+                for pidfd in pidfds:
                     os.close(pidfd)
         return pids
     for pid in _env_marked_pids_ps(mark, own):  # pragma: no cover — no /proc: macOS, BSD
@@ -992,8 +1080,8 @@ def exit_status_unreaped(proc: subprocess.Popen[Any]) -> int | None:
         return proc.poll()
     try:
         info = waitid_exited(proc.pid)
-    except ChildProcessError:  # pragma: no cover — reaped by another thread meanwhile
-        return proc.returncode
+    except ChildProcessError:  # reaped by another thread, or by the kernel (SIGCHLD ignored)
+        return proc.poll()
     if info is None:
         return None
     return info.si_status if info.si_code == os.CLD_EXITED else -info.si_status
@@ -1050,18 +1138,20 @@ def signal_unreaped_child(pid: int, sig: int) -> bool:
             pidfds (``EMFILE`` and the like); nothing was signalled.
     """
     pidfd_open = getattr(os, "pidfd_open", None)
-    pidfd = -1
-    if pidfd_open is not None:
-        try:
-            pidfd = pidfd_open(pid)
-        except ProcessLookupError:
-            return False
-        except OSError as exc:
-            # Without pidfds the pid is signalled below.  Not logged: callers signal under a
-            # lock of their own (the browser watchdog's), which a blocked log sink would hold.
-            if exc.errno not in (errno.ENOSYS, errno.EPERM):
-                raise
+    pidfds: list[int] = []  # the pidfd once it is open, closed below
     try:
+        if pidfd_open is not None:
+            try:
+                # One C call opens and stores it, so that a Stop raised as that call
+                # returns finds it in the list (see :func:`_env_marked_pids`).
+                pidfds.extend(map(pidfd_open, (pid,)))
+            except ProcessLookupError:
+                return False
+            except OSError as exc:
+                # Without pidfds the pid is signalled below.  Not logged: callers signal under a
+                # lock of their own (the browser watchdog's), which a blocked log sink would hold.
+                if exc.errno not in (errno.ENOSYS, errno.EPERM):
+                    raise
         try:
             exited = waitid_exited(pid)
         except ChildProcessError:
@@ -1069,15 +1159,15 @@ def signal_unreaped_child(pid: int, sig: int) -> bool:
         if exited is not None:
             return True
         try:
-            if pidfd >= 0 and sys.platform == "linux":
-                signal.pidfd_send_signal(pidfd, sig)
+            if pidfds and sys.platform == "linux":
+                signal.pidfd_send_signal(pidfds[0], sig)
             else:
                 os.kill(pid, sig)
         except ProcessLookupError:  # pragma: no cover — reaped between the check and the signal
             return False
         return True
     finally:
-        if pidfd >= 0:
+        for pidfd in pidfds:
             os.close(pidfd)
 
 
@@ -1280,8 +1370,8 @@ def run_capped(
                 args=(proc.stderr, out, keep_stderr, give_up, drain_stop),
                 daemon=True,
             )
-            err_thread.start()
-        timer.start()
+            call_without_injection(err_thread.start)
+        call_without_injection(timer.start)
         while size < limit:
             chunk = _read_some(stdout, min(65536, limit - size), give_up)
             if not chunk:
@@ -1419,7 +1509,7 @@ def process_identity(pid: int) -> str | None:
         could not be inspected.
     """
     if IS_WINDOWS:  # pragma: no cover — Windows-only branch
-        return _windows_process_identity(pid)
+        return _windows_process_identity(pid) if pid <= _MAX_WINDOWS_PID else None
     try:
         result = subprocess.run(
             ["ps", "-ww", "-p", str(pid), "-o", "lstart=", "-o", "command="],
@@ -1456,7 +1546,7 @@ def pin_process(pid: int) -> int | None:
         or cannot be opened.
     """
     if IS_WINDOWS:  # pragma: no cover — Windows-only branch
-        return _windows_pin_process(pid)
+        return _windows_pin_process(pid) if pid <= _MAX_WINDOWS_PID else None
     return None
 
 

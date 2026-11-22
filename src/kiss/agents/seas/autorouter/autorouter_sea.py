@@ -71,6 +71,7 @@ from kiss.core.config import kiss_home
 from kiss.core.file_lock import lock_exclusive, unlock
 from kiss.core.models.model_info import MODEL_INFO, get_available_models, get_default_model
 from kiss.core.utils import seed_file_atomically
+from kiss.scripts.sync_kiss_notes import SyncError, read_note
 from kiss.server.agent_state import current_agent
 
 RSI7D_SEA_RELATIVE = "src/kiss/agents/seas/rsi7d/rsi7d_sea.py"
@@ -303,10 +304,15 @@ def observed_evidence() -> str:
     machine-merged file cannot inflate every prompt.  Evaluated when this
     module loads, which the daemon does for every task the SEA runs, so a
     refreshed file reaches the next task's prompt.
+
+    The file is read under its lock (``sync_kiss_notes.read_note``), which
+    a notes sync holds while it rewrites the file in place: it is never
+    seen half rewritten.  A file that is not UTF-8, is no regular file or
+    stays locked is unreadable.
     """
     try:
-        text = evidence_path().read_text(encoding="utf-8").strip()
-    except OSError:
+        text = (read_note(str(evidence_path())) or "").strip()
+    except (OSError, UnicodeError, SyncError):
         text = ""
     if len(text) > EVIDENCE_MAX_CHARS:
         head = text[: EVIDENCE_MAX_CHARS + 1]  # a break right at the cap keeps its line

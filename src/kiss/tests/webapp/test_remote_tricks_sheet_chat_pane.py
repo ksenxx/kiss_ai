@@ -6,8 +6,8 @@
 #   kiss.tests.server.test_explorer_scm_commands are used by param name)
 """End-to-end browser tests for three remote page details.
 
-* The Inject promptlet sheet (``#tricks-panel``, opened by the
-  composer's "Inject promptlet" button) rises INSIDE the chat pane: it
+* The Inject promptlet sheet (``#tricks-panel``, opened by "Inject
+  promptlet" in the composer's "..." menu) rises INSIDE the chat pane: it
   and its scrim stop at the docked history panel on the left and at
   the docked task-info panel (or, with a file open, the content pane)
   on the right, instead of spanning the whole window.  The Working
@@ -69,14 +69,15 @@ def _rect(page, selector: str) -> dict:
     return dict(page.evaluate(_RECT_JS, selector))
 
 
-def _open_sheet(page, button: str, sheet: str) -> None:
-    """Press *button* and wait for *sheet* to finish its slide in."""
-    page.locator(button).click()
-    page.wait_for_selector(f"{sheet}.open", state="attached", timeout=5000)
+def _open_promptlet_sheet(page) -> None:
+    """Pick "Inject promptlet" in the "..." menu and wait for the sheet
+    to finish its slide in."""
+    page.locator("#more-btn").click()
+    page.locator("#tricks-btn").click()
+    page.wait_for_selector("#tricks-panel.open", state="attached", timeout=5000)
     page.wait_for_function(
-        "sel => Math.abs(document.querySelector(sel).getBoundingClientRect()"
+        "() => Math.abs(document.getElementById('tricks-panel').getBoundingClientRect()"
         ".bottom - document.getElementById('app').getBoundingClientRect().bottom) < 1",
-        arg=sheet,
         timeout=5000,
     )
 
@@ -110,7 +111,7 @@ def test_promptlet_sheet_stays_inside_the_chat_beside_the_docked_panels(browser,
     try:
         page.wait_for_selector("#meta-panel", state="visible")
         panel = _rect(page, "#meta-panel")
-        _open_sheet(page, "#tricks-btn", "#tricks-panel")
+        _open_promptlet_sheet(page)
         _assert_inside_chat_pane(page, "#tricks-panel", "#tricks-overlay", panel["left"])
         # The scrim stops at the chat pane, so the task-info panel is
         # neither dimmed nor shielded: its refresh button still works.
@@ -133,7 +134,7 @@ def test_promptlet_sheet_stays_in_the_chat_pane_beside_an_open_file(browser, har
     try:
         _open_file(page)
         handle = _rect(page, "#pane-resizer")
-        _open_sheet(page, "#tricks-btn", "#tricks-panel")
+        _open_promptlet_sheet(page)
         _assert_inside_chat_pane(page, "#tricks-panel", "#tricks-overlay", handle["left"])
         # The content pane is not under the scrim: a click there still
         # lands on the pane (it slides the task-info panel away, as
@@ -175,11 +176,13 @@ def test_closed_drawers_are_out_of_the_tab_order(browser, harness):
     context, page, _ = _open_page_mobile(browser, harness)
     try:
         assert _closed_drawer_tab_stops(page) == []
-        for opener, field, closer in (
-            ("#menu-btn", "history-search", "#sidebar-close"),
-            ("#tricks-btn", "tricks-search", "#tricks-panel-close"),
+        # The promptlet sheet is opened from the "..." menu.
+        for openers, field, closer in (
+            (("#menu-btn",), "history-search", "#sidebar-close"),
+            (("#more-btn", "#tricks-btn"), "tricks-search", "#tricks-panel-close"),
         ):
-            page.locator(opener).click()
+            for opener in openers:
+                page.locator(opener).click()
             page.locator("#" + field).focus()
             assert page.evaluate("document.activeElement.id") == field
             page.locator(closer).click()

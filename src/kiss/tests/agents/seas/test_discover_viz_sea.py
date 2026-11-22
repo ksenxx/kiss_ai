@@ -345,7 +345,7 @@ def test_a_run_is_found_by_id_prefix_or_as_the_newest_and_a_refusal_names_the_ru
     tmp_path: Path,
 ) -> None:
     """`list`, no id, an id and its first characters all resolve; anything else is refused
-    with the runs to choose from, and a task that ran no loop with its /discover sub-tasks."""
+    with the runs to choose from; a task that dispatched a /discover run stands for it."""
     out = str(tmp_path / "evidence.md")
     assert discover_trajectory("list", "") == "The history holds no /discover run."
     assert discover_trajectory("", out) == (
@@ -354,7 +354,9 @@ def test_a_run_is_found_by_id_prefix_or_as_the_newest_and_a_refusal_names_the_ru
     events, discover = _toy_events("/gone/tmp/run"), trajectory.DISCOVER_SEA
     old = persist_task("old run", events, None, sea=discover, timestamp=1e6)
     new = persist_task("new run", events, "none", success=False, sea=discover, timestamp=3e6)
-    plain = persist_task("no loop", [_call("Bash", command="ls"), _result()], "done", timestamp=4e6)
+    # The parent only looked for the ledgers its /discover sub-task wrote, as a14cda8b did.
+    look = [_call("Bash", command="find / -name pareto.md"), _result()]
+    plain = persist_task("no loop", look, "done", timestamp=4e6)
     child = persist_task(
         "sub run", events, "ok", success=True, sea=discover, parent_task_id=plain, timestamp=2e6
     )
@@ -380,9 +382,11 @@ def test_a_run_is_found_by_id_prefix_or_as_the_newest_and_a_refusal_names_the_ru
     assert discover_trajectory("abcdef011", out) == (
         f"Error: task abcdef01{'1' * 24} {no_loop}\n{listing}"
     )
-    assert discover_trajectory(plain, out) == (
-        f"Error: task {plain} {no_loop}\nIts /discover sub-tasks:\n{lines[2]}"
+    assert discover_trajectory(plain, out).startswith(
+        f"Task {plain} is not a /discover run; it dispatched these /discover runs:\n"
+        f"{lines[2]}\nAnimating the newest, {child}.\n/discover run {child}: evidence written"
     )
+    assert "find / -name" not in Path(out).read_text(encoding="utf-8")
     assert discover_trajectory(new, "evidence.md") == (
         "Error: pass absolute paths, not 'evidence.md'."
     )
@@ -778,15 +782,12 @@ def test_the_animation_plays_by_itself_and_every_control_moves_it(
     frame = "window.discoverViz.frame"
     state = "[window.discoverViz.frame, window.discoverViz.playing]"
     page.clock.install(time=0)
+    # Frozen before the page arms its first timer: only run_for moves the page's time,
+    # however long the browser and this process take between two steps.
+    page.clock.pause_at(3600)
     page.goto(toy_page.as_uri())
     assert page.evaluate(state) == [0, True] and page.inner_text("#play") == "Pause"
     assert page.evaluate("window.discoverViz.frameCount") == 15
-    # Freeze the page's clock an hour on: the one timer that was due has fired, and from
-    # here on only run_for moves the time.  Play again from the first frame.
-    page.clock.pause_at(3600)
-    assert page.evaluate(state) == [1, True]
-    page.click("#prev")
-    page.click("#play")
     for wait, expected in ((2599, 0), (1, 1), (4199, 1), (1, 2)):
         page.clock.run_for(wait)
         assert page.evaluate(frame) == expected

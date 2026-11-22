@@ -7,6 +7,8 @@
 import hashlib
 import json
 import sys
+import threading
+import time
 from pathlib import Path
 from types import FrameType
 
@@ -38,12 +40,16 @@ def pg_family(tools: MemoryTools) -> None:
 
 
 def set_stamp(memory: MemoryDir, name: str, key: str, value: str) -> None:
-    """Rewrite frontmatter line *key* of page *name* by hand, as an editor would."""
+    """Rewrite frontmatter line *key* of page *name* by hand, as an editor would.
+
+    That line alone: every other byte stays, the line endings too (Windows would
+    write each of them as CRLF).
+    """
     path = memory.page_path(name)
     text = path.read_text(encoding="utf-8")
     start = text.index(f"{key}:")
     path.write_text(text[:start] + f"{key}: {value!r}" + text[text.index("\n", start):],
-                    encoding="utf-8")
+                    encoding="utf-8", newline="\n")
 
 
 class _DeletesAfterListing:
@@ -68,6 +74,54 @@ class _StopsAtDelete:
     def __call__(self, frame: FrameType, event: str, arg: object) -> None:
         if event == "call" and frame.f_code is MemoryDir.delete.__code__:
             raise KeyboardInterrupt
+
+
+class _StopsAfterWrite:
+    """Profile hook: a Stop that lands as the write of a page of *memory* returns.
+
+    The merged page is published, and the merge has not run a line since.
+    """
+
+    def __init__(self, memory: MemoryDir) -> None:
+        self.memory = memory
+
+    def __call__(self, frame: FrameType, event: str, arg: object) -> None:
+        if (event == "return" and frame.f_code is MemoryDir.write.__code__
+                and frame.f_locals["self"] is self.memory):
+            raise KeyboardInterrupt
+
+
+class _RestoresDuringMerge:
+    """Profile hook of a merge: another thread restores it as it starts to delete the older members.
+
+    The merge goes on once the restore has returned, or sleeps: between
+    two tries for a lock that the merge holds.
+    """
+
+    def __init__(self, memory: MemoryDir) -> None:
+        self.memory = memory
+        self.settled = threading.Event()
+        self.thread = threading.Thread(target=self._restore)
+        self.result: tuple[list[str], dict[str, str]] = ([], {})
+
+    def __call__(self, frame: FrameType, event: str, arg: object) -> None:
+        if (event == "call" and frame.f_code is MemoryDir.delete.__code__
+                and self.thread.ident is None):
+            self.thread.start()
+            assert self.settled.wait(60)
+
+    def _restore(self) -> None:
+        sys.setprofile(self._sleeps)
+        try:
+            (record,) = consolidate.merges(self.memory)
+            self.result = consolidate.restore(self.memory, record["id"])
+        finally:
+            sys.setprofile(None)
+            self.settled.set()
+
+    def _sleeps(self, frame: FrameType, event: str, arg: object) -> None:
+        if event == "c_call" and arg is time.sleep:
+            self.settled.set()
 
 
 UNTOUCHED = "a page of this name exists that the merge did not write"
@@ -236,13 +290,16 @@ def test_a_merge_never_destroys_what_another_task_wrote_meanwhile(tmp_path: Path
     assert memory.read("pg-d").body == "merged\nAdded by hand: the pager rota is weekly.\n"
 
 
-def test_a_merge_stopped_halfway_can_still_be_undone(tmp_path: Path) -> None:
+@pytest.mark.parametrize("recorded", [True, False])
+def test_a_merge_stopped_halfway_can_still_be_undone(tmp_path: Path, recorded: bool) -> None:
+    """Stopped as it starts to delete, or as the write of the merged page returns,
+    before the merge has recorded what it wrote (*recorded* false)."""
     tools = make_tools(tmp_path / "memory")
     memory = tools.memory
     pg_family(tools)
     (family,) = consolidate.families(tools.index)
     previous = sys.getprofile()
-    sys.setprofile(_StopsAtDelete())
+    sys.setprofile(_StopsAtDelete() if recorded else _StopsAfterWrite(memory))
     try:
         with pytest.raises(KeyboardInterrupt):
             consolidate.commit(memory, family, "merged", "", "")
@@ -250,12 +307,56 @@ def test_a_merge_stopped_halfway_can_still_be_undone(tmp_path: Path) -> None:
         sys.setprofile(previous)
     # The merged page is written, no member is deleted, and the archive is complete.
     assert memory.page_names() == ["pg-a", "pg-b", "pg-c"]
-    assert memory.read("pg-c").body == "merged\n"
+    merged = memory.read("pg-c")
+    assert merged.body == "merged\n"
     (record,) = consolidate.merges(memory)
-    assert "deleted" not in record
+    assert "deleted" not in record and ("written" in record) is recorded
+    # Edited by hand since, the page stays: a line added to its body, a comment added to its
+    # frontmatter or to the line of its time, a blank line added at its end is in no archive.
+    path = memory.page_path("pg-c")
+    stamp = f"updated: '{merged.frontmatter['updated']}'"
+    for edited in (
+        merged.raw + "Added by hand.\n",
+        merged.raw.replace("---\n", "---\n# Added by hand.\n", 1),
+        merged.raw.replace(stamp, stamp + "  # Added by hand.", 1),
+        merged.raw + "\n",
+    ):
+        path.write_text(edited, encoding="utf-8", newline="\n")
+        assert consolidate.restore(memory, record["id"]) == (
+            [], dict.fromkeys(["pg-a", "pg-b", "pg-c"], UNTOUCHED))
+        assert memory.read("pg-c").raw == edited
+    path.write_text(merged.raw, encoding="utf-8", newline="\n")
+    if not recorded:
+        # All the stopped merge could not tell of its page: the time of the write.
+        set_stamp(memory, "pg-c", "updated", "2026-01-01T00:00:00Z")
     assert consolidate.restore(memory, record["id"]) == (
         ["pg-c"], dict.fromkeys(["pg-a", "pg-b"], UNTOUCHED))
     assert memory.read("pg-c").body == family.target.body
+
+
+def test_a_restore_waits_for_its_merge_to_be_committed(tmp_path: Path) -> None:
+    """A restore that ran between the merge's write and its deletions found the older
+    members in place and left them out; the merge then deleted them, and its last
+    record replaced the restore's."""
+    tools = make_tools(tmp_path / "memory")
+    memory = tools.memory
+    pg_family(tools)
+    (family,) = consolidate.families(tools.index)
+    hook = _RestoresDuringMerge(memory)
+    previous = sys.getprofile()
+    sys.setprofile(hook)
+    try:
+        merge = consolidate.commit(memory, family, "merged", "", "")
+    finally:
+        sys.setprofile(previous)
+    hook.thread.join(60)
+    assert not hook.thread.is_alive()
+    assert merge.deleted == ["pg-a", "pg-b"]
+    assert hook.result == (["pg-a", "pg-b", "pg-c"], {})
+    assert {name: memory.read(name).body for name in memory.page_names()} == {
+        page.name: page.body for page in family.pages}
+    (record,) = consolidate.merges(memory)
+    assert record["deleted"] == ["pg-a", "pg-b"] and "restored" in record
 
 
 def test_restore_reports_a_page_it_cannot_write_back_and_merged_pages_claim_no_evidence(

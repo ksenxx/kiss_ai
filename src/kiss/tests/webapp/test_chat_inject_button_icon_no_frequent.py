@@ -15,7 +15,9 @@ tooltip "Inject promptlet").
 This change removes the Frequent-tasks toggle entirely and replaces
 the lightbulb icon inside the Inject-instruction button with a
 syringe icon (which matches the button's semantic meaning of
-"injecting" an instruction into the chat).
+"injecting" an instruction into the chat).  ``#tricks-btn`` has since
+moved into the composer's "..." menu (``#more-menu``), where it also
+carries the label "Inject promptlet".
 
 The tests below boot a real headless Chromium via Playwright, load
 the actual shipped ``media/chat.html`` (with template placeholders
@@ -273,24 +275,34 @@ def test_inject_instruction_syringe_looks_natural(_page) -> None:
 
 
 def test_inject_instruction_button_is_visible(_page) -> None:
-    """The Inject-instruction button must remain visible/clickable
-    in the toolbar after the icon swap.
+    """The Inject-promptlet item must render in the open "..." menu,
+    and nowhere while the menu is closed.
 
-    Guards against accidentally hiding the button while editing the
-    SVG markup (e.g. broken close tag pushing the button out of the
-    flexbox row).
+    Guards against accidentally hiding the item while editing the
+    markup (e.g. a broken close tag pushing it out of the menu).  The
+    page loads no script, so the test opens the menu the way main.js
+    does: with the ``open`` class.
     """
-    visible = _page.evaluate(
+    sizes = _page.evaluate(
         """
         () => {
             const btn = document.getElementById('tricks-btn');
-            if (!btn) return false;
-            const r = btn.getBoundingClientRect();
-            return r.width > 0 && r.height > 0;
+            const menu = document.getElementById('more-menu');
+            if (!btn || !menu.contains(btn)) return null;
+            const size = () => {
+                const r = btn.getBoundingClientRect();
+                return [r.width, r.height];
+            };
+            const closed = size();
+            menu.classList.add('open');
+            return {closed, open: size(), label: btn.textContent.trim()};
         }
         """,
     )
-    assert visible, (
-        "#tricks-btn is in the DOM but renders with zero width/"
-        "height — the Inject-instruction button must stay visible."
+    assert sizes is not None, "#tricks-btn must be an item of #more-menu"
+    assert sizes["closed"] == [0, 0], "the item shows only in the open menu"
+    assert min(sizes["open"]) > 0, (
+        "#tricks-btn is in the open menu but renders with zero width/"
+        "height — the Inject-promptlet item must stay visible."
     )
+    assert sizes["label"] == "Inject promptlet"

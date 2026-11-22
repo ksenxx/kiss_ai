@@ -20,6 +20,10 @@
 //   expanded bodies above the boundary it moves; the resizer after a
 //   section is hidden while nothing shown follows it, `static` unless
 //   both sides are expanded, and a real handle otherwise;
+// * a section with no toggle is PINNED open (Recommendations, its
+//   card alone, hidden while it has no task): nothing folds it or
+//   stores a choice for it, its body takes no share, and no separator
+//   beside it is a handle;
 // * the Task update section joins the stack only once it has content
 //   (the `visible` class), and leaves it again when emptied;
 // * the resizer's keyboard, double-click and pointer paths, and a
@@ -27,7 +31,8 @@
 //   every choice lasts for the page only.
 //
 // Geometry (pixel heights, scrolling) needs a layout engine and is
-// covered by tests/webapp/test_meta_panel_sections.py.
+// covered by tests/webapp/test_meta_panel_sections.py; here the resize
+// arithmetic runs on bodies given a height (layOutSectionBodies).
 
 'use strict';
 
@@ -60,11 +65,31 @@ const EXTRA_SECTION =
 const pages = [];
 
 /**
+ * Lay out the section bodies, which jsdom does not: a body that shares
+ * the panel is *height* px tall and a dragged one as tall as its fixed
+ * flex-basis, as in a panel with room for both.  Every other element
+ * keeps jsdom's empty geometry.
+ */
+function layOutSectionBodies(win, height) {
+  const proto = win.Element.prototype;
+  const jsdomRect = proto.getBoundingClientRect;
+  proto.getBoundingClientRect = function () {
+    if (!this.classList.contains('meta-section-body'))
+      return jsdomRect.call(this);
+    const h =
+      this.style.flexGrow === '0' ? parseFloat(this.style.flexBasis) : height;
+    return {top: 0, bottom: h, height: h, left: 0, right: 300, width: 300};
+  };
+}
+
+/**
  * Boot a chat page.  *storage* pre-seeds localStorage before main.js
  * runs (so a stored collapse state or height is restored at boot);
  * `url: null` opens an OPAQUE origin, where jsdom's localStorage throws
  * SecurityError exactly as a browser's does; *extraSection* adds a
- * third section the way chat.html documents it.
+ * third section the way chat.html documents it; *bodyHeight* lays the
+ * section bodies out that tall (layOutSectionBodies) instead of
+ * leaving them jsdom's 0px.
  */
 function makePage(opts) {
   const {
@@ -72,6 +97,7 @@ function makePage(opts) {
     url = 'https://localhost/',
     extraSection = false,
     tips = undefined,
+    bodyHeight = 0,
   } = opts || {};
   // jsdom has no ResizeObserver: record the observers so a test can
   // fire a panel resize by hand.
@@ -97,6 +123,7 @@ function makePage(opts) {
       }
     };
     fakeMatchMedia(win, true);
+    if (bodyHeight) layOutSectionBodies(win, bodyHeight);
     // The page embeds the daemon's tips bootstrap (with the running
     // version) before main.js runs; *tips* stands in for it.
     if (tips !== undefined) win.__TIPS__ = tips;
@@ -132,17 +159,25 @@ function sections(win) {
   );
 }
 
+/** The sections that fold: every one but the pinned Recommendations. */
+function foldable(win) {
+  return sections(win).filter(toggleOf);
+}
+
+/** A section's state: its class and, where it has a toggle, what that says. */
 function assertExpanded(section, expanded) {
   assert.strictEqual(
     section.classList.contains('collapsed'),
     !expanded,
     section.id + ' collapsed class',
   );
-  assert.strictEqual(
-    toggleOf(section).getAttribute('aria-expanded'),
-    expanded ? 'true' : 'false',
-    section.id + ' aria-expanded',
-  );
+  const toggle = toggleOf(section);
+  if (toggle)
+    assert.strictEqual(
+      toggle.getAttribute('aria-expanded'),
+      expanded ? 'true' : 'false',
+      section.id + ' aria-expanded',
+    );
 }
 
 /**
@@ -210,9 +245,10 @@ function startOnChat(win, tabId) {
 
 /**
  * Take the workspace (Explorer, Source Control) and global (Schedule,
- * Machines, Apps, Spend, Recommendations) sections out of the stack (the `hidden`
- * attribute, which the page watches to re-apply the layout), leaving
- * only the two per-task sections.
+ * Machines, Skills, Connectors, Spend) sections out of the stack (the
+ * `hidden` attribute, which the page watches to re-apply the layout),
+ * leaving only the two per-task sections: the page itself keeps
+ * Recommendations hidden while it has no task.
  */
 async function hideGlobalSections(win) {
   for (const id of [
@@ -220,16 +256,16 @@ async function hideGlobalSections(win) {
     'meta-scm',
     'meta-schedule',
     'meta-machines',
+    'meta-skills',
     'meta-apps',
     'meta-spend',
-    'meta-recommendations',
   ])
     el(win, id).hidden = true;
   await flushMicrotasks();
 }
 
 async function main() {
-  await test('remote webapp: every section starts expanded, the Task update one hidden', () => {
+  await test('remote webapp: every section starts expanded, the Task update and Recommendations ones hidden', () => {
     const {win} = makePage();
     const [
       info,
@@ -238,6 +274,7 @@ async function main() {
       scm,
       schedule,
       machines,
+      skills,
       apps,
       spend,
       recommendations,
@@ -248,22 +285,35 @@ async function main() {
     assert.strictEqual(scm.id, 'meta-scm');
     assert.strictEqual(schedule.id, 'meta-schedule');
     assert.strictEqual(machines.id, 'meta-machines');
+    assert.strictEqual(skills.id, 'meta-skills');
     assert.strictEqual(apps.id, 'meta-apps');
     assert.strictEqual(spend.id, 'meta-spend');
     assert.strictEqual(recommendations.id, 'meta-recommendations');
     assert.strictEqual(toggleOf(info).textContent, 'Task Info');
-    assert.strictEqual(toggleOf(update).textContent, 'Task update');
+    assert.strictEqual(toggleOf(update).textContent, 'Task Progress');
     assert.strictEqual(toggleOf(explorer).textContent, 'Explorer');
     // The header count (uncommitted files) is empty until a git status.
     assert.strictEqual(toggleOf(scm).textContent, 'Source Control');
     assert.strictEqual(toggleOf(schedule).textContent, 'Schedule');
     assert.strictEqual(toggleOf(machines).textContent, 'Machines');
-    assert.strictEqual(toggleOf(apps).textContent, 'Apps');
-    assert.strictEqual(toggleOf(spend).textContent, 'Spend');
+    assert.strictEqual(toggleOf(skills).textContent, 'Skills');
+    // The section keeps the id it had when it was headed "Apps".
+    assert.strictEqual(toggleOf(apps).textContent, 'Connectors');
+    assert.strictEqual(apps.getAttribute('aria-label'), 'Connectors');
     assert.strictEqual(
-      toggleOf(recommendations).textContent,
-      'Recommendations',
+      resizerAfter(apps).getAttribute('aria-label'),
+      'Resize the Connectors section',
     );
+    assert.strictEqual(toggleOf(spend).textContent, 'Spend');
+    // Recommendations is pinned open: it has no toggle, nor any other
+    // header, and is hidden until it has a task to show.
+    assert.strictEqual(toggleOf(recommendations), null);
+    assert.strictEqual(
+      recommendations.querySelector('.meta-section-hdr'),
+      null,
+    );
+    assert.strictEqual(recommendations.hidden, true, 'no task: hidden');
+    assert.deepStrictEqual(foldable(win), sections(win).slice(0, -1));
     for (const section of sections(win)) assertExpanded(section, true);
     assert.ok(
       !update.classList.contains('visible'),
@@ -272,22 +322,48 @@ async function main() {
     // The workspace sections (Explorer, Source Control) are shown.
     assert.strictEqual(explorer.hidden, false, 'Explorer shown');
     assert.strictEqual(scm.hidden, false, 'Source Control shown');
-    // Nothing is dragged: every expanded body takes an equal share
-    // and no separator follows Recommendations, the last shown section.
+    // Nothing is dragged: every expanded body that folds takes an
+    // equal share.  The pinned body is sized by main.css alone.
     assert.strictEqual(bodyLayout(el(win, 'meta-list')), 'equal');
-    assert.strictEqual(bodyLayout(el(win, 'meta-schedule-list')), 'equal');
+    // The Schedule and Machines bodies scroll an example line with the
+    // list under it: the toggle and the separator name the body.
+    for (const section of [schedule, machines]) {
+      const body = el(win, section.id + '-body');
+      assert.strictEqual(body.lastElementChild.id, section.id + '-list');
+      for (const control of [toggleOf(section), resizerAfter(section)])
+        assert.strictEqual(control.getAttribute('aria-controls'), body.id);
+      assert.strictEqual(bodyLayout(body), 'equal');
+    }
+    // The Skills body scrolls under its search row, which keeps its
+    // own height.
+    assert.strictEqual(
+      toggleOf(skills).getAttribute('aria-controls'),
+      'meta-skills-body',
+    );
+    assert.strictEqual(bodyLayout(el(win, 'meta-skills-body')), 'equal');
     assert.strictEqual(bodyLayout(el(win, 'meta-apps-list')), 'equal');
     assert.strictEqual(bodyLayout(el(win, 'meta-spend-body')), 'equal');
-    assert.strictEqual(
-      bodyLayout(el(win, 'meta-recommendations-list')),
-      'equal',
-    );
+    assert.strictEqual(el(win, 'meta-recommendations-list').style.flex, '');
     assertResizer(resizerAfter(info), 'handle');
     assertResizer(resizerAfter(update), 'hidden');
     assertResizer(resizerAfter(schedule), 'handle');
     assertResizer(resizerAfter(machines), 'handle');
+    assertResizer(resizerAfter(skills), 'handle');
     assertResizer(resizerAfter(apps), 'handle');
-    assertResizer(resizerAfter(spend), 'handle');
+    // Nothing shown follows Spend while Recommendations has no task.
+    assertResizer(resizerAfter(spend), 'hidden');
+    assertResizer(resizerAfter(recommendations), 'hidden');
+    // A task brings the pinned section on show: Spend, the last that
+    // shares, has no handle under it, and no separator follows
+    // Recommendations, the last shown section.
+    send(win, {
+      type: 'recommendations',
+      generatedAt: 1,
+      tasks: ['Fix the parser'],
+    });
+    assert.strictEqual(recommendations.hidden, false);
+    assert.strictEqual(el(win, 'meta-recommendations-list').style.flex, '');
+    assertResizer(resizerAfter(spend), 'static');
     assertResizer(resizerAfter(recommendations), 'hidden');
     // Bodies are the scrolling parts.
     assert.ok(el(win, 'meta-list').classList.contains('meta-section-body'));
@@ -308,7 +384,8 @@ async function main() {
     const {win} = makePage();
     const stored = id =>
       win.localStorage.getItem('kiss-meta-section-collapsed:' + id);
-    const [info, ...others] = sections(win);
+    const [info, ...others] = foldable(win);
+    const pinned = el(win, 'meta-recommendations');
     click(win, toggleOf(info));
     assertExpanded(info, false);
     assert.strictEqual(stored('meta-section-info'), '1');
@@ -325,11 +402,14 @@ async function main() {
       assertExpanded(section, false);
       assert.strictEqual(stored(section.id), '1', section.id + ' folded');
     }
-    // Nothing expanded follows Task Info: its separator is static.
+    // ... but for the pinned section, which keeps no choice.
+    assertExpanded(pinned, true);
+    assert.strictEqual(stored(pinned.id), null);
+    // Nothing that shares follows Task Info: its separator is static.
     assertResizer(resizerAfter(info), 'static');
     assert.strictEqual(bodyLayout(el(win, 'meta-list')), 'equal');
-    // Opening Apps folds Task Info in turn; a click on the open Apps
-    // just folds it.
+    // Opening Connectors folds Task Info in turn; a click on the open
+    // Connectors just folds it.
     const apps = el(win, 'meta-apps');
     click(win, toggleOf(apps));
     assertExpanded(apps, true);
@@ -340,7 +420,8 @@ async function main() {
     click(win, toggleOf(apps));
     assertExpanded(apps, false);
     assert.strictEqual(stored('meta-apps'), '1');
-    for (const section of sections(win)) assertExpanded(section, false);
+    for (const section of foldable(win)) assertExpanded(section, false);
+    assertExpanded(pinned, true);
   });
 
   await test('remote webapp: a stored collapse state and height are restored at boot', () => {
@@ -354,8 +435,8 @@ async function main() {
     const [info, update] = sections(win);
     assertExpanded(info, true);
     assertExpanded(update, false);
-    // Task Info is not the last expanded section (Schedule, Apps and
-    // Spend follow), so its stored height applies.
+    // Task Info is not the last expanded section (Schedule, Connectors
+    // and Spend follow), so its stored height applies.
     assert.strictEqual(bodyLayout(el(win, 'meta-list')), '123px');
     assert.strictEqual(bodyLayout(el(win, 'meta-apps-list')), 'equal');
     assert.strictEqual(bodyLayout(el(win, 'meta-spend-body')), 'equal');
@@ -387,7 +468,7 @@ async function main() {
         'kiss-meta-section-collapsed:meta-info': '1',
       },
     });
-    const [info, update, ...others] = sections(win);
+    const [info, update, ...others] = foldable(win);
     assertExpanded(info, false);
     assertExpanded(update, false);
     for (const section of others) assertExpanded(section, true);
@@ -408,13 +489,16 @@ async function main() {
         section.id + ' collapse stored',
       );
     }
-    for (const section of [info, update])
+    // The pinned Recommendations stays open under the run's sections.
+    for (const section of [info, update, el(win, 'meta-recommendations')]) {
+      assertExpanded(section, true);
       assert.strictEqual(
         win.localStorage.getItem('kiss-meta-section-collapsed:' + section.id),
         null,
         section.id + ' expansion stored',
       );
-    // The arrangement is a starting point: the user unfolds Apps
+    }
+    // The arrangement is a starting point: the user unfolds Connectors
     // again (which folds the two per-task sections), and a repeated
     // running status (not a start) keeps it.
     const apps = el(win, 'meta-apps');
@@ -464,14 +548,19 @@ async function main() {
     assert.strictEqual(bodyLayout(el(win, 'meta-list')), 'equal');
     assertResizer(resizerAfter(info), 'hidden');
 
-    // With the Schedule, Machines, Apps and Spend sections
-    // back, the Task update section (still folded) sits between Task
-    // Info and Schedule; opening it folds the rest.
+    // With the Schedule, Machines, Connectors and Spend sections
+    // back, and Recommendations with a task to show, the Task update
+    // section (still folded) sits between Task Info and Schedule;
+    // opening it folds the rest.
     el(win, 'meta-schedule').hidden = false;
     el(win, 'meta-machines').hidden = false;
     el(win, 'meta-apps').hidden = false;
     el(win, 'meta-spend').hidden = false;
-    el(win, 'meta-recommendations').hidden = false;
+    send(win, {
+      type: 'recommendations',
+      generatedAt: 1,
+      tasks: ['Fix the parser'],
+    });
     showTaskUpdate(wv, '<p>progress</p>');
     assert.ok(update.classList.contains('visible'));
     assertExpanded(update, false);
@@ -489,7 +578,8 @@ async function main() {
   });
 
   await test('remote webapp: arrow keys, double-click and pointer drag on the separator', async () => {
-    const wv = makePage();
+    // Each sharing body is laid out 200px tall, so a move shows.
+    const wv = makePage({bodyHeight: 200});
     const win = wv.win;
     const [info] = sections(win);
     await hideGlobalSections(win);
@@ -508,9 +598,10 @@ async function main() {
     showTaskUpdate(wv, '<p>progress</p>');
     assertResizer(r, 'handle');
 
-    // Arrow keys fix the height (jsdom has no layout: every rect is 0,
-    // so the clamp lands on 0) and persist it; other keys are ignored.
-    // (key() returns false when the page consumed the key.)
+    // Arrow keys move the boundary by 16px, fixing the height, and
+    // persist it (it can take the 200px of the body below at most);
+    // other keys are ignored.  (key() returns false when the page
+    // consumed the key.)
     assert.strictEqual(key(win, r, 'Tab'), true, 'Tab keeps its default');
     assert.strictEqual(win.localStorage.getItem(HK), null);
     assert.strictEqual(
@@ -518,14 +609,16 @@ async function main() {
       false,
       'the arrow is consumed',
     );
-    assert.strictEqual(win.localStorage.getItem(HK), '0');
-    assert.strictEqual(bodyLayout(list), '0px');
+    assert.strictEqual(win.localStorage.getItem(HK), '216');
+    assert.strictEqual(bodyLayout(list), '216px');
     // The last expanded body below a dragged one still fills.
     assert.strictEqual(bodyLayout(el(win, 'meta-info-content')), 'equal');
-    assert.strictEqual(r.getAttribute('aria-valuenow'), '0');
-    assert.strictEqual(r.getAttribute('aria-valuemax'), '0');
+    assert.strictEqual(r.getAttribute('aria-valuenow'), '216');
+    assert.strictEqual(r.getAttribute('aria-valuemax'), '400');
     assert.strictEqual(key(win, r, 'ArrowUp'), false, 'the arrow is consumed');
-    assert.strictEqual(bodyLayout(list), '0px');
+    assert.strictEqual(win.localStorage.getItem(HK), '200');
+    assert.strictEqual(bodyLayout(list), '200px');
+    assert.strictEqual(r.getAttribute('aria-valuenow'), '200');
 
     // Double-click restores the equal share.
     r.dispatchEvent(new win.MouseEvent('dblclick', {bubbles: true}));
@@ -544,16 +637,26 @@ async function main() {
     // jsdom has no pointer capture: record what the page asks for.
     const captured = [];
     r.setPointerCapture = id => captured.push(id);
-    const press = pointer(win, r, 'pointerdown', {pointerId: 7});
+    const press = pointer(win, r, 'pointerdown', {pointerId: 7, clientY: 100});
     assert.ok(press.defaultPrevented, 'the press is consumed');
     assert.deepStrictEqual(captured, [7], 'the drag captures its pointer');
     assert.ok(win.document.body.classList.contains('meta-section-resizing'));
-    pointer(win, r, 'pointermove', {clientY: 40});
+    // 40px down from the press: the body is 40px taller.
+    pointer(win, r, 'pointermove', {clientY: 140});
+    assert.strictEqual(bodyLayout(list), '240px');
+    assert.strictEqual(r.getAttribute('aria-valuenow'), '240');
+    // The drag is clamped: going down at the 400px the two bodies have
+    // between them, going up at 0px.
+    pointer(win, r, 'pointermove', {clientY: 1000});
+    assert.strictEqual(bodyLayout(list), '400px');
+    pointer(win, r, 'pointermove', {clientY: -1000});
     assert.strictEqual(bodyLayout(list), '0px');
+    // Released 40px below the press: that height is the one kept.
+    pointer(win, r, 'pointermove', {clientY: 140});
     pointer(win, r, 'pointerup');
     assert.ok(!win.document.body.classList.contains('meta-section-resizing'));
     pointer(win, r, 'pointerup');
-    assert.strictEqual(win.localStorage.getItem(HK), '0');
+    assert.strictEqual(win.localStorage.getItem(HK), '240');
     // pointercancel ends a drag too.
     pointer(win, r, 'pointerdown');
     pointer(win, r, 'pointercancel');
@@ -568,7 +671,7 @@ async function main() {
     const wv = makePage({extraSection: true});
     const win = wv.win;
     await hideGlobalSections(win);
-    const [info, update, , , , , , , , extra] = sections(win);
+    const [info, update, , , , , , , , , extra] = sections(win);
     assert.strictEqual(extra.id, 'meta-section-extra');
     assertExpanded(extra, true);
     // No task: Task Info and Extra are shown, sharing equally.
@@ -613,32 +716,37 @@ async function main() {
 
   await test('a drag pins the expanded bodies above the moved boundary, and only those', () => {
     const HK = 'kiss-meta-section-h:';
-    // No task: Task Info, Schedule, Apps and Spend share the panel equally.
-    let win = makePage().win;
+    // No task: Task Info, Schedule, Connectors and Spend share the panel
+    // equally, each body laid out 200px tall.
+    let win = makePage({bodyHeight: 200}).win;
     let schedule = el(win, 'meta-schedule');
     const r = resizerAfter(schedule);
     assertResizer(r, 'handle');
-    // Dragging the Schedule / Apps boundary pins Task Info (jsdom has no
-    // layout, so at 0px) and fixes Schedule; Apps keeps its share and
-    // Spend, last, fills.  The hidden Task update section above is not
-    // pinned.
+    // Dragging the boundary under Schedule 40px down pins Task Info at
+    // the height it has and fixes Schedule 40px taller; Connectors keeps
+    // its share and Spend, last, fills.  The hidden Task update section
+    // above is not pinned.
     pointer(win, r, 'pointerdown');
     pointer(win, r, 'pointermove', {clientY: 40});
     pointer(win, r, 'pointerup');
-    assert.strictEqual(win.localStorage.getItem(HK + 'meta-section-info'), '0');
-    assert.strictEqual(win.localStorage.getItem(HK + 'meta-schedule'), '0');
+    assert.strictEqual(
+      win.localStorage.getItem(HK + 'meta-section-info'),
+      '200',
+    );
+    assert.strictEqual(win.localStorage.getItem(HK + 'meta-schedule'), '240');
     assert.strictEqual(win.localStorage.getItem(HK + 'meta-info'), null);
-    assert.strictEqual(bodyLayout(el(win, 'meta-list')), '0px');
-    assert.strictEqual(bodyLayout(el(win, 'meta-schedule-list')), '0px');
+    assert.strictEqual(bodyLayout(el(win, 'meta-list')), '200px');
+    assert.strictEqual(bodyLayout(el(win, 'meta-schedule-body')), '240px');
     assert.strictEqual(bodyLayout(el(win, 'meta-apps-list')), 'equal');
     assert.strictEqual(bodyLayout(el(win, 'meta-spend-body')), 'equal');
     // Double-click returns Schedule to an equal share; the pinned Task
     // Info keeps its height.
     r.dispatchEvent(new win.MouseEvent('dblclick', {bubbles: true}));
-    assert.strictEqual(bodyLayout(el(win, 'meta-schedule-list')), 'equal');
-    assert.strictEqual(bodyLayout(el(win, 'meta-list')), '0px');
+    assert.strictEqual(bodyLayout(el(win, 'meta-schedule-body')), 'equal');
+    assert.strictEqual(bodyLayout(el(win, 'meta-list')), '200px');
 
-    // A body above that already has a dragged height keeps it.
+    // A body above that already has a dragged height keeps it (jsdom
+    // has no layout: every rect is 0, so Schedule's clamp lands on 0).
     win = makePage({
       storage: {[HK + 'meta-section-info']: '123'},
     }).win;
@@ -703,8 +811,8 @@ async function main() {
   const RECS = 'meta-recommendations';
 
   /**
-   * Only Recommendations is expanded; every other section is folded, so
-   * no separator has an expanded section on both sides.
+   * Only the pinned Recommendations is open; every section that folds
+   * is folded, so no separator is a handle.
    */
   function assertFreshLayout(win) {
     for (const section of sections(win))
@@ -712,8 +820,9 @@ async function main() {
     assertResizer(resizerAfter(el(win, 'meta-schedule')), 'static');
   }
 
-  await test('remote webapp: the first load of a version expands only Recommendations, whatever was stored', () => {
-    // A profile that had Recommendations folded and Task Info open.
+  await test('remote webapp: the first load of a version folds every section but the pinned Recommendations, whatever was stored', () => {
+    // A profile from a version in which Recommendations still folded,
+    // and was folded; Task Info was open.
     let win = makePage({
       storage: {[CK + RECS]: '1', [CK + 'meta-info']: '1'},
       tips: {tips: [], show: false, version: '2026.10.1'},
@@ -724,10 +833,10 @@ async function main() {
     assert.strictEqual(win.localStorage.getItem(CK + RECS), null);
     assert.strictEqual(win.localStorage.getItem(CK + 'meta-section-info'), '1');
     assert.strictEqual(win.localStorage.getItem(CK + 'meta-spend'), '1');
-    // The user opens Task Info (which folds Recommendations) ...
+    // The user opens Task Info (Recommendations stays under it) ...
     click(win, toggleOf(el(win, 'meta-section-info')));
     assertExpanded(el(win, 'meta-section-info'), true);
-    assertExpanded(el(win, RECS), false);
+    assertExpanded(el(win, RECS), true);
     const kept = {};
     for (let i = 0; i < win.localStorage.length; i++) {
       const k = win.localStorage.key(i);
@@ -739,7 +848,7 @@ async function main() {
       tips: {tips: [], show: false, version: '2026.10.1'},
     }).win;
     assertExpanded(el(win, 'meta-section-info'), true);
-    assertExpanded(el(win, RECS), false);
+    assertExpanded(el(win, 'meta-spend'), false);
     // An update: the fresh layout again, once.
     win = makePage({
       storage: kept,
@@ -750,25 +859,31 @@ async function main() {
   });
 
   await test('no version (an empty bootstrap version, or none at all): nothing is reset', () => {
+    // A folded Spend, and a fold of Recommendations that an earlier
+    // version (in which it folded) stored: Spend's is kept, the pinned
+    // section's is dropped at boot.
+    const storage = {[CK + 'meta-spend']: '1', [CK + RECS]: '1'};
     let win = makePage({
-      storage: {[CK + RECS]: '1'},
+      storage,
       tips: {tips: [], show: false, version: ''},
     }).win;
-    assertExpanded(el(win, RECS), false);
+    assertExpanded(el(win, 'meta-spend'), false);
     assertExpanded(el(win, 'meta-section-info'), true);
+    assertExpanded(el(win, RECS), true);
+    assert.strictEqual(win.localStorage.getItem(CK + RECS), null);
     assert.strictEqual(win.localStorage.getItem(VK), null);
-    win = makePage({storage: {[CK + RECS]: '1'}}).win;
-    assertExpanded(el(win, RECS), false);
+    win = makePage({storage}).win;
+    assertExpanded(el(win, 'meta-spend'), false);
     assert.strictEqual(win.localStorage.getItem(VK), null);
   });
 
   await test('a page booted without a version learns it from tipsData and resets once', () => {
     {
       const win = makePage({
-        storage: {[CK + RECS]: '1'},
+        storage: {[CK + 'meta-spend']: '1'},
         tips: {tips: [], show: false, version: ''},
       }).win;
-      assertExpanded(el(win, RECS), false);
+      assertExpanded(el(win, 'meta-section-info'), true);
       send(win, {
         type: 'tipsData',
         tips: [],
@@ -781,7 +896,6 @@ async function main() {
       // re-sends.
       click(win, toggleOf(el(win, 'meta-spend')));
       assertExpanded(el(win, 'meta-spend'), true);
-      assertExpanded(el(win, RECS), false);
       send(win, {
         type: 'tipsData',
         tips: [],
@@ -789,7 +903,6 @@ async function main() {
         version: '2026.10.1',
       });
       assertExpanded(el(win, 'meta-spend'), true);
-      assertExpanded(el(win, RECS), false);
       // A tipsData without a version string changes nothing.
       send(win, {type: 'tipsData', tips: [], show: false});
       assertExpanded(el(win, 'meta-spend'), true);
@@ -808,7 +921,6 @@ async function main() {
     // connect (and of every reconnect) leaves its choices alone.
     send(win, {type: 'tipsData', tips: [], show: false, version: '2026.10.1'});
     assertExpanded(el(win, 'meta-spend'), true);
-    assertExpanded(el(win, RECS), false);
     // A new version (the daemon updated under an open page) resets.
     send(win, {type: 'tipsData', tips: [], show: false, version: '2026.10.2'});
     assertFreshLayout(win);

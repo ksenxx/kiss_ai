@@ -31,9 +31,11 @@ frame of the type is read as the answer, as before.
 from __future__ import annotations
 
 import json
+import sqlite3
 import ssl
 import threading
 from collections.abc import Callable
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
@@ -188,6 +190,64 @@ def test_two_links_counting_alike_each_get_their_own_answer(tmp_path: Path) -> N
             thread.join(timeout=120)
         assert not any(thread.is_alive() for thread in threads), outcome
         assert outcome == {}, outcome
+    finally:
+        mach.save_machines([])
+        remote.stop()
+
+
+def _retag_without_pause(url: str, task_id: str, stop: threading.Event) -> int:
+    """Retag *task_id* on the daemon at *url*, as another client, until *stop*; the count."""
+    edits = 0
+    with _client(url) as ws:
+        while not stop.is_set():
+            tags = ["work", ("coding", "review")[edits % 2]]
+            ws.send(json.dumps({
+                "type": "setTaskTags", "taskId": task_id, "tags": tags, "password": PASSWORD,
+            }))
+            while json.loads(ws.recv(timeout=30)).get("type") != "tasks_updated":
+                pass
+            edits += 1
+    return edits
+
+
+def test_a_tags_read_over_the_link_is_answered_for_its_own_task(tmp_path: Path) -> None:
+    """An edit's ``taskTags`` goes to every connection; a link takes the one echoing its request.
+
+    Another client edits one task's tags without pause while the link
+    reads another task's: no answer is the pushed one.
+    """
+    mine, theirs = "a" * 32, "b" * 32
+    remote = start_remote_daemon(
+        tmp_path / "remote-home", password=PASSWORD,
+        seed=[{"task": "mine", "task_id": mine}, {"task": "theirs", "task_id": theirs}],
+    )
+    try:
+        with closing(sqlite3.connect(remote.home / "history.db")) as db, db:
+            # Tasks that ended: one the daemon still runs takes no edit of its tags.
+            db.execute("UPDATE task_history SET tags = 'work', end_ts = 1000")
+        mach.save_machines([])
+        link = mach.link_for(mach.add_machine("box", remote.url, PASSWORD))
+        read = {"type": "getTaskTags", "taskId": mine}
+        assert link.request(read, "taskTags")["tags"] == ["work"]  # the link's socket is up
+        stop = threading.Event()
+        outcome: dict[str, Any] = {}
+
+        def other_client() -> None:
+            try:
+                outcome["edits"] = _retag_without_pause(remote.url, theirs, stop)
+            except BaseException as exc:  # noqa: BLE001 - reported by the test below
+                outcome["error"] = exc
+
+        other = threading.Thread(target=other_client, name="other-client", daemon=True)
+        other.start()
+        try:
+            answers = [link.request(read, "taskTags") for _ in range(SAVES * 5)]
+        finally:
+            stop.set()
+            other.join(timeout=60)
+        assert "error" not in outcome, outcome["error"]
+        assert {(a["taskId"], *a["tags"]) for a in answers} == {(mine, "work")}
+        assert outcome["edits"] > 0, outcome
     finally:
         mach.save_machines([])
         remote.stop()

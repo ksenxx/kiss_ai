@@ -17,24 +17,22 @@ Features on the remote webapp (served by ``RemoteAccessServer``):
 2. History rows (``.running-item``) are neutral on every surface and
    in both views: no pastel background, no coloured border, no
    per-chat ``--task-color`` custom property, no inline colours.  The
-   legacy flat list (``#history-list.legacy-view``, toggled by the
-   button right of the search box) is the same flat rows, newest
-   first.  The chat-panel headers of the grouped view are plain rows
-   on the list background (the neutral ``--hover`` fill only under the
-   pointer), show one line of text and carry no tooltip.
-3. ALL task metadata (steps, tok, cost, duration, time, work dir,
-   model, parallel, chat id, task id) renders as ONE wrapping line
-   instead of three separately-clipped lines.  Field AVAILABILITY is
-   unchanged: legacy rows whose persisted ``extra`` JSON predates the
-   run-mode metadata still omit the model/parallel group (the
-   span-omission contract pinned by
-   ``historyTaskMeta.test.js`` / ``historyTaskIds.test.js``); every
-   row persisted by the current backend carries all fields, and the
-   live test below renders a fully-populated row.
+   legacy flat list (``#history-list.legacy-view``, Group by: None in
+   the Filter and group menu, whose button sits right of the search
+   box) is the same flat rows, newest first.  The chat-panel headers
+   of the grouped view are plain rows on the list background (the
+   neutral ``--hover`` fill only under the pointer), show one line of
+   text and carry no tooltip.
+3. A chat header and a task panel show ONE line of text, cut with an
+   ellipsis, that ends in the row's buttons (a header's fold chevron
+   and the "…" button, a task panel's "…" button alone); the row's
+   actions are the lines of the "…" button's menu.  A task panel has
+   no fold button and nothing hangs under its text: a task's metadata
+   is in the Task Info panel.
 
-Static (regex) tests pin the CSS/JS wiring; the live test boots the
-production ``RemoteAccessServer`` + headless Chromium and asserts the
-COMPUTED styles.
+Static (regex) tests pin the CSS/JS wiring; the live tests boot the
+production ``RemoteAccessServer`` + headless Chromium and assert the
+COMPUTED styles and the real layout boxes.
 """
 
 from __future__ import annotations
@@ -50,7 +48,8 @@ from playwright.sync_api import Locator, expect, sync_playwright
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 from kiss.agents.sorcar.machines import local_machine_name
-from kiss.tests.conftest import click_row_menu_item, goto_retrying_network_change
+from kiss.tests.conftest import goto_retrying_network_change
+from kiss.tests.webapp.test_history_filter_menu import pick_filter_option
 
 MEDIA_DIR = Path(__file__).resolve().parents[2] / "webapp" / "media"
 CODEX_CSS = MEDIA_DIR / "remote-codex.css"
@@ -58,65 +57,16 @@ MAIN_CSS = MEDIA_DIR / "main.css"
 MAIN_JS = MEDIA_DIR / "main.js"
 
 
-def _dark_palette(css: str) -> dict[str, str]:
-    """Return the custom properties declared on ``body.remote-chat``.
-
-    That block holds the remote page's DEFAULT (dark) palette; the
-    light theme re-declares the same names under
-    ``body.remote-chat.light-theme``.
-
-    Args:
-        css: Full text of ``remote-codex.css``.
-
-    Returns:
-        Mapping of custom-property name (e.g. ``--fg``) to its declared
-        value (e.g. ``var(--theme-editor-foreground, #f0efec)``): the
-        theme variable it maps to, with the dark palette's fallback.
-    """
-    m = re.search(r"\nbody\.remote-chat\s*\{(.*?)\n\}", css, re.DOTALL)
-    assert m, "body.remote-chat palette block missing from remote-codex.css"
-    return dict(re.findall(r"(--[\w-]+):\s*([^;]+);", m.group(1)))
-
-
-def _resolve_palette_vars(decls: str, palette: dict[str, str]) -> str:
-    """Substitute every themed ``var(--name)`` in *decls* with its value.
-
-    Colors in ``remote-codex.css`` are routed through the palette
-    custom properties so the light theme can re-theme the page, so the
-    static assertions below have to compare resolved values instead of
-    literal declarations. ``var()`` references to properties outside
-    the palette are left untouched.
-
-    Args:
-        decls: CSS declarations to expand.
-        palette: Custom properties as returned by :func:`_dark_palette`.
-
-    Returns:
-        *decls* with palette ``var()`` references replaced by their
-        dark-theme values.
-    """
-    for name, value in palette.items():
-        decls = re.sub(rf"var\({re.escape(name)}\s*(?:,[^()]*)?\)", value, decls)
-    return decls
-
-
-def _find_rule(css: str, selector: str) -> str:
-    """Return the union of declaration bodies of every
-    ``body.remote-chat``-scoped rule for *selector*, with palette
-    ``var()`` references resolved to their dark-theme values, or fail."""
-    pattern = r"body\.remote-chat[^{,]*" + re.escape(selector) + r"\s*(?:,[^{]*)?\{([^}]*)\}"
-    bodies = re.findall(pattern, css)
-    assert bodies, f"body.remote-chat scoped rule for {selector!r} missing"
-    return _resolve_palette_vars("\n".join(bodies), _dark_palette(css))
-
-
 def test_main_js_history_rows_carry_no_colour() -> None:
     """renderHistory writes no inline colours on history rows in either
     view: no background, no text colour, no per-chat ``--task-color``."""
     js = MAIN_JS.read_text(encoding="utf-8")
     start = js.index("function renderHistory(")
-    end = js.index("function applyHistoryViewToggle(")
-    body = js[start:end]
+    # The function ends where the next one of its nesting level begins.
+    following = re.search(r"\n  function \w+\(", js[start:])
+    assert following is not None, "a function follows renderHistory in main.js"
+    body = js[start : start + following.start()]
+    assert "running-item" in body, "the slice is the function that builds the rows"
     assert "style.backgroundColor" not in body, (
         "renderHistory must not set an inline background color on "
         "history rows (inline styles beat every stylesheet)"
@@ -220,11 +170,9 @@ def _alpha_of(rgba: str) -> float:
     return float(nums[3]) if len(nums) > 3 else 1.0
 
 
-# The remote palette's theme tokens (remote-codex.css maps every
+# The remote palette's selection fill (remote-codex.css maps every
 # semantic name onto a --theme-* variable with the dark palette's value
 # as the fallback).
-DIM = "var(--theme-tab-inactiveForeground, #9c9a92)"
-FAINT = "var(--theme-input-placeholderForeground, #898781)"
 SELECTED = "var(--theme-list-inactiveSelectionBackground, #ffffff26)"
 
 
@@ -242,61 +190,6 @@ def test_remote_history_row_is_neutral() -> None:
     assert "--task-color" not in codex_css, (
         "remote-codex.css must not reference --task-color anywhere"
     )
-
-
-REMOTE_METADATA_COLOR_RULES = [
-    (".running-item-metrics", f"color: {DIM}"),
-    (".running-item-workspace", f"color: {FAINT}"),
-    (".running-item-ids", f"color: {FAINT}"),
-]
-
-
-@pytest.mark.parametrize(("selector", "decl"), REMOTE_METADATA_COLOR_RULES)
-def test_remote_history_metadata_readable_on_dark(selector: str, decl: str) -> None:
-    """The remote's neutral rows take the theme's dim and placeholder
-    foregrounds for the metadata lines.  (The row buttons keep main.css's
-    theme foreground; test_remote_stylesheet_cascade_sweep1030.py
-    measures them.)"""
-    rule = _find_rule(CODEX_CSS.read_text(encoding="utf-8"), selector)
-    assert decl in rule, f"{selector} must set {decl}; got: {rule!r}"
-
-
-def test_remote_metadata_container_flows_as_one_line() -> None:
-    """.running-item-info must stop stacking the three spans as flex
-    columns so they flow inline as one wrapping line."""
-    rule = _find_rule(CODEX_CSS.read_text(encoding="utf-8"), ".running-item-info")
-    assert "display: block" in rule, (
-        f".running-item-info must be a block flow container; got: {rule!r}"
-    )
-    assert "overflow-wrap: anywhere" in rule, (
-        f"long unbroken tokens (work dirs, ids) must wrap; got: {rule!r}"
-    )
-
-
-@pytest.mark.parametrize(
-    "selector",
-    [".running-item-metrics", ".running-item-workspace", ".running-item-ids"],
-)
-def test_remote_metadata_spans_wrap_instead_of_clip(selector: str) -> None:
-    """The spans lose nowrap/ellipsis so nothing is clipped."""
-    rule = _find_rule(CODEX_CSS.read_text(encoding="utf-8"), selector)
-    assert "white-space: normal" in rule, (
-        f"{selector} must wrap instead of nowrap-clipping; got: {rule!r}"
-    )
-    assert "overflow: visible" in rule, (
-        f"{selector} must not hide overflowing metadata; got: {rule!r}"
-    )
-
-
-@pytest.mark.parametrize(
-    "selector",
-    [".running-item-workspace::before", ".running-item-ids::before"],
-)
-def test_remote_metadata_separator_between_groups(selector: str) -> None:
-    """The workspace and ids groups join the single line with the same
-    dot separator used inside each group."""
-    rule = _find_rule(CODEX_CSS.read_text(encoding="utf-8"), selector)
-    assert "\u2022" in rule, f"{selector} must insert a ' \u2022 ' separator; got: {rule!r}"
 
 
 _INJECT_PAGE_JS = r"""
@@ -413,7 +306,7 @@ _INJECT_HISTORY_JS = r"""
   // display:none the injected row.  Clearing the inputs and
   // dispatching ``change`` pins the empty range
   // (``historyDateRangeUserSet``) so no later autofill re-hides the
-  // row — the same path the filter bar's own clear button uses.
+  // row — the same path the Date submenu's Clear dates button uses.
   for (const id of ['hf-from', 'hf-to']) {
     const el = document.getElementById(id);
     if (!el) continue;
@@ -533,24 +426,6 @@ _PROBE_STYLES_JS = r"""(() => {
 
   const row = document.querySelector('#history-list .running-item');
   const rowCs = row ? getComputedStyle(row) : null;
-  const info = document.querySelector('.running-item-info');
-  const metrics = document.querySelector('.running-item-metrics');
-  const workspace = document.querySelector('.running-item-workspace');
-  const ids = document.querySelector('.running-item-ids');
-  const span = el => {
-    if (!el) return 'MISSING';
-    const cs = getComputedStyle(el);
-    return cs.display + ' | ' + cs.whiteSpace + ' | ' + cs.overflow;
-  };
-  // Wrapping geometry: the inline metadata flow over N line boxes.
-  let infoLineRects = 0;
-  let infoClipped = false;
-  if (info) {
-    const range = document.createRange();
-    range.selectNodeContents(info);
-    infoLineRects = range.getClientRects().length;
-    infoClipped = info.scrollWidth > info.clientWidth + 1;
-  }
   return {
     taskPanelFontSize: tpText.fontSize,
     taskPanelColor: tpText.color,
@@ -562,8 +437,6 @@ _PROBE_STYLES_JS = r"""(() => {
     thinkBg: thinkCs ? thinkCs.backgroundColor : 'MISSING',
     thinkColor: thinkCs ? thinkCs.color : 'MISSING',
     fgColor,
-    infoLineRects,
-    infoClipped,
     oldAccent,
     row: rowCs ? {
       borderLeftWidth: rowCs.borderLeftWidth,
@@ -571,32 +444,22 @@ _PROBE_STYLES_JS = r"""(() => {
       backgroundColor: rowCs.backgroundColor,
       color: rowCs.color,
     } : 'MISSING',
-    infoDisplay: info ? getComputedStyle(info).display : 'MISSING',
-    metrics: span(metrics),
-    workspace: span(workspace),
-    ids: span(ids),
-    metricsText: metrics ? metrics.textContent : 'MISSING',
-    workspaceText: workspace ? workspace.textContent : 'MISSING',
-    idsText: ids ? ids.textContent : 'MISSING',
-    workspaceSep: workspace
-      ? getComputedStyle(workspace, '::before').content : 'MISSING',
-    idsSep: ids ? getComputedStyle(ids, '::before').content : 'MISSING',
   };
 })()"""
 
 
+# Read with Group by: None chosen in the Filter and group menu.
 _LEGACY_VIEW_PROBE_JS = r"""(() => {
-  const toggle = document.getElementById('history-view-toggle');
+  const button = document.getElementById('history-filter-btn');
   const search = document.getElementById('history-search');
-  const tBox = toggle.getBoundingClientRect();
+  const bBox = button.getBoundingClientRect();
   const sBox = search.getBoundingClientRect();
-  toggle.click();
   const list = document.getElementById('history-list');
   const row = list.querySelector(':scope > .running-item');
   const cs = getComputedStyle(row);
-  const out = {
-    toggleVisible: tBox.width > 0 && tBox.height > 0,
-    toggleLeft: tBox.left,
+  return {
+    buttonVisible: bBox.width > 0 && bBox.height > 0,
+    buttonLeft: bBox.left,
     searchRight: sBox.right,
     legacyClass: list.classList.contains('legacy-view'),
     groups: list.querySelectorAll('.history-chat-group').length,
@@ -607,9 +470,6 @@ _LEGACY_VIEW_PROBE_JS = r"""(() => {
     inlineStyle: row.getAttribute('style'),
     activeRow: row.classList.contains('history-active-task'),
   };
-  toggle.click();
-  out.restoredGroups = list.querySelectorAll('.history-chat-group').length;
-  return out;
 })()"""
 
 
@@ -668,8 +528,8 @@ def test_live_task_panel_typography_and_history_rows(
     look (the page foreground over the user bubble's neutral wash, no
     outline, its label in the thinking text's dim foreground) under the
     remote palette; chat headers are plain rows with no fill of their
-    own; history rows are flat and carry no per-chat colour; all
-    metadata flows as one wrapping line."""
+    own; history rows are flat, carry no per-chat colour and are one
+    line of text with no fold button."""
     ready = threading.Event()
     done = threading.Event()
     state: dict[str, object] = {}
@@ -814,47 +674,33 @@ def test_live_task_panel_typography_and_history_rows(
                     "server-pushed history refresh clobbered the "
                     "injected history row despite the dispatch shield"
                 )
-                # History panels are collapsed by default: only the
-                # one line of task text shows and the metadata is
-                # hidden.  A finished task's row carries one delete
-                # button (its inline Delete / Cancel confirmation stays
-                # hidden) and one collapse chevron, in its "…" menu.
-                collapse_probe = page.evaluate(
+                # A history panel is the one line of task text: it has
+                # no fold button, there being nothing to unfold.  A
+                # finished task's row carries one delete button (its
+                # inline Delete / Cancel confirmation stays hidden), in
+                # its "…" menu.
+                buttons_probe = page.evaluate(
                     """() => {
                         const row = document.querySelector(
                             '#history-list .running-item'
                         );
-                        const info = row.querySelector(
-                            '.running-item-info'
-                        );
                         return {
-                            collapsed: row.classList.contains(
-                                'collapsed'
-                            ),
-                            infoDisplay: getComputedStyle(info)
-                                .display,
                             deleteButtons: row.querySelectorAll(
                                 '.sidebar-item-delete'
                             ).length,
-                            toggles: row.querySelectorAll(
+                            foldButtons: row.querySelectorAll(
                                 '.sidebar-item-collapse'
                             ).length,
                         };
                     }"""
                 )
-                assert collapse_probe["collapsed"] is True, (
-                    "history panel must be collapsed by default: " + repr(collapse_probe)
+                assert buttons_probe["deleteButtons"] == 1, (
+                    "a finished task's panel renders one delete button: " + repr(buttons_probe)
                 )
-                assert collapse_probe["infoDisplay"] == "none", (
-                    "collapsed panel must hide the metadata block: " + repr(collapse_probe)
+                assert buttons_probe["foldButtons"] == 0, (
+                    "a history panel has no fold button: " + repr(buttons_probe)
                 )
-                assert collapse_probe["deleteButtons"] == 1, (
-                    "a finished task's panel renders one delete button: " + repr(collapse_probe)
-                )
-                assert collapse_probe["toggles"] == 1, (
-                    "history panels must render one collapse toggle: " + repr(collapse_probe)
-                )
-                # The collapsed task panel must hug its content: no
+                # The task panel must hug its content: no
                 # forced min-height and no oversized padding leaving
                 # blank bands above/below the task text.
                 spacing_probe = page.evaluate(
@@ -888,7 +734,7 @@ def test_live_task_panel_typography_and_history_rows(
                     }"""
                 )
                 assert spacing_probe["minHeight"] in ("0px", "auto"), (
-                    "collapsed history panel must not reserve a min-height: " + repr(spacing_probe)
+                    "a history panel must not reserve a min-height: " + repr(spacing_probe)
                 )
                 assert spacing_probe["paddingTop"] <= 8, (
                     "history panel must not pad extra space above "
@@ -917,53 +763,20 @@ def test_live_task_panel_typography_and_history_rows(
                 assert spacing_probe["actionsHeight"] == 0, (
                     "a closed menu takes no room in the panel: " + repr(spacing_probe)
                 )
-                # Expand the row via the chevron line of its menu so
-                # the metadata becomes visible.
-                task_row = page.locator("#history-list .running-item")
-                click_row_menu_item(task_row, ".sidebar-item-collapse")
-                # Collapse it back, then expand again: the toggle must
-                # round-trip in the real browser.
-                click_row_menu_item(task_row, ".sidebar-item-collapse")
-                recollapsed = page.evaluate(
-                    """() => document.querySelector(
-                        '#history-list .running-item'
-                    ).classList.contains('collapsed')"""
-                )
-                assert recollapsed is True, (
-                    "clicking the chevron again must collapse the panel back"
-                )
-                click_row_menu_item(task_row, ".sidebar-item-collapse")
-                # Park the mouse away from the row so the style probe
-                # below does not read the :hover background, and wait
-                # out the 0.15s background transition back to the
-                # row's own transparent fill.
-                page.mouse.move(0, 0)
-                page.wait_for_function(
-                    """() => getComputedStyle(
-                        document.querySelector(
-                            '#history-list .running-item'
-                        )
-                    ).backgroundColor === 'rgba(0, 0, 0, 0)'
-                    """,
-                    timeout=10000,
-                )
-                page.wait_for_function(
-                    """() => {
-                        const info = document.querySelector(
-                            '.running-item-info'
-                        );
-                        if (!info) return false;
-                        const range = document.createRange();
-                        range.selectNodeContents(info);
-                        return range.getClientRects().length >= 2;
-                    }""",
-                    timeout=10000,
-                )
+                # The pointer has not been on the row: the style probe
+                # reads the row's own fill, not its :hover background.
                 probes = page.evaluate(_PROBE_STYLES_JS)
-                # The legacy flat list: the toggle right of the search
-                # box switches to it, and its rows carry no per-chat
-                # colour bar (computed style, not just the declaration).
+                # The legacy flat list: Group by: None in the menu of
+                # the button right of the search box switches to it,
+                # and its rows carry no per-chat colour bar (computed
+                # style, not just the declaration).  Group by: Chat
+                # brings the chat panels back.
+                pick_filter_option(page, "group", "None")
                 legacy = page.evaluate(_LEGACY_VIEW_PROBE_JS)
+                pick_filter_option(page, "group", "Chat")
+                legacy["restoredGroups"] = page.locator(
+                    "#history-list .history-chat-group"
+                ).count()
             finally:
                 browser.close()
     finally:
@@ -971,9 +784,9 @@ def test_live_task_panel_typography_and_history_rows(
         thread.join(timeout=30)
     assert not thread.is_alive(), "RemoteAccessServer failed to stop"
 
-    assert legacy["toggleVisible"] is True, repr(legacy)
-    assert legacy["toggleLeft"] >= legacy["searchRight"], (
-        "the view toggle sits to the right of the search box: " + repr(legacy)
+    assert legacy["buttonVisible"] is True, repr(legacy)
+    assert legacy["buttonLeft"] >= legacy["searchRight"], (
+        "the Filter and group button sits to the right of the search box: " + repr(legacy)
     )
     assert legacy["legacyClass"] is True and legacy["groups"] == 0, (
         "the legacy view is a flat list: " + repr(legacy)
@@ -995,7 +808,7 @@ def test_live_task_panel_typography_and_history_rows(
         "the legacy row carries no inline colour: " + repr(legacy)
     )
     assert legacy["restoredGroups"] >= 1, (
-        "toggling back restores the chat panels: " + repr(legacy)
+        "Group by: Chat restores the chat panels: " + repr(legacy)
     )
     thread_error = state.get("error")
     if isinstance(thread_error, BaseException):
@@ -1055,28 +868,6 @@ def test_live_task_panel_typography_and_history_rows(
     assert row["color"] == probes["fgColor"] == "rgb(11, 11, 11)", (
         f"row text must be the editor foreground; row: {row}"
     )
-
-    assert probes["infoDisplay"] == "block", probes
-    for key in ("metrics", "workspace", "ids"):
-        assert probes[key] == "inline | normal | visible", (
-            f"{key} span must flow inline and wrap: " + repr(probes)
-        )
-    assert "\u2022" in probes["workspaceSep"], probes
-    assert "\u2022" in probes["idsSep"], probes
-    assert probes["infoLineRects"] >= 2, (
-        "the single metadata line must wrap over multiple line boxes: " + repr(probes)
-    )
-    assert probes["infoClipped"] is False, (
-        "the metadata flow must not be clipped horizontally: " + repr(probes)
-    )
-    assert "3 steps" in probes["metricsText"], probes
-    assert "1.23K tok" in probes["metricsText"], probes
-    assert "$0.50" in probes["metricsText"], probes
-    assert "00:01:01" in probes["metricsText"], probes
-    assert re.search(r"Nov 1[45], 2023, \d{1,2}:\d{2}\s?[AP]M", probes["metricsText"]), probes
-    assert probes["workspaceText"] == "/tmp/w \u2022 gpt-x \u2022 parallel", probes
-    assert "chat chat-abc123" in probes["idsText"], probes
-    assert "task 42" in probes["idsText"], probes
 
 
 # A task text far longer than the history panel is wide.
@@ -1209,12 +1000,12 @@ def test_live_history_rows_are_one_line_with_their_actions_in_a_menu(
 ) -> None:
     """Served page + real Chromium: a chat header and a task panel of
     the task history show ONE line - the text, cut with an ellipsis,
-    and the "…" button at its right end.  The button opens the row's
-    menu under it: one named line per action, the destructive one
-    last, then when the task was launched and the machine it ran on
-    (the daemon's own for a task that ran here).  Choosing a line
-    closes the menu and acts on the row; Escape closes the menu and
-    nothing else.
+    and at its right end the "…" button, after the fold chevron on a
+    header.  The "…" button opens the row's menu under it: one named
+    line per action, the destructive one last, then when the task was
+    launched and the machine it ran on (the daemon's own for a task
+    that ran here).  Choosing a line closes the menu and acts on the
+    row; Escape closes the menu and nothing else.
 
     The layout is measured from real layout boxes of the remote webapp
     exactly as ``RemoteAccessServer`` serves it (``body.remote-chat``
@@ -1276,19 +1067,23 @@ def test_live_history_rows_are_one_line_with_their_actions_in_a_menu(
                 task = page.locator("#history-list .running-item")
                 header_line = header.evaluate(_PROBE_ROW_LINE_JS)
                 header_menu = _open_row_menu(header)
-                # The menu's first line unfolds the chat's task rows.
-                header.locator(":scope > .sidebar-item-actions > .history-chat-collapse").click()
-                task.wait_for(state="visible", timeout=10000)
+                # Choosing a line of the menu closes it and acts on the
+                # row: the pencil turns the title into a text box, which
+                # Escape turns back.
+                header.locator(":scope > .sidebar-item-actions > .history-chat-rename").click()
+                rename_box = header.locator(".history-chat-title-input")
+                rename_box.wait_for(state="visible", timeout=10000)
                 header_menu_left_open = header.evaluate(_MENU_IS_OPEN_JS)
+                page.keyboard.press("Escape")
+                rename_box.wait_for(state="detached", timeout=10000)
+                # The chevron left of the "…" button unfolds the chat's task rows.
+                header.locator(":scope > .history-chat-collapse").click()
+                task.wait_for(state="visible", timeout=10000)
                 task_line = task.evaluate(_PROBE_ROW_LINE_JS)
                 task_menu = _open_row_menu(task)
                 page.keyboard.press("Escape")
                 task_menu_left_open = task.evaluate(_MENU_IS_OPEN_JS)
                 task_listed_after_escape = task.is_visible()
-                # Unfolded, the task's details take the lines under its text.
-                click_row_menu_item(task, ".sidebar-item-collapse")
-                task.locator(".running-item-info").wait_for(state="visible", timeout=10000)
-                unfolded_line = task.evaluate(_PROBE_ROW_LINE_JS)
                 # A chat that ran here names the machine of the daemon serving the page.
                 page.evaluate(_INJECT_HISTORY_JS, {"title": "a task that ran here"})
                 expect(header.locator(".sidebar-item-machine")).to_have_text(
@@ -1309,7 +1104,7 @@ def test_live_history_rows_are_one_line_with_their_actions_in_a_menu(
     _assert_row_menu(
         header_menu,
         "Chat actions",
-        ["Show the chat's tasks", "Favourite chat", "Edit the chat summary", "Delete chat"],
+        ["Favourite chat", "Pin chat", "Edit the chat summary", "Delete chat"],
         [r"Last task .+ ago", r"on gpu-box"],
     )
     assert header_menu_left_open is False, "choosing a line closes the menu"
@@ -1317,14 +1112,9 @@ def test_live_history_rows_are_one_line_with_their_actions_in_a_menu(
     _assert_row_menu(
         task_menu,
         "Task actions",
-        ["Favourite task", "Copy task to clipboard", "Expand task details", "Delete task"],
+        ["Favourite task", "Pin task", "Copy task to clipboard", "Delete task"],
         [r"Launched .+ ago", r"on gpu-box"],
     )
     assert task_menu_left_open is False, "Escape closes the menu"
     assert task_listed_after_escape is True, "Escape closes the menu only"
-    assert unfolded_line["textLines"] == pytest.approx(1, abs=0.1), unfolded_line
-    assert unfolded_line["ellipsized"] is True, unfolded_line
-    assert unfolded_line["aroundText"] > 16, (
-        f"the unfolded details take their lines under the text: {unfolded_line}"
-    )
     assert local_menu["notes"][-1] == f"on {local_machine_name()}", local_menu

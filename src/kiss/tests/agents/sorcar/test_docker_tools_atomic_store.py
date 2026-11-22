@@ -86,8 +86,11 @@ def user_env() -> Iterator[DockerManager]:
 
 
 def _without_python(env: DockerManager, command: str, description: str) -> str:
-    """``env.Bash`` with a ``command -v`` that finds nothing: an Edit takes its Perl editor."""
-    return env.Bash(f"command() {{ return 1; }}\n{command}", description)
+    """``env.Bash`` with a ``command -v`` that finds nothing: an Edit takes its Perl editor.
+
+    The script stays what the tool handed over (its own ``ToolScript``, not a model's command).
+    """
+    return env.Bash(type(command)(f"command() {{ return 1; }}\n{command}"), description)
 
 
 def _both_editors(env: DockerManager) -> list[DockerTools]:

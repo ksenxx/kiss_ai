@@ -16,6 +16,13 @@
 //  3. Ctrl-C on the runner kills the suites' process groups and the
 //     runner reaps its suite processes before exiting 130.
 //
+// A fourth case stops this test itself as run-all.js stops a suite
+// (SIGKILL to its process group, which runs no `finally`): the scratch
+// suite is in a group of its own (run-all.js starts it `detached`), and
+// so is its worker in case 2, so both were out of that kill's reach and
+// lived on, the hanging suite for good and its `sleep` worker for five
+// minutes.  Both must end with the test (LIFELINE_ENV).
+//
 // Whether a process was killed, and who reaped it, is checked without
 // relying on the host's init: each runner is started under a Python
 // helper that makes itself a child subreaper (prctl), so every orphan
@@ -25,7 +32,7 @@
 // helper cannot wait for was reaped by the runner, its parent.
 //
 // The runner is copied into a scratch directory holding one suite, with
-// its 2-minute SUITE_TIMEOUT_MS lowered to SHORT_TIMEOUT_MS, 1 s (the
+// its 10-minute SUITE_TIMEOUT_MS lowered to SHORT_TIMEOUT_MS, 1 s (the
 // constant is not configurable, by design: the copy is the only knob).
 // The runner arms that cap the moment it has spawned the suite; the copy
 // arms the short cap only once the suite has printed READY_MESSAGE, which
@@ -47,10 +54,18 @@ const RUNNER = path.join(__dirname, 'run-all.js');
 // the runner's real cap is its own business (makeScratchRunner patches
 // only this value and when it is armed).
 const SHORT_TIMEOUT_MS = 1000;
-// Long enough for the scratch suite to start node, spawn its `sleep`
-// grandchild and write the pid file on a loaded host.
+// Long enough for the scratch suite to start node, spawn its worker
+// (WORKER) and write the pid file on a loaded host.
 const STARTUP_WATCHDOG_MS = 15000;
 const READY_MESSAGE = 'stalling suite started';
+// The environment variable in which a helper names its lifeline: a file
+// it keeps locked (flock) for as long as it lives.  The kernel unlocks it
+// when the helper ends, however it ended.
+const LIFELINE_ENV = 'CONC1018_LIFELINE';
+// The suites' worker (`python3 -c`): it holds the stdio it inherits until
+// it is killed or the helper above its runner is gone, which is when it
+// gets the lifeline's lock.
+const WORKER = `import fcntl, os; fcntl.flock(open(os.environ["${LIFELINE_ENV}"]), fcntl.LOCK_SH)`;
 
 // prctl(PR_SET_CHILD_SUBREAPER) is a Linux system call: on macOS and
 // Windows the helper below cannot adopt the suites' orphans, so the
@@ -62,26 +77,41 @@ if (process.platform !== 'linux') {
   process.exit(0);
 }
 
-// Runs `node <runner>` as a child subreaper.  `mode` "sigint" sends the
-// runner SIGINT once the suite's pid file exists; if it has not
+// Runs a command (`node <runner>`) as a child subreaper, holding the
+// lifeline `lifeline_file` and naming it to the command in LIFELINE_ENV;
+// the command dies with the helper (PR_SET_PDEATHSIG).  `mode` "sigint"
+// sends the runner SIGINT once the suite's pid file exists; if it has not
 // appeared after 10 s the runner is still interrupted (so it kills its
 // suites' groups), killed if it lingers, and the status is
-// "no-pid-file".  After the runner has
-// exited (or 30 s passed, in which case it is SIGKILLed and status is
-// "hung"), every pid in the pid file is waited for: "not-ours" means
-// its parent (the runner) reaped it; "signal N"/"exit N" is how the
-// helper saw it end; "alive" means it was still running 3 s later and
-// the helper killed it.  The result is written to `result_file` as JSON.
+// "no-pid-file".  `mode` "stop" starts the command in a session of its
+// own and SIGKILLs its process group once the pid file exists.  After the
+// command has exited (or 30 s passed, in which case it is SIGKILLed and
+// status is "hung"), every pid in the pid file is waited for: "not-ours"
+// means its parent reaped it (the runner its suite, a suite its worker);
+// "signal N"/"exit N" is how the helper saw it end; "alive" means it was
+// still running 3 s later and the helper killed it.  The result is
+// written to `result_file` as JSON.
 const SUBREAPER_HELPER = `
-import ctypes, json, os, signal, subprocess, sys, time
-node, runner, mode, pid_file, result_file = sys.argv[1:6]
-PR_SET_CHILD_SUBREAPER = 36
-ctypes.CDLL(None).prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0)
-proc = subprocess.Popen([node, runner])
+import ctypes, fcntl, json, os, signal, subprocess, sys, time
+mode, pid_file, result_file, lifeline_file = sys.argv[1:5]
+libc = ctypes.CDLL(None)
+libc.prctl(36, 1, 0, 0, 0)  # PR_SET_CHILD_SUBREAPER
+helper = os.getpid()
+lifeline = open(lifeline_file, "w")
+fcntl.flock(lifeline, fcntl.LOCK_EX)
+os.environ["${LIFELINE_ENV}"] = lifeline_file
+
+def die_with_helper():
+    libc.prctl(1, 9, 0, 0, 0)  # PR_SET_PDEATHSIG, SIGKILL
+    if os.getppid() != helper:  # the helper died before the prctl
+        os._exit(1)
+
+proc = subprocess.Popen(
+    sys.argv[5:], start_new_session=mode == "stop", preexec_fn=die_with_helper)
 def pid_file_written():
     return os.path.exists(pid_file) and os.path.getsize(pid_file) > 0
 
-if mode == "sigint":
+if mode != "none":
     for _ in range(200):
         if pid_file_written():
             break
@@ -96,13 +126,24 @@ if mode == "sigint":
         with open(result_file, "w") as f:
             json.dump({"status": "no-pid-file", "fates": {}}, f)
         sys.exit(0)
-    proc.send_signal(signal.SIGINT)
+    if mode == "sigint":
+        proc.send_signal(signal.SIGINT)
+    else:
+        os.killpg(proc.pid, signal.SIGKILL)
 try:
     status = proc.wait(timeout=30)
 except subprocess.TimeoutExpired:
     proc.kill()
     proc.wait()
     status = "hung"
+if mode == "stop":
+    # What was killed under the command is this helper's child by now, and
+    # what that left (the suite) becomes one as each of them is reaped.
+    try:
+        while True:
+            os.waitpid(-proc.pid, 0)
+    except ChildProcessError:
+        pass
 
 def fate(pid):
     for _ in range(60):
@@ -161,11 +202,12 @@ function makeScratchRunner() {
 
 /**
  * Write the one suite of the scratch runner: it hands its stdio to a
- * long-lived `sleep` grandchild and records "<suite pid> <grandchild
+ * long-lived grandchild (WORKER) and records "<suite pid> <grandchild
  * pid>" in `pidFile`.  `detached` puts the grandchild in its own
  * process group; `exits` makes the suite exit right away instead of
- * hanging; `startDelayMs` makes it sit idle that long before doing any
- * of this, as a suite slow to start on a loaded host would.
+ * hanging until its worker ends; `startDelayMs` makes it sit idle that
+ * long before doing any of this, as a suite slow to start on a loaded
+ * host would.
  */
 function writeSuite(dir, pidFile, {detached, exits, startDelayMs = 0}) {
   fs.writeFileSync(
@@ -175,37 +217,57 @@ function writeSuite(dir, pidFile, {detached, exits, startDelayMs = 0}) {
       "const {spawn} = require('child_process');",
       "const fs = require('fs');",
       `Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ${startDelayMs});`,
-      `const child = spawn('sleep', ['300'], {stdio: 'inherit', detached: ${detached}});`,
+      `const child = spawn('python3', ['-c', ${JSON.stringify(WORKER)}], {stdio: 'inherit', detached: ${detached}});`,
       `fs.writeFileSync(${JSON.stringify(pidFile)}, process.pid + ' ' + child.pid);`,
       `console.log(${JSON.stringify(READY_MESSAGE)});`,
-      exits ? 'process.exit(0);' : 'setInterval(function () {}, 1000);',
+      exits
+        ? 'process.exit(0);'
+        : "child.on('exit', function () { process.exit(0); });",
       '',
     ].join('\n'),
   );
 }
 
+/** The result file of the helper of `mode` in `dir`. */
+function resultFile(dir, mode) {
+  return path.join(dir, `result-${mode}.json`);
+}
+
+/**
+ * The `python3` arguments of the subreaper helper running the scratch
+ * runner in `dir` in `mode`.  "stop" runs, in place of the runner, a
+ * stand-in for this test's process group: the helper of an ordinary run
+ * (mode "none") with that runner under it.  A helper's result and
+ * lifeline files are named for its mode, so the two do not share theirs.
+ */
+function helperArgs(dir, mode) {
+  const command =
+    mode === 'stop'
+      ? ['python3', ...helperArgs(dir, 'none')]
+      : [process.execPath, path.join(dir, 'run-all.js')];
+  return [
+    '-c',
+    SUBREAPER_HELPER,
+    mode,
+    path.join(dir, 'pids'),
+    resultFile(dir, mode),
+    path.join(dir, `lifeline-${mode}`),
+    ...command,
+  ];
+}
+
 /** Run the scratch runner in `dir` under the subreaper helper; returns
  * `{out, status, fates}`. */
 function runUnderSubreaper(dir, mode) {
-  const pidFile = path.join(dir, 'pids');
-  const resultFile = path.join(dir, 'result.json');
-  const res = spawnSync(
-    'python3',
-    [
-      '-c',
-      SUBREAPER_HELPER,
-      process.execPath,
-      path.join(dir, 'run-all.js'),
-      mode,
-      pidFile,
-      resultFile,
-    ],
-    {encoding: 'utf8', timeout: 60000, killSignal: 'SIGKILL'},
-  );
+  const res = spawnSync('python3', helperArgs(dir, mode), {
+    encoding: 'utf8',
+    timeout: 60000,
+    killSignal: 'SIGKILL',
+  });
   const out = (res.stdout || '') + (res.stderr || '');
   assert.ok(!res.error, `the helper ran: ${res.error}\n${out}`);
   assert.strictEqual(res.status, 0, `the helper finished\n${out}`);
-  const result = JSON.parse(fs.readFileSync(resultFile, 'utf8'));
+  const result = JSON.parse(fs.readFileSync(resultFile(dir, mode), 'utf8'));
   return {out, ...result};
 }
 
@@ -292,9 +354,34 @@ function checkSigintKillsAndReaps() {
   );
 }
 
+function checkStoppedTestLeavesNothingRunning() {
+  // The hanging suite ends when its worker has, and reaps it first.
+  withScratchRunner({detached: false, exits: false}, 'stop', r => {
+    assert.strictEqual(r.status, -9, `the test was stopped mid-run\n${r.out}`);
+    assert.deepStrictEqual(
+      r.fates,
+      {suite: 'exit 0', grandchild: 'not-ours'},
+      `the hanging suite and its worker ended with the test\n${r.out}`,
+    );
+  });
+  // The suite that exited left its worker in a group of its own.
+  withScratchRunner({detached: true, exits: true}, 'stop', r => {
+    assert.strictEqual(r.status, -9, `the test was stopped mid-run\n${r.out}`);
+    assert.strictEqual(
+      r.fates.grandchild,
+      'exit 0',
+      `the detached worker ended with the test\n${r.out}`,
+    );
+  });
+  console.log(
+    'ok - stopping the test ends the suite its runner started and its worker',
+  );
+}
+
 checkHangingSuiteTimesOut(0);
 // A suite that starts later than the short cap is still reported with
 // its output: the cap is armed by the suite's readiness, not its spawn.
 checkHangingSuiteTimesOut(SHORT_TIMEOUT_MS + 500);
 checkExitedSuiteWithPipeHolderTimesOut();
 checkSigintKillsAndReaps();
+checkStoppedTestLeavesNothingRunning();

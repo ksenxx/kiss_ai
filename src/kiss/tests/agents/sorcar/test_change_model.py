@@ -23,19 +23,64 @@ changed model.  These tests verify:
 from __future__ import annotations
 
 import json
+import sys
+import threading
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 import kiss.core.user_config as user_config
+from kiss.agents.sorcar import agent_dispatch
 from kiss.agents.sorcar import persistence as sorcar_persistence
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+from kiss.core import config as config_module
 from kiss.core.models import model_info
 from kiss.core.models.model_info import model as model_factory
-from kiss.tests.agents.sorcar.local_model_server import MODEL, serve, tool_call_body
-from kiss.tests.conftest import executor_of
+from kiss.core.models.openai_compatible_model import OpenAICompatibleBase, OpenAICompatibleModel
+from kiss.core.models.openai_compatible_model2 import OpenAICompatibleModel2
+from kiss.tests.agents.sorcar.local_model_server import (
+    MODEL,
+    ScriptedHandler,
+    serve,
+    text_body,
+    tool_call_body,
+    tool_calls_body,
+)
+from kiss.tests.conftest import clear_classification_cache, executor_of
 from kiss.tests.persistence_helpers import close_db
+
+OWN_ENDPOINT_MODEL = "own-endpoint-model"
+
+
+class _DeletedInFlight(ScriptedHandler):
+    """The settings panel deletes the custom model while its request is in flight."""
+
+    def do_POST(self) -> None:  # noqa: N802
+        for name in (OWN_ENDPOINT_MODEL, MODEL):  # whichever the test registered
+            model_info.delete_custom_model(name)
+        super().do_POST()
+
+
+class _FirstRequestRefused(ScriptedHandler):
+    """The endpoint refuses its first request for good: the model is not available."""
+
+    def do_POST(self) -> None:  # noqa: N802
+        if type(self).requests:
+            return super().do_POST()
+        length = int(self.headers.get("Content-Length", 0))
+        type(self).requests.append(json.loads(self.rfile.read(length)))
+        body = json.dumps({"error": {"message": "The model is not available"}}).encode()
+        self.send_response(404)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+def _refused(prompt: str) -> str:
+    """A system-prompt hook that fails its run before the run's first session."""
+    raise RuntimeError("no system prompt for this run")
 
 
 def _find_tool(tools: list, name: str) -> Any:
@@ -78,6 +123,13 @@ def _bootstrap_live_model(agent: Any, model_name: str) -> Any:
     executor.model_name = model_name
     agent.model_name = model_name  # as ``run(model_name=...)`` sets it
     return executor
+
+
+def _openai_model(executor: Any) -> OpenAICompatibleBase:
+    """Return *executor*'s live model, which must be an OpenAI-compatible one."""
+    model = executor.model
+    assert isinstance(model, OpenAICompatibleBase), type(model)
+    return model
 
 
 @pytest.fixture(autouse=True)
@@ -203,6 +255,24 @@ class TestChangeModelLiveSwap:
         assert getattr(agent.model, "base_url", None) == original_base_url
         assert getattr(agent.model, "api_key", None) == original_api_key
 
+    def test_run_endpoint_stays_when_the_live_models_name_is_registered(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The endpoint a run was launched with is the run's: registering the live model's
+        name as a custom model while it runs does not make that endpoint the model's own,
+        so the next model still inherits it and its key."""
+        monkeypatch.setattr(model_info, "USER_MY_MODELS_PATH", tmp_path / "MY_MODELS.json")
+        agent, tools = _make_agent()
+        agent = _bootstrap_live_model(agent, "gpt-4o")  # fake-key at localhost:65535
+        assert model_info.save_custom_model("gpt-4o", "http://localhost:65534/v1", "own") is None
+
+        _find_tool(tools, "set_model")("gpt-4o-mini")
+
+        # (the key is compared here, not by pytest: a failure must not print a real one)
+        assert (agent.model.base_url, agent.model.api_key == "fake-key") == (
+            "http://localhost:65535/v1", True,
+        )
+
     def test_custom_endpoint_model_runs_against_its_own_endpoint(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -253,6 +323,131 @@ class TestChangeModelLiveSwap:
         assert agent.model.base_url == "https://api.openai.com/v1"
         assert agent.model.api_key != "router-token"
         assert "extra_headers" not in agent.model.model_config
+
+        # The same once the custom model's entry is deleted while it is the live model.
+        set_model("s10s-scout-high")
+        assert model_info.delete_custom_model("s10s-scout-high") is None
+        set_model("gpt-5.5-mini")
+
+        assert agent.model.base_url == "https://api.openai.com/v1"
+        assert agent.model.api_key != "router-token"
+        assert "extra_headers" not in agent.model.model_config
+        # Nor is the default effort its adapter was built with, which the registry no longer names.
+        assert "reasoning_effort" not in agent.model.model_config
+
+    def test_an_explicit_null_effort_is_not_taken_for_a_default(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``reasoning_effort: None`` given for a model that has a default level is the caller's
+        choice: the next model keeps it instead of getting a default of its own."""
+        monkeypatch.setattr(model_info, "USER_MY_MODELS_PATH", tmp_path / "MY_MODELS.json")
+        entry = {
+            "context_length": 262144, "input_price_per_1M": 0.07, "output_price_per_1M": 0.15,
+            "endpoint": "http://localhost:65534/v1", "thinking": "high",
+        }
+        (tmp_path / "MY_MODELS.json").write_text(json.dumps({"scout-a": entry, "scout-b": entry}))
+        agent, tools = _make_agent()
+        executor = executor_of(agent)
+        executor.model = model_factory(
+            "scout-a", model_config={"base_url": entry["endpoint"], "reasoning_effort": None},
+        )
+        executor.model_name = agent.model_name = "scout-a"
+
+        _find_tool(tools, "set_model")("scout-b")
+
+        assert executor.model.model_name == "scout-b"
+        assert executor.model.model_config["reasoning_effort"] is None
+
+    def test_extra_headers_stay_with_their_endpoint(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``extra_headers`` (credentials among them) are the endpoint's they were given
+        for: a switch on that endpoint keeps them, a switch to another provider drops
+        them, so its SDK client authenticates with its own key and is not handed the
+        old endpoint's token (audit 2026-11-21, S14 F1)."""
+        monkeypatch.setattr(config_module.DEFAULT_CONFIG, "OPENROUTER_API_KEY", "openrouter-key")
+        headers = {"Authorization": "Bearer provider-a-token", "X-Team": "s10s"}
+        agent, tools = _make_agent()
+        executor = executor_of(agent)
+        executor.model = model_factory("gpt-4o", model_config={
+            "base_url": "https://api.openai.com/v1", "api_key": "task-key",
+            "extra_headers": headers,
+        })
+        executor.model_name = agent.model_name = "gpt-4o"
+        set_model = _find_tool(tools, "set_model")
+
+        set_model("gpt-4o-mini")
+
+        assert _openai_model(executor).api_key == "task-key"
+        assert executor.model.model_config["extra_headers"] == headers
+        assert agent.model_config["extra_headers"] == headers
+
+        set_model("openrouter/openai/gpt-4o-mini")
+
+        assert _openai_model(executor).base_url == "https://openrouter.ai/api/v1"
+        assert "extra_headers" not in executor.model.model_config
+        assert "extra_headers" not in agent.model_config
+        client = _openai_model(executor)._build_client()
+        sent = {**client.auth_headers, **client.default_headers}  # the SDK's own precedence
+        assert sent["Authorization"] == "Bearer openrouter-key" and "X-Team" not in sent
+
+    def test_a_native_models_headers_stay_within_its_provider(self) -> None:
+        """A native adapter has no ``base_url``; its endpoint is its provider's: Claude to
+        Claude keeps the run's ``extra_headers``, Claude to an OpenAI model drops them."""
+        pytest.importorskip("anthropic")
+        headers = {"anthropic-beta": "context-1m-2025-08-07"}
+        agent, tools = _make_agent()
+        executor = executor_of(agent)
+        executor.model = model_factory("claude-sonnet-4-5", model_config={"extra_headers": headers})
+        executor.model_name = agent.model_name = "claude-sonnet-4-5"
+        set_model = _find_tool(tools, "set_model")
+
+        set_model("claude-haiku-4-5")
+
+        assert executor.model.model_config["extra_headers"] == headers
+
+        set_model("gpt-4o-mini")
+
+        assert _openai_model(executor).base_url == "https://api.openai.com/v1"
+        assert "extra_headers" not in executor.model.model_config
+
+    def test_explicit_responses_transport_stays_on_the_same_endpoint(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An explicit ``use_responses_api`` is the endpoint's it was given for (a gateway
+        may serve nothing else): a switch on that endpoint, to a catalog name or to a
+        ``MY_MODELS.json`` model registered at the same URL, keeps the Responses
+        transport, for the continuation's executor too; a switch to another endpoint
+        drops it (audit 2026-11-21, S14 F2)."""
+        monkeypatch.setattr(model_info, "USER_MY_MODELS_PATH", tmp_path / "MY_MODELS.json")
+        fields = {"context_length": 262144, "input_price_per_1M": 0.07, "output_price_per_1M": 0.15}
+        gateway = {"base_url": "http://localhost:65535/v1", "api_key": "fake-key"}
+        (tmp_path / "MY_MODELS.json").write_text(json.dumps({
+            "same-gateway": {**fields, "endpoint": gateway["base_url"] + "/", "api_key": "own-key"},
+            "other-gateway": {**fields, "endpoint": "http://localhost:65534/v1"},
+        }))
+        agent, tools = _make_agent()
+        executor = executor_of(agent)
+        launch = {**gateway, "use_responses_api": True}
+        executor.model = model_factory("gpt-4o", model_config=launch)
+        executor.model_name = agent.model_name = "gpt-4o"
+        set_model = _find_tool(tools, "set_model")
+
+        set_model("gpt-4o-mini")
+
+        assert type(executor.model) is OpenAICompatibleModel2
+        assert agent.model_config == launch
+        continuation = model_factory(agent.model_name, model_config=agent._executor_model_config())
+        assert type(continuation) is OpenAICompatibleModel2
+        assert (continuation.base_url, continuation.api_key) == tuple(gateway.values())
+
+        set_model("same-gateway")
+
+        assert type(executor.model) is OpenAICompatibleModel2
+        assert executor.model.api_key == "own-key"
+
+        set_model("other-gateway")
+
+        assert type(executor.model) is OpenAICompatibleModel
+        assert "use_responses_api" not in agent.model_config
 
     def test_callbacks_preserved(self) -> None:
         agent, tools = _make_agent()
@@ -417,3 +612,162 @@ class TestSwitchSurvivesContinuation:
         assert [body["model"] for body in custom_requests] == [switched, switched]
         assert agent.model_name == switched
         assert agent.model_config == {"base_url": custom, "api_key": "custom-key"}
+
+    @pytest.mark.parametrize(
+        ("name", "classified", "configured"),
+        [
+            (OWN_ENDPOINT_MODEL, False, True),
+            (MODEL, True, True),
+            (OWN_ENDPOINT_MODEL, False, False),
+        ],
+        ids=["first-request", "classifier", "launched-by-name"],
+    )
+    def test_a_custom_model_deleted_mid_run_leaves_its_endpoint_to_no_other_model(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        name: str, classified: bool, configured: bool,
+    ) -> None:
+        """A run launched on a ``MY_MODELS.json`` model as the task runner launches it (on the
+        entry's endpoint, key and headers) or by its name alone (the run then takes the three
+        from the entry itself), whose entry is deleted while a request is in
+        flight (the run's first; or the one of the classifier that goes ahead of the run, on
+        a name the catalog lists too, which a run outlives): the model the run then switches
+        to, and the next session's executor built from the agent's ``model_config``, get none
+        of the three, as with the entry in place."""
+        monkeypatch.setenv("KISS_DISABLE_TASK_CLASSIFIER", "0" if classified else "1")
+        monkeypatch.setattr(model_info, "USER_MY_MODELS_PATH", tmp_path / "MY_MODELS.json")
+        user_config.save_config({"classify_with_decisions": False})  # the run's model classifies
+        clear_classification_cache()
+        switch_and_finish = tool_calls_body([
+            ("set_model", {"model_name": "gpt-5.5-mini"}),
+            ("finish", {"success": True, "is_continue": False, "summary_in_html": "<p>Done.</p>"}),
+        ], 500)
+        script = [text_body('{"is_simple": true}')] * classified + [switch_and_finish]
+        with serve(script, _DeletedInFlight) as (custom, requests):
+            assert model_info.save_custom_model(name, custom, "custom-key", "X-Team: s10s") is None
+            launch_config = model_info.custom_model_config(name)
+            assert launch_config == {
+                "base_url": custom, "api_key": "custom-key", "extra_headers": {"X-Team": "s10s"},
+            }
+            agent = SorcarAgent("test-deleted-custom-model")
+            agent.run(
+                model_name=name, model_config=launch_config if configured else None,
+                prompt_template="Call set_model, then finish.",
+                max_sub_sessions=1, max_budget=1, max_steps=5,
+                # Only a run that can edit files is classified.
+                tool_profile="" if classified else "control", web_tools=False, use_memory=False,
+                work_dir=str(tmp_path), verbose=False,
+            )
+        assert [body["model"] for body in requests] == [name] * len(script)
+        assert model_info.custom_model_config(name) is None
+        assert agent.model_name == "gpt-5.5-mini"
+        assert agent.model_config == {}
+
+    def test_a_gateway_run_keeps_its_gateway_though_its_model_is_registered_elsewhere(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A run sent to a gateway while a ``MY_MODELS.json`` entry gives its model an endpoint
+        of its own has the gateway as the run's: the model it switches to is asked there.
+        Whose endpoint a run has is said for that run alone: an earlier run of the agent on
+        the entry's endpoint, which failed before its first session, has no say in the next."""
+        monkeypatch.setenv("KISS_DISABLE_TASK_CLASSIFIER", "1")
+        monkeypatch.setattr(model_info, "USER_MY_MODELS_PATH", tmp_path / "MY_MODELS.json")
+        fields = {"context_length": 262144, "input_price_per_1M": 0.1, "output_price_per_1M": 0.4}
+        (tmp_path / "MY_MODELS.json").write_text(json.dumps({
+            OWN_ENDPOINT_MODEL: {**fields, "endpoint": "http://127.0.0.1:9/v1"},
+            "model-without-an-endpoint": fields,
+        }))
+        switch_body = tool_call_body("set_model", {"model_name": "model-without-an-endpoint"}, 500)
+        done_body = tool_call_body("finish", {
+            "success": True, "is_continue": False, "summary_in_html": "<p>Done.</p>",
+        }, 500)
+        agent = SorcarAgent("test-gateway-run")
+        run: dict[str, Any] = {
+            "model_name": OWN_ENDPOINT_MODEL, "prompt_template": "Call set_model, then finish.",
+            "max_sub_sessions": 1, "max_budget": 1, "max_steps": 5, "tool_profile": "control",
+            "web_tools": False, "use_memory": False, "work_dir": str(tmp_path), "verbose": False,
+        }
+        assert "no system prompt for this run" in agent.run(**run, system_prompt_hook=_refused)
+        with serve([switch_body, done_body]) as (gateway, requests):
+            agent.run(**run, model_config={"base_url": gateway, "api_key": "gateway-key"})
+        assert [body["model"] for body in requests] == [
+            OWN_ENDPOINT_MODEL, "model-without-an-endpoint",
+        ]
+
+    def test_a_fallback_after_a_switch_is_built_from_the_switched_models_configuration(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A run that switches to a ``MY_MODELS.json`` model whose endpoint then refuses it for
+        good fails over to the fallback that entry declares where the entry points (its
+        endpoint, as a run launched on that model does), not at the launch endpoint the run
+        left with the switch."""
+        monkeypatch.setenv("KISS_DISABLE_TASK_CLASSIFIER", "1")
+        monkeypatch.setattr(model_info, "USER_MY_MODELS_PATH", tmp_path / "MY_MODELS.json")
+        fields = {"context_length": 262144, "input_price_per_1M": 0.1, "output_price_per_1M": 0.4}
+        switch_body = tool_call_body("set_model", {"model_name": "switched-model"}, 500)
+        done_body = tool_call_body("finish", {
+            "success": True, "is_continue": False, "summary_in_html": "<p>Done.</p>",
+        }, 500)
+        with serve([switch_body, done_body]) as (launch, launch_requests):
+            with serve([done_body], _FirstRequestRefused) as (custom, custom_requests):
+                (tmp_path / "MY_MODELS.json").write_text(json.dumps({
+                    "switched-model": {
+                        **fields, "endpoint": custom, "api_key": "custom-key",
+                        "fallback": "its-fallback",
+                    },
+                    "its-fallback": fields,
+                }))
+                SorcarAgent("test-switch-then-fallback").run(
+                    model_name=MODEL,
+                    model_config={"base_url": launch, "api_key": "launch-key"},
+                    prompt_template="Call set_model, then finish.",
+                    max_sub_sessions=1, max_budget=1, max_steps=5,
+                    tool_profile="control", web_tools=False, use_memory=False,
+                    work_dir=str(tmp_path), verbose=False,
+                )
+        assert [body["model"] for body in launch_requests] == [MODEL]
+        assert [body["model"] for body in custom_requests] == ["switched-model", "its-fallback"]
+
+
+def _inherit_until(agent: Any, done: threading.Event, seen: set[tuple[Any, ...]]) -> None:
+    """Record what a sub-task dispatched now would inherit from *agent*, until *done*."""
+    while not done.is_set():
+        got = agent_dispatch.inherit_from_parent(agent, "", 1.0, agent_dispatch.RunOptions())
+        config = got.options.model_config or {}
+        seen.add((got.model_name, config.get("base_url"), got.model_owns_endpoint))
+
+
+def test_a_dispatch_racing_a_switch_inherits_one_models_name_endpoint_and_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A background ``run_agent`` job reads its caller's model on its own thread while the
+    caller's ``set_model`` replaces it: the sub-task gets one model's name, endpoint and
+    record, never a name with the other model's endpoint or with none."""
+    monkeypatch.setattr(model_info, "USER_MY_MODELS_PATH", tmp_path / "MY_MODELS.json")
+    fields = {"context_length": 262144, "input_price_per_1M": 0.07, "output_price_per_1M": 0.15}
+    endpoints = {"model-a": "http://localhost:65531/v1", "model-b": "http://localhost:65532/v1"}
+    (tmp_path / "MY_MODELS.json").write_text(json.dumps({
+        name: {**fields, "endpoint": endpoint, "api_key": "its-key"}
+        for name, endpoint in endpoints.items()
+    }))
+    agent, tools = _make_agent()
+    _bootstrap_live_model(agent, "model-b")
+    set_model = _find_tool(tools, "set_model")
+    set_model("model-a")
+    one_model = {(name, endpoint, True) for name, endpoint in endpoints.items()}
+    seen: set[tuple[Any, ...]] = set()
+    done = threading.Event()
+    reader = threading.Thread(target=_inherit_until, args=(agent, done, seen))
+    interval = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)  # the switch's stores are a few bytecodes apart
+    reader.start()
+    try:
+        for _ in range(300):
+            set_model("model-b")
+            set_model("model-a")
+            if not seen <= one_model:
+                break
+    finally:
+        done.set()
+        reader.join()
+        sys.setswitchinterval(interval)
+    assert seen <= one_model, seen - one_model

@@ -39,7 +39,12 @@ from collections.abc import Iterator
 import pytest
 
 from kiss.core import browser_handoff
-from kiss.core.browser_handoff import BROWSER_TAB, open_for_user, set_browser_tab_opener
+from kiss.core.browser_handoff import (
+    BROWSER_TAB,
+    NOT_OPENED,
+    open_for_user,
+    set_browser_tab_opener,
+)
 
 _STEP_TIMEOUT = 10.0
 _REOPEN_AFTER = 1.0
@@ -117,6 +122,86 @@ def test_first_caller_reports_the_browser_tab_its_successor_opened(
     assert open_for_user(url) == BROWSER_TAB
     assert opener.calls == 2
     assert time.monotonic() - started < browser_handoff._SETTLE_TIMEOUT / 4
+
+
+class _PendingRetryOpener:
+    """Opener whose first launch fails on cue and whose retry stays pending until released."""
+
+    def __init__(self, retry_opens: bool) -> None:
+        self.retry_opens = retry_opens
+        self.callers: list[str] = []
+        self.first_called = threading.Event()
+        self.fail_first = threading.Event()
+        self.retry_called = threading.Event()
+        self.finish_retry = threading.Event()
+
+    def __call__(self, url: str) -> bool:
+        self.callers.append(threading.current_thread().name)
+        if not self.first_called.is_set():
+            self.first_called.set()
+            self.fail_first.wait(_STEP_TIMEOUT)
+            return False
+        if self.retry_called.is_set():
+            return False  # a third launch: the assertions on ``callers`` report it
+        self.retry_called.set()
+        self.finish_retry.wait(_STEP_TIMEOUT)
+        return self.retry_opens
+
+
+@pytest.mark.parametrize("retry_opens", [False, True])
+def test_waiter_outlasted_by_a_pending_retry_reports_nothing_opened(
+    monkeypatch: pytest.MonkeyPatch, retry_opens: bool
+) -> None:
+    """A wait that runs out during a replacement launch reports no page (audit C1-F1).
+
+    Two callers wait for the first launch; it fails, one of them takes
+    the page over, and its retry is still pending when the other's wait
+    runs out.  That waiter used to report the retry's surface although
+    no launch had succeeded, and none might ever.  The pending retry
+    stays its launching thread's: the waiter opens no second copy, and
+    a retry that succeeds is still settled by its owner.
+    """
+    settle = 1.2
+    opener = _PendingRetryOpener(retry_opens)
+    set_browser_tab_opener(opener)
+    monkeypatch.setattr(browser_handoff, "_REOPEN_AFTER", settle)
+    monkeypatch.setattr(browser_handoff, "_SETTLE_TIMEOUT", settle)
+    monkeypatch.setenv("KISS_HEADLESS", "1")
+    url = f"https://example.test/signin/{uuid.uuid4()}"
+    results: dict[str, str] = {}
+    threads = {
+        name: threading.Thread(target=_open, args=(url, results, name), name=name, daemon=True)
+        for name in "ABC"
+    }
+    try:
+        threads["A"].start()
+        assert opener.first_called.wait(_STEP_TIMEOUT)
+        threads["B"].start()
+        threads["C"].start()
+        # Both waiters are waiting well before the retry is claimed, so
+        # neither finds that claim stale when its own wait runs out.
+        time.sleep(settle * 0.75)
+        opener.fail_first.set()
+        assert opener.retry_called.wait(_STEP_TIMEOUT), "no waiter retried the failed launch"
+        retrier = opener.callers[1]
+        waiter = "C" if retrier == "B" else "B"
+        threads[waiter].join(timeout=_STEP_TIMEOUT)
+        # The retry is still pending: the page is open nowhere.
+        assert results.get(waiter) == NOT_OPENED
+        opener.finish_retry.set()
+        for thread in threads.values():
+            thread.join(timeout=_STEP_TIMEOUT)
+            assert not thread.is_alive(), "open_for_user() did not return"
+        if retry_opens:
+            assert results[retrier] == BROWSER_TAB
+            assert open_for_user(url) == BROWSER_TAB  # settled by its owner: not opened again
+        else:
+            assert results == dict.fromkeys("ABC", NOT_OPENED)
+        assert opener.callers == ["A", retrier]
+    finally:
+        opener.fail_first.set()
+        opener.finish_retry.set()
+        set_browser_tab_opener(None)
 
 
 def _opens(url: str) -> bool:

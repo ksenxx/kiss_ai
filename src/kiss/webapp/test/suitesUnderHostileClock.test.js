@@ -3,10 +3,11 @@
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
 
-// The suites below assert day separators, "N minutes ago" labels, running
-// durations and the page's wall-clock windows (the 15 s launch window, the
-// 5 s close shield, the 30 s history flight, the 10 s rename overlay, the
-// transport shim's overlay, lockout and reload budgets).  They used to date
+// The suites below assert day separators, "N minutes ago" labels and the
+// page's wall-clock windows (the 15 s launch window, the 5 s close shield,
+// the 30 s history flight, the 10 s rename, star and pin overlays, the
+// transport shim's overlay, lockout and reload budgets, the 1.5 s of a
+// swipe, the time a live sub-agent panel took).  They used to date
 // their fixtures from Node's clock and let the page read its own, so they
 // failed whenever the two readings fell on different sides of a boundary: a
 // run across local midnight filed "today" under Yesterday, a render 16 s
@@ -25,16 +26,22 @@ const {spawn} = require('child_process');
 const PRELOAD = path.join(__dirname, 'hostile_clock_preload.js');
 const SUITES = [
   'historyGroups.test.js',
+  'historyProjects.test.js',
+  'audit1012_media_mobile_swipe.test.js',
   'historyTaskLaunchedAgo.test.js',
   'historyTagsChatLaunched.test.js',
   'launchTabSwitch.test.js',
   'mainJsDaemonReconnectRaces.test.js',
   'historyRefreshSingleFlight.test.js',
   'historyRenameSurvivesRebuild.test.js',
+  'historyChatFavorite.test.js',
+  'historyPinned.test.js',
+  'historyFavoriteFastPath_sweep1026.test.js',
   'remotePasswordBypass.test.js',
+  'subagentPanelElapsed.test.js',
 ];
-// Under run-all.js's own two minutes for this suite.
-const CHILD_TIMEOUT_MS = 110000;
+// Under run-all.js's own ten minutes for this suite.
+const CHILD_TIMEOUT_MS = 9.5 * 60 * 1000;
 
 /** Run `suite` under the hostile clock; resolves with `{suite, code, out}`. */
 function run(suite) {

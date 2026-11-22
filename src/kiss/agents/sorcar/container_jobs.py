@@ -14,15 +14,20 @@ or training run those polls are a large share of both.
 Everything here is done with shell commands in the container through the
 ``bash_fn`` the caller supplies (a ``Bash(command, description,
 timeout_seconds, max_output_chars) -> str`` of :class:`DockerManager` or
-:class:`ExecBridge`), so the same class serves both environments.  A job
-runs under ``setsid nohup`` with the exec token
+:class:`ExecBridge`), so the same class serves both environments.  Each
+script is handed over as a
+:class:`~kiss.agents.sorcar.docker_manager.ToolScript`: what it prints is
+the registry's to read, and none of it is streamed into the panel of the
+call it serves.  A job runs under ``setsid nohup`` with the exec token
 (:data:`kiss.agents.sorcar.docker_manager._EXEC_TOKEN_VAR`) removed from
 its environment, so the deadline sweep that kills a timed-out foreground
 command's process tree leaves the job alone.  Its state is three files
 under :data:`JOBS_DIR` (a sub-agent's job keeps them in the sub-agent's
 private folder instead, which is deleted, the job killed, when the
 sub-agent ends): ``<id>.log`` (stdout and stderr), ``<id>.pid``
-(the session leader, whose process group is the job) and ``<id>.exit``
+(the session leader, whose process group is the job; ``<id>.born`` holds
+its start time, by which a zombie that has the pid is told from the
+leader's own) and ``<id>.exit``
 (written when the command ends; the shell opens it before it writes the
 exit code, so only a non-empty marker is a finished job; a job stopped
 from outside before that gets :data:`LOST_STATUS`).  A job left with
@@ -50,7 +55,7 @@ import shlex
 import uuid
 from collections.abc import Callable
 
-from kiss.agents.sorcar.docker_manager import _EXEC_TOKEN_VAR, MARKED_FN
+from kiss.agents.sorcar.docker_manager import _EXEC_TOKEN_VAR, MARKED_FN, ToolScript
 from kiss.agents.sorcar.useful_tools import SUBAGENT_DIR_ENV
 
 #: Directory in the container that holds the log, pid and exit files of every
@@ -73,11 +78,26 @@ LOST_STATUS = "(no exit code: stopped from outside bash_job)"
 #: are gone (the agent cleared the jobs dir), and with them what became of it.
 #: No apostrophe: the text is echoed from a single-quoted shell word.
 GONE_STATUS = "unknown (the job files are gone; the process may still run)"
+#: Defines ``stranger <pid> <start time>``: true when the pid belongs to a
+#: process with another start time (clock ticks since boot, field 22 of
+#: ``/proc/<pid>/stat``), alive or a zombie; false when no process has it.
+#: A zombie has no command line to know it by, and one that is not the
+#: job's leader got the pid after the leader and its whole group were gone:
+#: the group it leads now is another's, not what the job left running.
+#: False also without a start time to compare with: the job was started
+#: before its start time was recorded (it has no ``.born`` file), and what
+#: has its pid is taken for its leader, as the version that started it did.
+STRANGER_FN = (
+    "stranger() {{ [ -n \"$2\" ] || return 1; "
+    "set -- \"$2\" $(sed 's/.*) //' /proc/$1/stat 2>/dev/null); "
+    "[ $# -ge 21 ] && [ \"$1\" != \"${{21}}\" ]; }}; "
+)
 #: Defines ``settle <id>``: writes :data:`LOST_STATUS` into the exit file of the
 #: started job *id* when it has none and nothing of the job is left, that is
-#: its shell is gone (no process, a zombie, or a stranger the kernel gave the
-#: pid, whose command line does not name the pid file) and no live process
-#: is in its group.  Only the shell writes the exit code, as its last
+#: its shell is gone (no process, its zombie, or a stranger the kernel gave
+#: the pid: a command line that does not name the pid file, or none and
+#: another start time than ``<id>.born``, :data:`STRANGER_FN`) and no live
+#: process is in its group.  Only the shell writes the exit code, as its last
 #: command, and a ``pkill -f`` of the job's command stops the shell too (its
 #: command line holds the command): such a job counted as running for ever.
 #: The exit file is looked at again once the shell is seen gone, since the
@@ -85,11 +105,12 @@ GONE_STATUS = "unknown (the job files are gone; the process may still run)"
 #: by its watcher (:data:`WATCH_SCRIPT`), not here.  Also defines ``running
 #: <id>``: true while the job *id*, settled, has a pid file and no exit code
 #: (with neither it is :data:`GONE_STATUS`, which nothing waits on).
-SETTLE_FN = (
+SETTLE_FN = STRANGER_FN + (
     "settle() {{ [ -s {d}/$1.exit ] || [ -s {d}/$1.owner ] && return; "
     "p=$(cat {d}/$1.pid 2>/dev/null); [ -n \"$p\" ] || return 0; "
     "c=$(tr '\\0' ' ' 2>/dev/null < /proc/$p/cmdline); "
     "case \"$c\" in (*\"{d}/$1.pid\"*) return 0;; ('') "
+    "stranger $p \"$(cat {d}/$1.born 2>/dev/null)\" || "
     "cat /proc/[0-9]*/stat 2>/dev/null | {{ while read -r pid rest; do set -- ${{rest##*) }}; "
     "[ \"$1\" != Z ] && [ \"$3\" = \"$p\" ] && exit 1; done; true; }} || return 0;; esac; "
     "[ -s {d}/$1.exit ] || echo '" + LOST_STATUS + "' > {d}/$1.exit; }}; "
@@ -102,8 +123,9 @@ BashFn = Callable[[str, str, int, int], str]
 
 #: Starts the job detached and prints the session leader's pid once the job
 #: wrote it.  ``{inner}`` is the quoted :data:`INNER_SCRIPT`, ``{d}`` the jobs
-#: dir, ``{id}`` the job id.  The inner shell records its own pid (``$$``:
-#: the session leader, whatever ``setsid`` did), runs the command with bash
+#: dir, ``{id}`` the job id.  The inner shell records its own start time and
+#: pid (``$$``: the session leader, whatever ``setsid`` did; the start time
+#: first, so no pid file is without one), runs the command with bash
 #: (``sh`` when the image has no bash) and writes the exit code when it ends.
 #: Only the launch is backgrounded (the braces): a backgrounded ``a && b && c &``
 #: list is a subshell that keeps the exec's stdout open until the job ends.
@@ -113,6 +135,7 @@ START_SCRIPT = (
     "for i in $(seq 1 50); do [ -s {d}/{id}.pid ] && break; sleep 0.1; done; cat {d}/{id}.pid"
 )
 INNER_SCRIPT = (
+    "sed 's/.*) //' /proc/$$/stat | cut -d' ' -f20 > {d}/{id}.born; "
     "echo $$ > {d}/{id}.pid; kiss_sh=bash; command -v bash >/dev/null 2>&1 || kiss_sh=sh; "
     "\"$kiss_sh\" -c {cmd} > {d}/{id}.log 2>&1 < /dev/null; echo $? > {d}/{id}.exit"
 )
@@ -150,23 +173,28 @@ IDENT_FN = (
 )
 #: Defines ``owned <pid> <pidfile>``: true when the process group *pid* is
 #: the job's, that is its leader is the job's shell (its command line names
-#: the pid file the shell wrote) or the leader has ended (no process, or a
-#: zombie, whose command line is empty) and only its group may live on (a
-#: pid in use as a group id is never reused).  A recycled pid, one the kernel
-#: gave an unrelated process after the job's group drained, fails the check,
-#: so the kill scripts never signal a stranger.  An adopted job (its
+#: the pid file the shell wrote) or the leader has ended (no process, or its
+#: zombie: no command line, and the start time of the job's ``.born`` file)
+#: and only its group may live on (a pid in use as a group id is never
+#: reused).  A recycled pid, one the kernel gave an unrelated process after
+#: the job's group drained, fails the check, a zombie's too
+#: (:data:`STRANGER_FN`; not that of a job with no start time on record,
+#: where any zombie passes for the leader's), so the kill scripts
+#: never signal a stranger.  An adopted job (its
 #: ``.owner`` file holds the start time of the process as adopted) is owned
 #: while the pid belongs to the process with that start time, whatever it
 #: has exec'd since: an adopted process ended is nobody's to signal, and so
 #: is a stranger wearing its pid.  One that led its own process group when
-#: adopted (its ``.group`` file) and has ended leaves the group the job's,
-#: as a started job's shell does: a child it left there is still killed.
-OWNED_FN = IDENT_FN + (
-    "owned() {{ if [ -s \"${{2%.pid}}.owner\" ]; then i=$(ident $1); "
-    "[ \"$i\" = \"$(cat \"${{2%.pid}}.owner\")\" ] || "
-    "{{ [ -z \"$i\" ] && [ -s \"${{2%.pid}}.group\" ]; }}; return; fi; "
+#: adopted (its ``.group`` file) and has ended (no process, or its zombie)
+#: leaves the group the job's, as a started job's shell does: a child it
+#: left there is still killed.
+OWNED_FN = IDENT_FN + STRANGER_FN + (
+    "owned() {{ if [ -s \"${{2%.pid}}.owner\" ]; then o=$(cat \"${{2%.pid}}.owner\"); "
+    "[ \"$(ident $1)\" = \"$o\" ] || "
+    "{{ [ -s \"${{2%.pid}}.group\" ] && ! stranger $1 \"$o\"; }}; return; fi; "
     "c=$(tr '\\0' ' ' 2>/dev/null < /proc/$1/cmdline); "
-    "case \"$c\" in (''|*\"$2\"*) true;; (*) false;; esac; }}; "
+    "case \"$c\" in (*\"$2\"*) true;; "
+    "('') ! stranger $1 \"$(cat \"${{2%.pid}}.born\" 2>/dev/null)\";; (*) false;; esac; }}; "
 )
 #: Defines ``tree <pid> <pidfile>``, which prints ``pid:start time`` of every
 #: descendant of the adopted process *pid* (nothing for a started job: its
@@ -309,6 +337,20 @@ class ContainerJobs:
         #: job id -> the directory of its files (:data:`JOBS_DIR` for an id not in it).
         self.dirs: dict[str, str] = {}
 
+    def _run(
+        self, script: str, description: str, timeout: int, max_output_chars: int,
+        command: str = "",
+    ) -> str:
+        """Run *script*, one of the registry's own, in the container and return its output.
+
+        Every script goes out as a
+        :class:`~kiss.agents.sorcar.docker_manager.ToolScript`, so that the
+        Docker tool streams nothing of it into the panel of the call and
+        its guards judge the model's *command* the script runs (a job's;
+        ``""`` for none), not the script.
+        """
+        return self.bash_fn(ToolScript(script, command), description, timeout, max_output_chars)
+
     def _new_job_dir(self) -> str:
         """Return the directory for the files of a job started or adopted now.
 
@@ -318,8 +360,8 @@ class ContainerJobs:
         deletes the folder.  Its files go there (``kiss-jobs`` in the
         folder) and leave with it; any other job's go to :data:`JOBS_DIR`.
         """
-        folder = self.bash_fn(f'printf %s "${{{SUBAGENT_DIR_ENV}-}}"', "find the jobs directory",
-                              QUICK_TIMEOUT, 2000).strip()
+        folder = self._run(f'printf %s "${{{SUBAGENT_DIR_ENV}-}}"', "find the jobs directory",
+                           QUICK_TIMEOUT, 2000).strip()
         return f"{folder}/kiss-jobs" if PRIVATE_DIR.fullmatch(folder) else JOBS_DIR
 
     def start(self, command: str) -> tuple[str | None, str]:
@@ -338,7 +380,8 @@ class ContainerJobs:
         inner = INNER_SCRIPT.format(cmd=shlex.quote(command), d=jobs_dir, id=job_id)
         script = START_SCRIPT.format(token=_EXEC_TOKEN_VAR, inner=shlex.quote(inner), d=jobs_dir,
                                      id=job_id, cmd=shlex.quote(command))
-        out = self.bash_fn(script, f"start background job {job_id}", QUICK_TIMEOUT, 2000).strip()
+        out = self._run(
+            script, f"start background job {job_id}", QUICK_TIMEOUT, 2000, command).strip()
         pid = out.splitlines()[-1].strip() if out else ""
         if not pid.isdigit():
             return None, f"Error: could not start the background job: {out or '(no output)'}"
@@ -378,8 +421,8 @@ class ContainerJobs:
         script = ADOPT_SCRIPT.format(d=jobs_dir, pid=int(pid), id=job_id,
                                      cmd=shlex.quote(command), log=shlex.quote(log_path),
                                      token=_EXEC_TOKEN_VAR, watch=shlex.quote(watch))
-        out = self.bash_fn(script, f"adopt process {pid} as job {job_id}", QUICK_TIMEOUT,
-                           2000).strip()
+        out = self._run(script, f"adopt process {pid} as job {job_id}", QUICK_TIMEOUT,
+                        2000).strip()
         if out.splitlines()[-1:] != ["adopted"]:
             what = "is not running" if out.endswith("gone") else f"could not be adopted: {out}"
             return None, f"Error: process {pid} {what}"
@@ -403,7 +446,7 @@ class ContainerJobs:
             by_dir.setdefault(self.dirs.get(job_id, JOBS_DIR), []).append(job_id)
         script = "; ".join(RUNNING_SCRIPT.format(ids=" ".join(ids), d=jobs_dir)
                            for jobs_dir, ids in by_dir.items())
-        out = self.bash_fn(script, "find the running background jobs", QUICK_TIMEOUT, 2000)
+        out = self._run(script, "find the running background jobs", QUICK_TIMEOUT, 2000)
         running = {line.strip() for line in out.splitlines() if JOB_ID.fullmatch(line.strip())}
         return next((job_id for job_id in reversed(self.commands) if job_id in running), None)
 
@@ -463,8 +506,8 @@ class ContainerJobs:
         if job_id not in self.commands:
             # A job started by an earlier session of this task: its files are
             # still in the container even though this registry never saw it.
-            probe = self.bash_fn(f"cat {JOBS_DIR}/{job_id}.cmd 2>/dev/null; true", "probe job",
-                                 QUICK_TIMEOUT, 2000).strip()
+            probe = self._run(f"cat {JOBS_DIR}/{job_id}.cmd 2>/dev/null; true", "probe job",
+                              QUICK_TIMEOUT, 2000).strip()
             if not probe:
                 known = ", ".join(self.commands) or "none"
                 return f"Error: unknown job id {job_id!r}. Known jobs: {known}."
@@ -477,8 +520,8 @@ class ContainerJobs:
             seconds = max(1, int(timeout_seconds))
             match = ""
             if until:
-                complaint = self.bash_fn(UNTIL_CHECK.format(pattern=shlex.quote(until)),
-                                         "check the until pattern", QUICK_TIMEOUT, 2000).strip()
+                complaint = self._run(UNTIL_CHECK.format(pattern=shlex.quote(until)),
+                                      "check the until pattern", QUICK_TIMEOUT, 2000).strip()
                 if complaint:
                     return f"Error: until is not a valid grep -E regex: {complaint}"
                 match = MATCH_CLAUSE.format(pattern=shlex.quote(until), d=jobs_dir, id=job_id)
@@ -491,5 +534,5 @@ class ContainerJobs:
             script = report
         else:
             return f"Error: action must be one of wait, tail, kill; got {action!r}."
-        out = self.bash_fn(script, f"{action} background job {job_id}", timeout, max_output_chars)
+        out = self._run(script, f"{action} background job {job_id}", timeout, max_output_chars)
         return f"Job {job_id}: {self.commands[job_id]}\n{out}"

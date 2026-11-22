@@ -6,10 +6,9 @@
 
 The real assertions live in
 ``src/kiss/webapp/test/runParallelMultiCallNested.test.js`` (run
-under node, mirrors ``runParallelPanelTabsSync.test.js``).  This
-wrapper spawns ``node`` on that file so the integration test is also
-picked up by ``uv run pytest`` and shows up in CI alongside the rest of
-the webapp Python tests.
+under node).  This wrapper spawns ``node`` on that file so the
+integration test is also picked up by ``uv run pytest`` and shows up in
+CI alongside the rest of the webapp Python tests.
 
 Invariant under test (chat page, ``media/main.js``)
 -----------------------------------------------------------------------
@@ -17,20 +16,14 @@ Invariant under test (chat page, ``media/main.js``)
   tab per spawned sub-agent — irrespective of how many run_parallel
   calls that agent/sub-agent already made (verified with three
   sequential calls by the root agent, three by a sub-agent, and a
-  3-level-deep nesting of run_parallel calls).
-* When a sub-agent finishes (``subagentDone``), ONLY the corresponding
-  tab closes — at every nesting level.
-* Collapsing a run_parallel panel (by the user clicking its header or
-  by the agent's automatic collapse passes) closes the tabs of ALL
-  sub-agents spawned by THAT call — and never the tabs spawned by a
-  DIFFERENT run_parallel call of the same agent.
-* Uncollapsing a run_parallel panel reopens the tabs of ALL sub-agents
-  spawned by THAT call (via ``resumeSession``) — and only that call.
-* A run_parallel panel replayed inside an adjacent-task history block
-  (whose parent tab belongs to a long-gone session) is inert.
-* A sub-agent spawned under a parent tab that has no chat DOM yet
-  still gets its own tab; a late-rendered run_parallel panel adopts
-  such unregistered tabs so its collapse closes them.
+  3-level-deep nesting of run_parallel calls), also under a parent tab
+  that has no chat DOM yet and under one that has already closed (the
+  nearest open ancestor then takes the tab).
+* A tab closes when its own sub-agent finishes (``subagentDone``) and
+  only then: a finished ancestor leaves the tabs of the sub-agents
+  still running below it, and folding or unfolding a fan-out panel,
+  live or in adjacent history, opens and closes nothing.
+* A sub-agent announced as finished gets no tab.
 """
 
 from __future__ import annotations

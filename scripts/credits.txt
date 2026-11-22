@@ -1,0 +1,10 @@
+# Outside contributors whose code is in the public repo, read by release.sh:
+#   <release that first shipped their code> <Name> <email>
+# Each line becomes a Co-authored-by trailer on that release commit, which is
+# what lists the person under Contributors on GitHub. The email is the
+# account's GitHub noreply address (<user id>+<login>@users.noreply.github.com).
+# Delete a line once none of that person's code is left; the next release
+# rewrites the release commits and tags from that version on.
+0.2.47 Cedric Richter <32569892+cedricrupb@users.noreply.github.com>
+0.2.74 Yogya Mehrotra <67778074+yogyam@users.noreply.github.com>
+2026.6.18 dsy122 <93703406+dsy122@users.noreply.github.com>

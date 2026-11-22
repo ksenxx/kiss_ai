@@ -139,27 +139,36 @@ async function openDirtyTab(ctx) {
     win.close();
   });
 
-  await test('an outage re-arms the manual Git Commit button', () => {
+  await test('an outage re-arms the Git commit and Create PR buttons', () => {
     const {win, posted} = h.makePage();
     connect(win);
     sendTabsState(win, [{tabId: 'a1', workDir: '/ws/a', chatId: 'chat-1'}]);
-    const btn = h.byId(win, 'autocommit-btn');
-    h.click(win, btn);
-    assert.strictEqual(h.ofType(posted, 'autocommitAction').length, 1);
-    assert.strictEqual(btn.disabled, true, 'precondition: committing');
+    // Neither request's end (autocommit_done, pr_done) crosses an outage.
+    const requests = [
+      ['autocommit-btn', 'autocommitAction', 'Git commit'],
+      ['create-pr-btn', 'createPrAction', 'Create pull request'],
+    ];
+    for (const [id, type] of requests) {
+      h.click(win, h.byId(win, id));
+      assert.strictEqual(h.ofType(posted, type).length, 1);
+      assert.strictEqual(h.byId(win, id).disabled, true, 'precondition');
+    }
     h.send(win, {type: 'daemonStatus', connected: false, reconnecting: true});
-    assert.strictEqual(btn.disabled, false);
-    assert.strictEqual(
-      btn.querySelector('.more-item-label').textContent,
-      'Git Commit',
-    );
+    for (const [id, , name] of requests) {
+      const btn = h.byId(win, id);
+      assert.strictEqual(btn.disabled, false);
+      assert.strictEqual(btn.getAttribute('aria-label'), name);
+      assert.ok(!btn.classList.contains('is-busy'));
+    }
     h.send(win, {type: 'daemonStatus', connected: true, reconnecting: true});
-    h.click(win, btn);
-    assert.strictEqual(
-      h.ofType(posted, 'autocommitAction').length,
-      2,
-      'a new commit can start',
-    );
+    for (const [id, type] of requests) {
+      h.click(win, h.byId(win, id));
+      assert.strictEqual(
+        h.ofType(posted, type).length,
+        2,
+        'a new request can start',
+      );
+    }
     win.close();
   });
 

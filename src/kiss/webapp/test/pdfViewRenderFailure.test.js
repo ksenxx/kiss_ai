@@ -100,7 +100,9 @@ function fakeTransport(win) {
  * pdf.js's do over a worker that answers nothing; with `opts.hungFree`
  * the document loads and only its destroy never settles (a worker that
  * hung after delivering pages); with `opts.failedFree` its destroy
- * rejects, as pdf.js's does when the worker answers with an error.
+ * rejects, as pdf.js's does when the worker answers with an error; with
+ * `opts.badDocument` the load is refused (an invalid or locked file) and
+ * with `opts.badPage` the document loads and its page does not.
  */
 function makePage(renders, opts) {
   opts = opts || {};
@@ -153,7 +155,13 @@ function makePage(renders, opts) {
     disconnect() {}
   };
   const page = fakePage(renders);
-  const doc = {numPages: 1, getPage: () => Promise.resolve(page)};
+  const doc = {
+    numPages: 1,
+    getPage: () =>
+      opts.badPage
+        ? Promise.reject(new Error('Bad page tree'))
+        : Promise.resolve(page),
+  };
   const tasks = [];
   const lib = {
     PDFWorker: {create: () => ({destroy() {}})},
@@ -161,7 +169,9 @@ function makePage(renders, opts) {
       const task = opts.deadWorker
         ? {promise: new Promise(() => {}), destroy: () => new Promise(() => {})}
         : {
-            promise: Promise.resolve(doc),
+            promise: opts.badDocument
+              ? Promise.reject(new Error('Invalid PDF structure'))
+              : Promise.resolve(doc),
             _transport: fakeTransport(win),
             destroy() {
               if (opts.hungFree) return new Promise(() => {});
@@ -352,6 +362,40 @@ async function testDeadWorker() {
 }
 
 /**
+ * A document pdf.js refuses, or one whose page does not load, is never
+ * shown: the viewer said "Cannot display" and kept its worker running,
+ * and the document's fonts and filter SVG in the page, until the tab
+ * was closed.
+ */
+async function testFailedLoad() {
+  for (const [opts, reason] of [
+    [{badDocument: true}, 'Invalid PDF structure'],
+    [{badPage: true}, 'Bad page tree'],
+  ]) {
+    const failed = makePage([], opts);
+    const {holder, viewer} = mount(failed.win);
+    await waitFor(
+      () => holder.querySelector('.content-binary-note'),
+      'the failed load is reported: ' + reason,
+    );
+    const note = holder.querySelector('.content-binary-note');
+    assert.ok(note.textContent.includes(reason), note.textContent);
+    assert.strictEqual(
+      failed.workers[0].terminated,
+      true,
+      'the worker is stopped when the load fails: ' + reason,
+    );
+    assert.deepStrictEqual(
+      pageResources(failed.win),
+      {fonts: [], filters: []},
+      'a failed load leaves no font or filter SVG in the page: ' + reason,
+    );
+    viewer.dispose();
+    assert.strictEqual(holder.childElementCount, 0, 'the viewer is gone');
+  }
+}
+
+/**
  * The shortcuts are the viewer's while nothing else is pointed at: a key
  * aimed at another element, or pressed after the user pointed outside
  * the viewer (the chat transcript beside it in the split layout), is
@@ -489,6 +533,7 @@ async function main() {
     'a draw cancelled by dispose reports no failure',
   );
   await testDeadWorker();
+  await testFailedLoad();
   await testKeysStayWithTheirScroller();
   console.log('pdfViewRenderFailure.test.js passed');
 }

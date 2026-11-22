@@ -245,7 +245,8 @@ function testVisibleTaskHighlightsAndScrolls() {
   showChatWithoutTask(win, 'chat-2');
   const newest = rowFor(win, 'chat-2', 3);
   assert.deepStrictEqual(highlighted(win), [newest]);
-  assert.deepStrictEqual(scrolled.slice(1), [header(win, 'chat-2')]);
+  assert.strictEqual(scrolled.length, 2);
+  assert.strictEqual(scrolled[1], header(win, 'chat-2'));
 
   // A fresh tab (no chat, no task) clears both highlights.
   win._testApi.createNewTab();
@@ -347,7 +348,8 @@ function testFoldIsTheUsersAlone() {
   const row = rowFor(win, 'chat-1', 1);
   assert.deepStrictEqual(highlighted(win), [row]);
   assert.ok(activeChat(win, 'chat-1') && !activeChat(win, 'chat-2'));
-  assert.deepStrictEqual(scrolled, [row], 'the row itself is scrolled to');
+  assert.strictEqual(scrolled.length, 1);
+  assert.strictEqual(scrolled[0], row, 'the row itself is scrolled to');
 
   // The user folds it again while looking at it: a rebuild keeps the
   // fold, and the rebuild's scroll lands on the header, the
@@ -428,7 +430,8 @@ function testFilteredRowWaitsForTheFilter() {
   completedBox.checked = true;
   completedBox.dispatchEvent(new win.Event('change', {bubbles: true}));
   assert.strictEqual(row.style.display, '');
-  assert.deepStrictEqual(scrolled, [row], 'the scroll waited for the filter');
+  assert.strictEqual(scrolled.length, 1);
+  assert.strictEqual(scrolled[0], row, 'the scroll waited for the filter');
   win.close();
   console.log(
     'PASS a filtered-out row is scrolled to once the filter shows it',

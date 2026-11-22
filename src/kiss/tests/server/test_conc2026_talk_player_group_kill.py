@@ -209,6 +209,48 @@ class TalkPlayerGroupKillTest(_EnvMixin):
             "never reached its process group",
         )
 
+    def test_exited_wrapper_leaves_no_player_for_the_next_clip(self) -> None:
+        """What a wrapper left running in its group ends with it, before the next clip.
+
+        The wrapper starts ``sleep 300`` without waiting for it (a
+        player run with ``&``) and exits.  Its clip is over then: the
+        sleeper must be gone when the next clip's wrapper starts (it
+        would play over that clip), and nothing may be left of either
+        clip (audit 2026-11-21 V10/F2: only a timeout or a shutdown
+        signalled the group, and a wrapper that had exited was reaped
+        with its group left alone).
+        """
+        tmp = Path(self.enterContext(_tempdir()))
+        pids = tmp / "left.pids"
+        overlap = tmp / "overlap"
+        script = tmp / "backgrounding_player.sh"
+        _write_script(
+            script,
+            f"last=$(tail -n 1 {shlex.quote(str(pids))} 2>/dev/null)\n"
+            f'[ -n "$last" ] && kill -0 "$last" 2>/dev/null'
+            f" && echo $last >> {shlex.quote(str(overlap))}\n"
+            f"sleep 300 &\n"
+            f"echo $! >> {shlex.quote(str(pids))}\n",
+        )
+        os.environ["KISS_SORCAR_PLAY_CMD"] = shlex.quote(str(script))
+        os.environ.pop("KISS_SORCAR_PLAY_TIMEOUT", None)
+
+        player = TalkPlayer()
+        self.addCleanup(player.shutdown)
+        for _ in range(2):
+            player.play({"talkId": uuid.uuid4().hex, "text": "", "audioB64": MP3_B64})
+        _wait_for(lambda: pids.exists() and len(pids.read_text().splitlines()) == 2, 30.0)
+        left = [int(line) for line in pids.read_text().splitlines()]
+        self._stray_pids += left
+        self.assertEqual(len(left), 2, "the two clips never played")
+        self.assertFalse(
+            overlap.exists(), "the first clip's player still ran when the second clip started"
+        )
+        self.assertTrue(
+            _wait_for(lambda: not any(map(_pid_alive, left)), 15.0),
+            "a player its wrapper did not wait for outlived the clip",
+        )
+
 
 @unittest.skipUnless(os.name == "posix", "process groups are POSIX-only")
 class TalkPlayerShutdownTest(_EnvMixin):

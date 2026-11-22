@@ -2,39 +2,41 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""E2E: a sub-agent tab reopened by ``resumeSession`` while another client
-closes it ends up consistent -- open AND streaming, or closed.
+"""E2E: a sub-agent tab resumed while another client closes it ends up open AND streaming.
 
-``_replay_session`` for a sub-agent tab used to commit in three
-separate ``_state_lock`` sections (attach + subscribe; clear
-``frontend_closed``; forget the user close) with the ``openSubagentTab``
-announcement after them, while ``_close_tab``'s tail (mark closed,
-broadcast ``closeSubagentTab``, remember the close, unsubscribe) runs in
+``_replay_session`` for a sub-agent tab used to commit in separate
+``_state_lock`` sections (attach + subscribe; clear
+``frontend_closed``) with the ``openSubagentTab`` announcement after
+them, while ``_close_tab``'s tail (mark closed, unsubscribe) runs in
 ONE section.  A close landing between the attach and the commit left
-the tab marked open on the reopening client, yet unsubscribed: the
+the tab announced to the resuming client, yet unsubscribed: the
 sub-agent's later events never reached it (findings H1-F1).
 
 Real daemon, two real client connections, scripted LLM loop (the
 parent fans out one child through ``run_agents_parallel``; the child
-blocks, then emits a ``tool_call`` on demand).  The attach-to-commit
-window is widened with the suite's ``KISS_RACE_DELAY`` hook and the
-close is sent while the replay thread sits in it (frame probe), so
-client B sees ``closeSubagentTab`` and THEN its own ``openSubagentTab``:
-B's tab is open, and the child's next event must reach it.
+blocks, then emits a ``tool_call`` on demand).  B's replay is held
+between its attach and its commit (``Pause``, a trace hook on the real
+code path) until A's ``closeTab`` of the same tab has unsubscribed it
+(a page sends none for a sub-agent's tab; an older page or a script
+can): B is then announced the running sub-agent, and the child's next
+event must reach B's tab.
+
+The daemon's own teardown takes the same section: a replay held the
+same way while the child ends tells B the end and leaves nothing
+subscribed or pinned for the tab, with no page closing it.
 """
 
 from __future__ import annotations
 
-import os
-import sys
 import threading
 import uuid
-from types import FrameType
 from typing import Any
 
 from kiss.agents.sorcar import cron_agent
 from kiss.agents.sorcar import persistence as _persistence
 from kiss.core.models.model_info import get_available_models
+from kiss.server.server import AgentServer
+from kiss.tests.server.pause import Pause
 from kiss.tests.server.test_subagent_tabs_two_clients import _fan_out
 from kiss.tests.server.two_client_harness import Client, TwoClientHarness
 
@@ -43,31 +45,8 @@ CHILD_MARK = "CONC1018CHILD"
 STEP_TOOL = "conc1018_step"
 
 
-def _replay_thread_in_window() -> bool:
-    """Whether some thread sits in ``_race_delay`` called by ``_replay_session``."""
-    for top in sys._current_frames().values():
-        names: set[str] = set()
-        frame: FrameType | None = top
-        while frame is not None:
-            names.add(frame.f_code.co_name)
-            frame = frame.f_back
-        if {"_race_delay", "_replay_session"} <= names:
-            return True
-    return False
-
-
-def _last_index(client: Client, event_type: str, **fields: Any) -> int:
-    """Index in ``client.events`` of the latest *event_type* matching *fields* (-1: none)."""
-    events = list(client.events)
-    for i in range(len(events) - 1, -1, -1):
-        e = events[i]
-        if e.get("type") == event_type and all(e.get(k) == v for k, v in fields.items()):
-            return i
-    return -1
-
-
-class SubagentReopenCloseRaceTest(TwoClientHarness):
-    """Reopen racing a close: the reopened tab keeps the live fan-out."""
+class SubagentResumeCloseRaceTest(TwoClientHarness):
+    """A resume racing a close: the resumed tab keeps the live fan-out."""
 
     def setUp(self) -> None:
         if not get_available_models():
@@ -82,7 +61,6 @@ class SubagentReopenCloseRaceTest(TwoClientHarness):
         self._install_race_stub()
 
     def tearDown(self) -> None:
-        os.environ.pop("KISS_RACE_DELAY", None)
         self.step_release.set()
         self.leaf_release.set()
         cron_agent.stop_scheduler_thread(self._cron_stop)
@@ -138,69 +116,20 @@ class SubagentReopenCloseRaceTest(TwoClientHarness):
         rows = _persistence._load_subagent_rows_by_parent_task_id(str(parents[0]["id"]))
         return str(rows[0]["task_id"]) if rows else None
 
-    def _resume(self, client: Client, child: str, sub_tab: str, reopen: bool = False) -> None:
+    def _resume(self, client: Client, child: str, sub_tab: str) -> None:
         """``resumeSession`` *sub_tab* on *client* and wait for ITS transcript.
 
         Counted, not merely awaited: an unscoped replay requested by
-        another client also reaches this one.  *reopen* is the user
-        asking for a closed tab again (an expanded fan-out panel): only
-        that undoes a close.
+        another client also reaches this one.
         """
         before = len(client.of_type("task_events", tabId=sub_tab))
-        client.send({
-            "type": "resumeSession", "taskId": child, "tabId": sub_tab, "reopen": reopen,
-        })
+        client.send({"type": "resumeSession", "taskId": child, "tabId": sub_tab})
         self.wait_for(
             lambda: len(client.of_type("task_events", tabId=sub_tab)) > before,
             what=f"{client.name}: transcript of the sub-agent tab",
         )
 
-    def _reopen_during_close(
-        self,
-        a: Client,
-        b: Client,
-        child: str,
-        sub_tab: str,
-    ) -> bool:
-        """One attempt: B reopens *sub_tab* while A closes it inside the window.
-
-        Returns ``True`` when the close landed between B's attach and
-        its commit (B saw ``closeSubagentTab`` before its own
-        ``openSubagentTab``), ``False`` when the window was missed.
-        """
-        closes_before = len(b.of_type("closeSubagentTab", tab_id=sub_tab))
-        opens_before = len(b.of_type("openSubagentTab", tab_id=sub_tab))
-        os.environ["KISS_RACE_DELAY"] = "0.1"
-        try:
-            b.send({
-                "type": "resumeSession", "taskId": child, "tabId": sub_tab, "reopen": True,
-            })
-            # The window is 0.1 s wide: a poll that a loaded machine holds up misses it and
-            # sees B's commit instead.  The close then lands after the commit, a missed
-            # attempt the caller repeats.
-            self.wait_for(
-                lambda: (
-                    _replay_thread_in_window()
-                    or len(b.of_type("openSubagentTab", tab_id=sub_tab)) > opens_before
-                ),
-                timeout=10,
-                what="B's replay thread to enter the attach-to-commit window",
-            )
-            a.send({"type": "closeTab", "tabId": sub_tab})
-            self.wait_for(
-                lambda: (
-                    len(b.of_type("closeSubagentTab", tab_id=sub_tab)) > closes_before
-                    and len(b.of_type("openSubagentTab", tab_id=sub_tab)) > opens_before
-                ),
-                what="B: the close and the reopen of the sub-agent tab",
-            )
-        finally:
-            os.environ.pop("KISS_RACE_DELAY", None)
-        close_at = _last_index(b, "closeSubagentTab", tab_id=sub_tab)
-        open_at = _last_index(b, "openSubagentTab", tab_id=sub_tab)
-        return close_at < open_at
-
-    def test_reopened_tab_keeps_the_live_fan_out(self) -> None:
+    def test_resumed_tab_keeps_the_live_fan_out(self) -> None:
         a = self.open_client("a")
         a.ready()
         b = self.open_client("b")
@@ -222,21 +151,50 @@ class SubagentReopenCloseRaceTest(TwoClientHarness):
             self.wait_event(client, "new_tab", task_id=child)
             self._resume(client, child, sub_tab)
 
-        hit = False
-        for _ in range(6):
-            if self._reopen_during_close(a, b, child, sub_tab):
-                hit = True
-                break
-            # The close landed after B's commit: B's tab is closed.
-            # Reopen it on B and try the window again.
-            self._resume(b, child, sub_tab, reopen=True)
-        self.assertTrue(hit, "never landed the close inside B's attach-to-commit window")
+        # A's close lands between the attach and the commit of B's resume.
+        watchers = self.server._printer._fanout_targets
+        announced = len(b.of_type("openSubagentTab", tab_id=sub_tab))
+        held = Pause(
+            AgentServer._announce_or_end_subagent_tab.__code__,
+            lambda local: local["tab_id"] == sub_tab,
+        )
+        with held:
+            b.send({"type": "resumeSession", "taskId": child, "tabId": sub_tab})
+            self.assertTrue(held.paused.wait(30), "B's replay never got to its commit")
+            a.send({"type": "closeTab", "tabId": sub_tab})
+            self.wait_for(
+                lambda: sub_tab not in watchers(child), what="A's close of the sub-agent tab",
+            )
+        self.wait_for(
+            lambda: len(b.of_type("openSubagentTab", tab_id=sub_tab)) > announced,
+            what="B: the running sub-agent announced",
+        )
 
-        # B's tab is open (its last event for the tab is the reopen):
-        # the child's next event must reach it.
+        # B's tab is open: the child's next event must reach it.
         self.step_release.set()
         self.wait_event(b, "tool_call", timeout=10, tabId=sub_tab, name=STEP_TOOL)
-        self.leaf_release.set()
+
+        # B asks once more and the child ends between that replay's
+        # attach and its commit: B is told the end by both, and the
+        # daemon holds nothing for the tab though no page closed it.
+        told = len(b.of_type("subagentDone", tab_id=sub_tab))
+        ending = Pause(
+            AgentServer._announce_or_end_subagent_tab.__code__,
+            lambda local: local["tab_id"] == sub_tab,
+        )
+        with ending:
+            b.send({"type": "resumeSession", "taskId": child, "tabId": sub_tab})
+            self.assertTrue(ending.paused.wait(30), "B's second replay never got to its commit")
+            self.leaf_release.set()
+            self.wait_event(a, "subagentDone", tab_id=sub_tab, task_id=child)
+        self.wait_for(
+            lambda: len(b.of_type("subagentDone", tab_id=sub_tab)) == told + 2,
+            what="B: the end from the child and from its own replay",
+        )
+        server = self.server._agent_server
+        with server._state_lock:
+            self.assertEqual(server.printer.tasks_for_tab(sub_tab), [])
+            self.assertNotIn(sub_tab, server._tab_opened_task_ids)
         self.wait_for(
             lambda: a.of_type("status", running=False, tabId=a.tab_id),
             what="parent task to finish",

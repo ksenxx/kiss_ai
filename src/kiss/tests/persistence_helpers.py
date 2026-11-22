@@ -2,12 +2,13 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""The tests' reset of the history database's connections.
+"""The tests' reset of the history database's connections, and their view of its event queue.
 
 No product code closes the database for the whole process, so this
 reset lives with the tests that need it: they redirect
 ``persistence._DB_PATH`` to a private database and must not keep a
-connection, the event writer or a cache of the previous one.
+connection, the event writer or a cache of the previous one.  None
+counts one task's queued events either (:func:`queued_events`).
 """
 
 from __future__ import annotations
@@ -37,6 +38,16 @@ def close_db(db: Any = persistence) -> None:
     db._stop_event_writer()
     db._close_thread_db()
     locked_call(db._init_tables_lock, _retire_other_threads_conns, db)
+
+
+def queued_events(task_id: str) -> int:
+    """Return how many events of *task_id* the event writer has not taken off its queue yet.
+
+    Args:
+        task_id: The ``task_history`` row id the events were queued for.
+    """
+    # A snapshot in one C call: the writer pops while this counts.
+    return sum(1 for item in list(persistence._event_deque) if item[0] == task_id)
 
 
 def _retire_other_threads_conns(db: Any) -> None:

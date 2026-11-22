@@ -283,7 +283,7 @@ class DeferredRestartTest(_UpdateCheckTestBase):
     async def test_a_refused_spawn_submission_is_retried_by_a_later_poll(self) -> None:
         """A refusal left the guard and the barrier up: no later poll, no new task."""
         loop = asyncio.get_running_loop()
-        self._pool = ws._default_executor()
+        self._pool = ThreadPoolExecutor(max_workers=ws._EXECUTOR_WORKERS)
         loop.set_default_executor(self._pool)
         self._shut = asyncio.Event()
         arm = ws.RemoteAccessServer._arm_update_barrier_if_idle.__code__
@@ -291,7 +291,7 @@ class DeferredRestartTest(_UpdateCheckTestBase):
             self._write_record(self._record_json())
             # Set in the poller's loop step, which the refusal ends.
             await asyncio.wait_for(self._shut.wait(), 10)
-        loop.set_default_executor(ws._default_executor())
+        loop.set_default_executor(ThreadPoolExecutor(max_workers=ws._EXECUTOR_WORKERS))
         self.assertFalse(self.server._update_in_progress())
         self.assertFalse(self._barrier_up())
         await self._wait_until(self.mark.exists, "the restart installer to start")

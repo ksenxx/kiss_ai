@@ -17,6 +17,7 @@ such a file now counts as empty metadata, like any other malformed block.
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 import pytest
@@ -92,3 +93,22 @@ def test_an_alias_tree_is_not_a_description(project: Path, description: str, sho
     tool = make_skill_tool(str(project))
     assert tool is not None
     assert f"<name>bad</name>\n<description>{shown}</description>" in (tool.__doc__ or "")
+
+
+def test_a_merge_key_bomb_is_empty_metadata_at_once(tmp_path: Path) -> None:
+    """Audit 2026-11-21 S13/F4: ``<<: [*m, *m]`` doubles a mapping at each level, and
+    ``safe_load`` wrote the pairs out: 20 levels (620 bytes) took a second of CPU and 73 MiB,
+    each further level twice that, wherever skills are discovered.  The loader refuses a
+    block past a budget of merged pairs; the merges metadata would write still load."""
+    levels = ["description: A harmless short description", "m0: &m0 {key: value}"]
+    levels += [f"m{n}: &m{n} {{<<: [*m{n - 1}, *m{n - 1}]}}" for n in range(1, 21)]
+    path = tmp_path / "SKILL.md"
+    path.write_text("---\n" + "\n".join(levels) + "\n---\nThe body.\n")
+    started = time.process_time()
+    assert parse_frontmatter(path) == ({}, "The body.\n")
+    assert time.process_time() - started < 0.5
+    path.write_text("---\nbase: &base {license: MIT}\nmeta: {<<: *base, name: demo}\n"
+                    "both: {<<: [*base, {name: two}]}\n---\nBody.\n")
+    assert parse_frontmatter(path) == ({
+        "base": {"license": "MIT"}, "meta": {"license": "MIT", "name": "demo"},
+        "both": {"license": "MIT", "name": "two"}}, "Body.\n")

@@ -206,9 +206,11 @@ def _model_and_effort(
     adapter the model factory builds for the name reads it: the one
     *model_config* sets (:func:`_asked_effort`), else the catalog
     entry's (``claude-fable-5-2`` runs at ``high``, as
-    ``claude-fable-5-2-high`` does); a name the catalog does not list
-    carries it only in its ``-{level}`` suffix.  Gemini has no level
-    above ``high`` and runs ``xhigh`` and ``max`` at it.
+    ``claude-fable-5-2-high`` does).  An ``-xhigh`` alias the catalog
+    does not list runs at that level on the Codex CLI alone
+    (``codex/gpt-6-astra-xhigh``): no other adapter reads the suffix, so
+    ``cc/opus-xhigh`` is ``cc/opus``.  Gemini has no level above
+    ``high`` and runs ``xhigh`` and ``max`` at it.
     """
     name = model_name.strip()
     config = model_config or {}
@@ -225,7 +227,8 @@ def _model_and_effort(
         route = _native_provider(name) or ""
     effort = _asked_effort(route, config)
     if effort is None:
-        effort = (info.thinking if info else None) or name[len(base):].lstrip("-")
+        suffix = name[len(base):].lstrip("-") if route == "Codex CLI" else ""
+        effort = (info.thinking if info else None) or suffix
     effort = effort.lower()
     if route == "Gemini" and effort in ("xhigh", "max"):
         effort = "high"
@@ -340,7 +343,6 @@ def other_worker_model(
     model_name: str,
     model_config: dict[str, Any] | None = None,
     pin_config: dict[str, Any] | None = None,
-    inheriting: str = "",
 ) -> str | None:
     """Return a configured model that is another worker than *model_name* at its effort.
 
@@ -353,8 +355,9 @@ def other_worker_model(
     is not offered when *pin_config* sets the effort itself, which
     outranks the one a name stands for; a caller whose model has no
     effort alias is still given a model its own credential serves; and
-    the name under which the sub-task would inherit the caller's
-    configuration, and with it the caller's effort, is no way out.
+    the caller's own model, under whose name a sub-task with no
+    configuration of its own inherits the caller's, and with it the
+    caller's effort, is no way out.
 
     Args:
         model_name: The caller's model.
@@ -362,9 +365,6 @@ def other_worker_model(
         pin_config: The model configuration of the sub-task's own (the
             call's option, else its SEA's setting), which it runs any
             pin with.
-        inheriting: The model name under which a sub-task with no
-            configuration of its own inherits the caller's: the model
-            the caller was launched with.
 
     Returns:
         The model name, or ``None`` when nothing configured differs.
@@ -376,7 +376,7 @@ def other_worker_model(
         *(model for model in _strong_models() if family_of(model) == family),
     )
     for candidate in candidates:
-        config = model_config if pin_config is None and candidate == inheriting else pin_config
+        config = model_config if pin_config is None and candidate == model_name else pin_config
         if candidate and not same_model_and_effort(model_name, candidate, model_config, config):
             return candidate
     return None

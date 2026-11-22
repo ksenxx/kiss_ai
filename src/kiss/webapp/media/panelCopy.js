@@ -52,6 +52,39 @@
     return false;
   }
 
+  // HTML's text-level tags, and INS / DEL.  Such an element continues
+  // the line it is in (a file link, a highlighted token, a diff
+  // highlight, an argument's value); any other element is a block on
+  // lines of its own.
+  const INLINE_TAG_RE = new RegExp(
+    '^(?:A|ABBR|B|BDI|BDO|CITE|CODE|DATA|DEL|DFN|EM|I|INS|KBD|MARK|Q|RP|RT|' +
+      'RUBY|S|SAMP|SMALL|SPAN|STRONG|SUB|SUP|TIME|U|VAR)$',
+  );
+
+  /**
+   * Whether the element *el* is inline (INLINE_TAG_RE): it continues
+   * the text it is in, where any other element is a block.  Shared with
+   * main.js's collapsed-preview text; share.js, which a shared page
+   * loads without this file, has a copy of the list.
+   *
+   * @param {Element} el An element.
+   * @returns {boolean} True for an inline element.
+   */
+  function isInline(el) {
+    return INLINE_TAG_RE.test(el.tagName);
+  }
+
+  /**
+   * The text a panel's copy button takes from *node*: an element's
+   * `data-raw-text` verbatim when it has one (the source of rendered
+   * Markdown), else the text of its children with the panel chrome
+   * (SKIP_CLASSES) left out.  A block element starts a line of its
+   * own, and so does the element after it; an inline element
+   * (INLINE_TAG_RE) otherwise continues the line it is in.
+   *
+   * @param {?Node} node The panel, or a node inside it.
+   * @returns {string} The text (untrimmed; the copy path normalises it).
+   */
   function getRawText(node) {
     if (!node) return '';
     if (node.nodeType === 3) return node.textContent || '';
@@ -64,17 +97,23 @@
       return node.dataset.rawText || '';
     }
     let out = '';
+    // Whether the last element added was a block: its line has ended.
+    let afterBlock = false;
     for (let i = 0; i < node.childNodes.length; i++) {
       const child = node.childNodes[i];
       const t = getRawText(child);
       if (!t) continue;
-      if (
-        out.length > 0 &&
-        child.nodeType === 1 &&
-        !out.endsWith('\n') &&
-        !t.startsWith('\n')
-      ) {
-        out += '\n';
+      if (child.nodeType === 1) {
+        const block = !isInline(child);
+        if (
+          out.length > 0 &&
+          (block || afterBlock) &&
+          !out.endsWith('\n') &&
+          !t.startsWith('\n')
+        ) {
+          out += '\n';
+        }
+        afterBlock = block;
       }
       out += t;
     }
@@ -629,6 +668,7 @@
   // them through the other entries.
   const api = {
     shouldSkip: shouldSkip,
+    isInline: isInline,
     getRawText: getRawText,
     formattedTextFromNode: formattedTextFromNode,
     wireCopyButton: wireCopyButton,

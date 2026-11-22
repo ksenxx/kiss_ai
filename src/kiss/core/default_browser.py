@@ -152,7 +152,9 @@ def resolve_browser() -> ResolvedBrowser:
     ``$KISS_BROWSER`` (an executable path) overrides every probe.  The
     machine's default browser is used when it is Chromium-based;
     otherwise the first installed Chromium-family browser is used, and
-    finally Playwright's bundled Chromium.
+    finally Playwright's bundled Chromium.  A default that is a link
+    named for no browser (Debian's ``x-www-browser``) is the browser
+    of the file it leads to, and is launched by its own path.
 
     Returns:
         The resolved browser, never ``None``.
@@ -164,7 +166,7 @@ def resolve_browser() -> ResolvedBrowser:
             return ResolvedBrowser(family_name(exe) or Path(exe).name, exe, False)
     default = default_browser_executable()
     if default:
-        name = family_name(default)
+        name = family_name(default) or family_name(os.path.realpath(default))
         if name:
             return ResolvedBrowser(name, default, True)
         note = (

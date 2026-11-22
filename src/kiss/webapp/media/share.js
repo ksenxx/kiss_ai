@@ -16,12 +16,23 @@
 (function () {
   'use strict';
 
+  // HTML's text-level tags, and INS / DEL, as the chat page reads them
+  // (media/panelCopy.js INLINE_TAG_RE): such an element continues the
+  // text it is in; any other element is a block on lines of its own.
+  const INLINE_TAG_RE = new RegExp(
+    '^(?:A|ABBR|B|BDI|BDO|CITE|CODE|DATA|DEL|DFN|EM|I|INS|KBD|MARK|Q|RP|RT|' +
+      'RUBY|S|SAMP|SMALL|SPAN|STRONG|SUB|SUP|TIME|U|VAR)$',
+  );
+
   /**
    * Collect the visible text of *node* for a collapsed panel's
    * one-line preview, skipping the chrome elements the chat page's
    * collectText (media/main.js) also skips, and a task panel's info
    * rows (`.task-panel-info`, hidden while the panel is folded): a
-   * folded task panel previews its task text alone.
+   * folded task panel previews its task text alone.  As on the chat
+   * page, a block element's text has a space on either side (the
+   * caller folds the runs of white space) and an inline element
+   * (INLINE_TAG_RE) continues the text it is in.
    *
    * @param {Node} node Panel content node.
    * @returns {string} The concatenated text.
@@ -43,8 +54,8 @@
     for (let i = 0; i < node.childNodes.length; i++) {
       const child = node.childNodes[i];
       const t = collectText(child);
-      if (child.nodeType === 1 && out.length > 0 && t.length > 0) out += ' ';
-      out += t;
+      const block = child.nodeType === 1 && !INLINE_TAG_RE.test(child.tagName);
+      out += block ? ' ' + t + ' ' : t;
     }
     return out;
   }
@@ -123,12 +134,10 @@
   }
 
   /**
-   * Collapse every run_parallel panel inside *root*, mirroring
-   * collapseNestedRunParallel in media/main.js: a collapsed panel
+   * Collapse every run_parallel panel inside *root*: a collapsed panel
    * hides its children, so a fan-out panel it swallowed must show as
-   * collapsed too when it is expanded again — and, exactly like the
-   * chat page, the swallowed fan-out's sub-agent tabs close with
-   * it.
+   * collapsed too when it is expanded again, and the swallowed
+   * fan-out's sub-agent tabs close with it.
    *
    * @param {Element} root The panel that just collapsed.
    */
@@ -150,16 +159,15 @@
   // The export (buildShareableHtml in media/main.js) renders every
   // sub-agent's transcript into a hidden .share-subagent section and
   // stamps each run_parallel panel with the task ids of the
-  // sub-agents it fanned out (data-rp-subagents). This block
-  // re-creates the chat page's tab behaviour on top of that
-  // static data: expanding a fan-out panel opens its sub-agents'
-  // tabs, collapsing it closes them, a tab closed by hand stays
-  // closed until its panel is collapsed and expanded again, closing
-  // a tab takes its descendants' tabs with it, and selecting a tab
-  // swaps the transcript on screen (the root tab being the chat
-  // itself). The tab strip reuses the chat page's own markup and
-  // classes (#tab-bar / .chat-tab..., styled by the inlined
-  // main.css).
+  // sub-agents it fanned out (data-rp-subagents). This block gives
+  // the shared page its tabs on top of that static data: expanding
+  // a fan-out panel opens its sub-agents' tabs, collapsing it
+  // closes them, a tab closed by hand stays closed until its panel
+  // is collapsed and expanded again, closing a tab takes its
+  // descendants' tabs with it, and selecting a tab swaps the
+  // transcript on screen (the root tab being the chat itself). The
+  // tab strip reuses the chat page's own markup and classes
+  // (#tab-bar / .chat-tab..., styled by the inlined main.css).
 
   // Ordered ids of the open sub-agent tabs (the root chat tab is
   // always open and lives outside this list).
@@ -309,8 +317,7 @@
   /**
    * Open the tab of sub-agent *taskId* (a no-op when it has no
    * exported section or is open already), then open the tabs of the
-   * expanded fan-outs INSIDE its transcript — the chat page does the
-   * same for a sub-agent that ran fan-outs of its own.
+   * expanded fan-outs INSIDE its transcript.
    *
    * @param {string} taskId The sub-agent to open.
    */
@@ -381,8 +388,7 @@
    */
   function closeSubagentTab(taskId) {
     // Which tab takes over when the SELECTED tab is closed: plain index
-    // adjacency (the chat page's rule — whatever now sits where the tab
-    // was).
+    // adjacency (whatever now sits where the tab was).
     const before = [null].concat(openSubTabs);
     const activeAt = before.indexOf(activeSubTab);
     const activeClosed = dropSubagentTabs(taskId);
@@ -422,10 +428,8 @@
       const section = subagentSection(open);
       if (!section) continue;
       section.toggleAttribute('hidden', true);
-      // A sub-agent tab the chat page reopens replays its transcript
-      // with the fan-outs collapsed; fold this section's the same
-      // way, so reopening the tab never resurrects grandchild tabs
-      // on its own.
+      // The section's fan-outs fold, so reopening the tab never
+      // resurrects grandchild tabs on its own.
       const panels = section.querySelectorAll(
         '.tc-run-parallel[data-rp-subagents]',
       );
@@ -441,10 +445,10 @@
 
   /**
    * Put a fan-out panel's sub-agent tabs in step with its collapsed
-   * state — the shared page's syncRunParallelPanel. A collapsed panel
-   * takes its sub-agents' tabs with it and forgives every hand-close
-   * (so expanding reopens them all); an expanded one opens a tab per
-   * sub-agent the user has not closed by hand.
+   * state. A collapsed panel takes its sub-agents' tabs with it and
+   * forgives every hand-close (so expanding reopens them all); an
+   * expanded one opens a tab per sub-agent the user has not closed by
+   * hand.
    *
    * @param {Element} panelEl The .tc-run-parallel panel.
    */
@@ -555,11 +559,10 @@
   });
 
   // The exported page may hold fan-out panels the user left expanded:
-  // their sub-agent tabs open on load, exactly like the live layout
-  // the export captured (a collapsed panel's stay shut). A chat
-  // task's orphan children (sub-agents no fan-out panel claims in
-  // the export) open alongside, there being no panel entry to expand
-  // for them here.
+  // their sub-agent tabs open on load (a collapsed panel's stay
+  // shut). A chat task's orphan children (sub-agents no fan-out
+  // panel claims in the export) open alongside, there being no panel
+  // entry to expand for them here.
   (function initShareSubagentTabs() {
     const roots = document.querySelectorAll(
       '.share-task:not(.share-subagent) .tc-run-parallel[data-rp-subagents]',
@@ -692,8 +695,7 @@
       panelEl.classList.add('user-pinned');
     }
     collapsePreview(panelEl);
-    // A fan-out panel's sub-agent tabs follow its collapsed state,
-    // exactly like the chat page's syncRunParallelPanel.
+    // A fan-out panel's sub-agent tabs follow its collapsed state.
     if (panelEl.classList.contains('tc-run-parallel'))
       syncSubagentTabs(panelEl);
     if (panelEl.classList.contains('collapsed')) {

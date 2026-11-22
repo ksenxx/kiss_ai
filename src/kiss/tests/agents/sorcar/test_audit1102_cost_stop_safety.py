@@ -106,6 +106,17 @@ def _persisted_usage(task_id: str) -> list[tuple[str, float]]:
     ]
 
 
+def _persisted_totals(task_id: str) -> tuple[float, int, int]:
+    """``(cost, tokens, steps)`` of the newest persisted ``usage_info`` / ``result`` event."""
+    persistence._flush_chat_events(task_id)
+    loaded = persistence._load_chat_events_by_task_id(task_id)
+    assert loaded is not None
+    events = loaded["events"]
+    assert isinstance(events, list)
+    last = [e for e in events if e.get("type") in ("usage_info", "result")][-1]
+    return last["cost_usd"], last["total_tokens"], last.get("step_count", last.get("total_steps"))
+
+
 def _zero_session_run(
     env: IsolatedKissHome,
     printer: CapturePrinter | None,
@@ -348,16 +359,21 @@ def _finish(agent: ChatSorcarAgent, task_id: str) -> None:
         agent._save_final_usage({}, task_id, result_summary="Done")
 
 
+@pytest.mark.parametrize("spend", [(0.5, 500, 1), (0.0, 500, 1), (0.0, 0, 1)])
 @pytest.mark.parametrize("after_commit", [False, True])
 @pytest.mark.parametrize("with_printer", [True, False])
 @pytest.mark.parametrize("finished", [False, True])
 def test_a_stop_in_a_side_call_charge_and_its_retry_charge_the_run_once(
-    env: IsolatedKissHome, finished: bool, with_printer: bool, after_commit: bool
+    env: IsolatedKissHome, finished: bool, with_printer: bool, after_commit: bool,
+    spend: tuple[float, int, int],
 ) -> None:
     """A Stop cuts a side call's charge before its accounting or right after that committed,
     and the call is charged again with its key: the run is charged exactly once, on the
     ledger of a running row (which its final save writes) or in a finished row, through
-    the printer's bridge and without one (audit 2026-11-09, S11 F1)."""
+    the printer's bridge and without one (audit 2026-11-09, S11 F1).  A call that cost
+    nothing is charged and published by its tokens and steps (audit 2026-11-21, S10 F2)."""
+    cost, tokens, steps = spend
+    totals = (1.0 + cost, 100 + tokens, 2 + steps)
     if not after_commit:
         code, event = locked_call.__code__, "call"  # at the usage lock: nothing charged yet
     elif not finished:
@@ -379,18 +395,18 @@ def test_a_stop_in_a_side_call_charge_and_its_retry_charge_the_run_once(
     sys.settrace(functools.partial(_stop_at, code, event))
     try:
         with pytest.raises(KeyboardInterrupt):
-            charge(0.5, 500, 1, "side:stopped")
+            charge(cost, tokens, steps, "side:stopped")
     finally:
         sys.settrace(tracer)
-    charge(0.5, 500, 1, "side:stopped")
+    charge(cost, tokens, steps, "side:stopped")
     if not finished:
         _finish(agent, task_id)
     row = _row(task_id)
-    assert (row["cost"], row["tokens"], row["steps"]) == (1.5, 600, 3)
-    assert agent.usage_snapshot() == ((1.0, 100, 2) if finished else (1.5, 600, 3))
+    assert (row["cost"], row["tokens"], row["steps"]) == totals
+    assert agent.usage_snapshot() == ((1.0, 100, 2) if finished else totals)
     # The retry also publishes what the stopped charge committed but never
-    # published: a replay (the UI) shows the row's cost (audit 2026-11-11).
-    assert _persisted_usage(task_id)[-1][1] == 1.5
+    # published: a replay (the UI) shows the row's totals (audit 2026-11-11).
+    assert _persisted_totals(task_id) == totals
 
 
 def test_a_retried_keyed_charge_publishes_nothing_when_its_first_charge_was_published(
@@ -410,6 +426,12 @@ def test_a_retried_keyed_charge_publishes_nothing_when_its_first_charge_was_publ
     charge(0.5, 500, 1, "side:once")
     assert _persisted_usage(task_id) == before
     assert before[-1][1] == 1.5
+    assert persistence._unpublished_keyed_charge(task_id, "side:once") == ([], "", False)
+    # A ``result`` event shows the row's totals as well, its steps as ``step_count``.
+    persistence._append_chat_event(
+        {"type": "result", "text": "Done", "total_tokens": 600, "cost_usd": 1.5, "step_count": 3},
+        task_id,
+    )
     assert persistence._unpublished_keyed_charge(task_id, "side:once") == ([], "", False)
 
 

@@ -149,7 +149,11 @@ def test_bestrouter_protocol_names_its_models_literally() -> None:
         bestrouter_sea.SIMPLE_MODEL, bestrouter_sea.PRIMARY_MODEL, bestrouter_sea.REVIEW_MODEL,
         bestrouter_sea.WRITER_MODEL,
     ):
+        # A routed model without a priced catalog entry has no context length and no
+        # fallback price: calculate_cost raises for it when the provider reports no cost.
         assert name in MODEL_INFO, name
+        assert MODEL_INFO[name].input_price_per_1M > 0, name
+        assert MODEL_INFO[name].output_price_per_1M > 0, name
     assert "codex" not in bestrouter_sea.REVIEW_MODEL
     assert "bestrouter" in sea.description()
     assert ", writes on openrouter/google/gemini-4-carbon, " in sea.description()
@@ -755,6 +759,46 @@ class Sea(BaseSea):
         assert {line.split("SEA ", 1)[1].splitlines()[0] for line in logs.output} == {
             f"{cut_sea}: register_as_model() failed"
         }
+
+    def test_a_repaired_script_is_listed_while_the_import_of_its_old_text_is_stuck(self) -> None:
+        """A script repaired while the import of its old text does not return is listed.
+
+        The check of the repaired script waited to execute the file until the old check's
+        execution of it ended, which it never did: the entry stayed out of the picker and
+        every further edit left one more waiting thread (audit 2026-11-21, S11/F1).  The new
+        check runs the script beside the stuck import, as a run of the script does; asking
+        again starts nothing; and the old import ending at last changes nothing.
+        """
+        assert AUTOROUTER in self._listed()  # the bundled verdicts are cached from here on
+        answer = Path(self.tmpdir) / "answer"
+        sea = self._write_user_sea(
+            "stuckimport", "    def register_as_model(self):\n        return True\n"
+        )
+        self._register_user_seas()
+        assert "stuckimport" in self._listed()
+        healthy = sea.read_text(encoding="utf-8")
+        sea.write_text(
+            healthy + "\n\nimport os, time\ndeadline = time.monotonic() + 20\n"
+            f"while not os.path.exists({str(answer)!r}) and time.monotonic() < deadline:\n"
+            "    time.sleep(0.02)\n",
+            encoding="utf-8",
+        )
+        original = sea_commands.MODEL_CHECK_TIMEOUT_SECONDS
+        sea_commands.MODEL_CHECK_TIMEOUT_SECONDS = 0.5
+        self.addCleanup(setattr, sea_commands, "MODEL_CHECK_TIMEOUT_SECONDS", original)
+        with self.assertLogs("kiss.sea_commands", level="WARNING"):
+            assert "stuckimport" not in self._listed()
+        (stuck,) = self.checks
+        sea.write_text(healthy + "\n# repaired\n", encoding="utf-8")
+        sea_commands.MODEL_CHECK_TIMEOUT_SECONDS = 10.0  # what waiting for the old import takes
+        started = time.monotonic()
+        assert "stuckimport" in self._listed()
+        assert time.monotonic() - started < 5
+        assert "stuckimport" in self._listed() and self.checks == [stuck]
+        assert sea_commands.sea_description(sea_commands.load_sea(sea)) == "stuckimport"
+        answer.touch()
+        stuck.join(10)
+        assert "stuckimport" in self._listed() and self.checks == []
 
     def test_a_process_out_of_threads_leaves_an_undecided_entry_out(self) -> None:
         """With no thread to decide it on, a script is logged and left out of the listing, not

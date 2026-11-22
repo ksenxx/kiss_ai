@@ -7,8 +7,8 @@
 #   shadowed by test parameters of the same name)
 """E2E: the remote webapp's terminal tab, in a real browser.
 
-The "..." menu of the composer has a "Terminal" item (remote webapp
-only).  It opens a content tab holding an xterm.js terminal
+The strip at the bottom of the task-info panel has a "Terminal" button
+(remote webapp only).  It opens a content tab holding an xterm.js terminal
 (``media/terminalTab.js``) whose shell runs on the daemon's machine
 (``kiss/server/terminal_tab.py``): typed commands run in the chat's
 work dir, the pty follows the terminal's size, a second terminal gets
@@ -41,6 +41,7 @@ from kiss.tests.server.test_explorer_scm_commands import (
 )
 from kiss.tests.server.test_terminal_tab_service import hermetic_shell, session_count
 from kiss.tests.webapp.test_content_tab_editing import _dismiss_toasts
+from kiss.tests.webapp.test_sidebar_menus import _show_panel
 from kiss.tests.webapp.test_workspace_sections import _set_work_dir
 
 pytestmark = pytest.mark.skipif(
@@ -112,7 +113,8 @@ def _open_page(browser, harness: ExplorerHarness):
 
 
 def _open_terminal(page) -> None:
-    """Open a terminal through the "..." menu and wait for its prompt.
+    """Open a terminal from the task-info strip (brought back first when
+    an open tab slid the panel away) and wait for its prompt.
 
     xterm.js is downloaded from jsDelivr when the first terminal opens
     (15 s budget in ``terminalTab.js``); when that download fails the
@@ -123,8 +125,7 @@ def _open_terminal(page) -> None:
     """
     before = page.locator(_XTERM).count()
     for attempt in range(3):
-        page.click("#more-btn")
-        page.wait_for_selector("#terminal-btn", state="visible")
+        _show_panel(page)
         page.click("#terminal-btn")
         page.wait_for_function(
             f"document.querySelectorAll('{_XTERM}').length === {before + 1}"
@@ -221,8 +222,8 @@ def _back_online(context, harness: ExplorerHarness) -> None:
         time.sleep(0.05)
 
 
-def test_menu_item_opens_a_shell_in_the_work_dir(browser, harness):
-    """The "..." menu's Terminal item opens a tab titled "Terminal"
+def test_strip_button_opens_a_shell_in_the_work_dir(browser, harness):
+    """The strip's Terminal button opens a tab titled "Terminal"
     whose shell runs in the chat's work dir and whose pty is sized by
     xterm's fit."""
     context, page = _open_page(browser, harness)
@@ -430,13 +431,11 @@ def test_theme_switch_recolours_the_terminal(browser, harness):
         _open_terminal(page)
         colour = "getComputedStyle(document.querySelector('.terminal-tab-view .xterm-rows')).color"
         before = page.evaluate(colour)
-        page.click("#more-btn")
         page.click("#theme-btn")
         page.wait_for_function(f"{colour} !== {before!r}", timeout=10000)
         after = page.evaluate(colour)
         assert after != before
         # Switch back so the module's other tests see the default theme.
-        page.click("#more-btn")
         page.click("#theme-btn")
         page.wait_for_function(f"{colour} === {before!r}", timeout=10000)
         _close_active_tab(page)

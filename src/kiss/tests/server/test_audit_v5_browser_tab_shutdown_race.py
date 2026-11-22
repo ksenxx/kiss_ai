@@ -18,8 +18,8 @@ tab the shutdown closes right after) depends on which thread wins, so
 the timing is what the test asserts.
 
 Pinned with two settrace pauses (``tests/server/pause.py``): the opener
-is held on the way into ``run_coroutine_threadsafe`` (its first call,
-``iscoroutine``), the shutting-down thread at ``loop.close``.
+is held where it queues its request on the loop
+(``call_soon_threadsafe``), the shutting-down thread at ``loop.close``.
 """
 
 from __future__ import annotations
@@ -74,7 +74,7 @@ class TestOpenRacingShutdown(unittest.TestCase):
 
         opener = threading.Thread(target=open_tab, name=_OPENER, daemon=True)
         closer = threading.Thread(target=service.shutdown, name=_CLOSER, daemon=True)
-        hold_opener = Pause(asyncio.coroutines.iscoroutine.__code__, _on_opener)
+        hold_opener = Pause(asyncio.BaseEventLoop.call_soon_threadsafe.__code__, _on_opener)
         hold_closer = Pause(_loop_close_code(), _on_closer)
         started = time.monotonic()
         with Pauses(hold_opener, hold_closer):

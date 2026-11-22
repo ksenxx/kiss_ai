@@ -31,6 +31,7 @@ from typing import Any
 import httpx2
 import pytest
 from anthropic import Anthropic
+from anthropic.lib.bedrock import AnthropicBedrock
 
 import kiss.core.models.anthropic_model as am
 from kiss.core import stop_signal
@@ -113,14 +114,21 @@ def server() -> Iterator[_DrippingServer]:
         thread.join(5)
 
 
-def _model(server: _DrippingServer, http_client: httpx2.Client | None = None) -> AnthropicModel:
-    model = AnthropicModel("claude-under-test", api_key="local-only")
-    model.client = Anthropic(
-        api_key="local-only",
-        base_url=f"http://127.0.0.1:{server.server_port}",
-        max_retries=0,
-        http_client=http_client,
-    )
+def _model(
+    server: _DrippingServer, http_client: httpx2.Client | None = None, bedrock: bool = False
+) -> AnthropicModel:
+    url = f"http://127.0.0.1:{server.server_port}"
+    if bedrock:
+        name = "bedrock/us.anthropic.claude-opus-4-6-v1:0"
+        model = AnthropicModel(name, api_key="local-only", bedrock=True)
+        model.client = AnthropicBedrock(
+            api_key="local-only", aws_region="us-east-1", base_url=url, max_retries=0
+        )
+    else:
+        model = AnthropicModel("claude-under-test", api_key="local-only")
+        model.client = Anthropic(
+            api_key="local-only", base_url=url, max_retries=0, http_client=http_client
+        )
     model.conversation = [{"role": "user", "content": "Keep the local test cache warm"}]
     return model
 
@@ -134,12 +142,15 @@ def _keeper(model: AnthropicModel, owner_stop: threading.Event | None) -> Prompt
         stop_signal.set_thread_stop_event(None)
 
 
+@pytest.mark.parametrize("bedrock", [False, True], ids=["direct", "bedrock"])
 def test_a_task_stop_aborts_a_ping_the_server_keeps_dripping(
-    monkeypatch: pytest.MonkeyPatch, server: _DrippingServer
+    monkeypatch: pytest.MonkeyPatch, server: _DrippingServer, bedrock: bool
 ) -> None:
-    # The deadline is far away: only the Stop can end the ping in time.
+    # The deadline is far away: only the Stop can end the ping in time.  On Bedrock the
+    # SDK gives a client's copy (``with_options``) a pool of its own: the ping went
+    # through one the watchdog did not watch, and neither Stop nor deadline reached it.
     monkeypatch.setattr(am, "KEEP_ALIVE_TIMEOUT_SECONDS", 10.0)
-    model = _model(server)
+    model = _model(server, bedrock=bedrock)
     owner_stop = threading.Event()
     keeper = _keeper(model, owner_stop)
     # Safety net so a stop() that waits for the server fails instead of hanging.

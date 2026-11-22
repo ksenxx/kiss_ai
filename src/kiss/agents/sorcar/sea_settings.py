@@ -433,8 +433,8 @@ def safe_message(exc: BaseException) -> str:
 _EXECUTING = threading.Condition()
 """Guards the map below and wakes the threads waiting for a file."""
 
-_EXECUTING_OWNER: dict[str, tuple[threading.Thread, int]] = {}
-"""Module name -> (the thread executing it, re-entry depth)."""
+_EXECUTING_OWNER: dict[str, tuple[threading.Thread, int, str]] = {}
+"""Revision key -> (executing thread, re-entry depth, reserved publication name)."""
 
 _IMPORT_WAITS: Any = getattr(importlib._bootstrap, "_blocking_on")
 """Thread ident -> the module locks the thread waits for in an ``import`` (each lock names
@@ -445,8 +445,8 @@ _EXECUTING_RECHECK_SECONDS = 1.0
 (:func:`_executing_owner`)."""
 
 
-def _executing_owner(module_name: str) -> tuple[threading.Thread, int] | None:
-    """Return the record of the thread executing *module_name*, or ``None``.
+def _executing_owner(module_name: str) -> tuple[threading.Thread, int, str] | None:
+    """Return the record of the thread executing *module_name* that is waited for, or ``None``.
 
     Called under :data:`_EXECUTING`.  A record whose thread is not inside
     an :func:`execute_python_file` call of *module_name* (dead, or alive
@@ -460,25 +460,31 @@ def _executing_owner(module_name: str) -> tuple[threading.Thread, int] | None:
     per-tool Stop and carries on with its task, so only its stack tells
     whether it still executes the file (:func:`_in_execution`).  The
     maps hold the thread, not its ident, which the next thread started
-    may reuse; the ident is read only while the thread is alive.
+    may reuse; the ident is read only while the thread is alive.  The
+    claim stays owned even when a picker gives up waiting for it. Its
+    key names immutable source bytes, so a repaired revision has a
+    separate gate without handing the same revision to two importers.
     """
     owner = _EXECUTING_OWNER.get(module_name)
-    if owner is not None and not (owner[0].is_alive() and _in_execution(owner[0], module_name)):
-        del _EXECUTING_OWNER[module_name]
+    if owner is None:
         return None
-    return owner
+    if owner[0].is_alive() and _in_execution(owner[0], module_name):
+        return owner
+    del _EXECUTING_OWNER[module_name]
+    return None
 
 
 def _in_execution(thread: threading.Thread, module_name: str) -> bool:
-    """Whether *thread*'s stack holds an :func:`execute_python_file` or
-    :func:`refresh_imported_module` call of *module_name*.
-
-    :func:`_executing` makes and drops its claim inside those calls, so
-    the owner of a live record always has one on its stack.
-    """
-    return module_name in _stack_modules(
-        thread.ident, execute_python_file, refresh_imported_module
-    )
+    """Whether *thread* still holds the execution context of this revision."""
+    frame = sys._current_frames().get(thread.ident or 0)
+    while frame is not None:
+        if frame.f_code in (execute_python_file.__code__, refresh_imported_module.__code__):
+            execution = frame.f_locals.get("execution")
+            source_frame = execution.gen.gi_frame if execution is not None else None
+            if source_frame is not None and source_frame.f_locals.get("key") == module_name:
+                return True
+        frame = frame.f_back
+    return False
 
 
 def _stack_modules(ident: int | None, *functions: Any) -> Iterator[str | None]:
@@ -540,8 +546,8 @@ def _waits_on_thread(module_name: str, me: threading.Thread) -> bool:
 
 
 @contextlib.contextmanager
-def _executing(module_name: str, raw_path: str) -> Iterator[None]:
-    """Serialise executions of the file named *module_name*.
+def _executing(module_name: str, raw_path: str) -> Iterator[str]:
+    """Serialise one source revision; yield its reserved module publication name.
 
     Per file, not global: a script's import-time code runs while it is
     held, and one task's slow SEA import (heavy dependencies, a script
@@ -554,27 +560,31 @@ def _executing(module_name: str, raw_path: str) -> Iterator[None]:
     A record left behind by a stopped thread (see
     :func:`_executing_owner`) is dropped by the next thread that waits
     for the file, which re-checks every
-    :data:`_EXECUTING_RECHECK_SECONDS`.  :data:`_EXECUTING` itself is
+    :data:`_EXECUTING_RECHECK_SECONDS`. Different revisions use separate
+    gates and publication names, even while an earlier import is stuck.
+    :data:`_EXECUTING` itself is
     taken through :func:`locked_call`: this runs on task threads, where
     a Stop injected right after a plain ``with _EXECUTING:`` acquired
     it would skip the release and wedge every later SEA load in the
     daemon (gh-74174).
     """
     me = threading.current_thread()
-    depth = locked_call(_EXECUTING, _claim, module_name, raw_path, me)
+    depth, name = locked_call(_EXECUTING, _claim, module_name, raw_path, me)
     try:
-        yield
+        yield name
     finally:
         locked_call(_EXECUTING, _release, module_name, me, depth)
 
 
-def _claim(module_name: str, raw_path: str, me: threading.Thread) -> int:
+def _claim(module_name: str, raw_path: str, me: threading.Thread) -> tuple[int, str]:
     """Record *me* as the thread executing *module_name*; the caller holds :data:`_EXECUTING`.
 
-    Waits while another live thread executes the file.
+    Waits while another live thread executes the same revision.
 
     Returns:
-        The re-entry depth before this claim (0 for an outermost one).
+        The previous re-entry depth and a publication name reserved until this claim ends.
+        Re-entry uses the owner's name; a new revision takes a free name for the same file.
+        Publication slots are reusable, but never determine the revision's gate identity.
 
     Raises:
         SeaError: When the thread executing the file is waiting on *me*.
@@ -587,20 +597,64 @@ def _claim(module_name: str, raw_path: str, me: threading.Thread) -> int:
             )
         _EXECUTING.wait(_EXECUTING_RECHECK_SECONDS)
     depth = owner[1] if owner is not None else 0
-    _EXECUTING_OWNER[module_name] = (me, depth + 1)
-    return depth
+    if owner is not None:
+        name = owner[2]
+    else:
+        base = module_name.rsplit("__", 1)[0]
+        occupied = {
+            active[2]
+            for key in tuple(_EXECUTING_OWNER)
+            if key.rsplit("__", 1)[0] == base
+            and (active := _executing_owner(key)) is not None
+        }
+        name, slot = base, 0
+        while name in occupied:
+            slot += 1
+            name = f"{base}_{slot}"
+    _EXECUTING_OWNER[module_name] = (me, depth + 1, name)
+    return depth, name
 
 
 def _release(module_name: str, me: threading.Thread, depth: int) -> None:
     """Undo one :func:`_claim` of *module_name* by *me*; the caller holds :data:`_EXECUTING`.
 
-    The outermost release drops the record and wakes the waiters.
+    The outermost release drops the record and wakes the waiters. A record reclaimed
+    after a Stop is never removed on behalf of its previous owner.
     """
+    owner = _EXECUTING_OWNER.get(module_name)
+    if owner is None or owner[0] is not me:
+        return
     if depth:
-        _EXECUTING_OWNER[module_name] = (me, depth)
+        _EXECUTING_OWNER[module_name] = (me, depth, owner[2])
     else:
         del _EXECUTING_OWNER[module_name]
         _EXECUTING.notify_all()
+
+
+@contextlib.contextmanager
+def _source_execution(
+    path: Path,
+) -> Iterator[tuple[str, str, bytes, tuple[int, int, int] | None]]:
+    """Claim a source snapshot, requeueing if it changed while this caller waited.
+
+    Yield its publication name, canonical path, bytes, and the stamp read BEFORE those
+    bytes. A concurrent edit can make that stamp stale, never bless old bytes as current.
+    """
+    try:
+        while True:
+            real_path = os.path.realpath(path)
+            stamp = file_stamp(Path(real_path))
+            source = read_bytes_waiting_for_writer(Path(real_path))
+            key = f"{_module_name(Path(real_path))}__{source_revision(source)}"
+            with _executing(key, str(path)) as name:
+                if os.path.realpath(path) != real_path or (
+                    read_bytes_waiting_for_writer(Path(real_path)) != source
+                ):
+                    continue
+                yield name, real_path, source, stamp
+                return
+    except (OSError, ValueError) as exc:
+        raise SeaError(f"SEA {str(path)!r} failed to import: {safe_message(exc)}") from exc
 
 
 def execute_python_file(path: str | Path) -> dict[str, Any]:
@@ -622,7 +676,10 @@ def execute_python_file(path: str | Path) -> dict[str, Any]:
     not one per run, and an earlier execution's classes resolve their
     annotations through the latest execution of the same source; two
     files with the same stem in different folders get different names.
-    Executions of the SAME file are serialised (:func:`_executing`):
+    Different revisions of a file can run beside each other under
+    separate publication names (:func:`_claim`), so an old import
+    cannot prevent the repaired source from running.
+    Executions of the SAME revision are serialised (:func:`_executing`):
     task threads evaluate SEAs concurrently, and a failed execution in
     one thread must restore the entry that is current when it fails,
     not the one it saw before another thread replaced it.  Different
@@ -636,9 +693,9 @@ def execute_python_file(path: str | Path) -> dict[str, Any]:
             ``sea_apply.load_layers`` before it becomes a path.
 
     Returns:
-        The executed module's namespace dict.  Its :data:`SOURCE_REVISION`
-        entry, set once the source ran, is the revision of the text that
-        ran in it.
+        The executed module's namespace dict.  Its :data:`SOURCE` entry,
+        set once the source ran, names what ran in it: the real path of
+        the file the text was read from and the revision of that text.
 
     Raises:
         SeaError: *path* is not the path of an existing ``.py`` file,
@@ -660,24 +717,24 @@ def execute_python_file(path: str | Path) -> dict[str, Any]:
         is_py_file = False
     if not is_py_file:
         raise SeaError(f"SEA {raw_path!r} is not an existing Python (.py) file")
-    module_name = _module_name(path)
-    module = types.ModuleType(module_name)
-    module.__file__ = raw_path
-    with _executing(module_name, raw_path):
+    execution = _source_execution(path)
+    with execution as (name, real_path, source, _):
+        module = types.ModuleType(name)
+        module.__file__ = raw_path
         # A failed re-execution must not unregister the module of an
         # earlier, successful execution of the same file whose classes
         # still resolve their annotations through this name: the previous
         # entry is put back.  The new one is published inside the ``try``,
         # so a Stop landing right after it is undone like any failure.
-        previous = sys.modules.get(module_name)
+        previous = sys.modules.get(name)
         try:
-            sys.modules[module_name] = module
-            module.__dict__[SOURCE_REVISION] = _run_source(path, module)
+            sys.modules[name] = module
+            module.__dict__[SOURCE] = _run_source(path, module, real_path, source)
         except BaseException as exc:  # noqa: BLE001 — untrusted module code may raise anything
             if previous is None:
-                sys.modules.pop(module_name, None)
+                sys.modules.pop(name, None)
             else:
-                sys.modules[module_name] = previous
+                sys.modules[name] = previous
             if is_stop(exc):
                 raise  # a Stop (per-tool or the task's) landed inside the import
             logger.warning("Failed to import SEA %r", raw_path, exc_info=True)
@@ -685,8 +742,10 @@ def execute_python_file(path: str | Path) -> dict[str, Any]:
     return module.__dict__
 
 
-def _run_source(path: Path, module: types.ModuleType) -> str:
-    """Compile the current source of *path*, run it in *module*'s namespace, return its revision.
+def _run_source(
+    path: Path, module: types.ModuleType, real_path: str, source: bytes
+) -> tuple[str, str]:
+    """Compile the claimed snapshot of *path*, run it in *module*, return what ran.
 
     Directly, with no ``__pycache__`` read or write: the module runs
     the file's current contents, where the import machinery would run
@@ -696,19 +755,23 @@ def _run_source(path: Path, module: types.ModuleType) -> str:
     byte-order mark is skipped, a ``coding`` cookie is honoured).  Read
     past a concurrent atomic publish of the script (``sea lint --fix``),
     which Windows otherwise reports to the reader as ``PermissionError``.
-    The file is read once: the revision returned (:func:`source_revision`)
-    is that of the bytes that ran, whatever the file held while the
-    caller waited to run it and whatever it holds since.
+    The file is resolved once and read once, from the path it resolved
+    to: the real path and the revision (:func:`source_revision`)
+    returned are those of the bytes that ran, whatever *path* named (a
+    link moved to another script) or held while the caller waited to
+    run it, and whatever it names or holds since.
+
+    Returns:
+        The real path of the file the source was read from, and the revision of the source.
     """
-    source = read_bytes_waiting_for_writer(path)
     code = compile(source, str(path), "exec", dont_inherit=True)
     exec(code, module.__dict__)  # noqa: S102 — the script is the user's own code
-    return source_revision(source)
+    return real_path, source_revision(source)
 
 
-SOURCE_REVISION = "__source_revision__"
-"""Name, in the namespace :func:`execute_python_file` returns, of the revision
-(:func:`source_revision`) of the source that ran in it."""
+SOURCE = "__source__"
+"""Name, in the namespace :func:`execute_python_file` returns, of the source that ran in it:
+the real path of the file it was read from and its revision (:func:`source_revision`)."""
 
 
 def source_revision(source: bytes) -> str:
@@ -789,7 +852,9 @@ def _lock_import(lock: Any) -> None:
     lock.acquire()
 
 
-def _run_imported(path: Path, old: types.ModuleType, module: types.ModuleType) -> None:
+def _run_imported(
+    path: Path, old: types.ModuleType, module: types.ModuleType, real_path: str, source: bytes
+) -> None:
     """Run the current source of *path* in *module*, which replaces *old*, as ``import`` runs it.
 
     ``sys.modules`` names *module* while its source runs: ``@dataclass``
@@ -817,7 +882,7 @@ def _run_imported(path: Path, old: types.ModuleType, module: types.ModuleType) -
         try:
             spec._initializing = True
             sys.modules[module.__name__] = module
-            _run_source(path, module)
+            _run_source(path, module, real_path, source)
         except BaseException:
             sys.modules[module.__name__] = old
             vars(module).clear()
@@ -882,9 +947,10 @@ def refresh_imported_module(path: Path, stale: bool = False) -> bool:
             landing in it is re-raised unchanged (:func:`is_stop`).
     """
     raw_path = str(path)
-    module_name = _module_name(path)
-    with _executing(module_name, raw_path):
-        stamp = parsed_sea(path).stamp
+    if parsed_sea(path).stamp is None:
+        return False
+    execution = _source_execution(path)
+    with execution as (_, real_path, source, stamp):
         if stamp is None or (_IMPORTED_STAMPS.get(raw_path) == stamp and not stale):
             return False
         modules = [
@@ -902,7 +968,7 @@ def refresh_imported_module(path: Path, stale: bool = False) -> bool:
                     setattr(fresh[-1], attr, getattr(module, attr))
         try:
             for old, module in zip(modules, fresh, strict=True):
-                _run_imported(path, old, module)
+                _run_imported(path, old, module, real_path, source)
         except BaseException as exc:  # noqa: BLE001 — untrusted module code may raise anything
             for old, module in zip(modules, fresh, strict=True):
                 if sys.modules.get(old.__name__) is module:  # ran through before the raise
@@ -1239,14 +1305,34 @@ def _settings_entries(tree: ast.Module) -> list[_Entry]:
                 for target in targets:
                     if isinstance(target, ast.Name):
                         if isinstance(statement, ast.AugAssign):
-                            held.setdefault(target.id, []).extend(found)
+                            _lay(held.setdefault(target.id, []), found)
                         elif statement in node.body:
                             held[target.id] = found
                         else:
-                            held[target.id] = held.get(target.id, []) + found
+                            held[target.id] = _first_and_last(held.get(target.id, []) + found)
             elif (updated := _update_call(statement)) is not None:
-                held.setdefault(updated[0], []).extend(_result_entries(updated[1], held))
+                _lay(held.setdefault(updated[0], []), _result_entries(updated[1], held))
     return entries
+
+
+def _first_and_last(entries: list[_Entry]) -> list[_Entry]:
+    """Return *entries* without the occurrences of an entry between its first and its last.
+
+    The readers of the entries look at where a dict is first reached (:func:`settings_dicts`)
+    and at the entry that writes a key last (:func:`settings_literals`); an occurrence in
+    between tells them nothing.  Without those, a method that lays a dict over itself any
+    number of times (``mine.update(mine)``, ``mine |= mine``) tracks at most two entries per
+    entry of its dict literals; with them, each such statement doubled what was tracked.
+    """
+    last = {entry: index for index, entry in enumerate(entries)}
+    first = {entry: index for index, entry in reversed(list(enumerate(entries)))}
+    return [entry for index, entry in enumerate(entries) if index in (first[entry], last[entry])]
+
+
+def _lay(mine: list[_Entry], found: list[_Entry]) -> None:
+    """Lay *found* over the entries *mine* holds, in place: every name that shares the list
+    (``alias = mine``) holds the result (:func:`_first_and_last`)."""
+    mine[:] = _first_and_last(mine + found)
 
 
 def _update_call(statement: ast.stmt) -> tuple[str, ast.expr] | None:
@@ -1293,7 +1379,9 @@ def _result_entries(expr: ast.expr, held: dict[str, list[_Entry]]) -> list[_Entr
     read before it holds anything (the method's parameter) gets its
     list here, so that it shares one from then on as well.  Read with
     a stack, not by recursion: a ``|`` chain may be longer than the
-    interpreter's recursion limit (:func:`own_statements`).
+    interpreter's recursion limit (:func:`own_statements`).  An entry
+    the value reaches more than twice is returned where it is laid
+    first and last (:func:`_first_and_last`).
     """
     if isinstance(expr, ast.Name):
         return held.setdefault(expr.id, [])
@@ -1315,7 +1403,7 @@ def _result_entries(expr: ast.expr, held: dict[str, list[_Entry]]) -> list[_Entr
             pending += [item.orelse, item.body]
         elif isinstance(item, ast.Name):
             found.extend(held.setdefault(item.id, []))
-    return found
+    return _first_and_last(found)
 
 
 def resolve_settings(declared: Mapping[str, Any], channel: bool = False) -> dict[str, Any]:

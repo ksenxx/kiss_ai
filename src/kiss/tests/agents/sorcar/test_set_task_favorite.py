@@ -13,6 +13,10 @@ Covers :func:`kiss.agents.sorcar.persistence._set_task_favorite`:
 * unrelated extra keys (tokens, cost, steps, model, subagent) are
   preserved across favourite toggles,
 * a non-existent task_id returns ``False`` and writes nothing.
+
+The task's pin (``is_pinned``,
+:func:`kiss.agents.sorcar.persistence._set_task_pinned`) is written by
+the same code and covered by one scenario at the end.
 """
 
 from __future__ import annotations
@@ -145,3 +149,15 @@ class TestSetTaskFavorite:
         ):
             extra.pop(k, None)
         assert extra == {"is_favorite": True}
+
+    def test_pin_is_a_flag_of_its_own_that_a_finished_task_keeps(self) -> None:
+        """``_set_task_pinned`` writes ``is_pinned`` alone; the task's saved metrics leave it."""
+        task_id, _ = th._add_task("pin me")
+        assert th._load_history()[0]["is_pinned"] == 0
+        assert th._set_task_pinned(task_id, True) is True
+        th._save_task_extra({"tokens": 5, "endTs": 2_000}, task_id=task_id)
+        entry = th._load_history()[0]
+        assert (entry["is_pinned"], entry["is_favorite"], entry["tokens"]) == (1, 0, 5)
+        assert th._set_task_pinned(task_id, False) is True
+        assert th._load_history()[0]["is_pinned"] == 0
+        assert th._set_task_pinned("987654", True) is False

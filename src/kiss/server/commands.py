@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import contextlib
 import functools
+import getpass
 import logging
 import math
 import queue
@@ -26,20 +27,29 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from kiss.agents.sorcar import chrome_bridge
+from kiss.agents.sorcar import chrome_bridge, projects
 from kiss.agents.sorcar.machines import local_machine_name
 from kiss.agents.sorcar.persistence import (
     _chat_task_tree,
     _delete_chat,
+    _delete_project,
     _delete_task,
+    _get_project,
     _load_slash_command_usage,
+    _load_task_tags,
     _record_file_usage,
     _record_model_usage,
     _record_steer_input,
     _save_last_model,
+    _save_project,
     _set_chat_favorite,
+    _set_chat_pinned,
+    _set_chat_project,
     _set_chat_summary,
+    _set_project_pinned,
     _set_task_favorite,
+    _set_task_pinned,
+    _set_task_tags,
     _task_tree,
     _task_usage,
 )
@@ -52,13 +62,15 @@ from kiss.agents.sorcar.sea_commands import (
     run_picked_hook,
 )
 from kiss.agents.sorcar.sorcar_agent import _persisted_task_id
+from kiss.agents.sorcar.task_metadata import ALL_TAGS
 from kiss.core.brand import HOME_DIR
-from kiss.core.browser_handoff import open_in_default_browser
+from kiss.core.browser_handoff import is_headless_environment, open_in_default_browser
 from kiss.core.models.model import Attachment
 from kiss.core.utils import is_root_dir
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.json_printer import IdentifiedPrompt, name_prompts, prompt_ids_of
+from kiss.server.pr_flow import PrOutcome
 from kiss.server.tab_registry import OpenTabOutcome
 from kiss.server.task_runner import (
     _client_task_id_of,
@@ -284,6 +296,14 @@ def _stored_machine() -> str:
     return str(stored.get("last_machine", ""))
 
 
+def _local_user_name() -> str:
+    """Return the OS user the daemon runs as (``""`` when the system names none)."""
+    try:
+        return getpass.getuser()
+    except (OSError, KeyError):
+        return ""
+
+
 def _open_external_report(url: str) -> dict[str, Any]:
     """Open *url* in the user's default browser; the ``openExternalResult`` fields."""
     return {"opened": open_in_default_browser(url, once=False)}
@@ -341,6 +361,67 @@ def _my_models_event(models: list[dict[str, str]], generation: int) -> dict[str,
     return event
 
 
+def _task_tags_refusal(tags: Any) -> str:
+    """Return why *tags* cannot be a task's new tags, in one sentence (``""``: they can).
+
+    A task carries names of :data:`~kiss.agents.sorcar.task_metadata.ALL_TAGS`
+    only, and at least one: an empty ``tags`` column marks a row not
+    finalized (:func:`~kiss.agents.sorcar.persistence._set_task_tags`).
+
+    Args:
+        tags: The ``tags`` field of a ``setTaskTags`` command.
+    """
+    if not isinstance(tags, list) or not tags:
+        return "A task keeps at least one tag."
+    for tag in tags:
+        if tag not in ALL_TAGS:
+            return f"There is no tag named {tag}."
+    return ""
+
+
+def _read_task_tags(task_id: str, running: set[str]) -> tuple[list[str], bool, str]:
+    """Return the tags of task row *task_id*, whether they are editable, and the read's failure.
+
+    *running* are the tasks this daemon runs, for
+    :func:`~kiss.agents.sorcar.persistence._load_task_tags`.  A history
+    that cannot be read is answered, as a task without tags and the
+    failure in one sentence (``""`` when the read worked): a machine
+    link would wait out its timeout for a missing answer.
+    """
+    try:
+        return *_load_task_tags(task_id, running), ""
+    except (sqlite3.Error, OSError) as e:
+        logger.warning("Could not read the tags of task %s", task_id, exc_info=True)
+        return [], False, f"Could not read the task's tags: {e}."
+
+
+def _task_tags_event(
+    task_id: str, tags: list[str], editable: bool, error: str = ""
+) -> dict[str, Any]:
+    """Return the ``taskTags`` event of a task, for the Task Info panel's Tags row.
+
+    ``allTags`` is every name a task can carry
+    (:data:`~kiss.agents.sorcar.task_metadata.ALL_TAGS`, in its order)
+    and ``editable`` whether the row takes a ``setTaskTags``: it has
+    tags and its task is over (a task still running gets its tags when
+    it ends; the ones a backfill gave it meanwhile are shown as they are).
+
+    Args:
+        task_id: The ``task_history`` row id the command named.
+        tags: The tags stored on the row.
+        editable: Whether the row takes a ``setTaskTags``
+            (:func:`~kiss.agents.sorcar.persistence._load_task_tags`).
+        error: Why the command this answers failed, in one sentence (``""``: it did not).
+    """
+    event: dict[str, Any] = {
+        "type": "taskTags", "taskId": task_id, "tags": tags,
+        "allTags": list(ALL_TAGS), "editable": editable,
+    }
+    if error:
+        event["error"] = error
+    return event
+
+
 # Each held from reading its list off the home directory until the
 # list is handed to the printer, so the lists reach a client in the
 # order they were read: one read earlier and sent later (two edits
@@ -348,6 +429,15 @@ def _my_models_event(models: list[dict[str, str]], generation: int) -> dict[str,
 # leave a panel showing the older file.
 _MY_MODELS_PUBLISH_LOCK = threading.Lock()
 _TRICKS_PUBLISH_LOCK = threading.Lock()
+# Each held by a command from its first read or write of the rows it
+# reports until its last event about them is handed to the printer, so
+# what a page is sent last is what the database holds: a ``getProjects``
+# or ``getTaskTags`` answer read before another page's change and sent
+# after that change's event left the asking page on the older rows.
+# The projects' lock is reentrant for ``locked_call``: a run's thread,
+# which a Stop is injected into, takes it too (``_move_chat_to_project``).
+_PROJECTS_PUBLISH_LOCK = threading.RLock()
+_TASK_TAGS_PUBLISH_LOCK = threading.Lock()
 
 
 def broadcast_tricks_data(printer: Any, conn_id: str) -> None:
@@ -479,6 +569,7 @@ class _CommandsMixin:
         _tab_chat_views: dict[str, str]
         _tab_models: dict[str, str]
         _autocommit_tabs: set[str]
+        _pr_tabs: set[str]
         tab_registry: TabRegistry
         browser_tabs: BrowserTabService
 
@@ -503,6 +594,7 @@ class _CommandsMixin:
             self, viewer_tab_id: str,
         ) -> list[AgentState]: ...
         def _get_models(self, conn_id: str = "", generation: int = 0) -> None: ...
+        def _get_running_task_ids(self) -> set[str]: ...
         def _get_history(
             self,
             query: str | None,
@@ -512,6 +604,8 @@ class _CommandsMixin:
             tag: str = "",
             machine: str = "",
             work_dir: str = "",
+            project: str = "",
+            project_limit: int = 0,
         ) -> None: ...
         def _get_files(
             self,
@@ -527,7 +621,6 @@ class _CommandsMixin:
             task_id: str | None = None,
             conn_id: str = "",
             replay_id: str = "",
-            reopen: bool = False,
             recovery: bool = False,
             lazy: bool = False,
         ) -> None: ...
@@ -539,9 +632,7 @@ class _CommandsMixin:
             conn_id: str,
         ) -> None: ...
         def _new_chat(self, tab_id: str) -> None: ...
-        def _close_tab(
-            self, tab_id: str, ack: str = "", incarnation: int | None = None,
-        ) -> None: ...
+        def _close_tab(self, tab_id: str, ack: str = "") -> None: ...
         def _dispose_if_closed(self, tab_id: str) -> None: ...
         def _registry_update_tab(
             self,
@@ -568,6 +659,11 @@ class _CommandsMixin:
         def _broadcast_autocommit_done(
             self, tab_id: str, *, success: bool, committed: bool, message: str,
             commit_message: str | None = None, work_dir: str = "", reply_to: str = "",
+        ) -> None: ...
+        def _create_pr(self, tab_id: str, work_dir: str = "", reply_to: str = "") -> None: ...
+        def _create_pr_on_machine(self, tab_id: str, machine: str, work_dir: str) -> None: ...
+        def _broadcast_pr_done(
+            self, tab_id: str, outcome: PrOutcome, work_dir: str = "", reply_to: str = "",
         ) -> None: ...
         def _handle_worktree_action(
             self, action: str, tab_id: str = "",
@@ -862,6 +958,10 @@ class _CommandsMixin:
             while self._history_deletes:
                 self._history_delete_done.wait()
             prev = agent_state.find_by_tab(tab_id)
+            # ``prev`` while the tab shows its chat: a line typed into a
+            # tab that a replay bound to another chat since is for the
+            # task shown there, as in a tab that launched nothing.
+            shown = self._shown_own_state_locked(tab_id)
             # A plain message typed into a tab that only VIEWS a task
             # whose agent is blocked in ``ask_user_question`` (a
             # client-local sub-agent tab, or a stale viewer that sent
@@ -871,7 +971,7 @@ class _CommandsMixin:
             asked: AgentState | None = None
             if (
                 typed
-                and (prev is None or prev.task_thread is None)
+                and (shown is None or shown.task_thread is None)
                 and not contains_task_tags(prompt)
             ):
                 asked = self._viewer_awaiting_answer(tab_id)
@@ -886,7 +986,7 @@ class _CommandsMixin:
                     cmd=cmd,
                 )
                 return
-            if prev is not None and prev.task_thread is not None:
+            if shown is not None and shown.task_thread is not None:
                 # S3-05: queue the prompt whenever a task thread is
                 # installed.  The worker sets ``is_task_active`` only
                 # AFTER the thread starts, so gating on the flag (or on
@@ -896,7 +996,7 @@ class _CommandsMixin:
                 # line is the same user action as ``appendUserMessage``
                 # (the page sends that once it knows the tab is busy):
                 # steering text, or a ``/ask`` side-channel question,
-                # admitted on ``prev`` in THIS lock hold — a lookup
+                # admitted on ``shown`` in THIS lock hold — a lookup
                 # after the lock could find the tab idle (the task
                 # just ended: the text would be refused instead of
                 # re-run) or re-armed by another chat's task (which
@@ -904,7 +1004,7 @@ class _CommandsMixin:
                 steer = typed
                 if steer:
                     admitted = self._admit_steer(
-                        prev, prompt, tab_id, attachments, _continued_task_named(cmd),
+                        shown, prompt, tab_id, attachments, _continued_task_named(cmd),
                     )
             elif asked is not None:
                 queued = self._queue_prompt_on_owner(asked, prompt, tab_id, attachments)
@@ -913,6 +1013,19 @@ class _CommandsMixin:
                 remember, inject_task = queued
                 inject_publication = self.tab_registry.generation(tab_id)
                 inject_prompt = prompt
+            elif prev is not None and prev.task_thread is not None:
+                # The run this tab launched goes on in the chat the tab
+                # showed before a replay bound it to another.  Its state
+                # stays the tab's to its end, so no task can start here
+                # meanwhile, and the line is not for a task its sender
+                # cannot see.
+                self._refuse_run(
+                    tab_id,
+                    "The task this tab started is still running in another chat;"
+                    " a new task can start here once it has finished.",
+                    cmd=cmd,
+                )
+                return
             elif self._update_installing:
                 # The self-update installer is (about to be) running
                 # and will restart this daemon: a task started now
@@ -929,10 +1042,18 @@ class _CommandsMixin:
                 )
                 return
             else:
+                if cmd.get("_leftover") and (prev is None or prev.frontend_closed):
+                    # A message a finished run left for the tab's next
+                    # one (``_redispatch_leftover_prompts``), and the tab
+                    # was closed since that run freed it: no task starts
+                    # in a closed tab, and the message is handed back as
+                    # when the close came before the run's end.
+                    self._refuse_unanswered_prompts(tab_id, [prompt])
+                    return
                 requested_chat_id = cmd.get("chatId", "")
                 resumed_chat_id = self._tab_chat_views.get(tab_id, "")
-                if prev is not None and prev.chat_id:
-                    chat_id = prev.chat_id
+                if shown is not None and shown.chat_id:
+                    chat_id = shown.chat_id
                 elif isinstance(requested_chat_id, str) and requested_chat_id:
                     chat_id = requested_chat_id
                 elif resumed_chat_id:
@@ -1189,9 +1310,14 @@ class _CommandsMixin:
                     {"type": "setTaskText", "text": str(prompt or ""), "tabId": tab_id}, prompt,
                 ),
             )
-        self.printer.broadcast(
-            name_prompts({"type": "clear", "chat_id": chat_id, "tabId": tab_id}, prompt),
-        )
+        # ``workDir``: the folder the run starts in, which the daemon
+        # records when it is a task worktree nobody announced to the tab
+        # (``WebPrinter._begin_tab_run``).
+        start: dict[str, Any] = {
+            "type": "clear", "chat_id": chat_id, "tabId": tab_id,
+            "workDir": str(cmd.get("workDir") or self.work_dir),
+        }
+        self.printer.broadcast(name_prompts(start, prompt))
         self._broadcast_run_notice(cmd, tab_id)
         for text in state.unattributed_prompt_echoes:
             self._note_prompts_taken(tab_id, text)
@@ -1355,6 +1481,7 @@ class _CommandsMixin:
             query = None
         offset = _parse_int(cmd.get("offset", 0))
         generation = _parse_int(cmd.get("generation", 0))
+        limit = _parse_int(cmd.get("limit", 0))
         tag = cmd.get("tag", "")
         machine = cmd.get("machine", "")
         work_dir = cmd.get("workDir", "")
@@ -1370,6 +1497,9 @@ class _CommandsMixin:
             tag if isinstance(tag, str) else "",
             machine if isinstance(machine, str) else "",
             work_dir if isinstance(work_dir, str) else "",
+            _opt_str(cmd.get("project")) or "",
+            # The rows of a project's page; none asked for is the default.
+            0 if limit is None else max(0, min(limit, 2**62)),
         )
 
     def _cmd_get_task_usage(self, cmd: dict[str, Any]) -> None:
@@ -1440,16 +1570,252 @@ class _CommandsMixin:
         _set_chat_summary(chat_id, summary.strip() if isinstance(summary, str) else "")
         self.printer.broadcast({"type": "tasks_updated"})
 
+    def _set_history_flag(
+        self, row_id: Any, setter: Callable[[str, bool], bool], value: Any,
+    ) -> None:
+        """Write a flag of the CHATS panel (a star, a pin), then have every page refetch.
+
+        Args:
+            row_id: The command's ``chatId`` or ``taskId``; a command
+                that names none changes nothing.
+            setter: The persistence function that writes the flag.
+            value: The command's new value for the flag.
+        """
+        target = _opt_str(row_id)
+        if target is None:
+            return
+        setter(target, bool(value))
+        self.printer.broadcast({"type": "tasks_updated"})
+
     def _cmd_set_chat_favorite(self, cmd: dict[str, Any]) -> None:
         """Persist the favourite star the user gave a chat in the CHATS panel.
 
         Every page is nudged to refresh its history so the other
         surfaces show the star too.
         """
-        chat_id = _opt_str(cmd.get("chatId"))
-        if not chat_id:
+        self._set_history_flag(cmd.get("chatId"), _set_chat_favorite, cmd.get("isFavorite"))
+
+    def _cmd_set_pinned(self, cmd: dict[str, Any]) -> None:
+        """Persist the pin the user gave a task row in the CHATS panel.
+
+        Every page is nudged to refresh its history: a pin moves the
+        row to the Pinned section on every surface.
+        """
+        self._set_history_flag(cmd.get("taskId"), _set_task_pinned, cmd.get("isPinned"))
+
+    def _cmd_set_chat_pinned(self, cmd: dict[str, Any]) -> None:
+        """Persist the pin the user gave a chat in the CHATS panel.
+
+        Every page is nudged to refresh its history, as for a task's pin.
+        """
+        self._set_history_flag(cmd.get("chatId"), _set_chat_pinned, cmd.get("isPinned"))
+
+    def _cmd_get_projects(self, cmd: dict[str, Any]) -> None:
+        """Send the asking page every project and the project of every chat in one."""
+        with _PROJECTS_PUBLISH_LOCK:
+            self._broadcast_to_conn(
+                projects.projects_event(with_chats=True), cmd.get("connId", ""),
+            )
+
+    def _refuse_project(self, cmd: dict[str, Any], project_id: str, text: str) -> None:
+        """Answer a ``saveProject`` that wrote nothing with a ``projectError``.
+
+        Args:
+            cmd: The request (its ``connId`` scopes the event, its
+                ``requestId`` names the panel that sent it).
+            project_id: The project the request named (``""`` for a new one).
+            text: The refusal, shown in that panel.
+        """
+        self._broadcast_to_conn(
+            {
+                "type": "projectError", "id": project_id,
+                "requestId": str(cmd.get("requestId", "") or ""), "text": text,
+            },
+            cmd.get("connId", ""),
+        )
+
+    def _cmd_save_project(self, cmd: dict[str, Any]) -> None:
+        """Create or update a project of the Projects page.
+
+        ``project`` holds ``id`` (absent or empty: a new project),
+        ``name``, ``description``, ``isPinned`` and ``settings``: the
+        settings the project is to have (what it overrides already and
+        what the user set in its panel; a setting the user left alone
+        is not sent, the page's copy of the product's settings being
+        possibly older than this daemon's), of which only what differs
+        from the product's settings is stored
+        (:func:`~kiss.agents.sorcar.projects.settings_overrides`).  A
+        request that carries no ``settings`` writes none: a new project
+        overrides nothing, and the stored ones of an existing project
+        stay as they are (they are not read and written back), also
+        those another page or another process saves meanwhile.  The
+        sender gets ``projectSaved`` and every page the new ``projects``
+        list; a request without a name, or for a project that is gone,
+        writes nothing and is answered with ``projectError``, as is one
+        the database fails: the panel that sent it awaits an answer (the
+        form of a new project is locked until one comes).
+        """
+        from kiss.core.user_config import get_current_api_keys, load_config
+
+        raw = cmd.get("project")
+        raw = raw if isinstance(raw, dict) else {}
+        project_id = _opt_str(raw.get("id")) or ""
+        name, description = (
+            value.strip() if isinstance(value, str) else ""
+            for value in (raw.get("name"), raw.get("description"))
+        )
+        if not name:
+            self._refuse_project(cmd, project_id, "A project needs a name.")
             return
-        _set_chat_favorite(chat_id, bool(cmd.get("isFavorite", False)))
+        with _PROJECTS_PUBLISH_LOCK:
+            try:
+                if project_id and _get_project(project_id) is None:
+                    self._refuse_project(cmd, project_id, "This project no longer exists.")
+                    return
+                settings: dict[str, Any] | None = None
+                if "settings" in raw:
+                    settings = projects.settings_overrides(
+                        raw["settings"], load_config(), get_current_api_keys(),
+                    )
+                    # Its API keys are replaced in tool output from now on.  Before the
+                    # row is written: a running task that reads a key from the
+                    # database must find it a secret of its output already.
+                    projects.register_keys(settings)
+                pinned = raw.get("isPinned")
+                saved_id = _save_project(
+                    project_id,
+                    name[: projects.NAME_MAX],
+                    description[: projects.DESCRIPTION_MAX],
+                    settings,
+                    pinned if isinstance(pinned, bool) else None,
+                )
+            except (sqlite3.Error, OSError) as e:
+                logger.warning("Could not save project %r", project_id, exc_info=True)
+                self._refuse_project(cmd, project_id, f"Could not save the project: {e}.")
+                return
+            if not saved_id:
+                # Deleted by another process between the read and the write.
+                self._refuse_project(cmd, project_id, "This project no longer exists.")
+                return
+            self._broadcast_to_conn(
+                {
+                    "type": "projectSaved", "id": saved_id,
+                    "requestId": str(cmd.get("requestId", "") or ""),
+                },
+                cmd.get("connId", ""),
+            )
+            self.printer.broadcast(projects.projects_event(with_chats=False))
+
+    def _cmd_delete_project(self, cmd: dict[str, Any]) -> None:
+        """Delete a project; its chats stay, in no project.  Every page gets ``projects``."""
+        with _PROJECTS_PUBLISH_LOCK:
+            if _delete_project(_opt_str(cmd.get("projectId")) or ""):
+                self.printer.broadcast(projects.projects_event(with_chats=False))
+
+    def _cmd_set_project_pinned(self, cmd: dict[str, Any]) -> None:
+        """Persist the pin of a project.  Every page gets ``projects``."""
+        project_id = _opt_str(cmd.get("projectId")) or ""
+        with _PROJECTS_PUBLISH_LOCK:
+            if _set_project_pinned(project_id, bool(cmd.get("pinned"))):
+                self.printer.broadcast(projects.projects_event(with_chats=False))
+
+    def _cmd_set_chat_project(self, cmd: dict[str, Any]) -> None:
+        """Put a chat in a project, or (``projectId`` ``""``) take it out of its project.
+
+        Every page gets ``chatProject``.  A project that is gone is an
+        ``error`` to the sender, and nothing is written.
+        """
+        chat_id = _opt_str(cmd.get("chatId"))
+        project_id = cmd.get("projectId")
+        if chat_id is None or not isinstance(project_id, str):
+            return
+        with _PROJECTS_PUBLISH_LOCK:
+            try:
+                _set_chat_project(chat_id, project_id)
+            except LookupError:
+                self._send_error_to_sender(
+                    "This project no longer exists.", cmd, "setChatProject",
+                )
+                return
+            self.printer.broadcast(
+                {"type": "chatProject", "chatId": chat_id, "projectId": project_id},
+            )
+
+    def _answer_task_tags(self, cmd: dict[str, Any], event: dict[str, Any]) -> None:
+        """Send the ``taskTags`` *event* to the sender of *cmd* alone.
+
+        The ``generation`` of a machine link's command is echoed
+        (:func:`request_generation`): the link takes no other
+        ``taskTags`` for its answer, so the one pushed to every
+        connection for another client's edit never passes for it.
+
+        Args:
+            cmd: The ``getTaskTags`` / ``setTaskTags`` command.
+            event: Its :func:`_task_tags_event`.
+        """
+        if generation := request_generation(cmd):
+            event = {**event, "generation": generation}
+        self._broadcast_to_conn(event, cmd.get("connId", ""))
+
+    def _cmd_get_task_tags(self, cmd: dict[str, Any]) -> None:
+        """Tell the requesting page the tags of the task its Task Info panel shows.
+
+        Answered with the task's ``taskTags`` (:func:`_task_tags_event`).
+        """
+        task_id = str(cmd.get("taskId") or "")
+        running = self._get_running_task_ids()
+        with _TASK_TAGS_PUBLISH_LOCK:
+            answer = _read_task_tags(task_id, running)
+            self._answer_task_tags(cmd, _task_tags_event(task_id, *answer))
+
+    def _cmd_set_task_tags(self, cmd: dict[str, Any]) -> None:
+        """Store the tags the user edited in the Task Info panel on a finished task's row.
+
+        ``tags`` is the task's whole new set: names of
+        :data:`~kiss.agents.sorcar.task_metadata.ALL_TAGS`, at least
+        one, stored without repeats in that vocabulary's order.  Every
+        page is then sent a ``taskTags`` of the set stored (the ones
+        showing the task repaint its Tags row; the sender's page knows
+        its edit's answer by that set) and nudged to refetch its
+        history, whose rows and Tag filter read the same column.  A
+        machine link's command (one carrying a ``generation``) is
+        answered besides with a copy echoing it, as
+        :meth:`_broadcast_my_models` answers one.
+
+        A refused set changes nothing and is answered to the sender
+        alone: the row's ``taskTags`` as stored, the reason its
+        ``error``.  Refused are an empty set, a name outside the
+        vocabulary, a row that does not exist, has no tags yet or is
+        that of a task still running (its task's end derives them) and
+        a history that cannot be written.
+        """
+        task_id = str(cmd.get("taskId") or "")
+        tags = cmd.get("tags") or []
+        running = self._get_running_task_ids()
+        error = _task_tags_refusal(tags)
+        stored: list[str] = []
+        with _TASK_TAGS_PUBLISH_LOCK:
+            if not error:
+                stored = [tag for tag in ALL_TAGS if tag in tags]
+                try:
+                    if not _set_task_tags(task_id, stored, running):
+                        error = (
+                            "This task has no tags to edit: it is still running or was deleted."
+                        )
+                except (sqlite3.Error, OSError) as e:
+                    logger.warning("Could not save the tags of task %s", task_id, exc_info=True)
+                    error = f"Could not save the task's tags: {e}."
+            if error:
+                kept, editable, _unreadable = _read_task_tags(task_id, running)
+                self._answer_task_tags(cmd, _task_tags_event(task_id, kept, editable, error))
+                return
+            event = _task_tags_event(task_id, stored, True)
+            # The explicit empty ``tabId`` makes the event a global one: an
+            # event naming a ``taskId`` and no tab is one of that task's
+            # transcript to the printer, which would record it there.
+            self.printer.broadcast({**event, "tabId": ""})
+            if request_generation(cmd):
+                self._answer_task_tags(cmd, event)
         self.printer.broadcast({"type": "tasks_updated"})
 
     def _cmd_open_external(self, cmd: dict[str, Any]) -> None:
@@ -1885,6 +2251,34 @@ class _CommandsMixin:
             owner.unattributed_prompt_echoes.append(prompt)
         return remember, owner_task
 
+    def _shown_own_state_locked(self, tab_id: str) -> AgentState | None:
+        """Under ``_state_lock``: the state launched from *tab_id*, while the tab shows its chat.
+
+        ``None`` too once a replay bound the tab to another chat
+        (``_commit_replay_publication``).  The run goes on unseen in
+        the tab, its state the tab's to the run's end, and what is
+        answered or typed in the tab is for the task the tab shows,
+        which it is subscribed to (:meth:`_find_viewer_task_states`),
+        as in a tab that launched nothing.  Sent to the launched run, a
+        line typed under the other chat's transcript steered a task its
+        sender could not see, and the answer to the question shown was
+        dropped as late.
+
+        The rule of ``_subscribe_launching_tab_locked``: a tab without
+        a chat view (no replay bound it: a sub-agent's, a run's before
+        its first replay) and a state without a chat id have nothing to
+        compare, and the state is the tab's.
+
+        Args:
+            tab_id: The frontend tab id.
+        """
+        state = agent_state.find_by_tab(tab_id)
+        if state is None or not state.chat_id:
+            return state
+        if self._tab_chat_views.get(tab_id, state.chat_id) != state.chat_id:
+            return None
+        return state
+
     def _viewer_awaiting_answer(self, tab_id: str) -> AgentState | None:
         """Return the task *tab_id* views whose agent is blocked in ``ask_user_question``.
 
@@ -1921,9 +2315,11 @@ class _CommandsMixin:
         Routing precedence:
 
         1. The state launched from the frontend tab ``ans_tab``
-           itself, when it holds a non-None ``user_answer_queue``.
-           This is the common path: a single-window user answers from
-           the same tab that launched the task.
+           itself, while the tab shows its chat
+           (:meth:`_shown_own_state_locked`), when it holds a non-None
+           ``user_answer_queue``.  This is the common path: a
+           single-window user answers from the same tab that launched
+           the task.
 
         2. Otherwise, the state of any task that ``ans_tab`` is
            subscribed to.  This covers the multi-viewer case where one
@@ -1943,7 +2339,7 @@ class _CommandsMixin:
             ``ask_user_question`` waiter can be associated with the
             command.  Must be called with ``_state_lock`` held.
         """
-        ans_state = agent_state.find_by_tab(ans_tab)
+        ans_state = self._shown_own_state_locked(ans_tab)
         if ans_state is not None and ans_state.user_answer_queue is not None:
             return ans_state
         for state in self._find_viewer_task_states(ans_tab):
@@ -2282,7 +2678,8 @@ class _CommandsMixin:
         steering input until the tool returns) and every viewer tab
         receives ``askUserDone``, exactly as for a ``userAnswer``.
 
-        When the tab itself has no live task (the common case for a
+        When the tab itself shows no live task of its own
+        (:meth:`_shown_own_state_locked`; the common case for a
         VIEWER tab opened from the history sidebar while a task runs
         in ANOTHER tab — the viewer is subscribed to the running
         task's event stream but the live agent belongs to that task's
@@ -2319,7 +2716,7 @@ class _CommandsMixin:
         # while ``_cmd_run`` has installed but not yet started the
         # worker thread is queued instead of silently dropped.
         with self._state_lock:
-            owner = agent_state.find_by_tab(tab_id)
+            owner = self._shown_own_state_locked(tab_id)
             if owner is not None and not owner.running():
                 owner = None
             if owner is None:
@@ -2517,9 +2914,6 @@ class _CommandsMixin:
         left waiting for the marker, and can tell the failure from the
         end of the task.
 
-        ``reopen: true`` marks a sub-agent tab the user asked for again
-        (an expanded fan-out panel), see ``_replay_session``.
-
         ``recovery: true`` is a ``daemon_client`` run reconnecting after
         a dropped connection: it gets its subscription and transcript
         back, but a tab the user closed meanwhile is not reopened, see
@@ -2550,7 +2944,6 @@ class _CommandsMixin:
                 task_id=task_id,
                 conn_id=conn_id,
                 replay_id=replay_id,
-                reopen=cmd.get("reopen") is True,
                 recovery=cmd.get("recovery") is True,
                 lazy=cmd.get("lazy") is True,
             )
@@ -2622,18 +3015,11 @@ class _CommandsMixin:
         """Clean up backend state for a closed frontend tab.
 
         The command's ``ack`` token, when it sends one, rides the
-        snapshot that omits the tab (see :meth:`_cmd_open_tab`).  Its
-        ``incarnation`` marks a close the page made by itself (see
-        ``_close_tab``).
+        snapshot that omits the tab (see :meth:`_cmd_open_tab`).
         """
         tab_id = cmd.get("tabId", "")
         if tab_id:
-            incarnation = cmd.get("incarnation")
-            self._close_tab(
-                tab_id,
-                _opt_str(cmd.get("ack")) or "",
-                incarnation if isinstance(incarnation, int) else None,
-            )
+            self._close_tab(tab_id, _opt_str(cmd.get("ack")) or "")
 
     # -- Browser tab: the daemon machine's browser streamed to every surface.
     # Browser page ids travel as ``tab_id`` (never ``tabId``, which names
@@ -2833,17 +3219,84 @@ class _CommandsMixin:
             lazy=cmd.get("lazy") is True,
         )
 
-    def _run_autocommit_job(self, tab_id: str, job: Callable[[], None]) -> None:
-        """Run *job*, then release *tab_id*'s ``_autocommit_tabs`` claim.
+    def _run_press_job(self, tab_id: str, claims: set[str], job: Callable[[], None]) -> None:
+        """Run *job*, then release *tab_id*'s claim in *claims*.
 
-        Thread body spawned by :meth:`_cmd_autocommit_action`; the
-        ``finally`` makes a failed commit re-arm the tab.
+        Thread body spawned by :meth:`_start_press`; the ``finally``
+        makes a failed press re-arm the tab.
         """
         try:
             job()
         finally:
             with self._state_lock:
-                self._autocommit_tabs.discard(tab_id)
+                claims.discard(tab_id)
+
+    def _start_press(
+        self,
+        cmd: dict[str, Any],
+        claims: set[str],
+        on_machine: Callable[[str, str, str], None],
+        here: Callable[[str, str, str], None],
+    ) -> str:
+        """Run a tab's button press (Git Commit, Create PR) in the background.
+
+        The command's ``workDir`` (the tab's own folder) is preferred
+        over the daemon-wide ``self.work_dir``, which may point at a
+        different, possibly non-git, folder.  A command stamped
+        ``machine`` (the tab's drop-down names a registered machine)
+        runs on that machine's folder instead.
+
+        At most one press of a kind runs per tab: it may make a billed
+        LLM call and it changes the repository, so an impatient double
+        click must not race two of them.
+
+        Args:
+            cmd: The ``autocommitAction`` or ``createPrAction`` command.
+            claims: The tabs whose press of this kind is in flight.
+            on_machine: Runs the press on a registered machine, given
+                the tab, the machine and the folder there.
+            here: Runs it on this machine, given the tab, its folder
+                and the daemon link to answer (``""`` for none).
+
+        Returns:
+            ``""`` once the press runs.  While an earlier press of the
+            tab is in flight nothing is started, and the connection to
+            tell so is returned (``""`` when the command names none): a
+            link waiting for its answer would otherwise wait out the
+            whole request timeout, and a browser of this daemon whose
+            click lost to a forwarded press (whose outcome goes to its
+            link alone) would never hear back.
+        """
+        tab_id = cmd.get("tabId", "")
+        machine = str(cmd.get("machine") or "")
+        work_dir = str(cmd.get("workDir") or "")
+        # ``replyTo``: the command came over a daemon link (see
+        # ``ServerApi.autocommit_action``); the outcome goes to that
+        # connection as the reply to its request.
+        reply_to = str(cmd.get("replyTo") or "")
+        if machine:
+            job = functools.partial(on_machine, tab_id, machine, work_dir)
+        else:
+            job = functools.partial(here, tab_id, work_dir or self.work_dir, reply_to)
+        with self._state_lock:
+            in_flight = tab_id in claims
+            if not in_flight:
+                claims.add(tab_id)
+        if in_flight:
+            logger.debug("A press is already in flight for tab %r; refusing the duplicate", tab_id)
+            return reply_to or str(cmd.get("connId") or "")
+        # The claim is released when the job returns, or right here
+        # when the thread cannot be started, so a failed spawn never
+        # leaves the tab refusing every later click as a duplicate.
+        try:
+            threading.Thread(
+                target=self._run_press_job, args=(tab_id, claims, job), daemon=True,
+            ).start()
+        except BaseException:
+            with self._state_lock:
+                claims.discard(tab_id)
+            raise
+        return ""
 
     def _cmd_autocommit_action(self, cmd: dict[str, Any]) -> None:
         """Stage-all + commit the tab's working tree in the background.
@@ -2854,62 +3307,41 @@ class _CommandsMixin:
         reports through toast ``notification`` events — the chat
         transcript stays clean except for a failure, whose reason is
         still rendered there via the non-silent ``autocommit_done``
-        event.
+        event.  A command stamped ``machine`` commits that machine's
+        folder instead, through :meth:`_commit_on_machine`.
 
-        The command's ``workDir`` (the tab's own folder) is forwarded so
-        the commit lands in the tab's repository rather than the
-        daemon-wide ``self.work_dir``, which may point at a different —
-        possibly non-git — folder.  A command stamped ``machine`` (the
-        tab's drop-down names a registered machine) commits that
-        machine's folder instead, through :meth:`_commit_on_machine`.
-
-        At most one commit runs per tab: the commit-message generation
-        is a billed LLM call and ``git add -A``/``git commit`` mutate
-        the repository, so an impatient double click must not race two
-        commits.  While the tab's commit is in flight an extra click is
-        answered, on its own connection alone, with a failed
-        ``autocommit_done`` saying so: a link waiting for its answer
-        would otherwise wait out the whole request timeout, and a
-        browser of this daemon whose click lost to a forwarded commit
-        (whose outcome goes to its link alone) would never hear back.
+        One commit runs per tab at a time (:meth:`_start_press`); while
+        it is in flight an extra click is answered, on its own
+        connection alone, with a failed ``autocommit_done`` saying so.
         """
-        tab_id = cmd.get("tabId", "")
-        machine = str(cmd.get("machine") or "")
-        work_dir = str(cmd.get("workDir") or "")
-        # ``replyTo``: the command came over a daemon link (see
-        # ``ServerApi.autocommit_action``); the outcome goes to that
-        # connection as the reply to its request.
-        reply_to = str(cmd.get("replyTo") or "")
-        if machine:
-            job = functools.partial(self._commit_on_machine, tab_id, machine, work_dir)
-        else:
-            job = functools.partial(
-                self._commit_main_tree, tab_id, work_dir or self.work_dir, reply_to,
+        requester = self._start_press(
+            cmd, self._autocommit_tabs, self._commit_on_machine, self._commit_main_tree,
+        )
+        if requester:
+            self._broadcast_autocommit_done(
+                cmd.get("tabId", ""), success=False, committed=False,
+                message="A Git Commit of this tab is already running.", reply_to=requester,
             )
-        with self._state_lock:
-            in_flight = tab_id in self._autocommit_tabs
-            if not in_flight:
-                self._autocommit_tabs.add(tab_id)
-        if in_flight:
-            logger.debug("Commit already in flight for tab %r; refusing the duplicate", tab_id)
-            requester = reply_to or str(cmd.get("connId") or "")
-            if requester:
-                self._broadcast_autocommit_done(
-                    tab_id, success=False, committed=False,
-                    message="A Git Commit of this tab is already running.", reply_to=requester,
-                )
-            return
-        # The claim is released when the job returns, or right here
-        # when the thread cannot be started, so a failed spawn never
-        # leaves the tab refusing every later click as a duplicate.
-        try:
-            threading.Thread(
-                target=self._run_autocommit_job, args=(tab_id, job), daemon=True,
-            ).start()
-        except BaseException:
-            with self._state_lock:
-                self._autocommit_tabs.discard(tab_id)
-            raise
+
+    def _cmd_create_pr_action(self, cmd: dict[str, Any]) -> None:
+        """Push the tab's branch and open its pull request in the background.
+
+        Serves the Create PR button.  Delegates to :meth:`_create_pr`,
+        which reports through toast ``notification`` events and a
+        ``pr_done`` event; a command stamped ``machine`` opens the pull
+        request of that machine's folder instead, through
+        :meth:`_create_pr_on_machine`.
+
+        One press runs per tab at a time (:meth:`_start_press`); while
+        it is in flight an extra click is answered, on its own
+        connection alone, with a failed ``pr_done`` saying so.
+        """
+        requester = self._start_press(
+            cmd, self._pr_tabs, self._create_pr_on_machine, self._create_pr,
+        )
+        if requester:
+            refusal = PrOutcome(False, "A pull request of this tab is already being created.")
+            self._broadcast_pr_done(cmd.get("tabId", ""), refusal, reply_to=requester)
 
     def _cmd_worktree_action(self, cmd: dict[str, Any]) -> None:
         """Execute a worktree merge/discard action."""
@@ -2927,8 +3359,11 @@ class _CommandsMixin:
                 agent = state.agent if state is not None else None
                 pending = agent is not None and agent._wt_pending
             result = {"success": False, "message": str(e), "retryable": pending}
+        # ``action`` tells the pages a merge from a discard: a report the
+        # task wrote in the worktree is shown once it is merged, and
+        # dropped when the worktree is discarded.
         self.printer.broadcast(
-            {"type": "worktree_result", "tabId": wt_tab_id, **result},
+            {"type": "worktree_result", "tabId": wt_tab_id, "action": action, **result},
         )
 
     def _cmd_get_config(self, cmd: dict[str, Any]) -> None:
@@ -3019,6 +3454,13 @@ class _CommandsMixin:
             # `machines` reply (the chat header's machine drop-down):
             # `platform.node()` would add the domain on cloud hosts.
             "machine": local_machine_name(),
+            # The OS user the daemon runs as, shown at the left of the
+            # strip under the Chats list.
+            "user": _local_user_name(),
+            # Whether this daemon can start a browser on its own screen:
+            # a page on the daemon's machine then has it open an HTML
+            # file there ("Open in Browser") instead of in a new tab.
+            "opensBrowser": not is_headless_environment(),
         }
 
     def _cmd_save_config(self, cmd: dict[str, Any]) -> None:
@@ -3393,18 +3835,37 @@ class _CommandsMixin:
         a ``tricksData`` stamped for the sender alone: the panel drops a
         deleted row (or shows an edited one) before the answer arrives,
         so the list on disk is re-sent to put the row back.
+
+        A list tells a page what the file holds, not which edit made
+        it so: another window's change may leave it reading the same.
+        A command stamped with a ``generation`` (see
+        :func:`request_generation`) is therefore answered first with a
+        ``trickResult`` echoing it, for the sender alone, whose
+        ``error`` is the refusal (it takes the ``error`` event's
+        place), ``""`` when the edit was made.  The edit and its
+        answer are one hold of the promptlet publication lock: every
+        list sent before the result was read before the edit, every
+        later one after it.
         """
         text = cmd.get("text", "")
-        try:
-            error = edit(text if isinstance(text, str) else "")
-        except OSError as e:
-            logger.warning("%s failed", name, exc_info=True)
-            error = f"Could not write ~/{HOME_DIR}/MY_INJECTION.md: {e}"
-        if error:
-            self._send_error_to_sender(error, cmd, name)
+        conn_id = cmd.get("connId", "")
+        generation = request_generation(cmd)
+        with _TRICKS_PUBLISH_LOCK:
+            try:
+                error = edit(text if isinstance(text, str) else "")
+            except OSError as e:
+                logger.warning("%s failed", name, exc_info=True)
+                error = f"Could not write ~/{HOME_DIR}/MY_INJECTION.md: {e}"
+            if generation:
+                self._broadcast_to_conn(
+                    {"type": "trickResult", "generation": generation, "error": error or ""},
+                    conn_id,
+                )
+            elif error:
+                self._send_error_to_sender(error, cmd, name)
         # A failed write repaints only the sender; a successful one
         # repaints every window (the file is shared).
-        broadcast_tricks_data(self.printer, cmd.get("connId", "") if error else "")
+        broadcast_tricks_data(self.printer, conn_id if error else "")
 
     def _cmd_set_work_dir(self, cmd: dict[str, Any]) -> None:
         """Make ``workDir`` the global working directory of every task.
@@ -3526,8 +3987,17 @@ class _CommandsMixin:
         "setFavorite": _cmd_set_favorite,
         "setChatSummary": _cmd_set_chat_summary,
         "setChatFavorite": _cmd_set_chat_favorite,
+        "setPinned": _cmd_set_pinned,
+        "setChatPinned": _cmd_set_chat_pinned,
+        "getTaskTags": _cmd_get_task_tags,
+        "setTaskTags": _cmd_set_task_tags,
         "deleteTask": _cmd_delete_task,
         "deleteChat": _cmd_delete_chat,
+        "getProjects": _cmd_get_projects,
+        "saveProject": _cmd_save_project,
+        "deleteProject": _cmd_delete_project,
+        "setProjectPinned": _cmd_set_project_pinned,
+        "setChatProject": _cmd_set_chat_project,
         "openExternal": _cmd_open_external,
         "getFiles": _cmd_get_files,
         "recordFileUsage": _cmd_record_file_usage,
@@ -3542,6 +4012,7 @@ class _CommandsMixin:
         "getSeaCommands": _cmd_get_sea_commands,
         "getAdjacentTask": _cmd_get_adjacent_task,
         "autocommitAction": _cmd_autocommit_action,
+        "createPrAction": _cmd_create_pr_action,
         "worktreeAction": _cmd_worktree_action,
         "setWorkDir": _cmd_set_work_dir,
         "setMachine": _cmd_set_machine,

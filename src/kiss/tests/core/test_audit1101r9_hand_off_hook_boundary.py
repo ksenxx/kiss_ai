@@ -131,7 +131,7 @@ def test_the_next_call_hook_sees_the_switching_steps_tool_results() -> None:
 
     agent.llm_call_hook = hook
     agent._reasoning_tokens = agent._newest_reasoning_tokens = 4_000
-    agent.switch_model(new, "gemini-2.5-flash")
+    agent.switch_model(new, "gemini-2.5-flash", None)
 
     assert agent.model is new and agent.model_name == "gemini-2.5-flash"
     # The conversion dropped the reasoning items, so none is counted as carried.
@@ -152,7 +152,7 @@ def test_a_gemini_to_gemini_switch_carries_the_thought_signatures() -> None:
     new.initialize("")
     agent._reasoning_tokens = agent._newest_reasoning_tokens = 4_000
 
-    agent.switch_model(new, "gemini-3-flash-preview")
+    agent.switch_model(new, "gemini-3-flash-preview", None)
 
     assert new._thought_signatures == {"call_1": b"sig-1"}
     assert new.conversation == old.conversation

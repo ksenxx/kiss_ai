@@ -45,20 +45,28 @@ import re
 import shlex
 import sys
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
 from kiss.agents.sorcar.edit_matching import tolerant_matches
 from kiss.agents.sorcar.shell_scan import (
+    _LOOPS,
+    _SOURCING_BUILTINS,
+    _SUBSTITUTIONS,
+    ELSEWHERE,
+    SHELLS,
     Group,
     SimpleCommand,
     Word,
     _continued,
     bash_path,
     cd_path,
+    descriptor,
+    duplicated,
     handed_text,
     host_path,
+    inherited_cdpath,
     receiver,
     resolve,
     simple_commands,
@@ -132,7 +140,8 @@ def shell_view_target(command: str, cwd: str | None) -> Path | None:
 
     The command is read as bash reads it
     (:func:`~kiss.agents.sorcar.shell_scan.simple_commands`: quotes,
-    comments, subshells, ``cd``); the last view command
+    comments, subshells, ``cd``, which bash looks up in the ``CDPATH``
+    its shell inherits from this process); the last view command
     (:data:`VIEW_COMMANDS`) with exactly one literal operand naming an
     existing file names the file.  Options are skipped, as is the
     script of ``sed`` and the pattern of ``grep``.
@@ -143,7 +152,7 @@ def shell_view_target(command: str, cwd: str | None) -> Path | None:
     """
     target: Path | None = None
     start = bash_path(os.path.abspath(cwd or os.getcwd()))
-    for simple in simple_commands(command, start):
+    for simple in simple_commands(command, start, cdpath=inherited_cdpath):
         program = simple.program()
         if program not in VIEW_COMMANDS:
             continue
@@ -300,6 +309,7 @@ def _rewrites_unguarded(
 def rewrite_guard(
     command: str, cwd: str | None = None, guarded: Callable[[str], bool] | None = None,
     isdir: Callable[[str], bool] | None = None,
+    cdpath: Callable[[], str] = inherited_cdpath,
 ) -> str | None:
     """Return the refusal of a shell command that rewrites a file the way ``Edit`` should.
 
@@ -331,12 +341,15 @@ def rewrite_guard(
             leaves a directory only the shell knows
             (:func:`~kiss.agents.sorcar.shell_scan.simple_commands`),
             where every file is guarded.
+        cdpath: The ``CDPATH`` the command's shell inherits there, as
+            for :func:`heredoc_guard`: with one, a ``cd dir`` leaves a
+            directory only the shell knows too.
 
     Returns:
         The refusal text naming the ``Edit`` call to make (with the file
         and the strings when the command names them literally), or ``None``.
     """
-    commands = simple_commands(command, cwd, isdir=isdir)
+    commands = simple_commands(command, cwd, isdir=isdir, cdpath=cdpath)
     for simple in commands:
         if _is_multiline_sed_inplace(simple):
             if _unguarded(simple.cwd, _operands("sed", simple.argv()[1:]), guarded):
@@ -632,7 +645,7 @@ def _exact_redirections(simple: SimpleCommand) -> bool:
         elif operator in _BOTH_OPERATORS:
             exact = True
         elif fd in ("", "1") and operator in _STDOUT_OPERATORS:
-            exact = not (operator == ">&" and (operand.text.isdigit() or operand.text == "-"))
+            exact = duplicated(operator, operand) is None
         elif fd == "2" and operator == ">&":
             exact = operand.text == "1"
         elif fd == "2" and operator == ">":
@@ -666,14 +679,17 @@ class _Rewrite:
     remainder: str
 
 
-def _rewrite_segment(command: str, cwd: str | None) -> _Rewrite | None:
+def _rewrite_segment(
+    command: str, cwd: str | None, cdpath: Callable[[], str],
+) -> _Rewrite | None:
     """Read *command* as ``[cd DIR &&] <rewrite> [&& | ; | newline] <rest>``; return the rewrite.
 
     The grammar, on the first non-blank line of the command:
 
     * an optional ``cd DIR`` segment, ended by ``&&``, whose ``DIR``
       resolves to an absolute directory (a ``cd`` to a path only the
-      shell knows, or ended by ``;``, is not read);
+      shell knows, one bash may look up in an inherited ``CDPATH``, or
+      one ended by ``;``, is not read);
     * then the rewrite: the first simple command after it, named by its
       program word (no ``!``, wrapper or reserved word before it), at
       the top level (no subshell, group, pipe or ``&``), ended by
@@ -696,6 +712,8 @@ def _rewrite_segment(command: str, cwd: str | None) -> _Rewrite | None:
     Args:
         command: The shell command text.
         cwd: The absolute POSIX directory it starts in; ``None`` when unknown.
+        cdpath: The ``CDPATH`` the command's shell inherits where it
+            runs (:func:`heredoc_guard`).
 
     Returns:
         The rewrite with the path of its ``cd`` as written (a ``..``
@@ -707,7 +725,7 @@ def _rewrite_segment(command: str, cwd: str | None) -> _Rewrite | None:
         rewrite's when it gets there through a link only) and run the
         rest only when the call went through.
     """
-    commands = simple_commands(command, cwd)
+    commands = simple_commands(command, cwd, cdpath=cdpath)
     if len(commands) == 1 and not commands[0].heredoc and commands[0].group is None:
         # One command: its text is the whole command, whose operators
         # (a trailing ``&``) the segments of the whole text show.
@@ -817,7 +835,10 @@ def _home_path(target: Word, home: str) -> str | None:
     return resolve(None, Word(home + rest, literal=True))
 
 
-def heredoc_copy(command: str, cwd: str | None, home: str | None = "~") -> HeredocCopy | None:
+def heredoc_copy(
+    command: str, cwd: str | None, home: str | None = "~",
+    cdpath: Callable[[], str] = inherited_cdpath,
+) -> HeredocCopy | None:
     """Return the one literal here-document copy that *command* is, or ``None``.
 
     Qualifies: ``cat`` (no option) or ``tee`` (``-a``/``--append``/``-i``
@@ -839,8 +860,13 @@ def heredoc_copy(command: str, cwd: str | None, home: str | None = "~") -> Hered
             (``"~"``, the host shell's), a container's or a remote
             shell's when the command runs there, or ``None`` when that
             is unknown, which leaves a ``~`` target's ``path`` ``None``.
+        cdpath: The ``CDPATH`` the command's shell inherits where it
+            runs, as for :func:`heredoc_guard`: this process's own by
+            default, the host shell's.  With one, a copy after a ``cd
+            dir`` that bash may look up there is no copy into a file of
+            the directory the text names: ``None``.
     """
-    rewrite = _rewrite_segment(command, cwd)
+    rewrite = _rewrite_segment(command, cwd, cdpath)
     if rewrite is None or rewrite.body is None:
         return None
     simple = rewrite.simple
@@ -906,6 +932,12 @@ class MechanicalEdit:
             ``\\n`` before the replacements and writes it back so: exact
             only while the file holds no ``\\r``; :meth:`edits_for`
             settles it from the file's text.
+        default_encoding: Whether the python rewrite reads or writes the
+            file in the interpreter's own encoding (an ``encoding``
+            keyword left out or ``None``; :func:`_default_encoding`),
+            which is its locale's and need not be ``Edit``'s UTF-8:
+            exact only while the file and the replacements are ASCII;
+            :meth:`edits_for` settles it from the file's text.
     """
 
     what: str
@@ -917,12 +949,15 @@ class MechanicalEdit:
     per_line: bool = False
     universal_newlines: bool = False
     separator: str = "\n"
+    default_encoding: bool = False
 
     @property
     def text_dependent(self) -> bool:
         """Whether :meth:`edits_for` depends on the file's text (else it is :attr:`edits`)."""
-        return self.per_line or self.universal_newlines or len(self.edits) > 1 or any(
-            "\n" in old and "\r\n" not in old for old, _, _ in self.edits
+        return (
+            self.per_line or self.universal_newlines or self.default_encoding
+            or len(self.edits) > 1
+            or any("\n" in old and "\r\n" not in old for old, _, _ in self.edits)
         )
 
     def edits_for(self, content: str) -> list[tuple[str, str, bool]] | None:
@@ -930,7 +965,11 @@ class MechanicalEdit:
 
         A :attr:`universal_newlines` read has no ``Edit`` equivalent for
         a file holding a ``\\r``: the rewrite would turn its line endings
-        into ``\\n``, which ``Edit`` keeps.  A :attr:`per_line`
+        into ``\\n``, which ``Edit`` keeps.  Nor has a
+        :attr:`default_encoding` one for a file or a replacement holding
+        a non-ASCII character: an interpreter whose encoding is not
+        UTF-8 fails on it (the file left as it was, or truncated), or
+        writes other bytes than ``Edit`` does.  A :attr:`per_line`
         substitution depends on the text too: with several matches, each
         alone in its record (:attr:`separator`), sed replaces them all,
         so the ``Edit`` gets ``replace_all``; a record holding the
@@ -957,6 +996,10 @@ class MechanicalEdit:
             The pairs to apply, or ``None`` when no ``Edit`` is exact.
         """
         if self.universal_newlines and "\r" in content:
+            return None
+        if self.default_encoding and not (
+            content.isascii() and all(new.isascii() for _, new, _ in self.edits)
+        ):
             return None
         pairs = self.edits
         if self.per_line:
@@ -1009,9 +1052,11 @@ def _exact_text_io(node: ast.expr) -> bool:
     ``Edit`` reads and writes UTF-8 with strict errors and no newline
     translation, so ``encoding`` may only name UTF-8, ``errors`` be
     ``"strict"`` and ``newline`` be ``""`` or ``"\\n"``; a keyword left
-    out, or ``None``, is the default, which agrees on a UTF-8 file with
-    ``\\n`` line endings.  Any other value, or one that is no constant,
-    changes the bytes read or written.
+    out, or ``None``, is the default: strict errors, universal newlines
+    (:func:`_universal_newlines`) and the interpreter's own encoding
+    (:func:`_default_encoding`), which agree with ``Edit`` on the texts
+    :meth:`MechanicalEdit.edits_for` tells.  Any other value, or one
+    that is no constant, changes the bytes read or written.
     """
     keywords = node.keywords if isinstance(node, ast.Call) else []
     for keyword in keywords:
@@ -1488,6 +1533,31 @@ def python_edit(program: str) -> tuple[str | None, list[tuple[str, str, bool]], 
     return path, [], False
 
 
+def _default_encoding(program: str) -> bool:
+    """Whether a text I/O call of the rewrite *program* leaves its encoding to the interpreter.
+
+    Of a program :func:`python_edit` gave pairs for: its ``open``,
+    ``read_text`` and ``write_text`` calls are then the read and the
+    write of the pattern, their keywords constants.  One with no
+    ``encoding``, or ``None``, reads or writes in the encoding of the
+    interpreter's locale: UTF-8 by default, ASCII or a legacy code page
+    where the environment says so (``LC_ALL=C`` with ``PYTHONUTF8=0``),
+    which nothing here knows of the python the command runs.  Every such
+    encoding reads and writes ASCII text as UTF-8 does.
+    """
+    return any(
+        isinstance(node, ast.Call)
+        and _called_name(node) in ("open", "read_text", "write_text")
+        and not any(
+            keyword.arg == "encoding"
+            and isinstance(keyword.value, ast.Constant)
+            and keyword.value.value is not None
+            for keyword in node.keywords
+        )
+        for node in ast.walk(ast.parse(program))
+    )
+
+
 def python_written_paths(program: str) -> list[str] | None:
     """Return the literal paths of every file the python *program* writes, or ``None``.
 
@@ -1813,6 +1883,7 @@ def _found(program: str | None, runs: Callable[[str], bool] | None) -> bool:
 def mechanical_edit(
     command: str, cwd: str | None, shadowed: Callable[[str, str, set[str]], bool] | None = None,
     runs: Callable[[str], bool] | None = None,
+    cdpath: Callable[[], str] = inherited_cdpath,
 ) -> MechanicalEdit | None:
     """Return the ``Edit`` a python heredoc rewrite or a ``sed -i`` *command* stands for.
 
@@ -1842,8 +1913,11 @@ def mechanical_edit(
             path.  With it a rewrite whose program is not found is not
             mechanical (bash fails with status 127 and leaves the file
             alone); without it the program is taken to be there.
+        cdpath: The ``CDPATH`` the command's shell inherits where it
+            runs, as for :func:`heredoc_copy`: a rewrite after a ``cd
+            dir`` that bash may look up there is not mechanical.
     """
-    rewrite = _rewrite_segment(command, cwd)
+    rewrite = _rewrite_segment(command, cwd, cdpath)
     if rewrite is None:
         return None
     simple = rewrite.simple
@@ -1863,6 +1937,7 @@ def mechanical_edit(
         return MechanicalEdit(
             "python heredoc", resolve(simple.cwd, Word(path, True)), path, edits,
             rewrite.cwd, rewrite.remainder, universal_newlines=universal_newlines,
+            default_encoding=_default_encoding(rewrite.body),
         )
     if program == "sed" and rewrite.body is None:
         operand, edits = sed_edit(simple)
@@ -1903,6 +1978,33 @@ HEREDOC_UNRESOLVED_VERDICT = (
     "at a literal path."
 )
 """The refusal :func:`heredoc_guard` returns for a target ``{path}`` only the shell resolves."""
+HEREDOC_UNKNOWN_VERDICT = (
+    "REFUSED: the command did not run: a here-document is the input of {command}, and only "
+    "the shell knows what that runs, so it may copy the text into an existing file. Name the "
+    "program that reads the here-document literally (python3, or a quoted path ending in a "
+    "literal name: \"$DIR/bin/python\", or \"$PY\" after PY=\"$DIR/bin/python\"), in a command "
+    "of its own or before the commands the shell alone can resolve; quote the delimiter of a "
+    "script for a shell (bash <<'EOF') so that the shell does not expand it first; write a "
+    "file with Write(file_path=<the literal path>, content=<the here-document body>)."
+)
+"""The refusal :func:`heredoc_guard` returns for a reader ``{command}`` only the shell knows."""
+# The directory :func:`_output_files` reports with a reader only the shell knows.
+_UNKNOWN_READER = "\0"
+
+
+def _tee_files(tee: SimpleCommand) -> list[Word]:
+    """Return the files the ``tee`` command *tee* writes: its operands.
+
+    Every word after ``--`` is one, whatever it starts with (``tee --
+    -f``), as is ``-``: a file of that name.
+    """
+    files: list[Word] = []
+    ended = False
+    for word in tee.argv()[1:]:
+        if ended or word.text == "-" or not word.text.startswith("-"):
+            files.append(word)
+        ended = ended or word.text == "--"
+    return files
 
 
 def _output_files(
@@ -1917,28 +2019,189 @@ def _output_files(
     ``script``: a shell's ``-c``, ``eval``), it reaches what the commands
     in it that read its input write (*commands* holds them all).  With
     *copies_only*, it stops at the first command that is not ``cat`` or
-    ``tee``: that one writes output of its own.
+    ``tee``: that one writes output of its own.  Before that, a command
+    only the shell knows (:attr:`SimpleCommand.unknown`) may be a copier
+    into any file: after the files its words name it is reported as
+    itself, in the directory :data:`_UNKNOWN_READER`; the
+    substitutions in the words of a command the text is piped to read
+    the pipe; and the output of a process substitution
+    (:attr:`~kiss.agents.sorcar.shell_scan.Group.asynchronous`) goes
+    on to its :func:`_stream_files`.
     """
     writes: list[tuple[str | None, Word]] = []
+    unknown: Word | None = None
     node: SimpleCommand | Group | None = reader
     while node is not None:
         if isinstance(node, SimpleCommand):
             program = node.program()
+            words = node.argv()
+            files = _tee_files(node) if program == "tee" else []
+            if copies_only and program and program not in _COPIERS | ELSEWHERE:
+                # a program may run the command its operands name on its own input and
+                # output (``setsid tee f``, ``find -exec tee f \;``): a copier named there
+                # copies, a shell runs text this scan did not read
+                named = [posixpath.basename(word.text) if word.literal else "" for word in words]
+                at = next((index for index, name in enumerate(named)
+                           if index and name in _COPIERS | SHELLS), None)
+                if at is not None and named[at] in _COPIERS:
+                    program = named[at]
+                    files = [word for word in words[at + 1:] if not word.text.startswith("-")]
+                elif at is not None and program not in SHELLS:
+                    unknown = unknown or Word(words[0].text, False)
+            if copies_only and node.unknown and unknown is None:
+                unknown = Word(words[0].text if words else "a command the shell runs on its own",
+                               False)
+            if copies_only and node is not reader:
+                for group in node.substitutions:
+                    for member in _input_readers(group, commands):
+                        writes.extend(_output_files(member, copies_only, commands))
             if copies_only and program not in _COPIERS:
                 break
             if program == "tee":
-                operands = node.argv()[1:]
-                writes.extend((node.cwd, word) for word in operands if word.text[:1] != "-")
-        if node.outputs:
-            writes.extend((node.cwd, word) for word in node.outputs)
+                writes.extend(_named_files(node, files, commands, copies_only))
+        sinks = _stdout_sinks(node)
+        for sink in sinks:
+            if isinstance(sink, Word) and all(sink is not word for word in node.outputs):
+                writes.append((node.cwd, sink))  # a copy of a descriptor it opened: ``3>f >&3``
+            elif isinstance(sink, str) and sink.startswith("&") and copies_only:
+                # a copy of one opened elsewhere
+                writes.extend(_descriptor_files(sink[1:], node, commands))
+        writes.extend(_named_files(node, node.outputs, commands, copies_only))
+        # the output goes on down the pipe unless every reading ends it in a file the scan
+        # names: one only the shell knows may be the pipe again (``"$X"`` for ``/dev/stdout``)
+        if not any(sink in ("stream", "unknown")
+                   or (isinstance(sink, Word) and not _names_a_file(node.cwd, sink))
+                   for sink in sinks):
             break
         into = node.reader.script if isinstance(node.reader, SimpleCommand) else node.reader
         if isinstance(into, Group):
             for member in _input_readers(into, commands):
                 writes.extend(_output_files(member, copies_only, commands))
             break
+        around = node.group
+        if (copies_only and node.reader is None and around is not None
+                and around.kind in _SUBSTITUTIONS and around.asynchronous):
+            writes.extend(_stream_files(around, commands))
         node = receiver(node)
+    if unknown is not None:
+        writes.append((_UNKNOWN_READER, unknown))
     return writes
+
+
+def _stream_files(
+    stream: Group, commands: list[SimpleCommand],
+) -> list[tuple[str | None, Word]]:
+    """Return ``(directory, file)`` for each file the output of a process substitution reaches.
+
+    The simple command that holds a ``<(...)`` reads it: the files of a
+    copier (:func:`_output_files`), none for another program named as
+    written (``diff <(cat <<EOF) f``); so do the commands that read the
+    input of a group it is the standard input of (``done < <(...)``).
+    Otherwise a file only the shell knows: ``>(...)`` writes to the
+    output the shell has where it expands it, a bare ``exec`` or
+    another descriptor of a group leaves the stream to any command,
+    and a shell, a sourcing builtin or a function may run it.
+    """
+    holder = stream.reader
+    if isinstance(holder, Group):
+        return [file for member in _input_readers(holder, commands)
+                for file in _output_files(member, True, commands)]
+    if (holder is None or holder.script is not None
+            or holder.program() in SHELLS | _SOURCING_BUILTINS | {""}):
+        return [(stream.cwd, Word("a process substitution's output", False))]
+    return _output_files(holder, True, commands)
+
+
+def _descriptor(cwd: str | None, word: Word) -> str | None:
+    """Return the descriptor the file name *word* stands for (``/dev/fd/3``, ``/dev/stdin``)."""
+    path = resolve(cwd, word)
+    if path is None:
+        return None
+    path = "/" + path.lstrip("/")
+    number = next((path[len(prefix):] for prefix in _DESCRIPTOR_ALIASES[4:]
+                   if path.startswith(prefix)),
+                  {"/dev/stdin": "0", "/dev/stdout": "1", "/dev/stderr": "2"}.get(path))
+    return number if number is not None and number.isdigit() else None
+
+
+def _named_files(
+    node: SimpleCommand | Group, words: list[Word], commands: list[SimpleCommand],
+    copies_only: bool,
+) -> list[tuple[str | None, Word]]:
+    """Return ``(directory, file)`` for each file of *words* that *node* writes.
+
+    For the guard (*copies_only*) a descriptor's name (``/dev/fd/3``,
+    ``/dev/stdout``) stands for the files opened on the descriptor
+    (:func:`_descriptor_files`).
+    """
+    files: list[tuple[str | None, Word]] = []
+    for word in words:
+        alias = _descriptor(node.cwd, word) if copies_only else None
+        files.extend([(node.cwd, word)] if alias is None
+                     else _descriptor_files(alias, node, commands))
+    return files
+
+
+def _descriptor_files(
+    number: str, user: SimpleCommand | Group, commands: list[SimpleCommand],
+) -> list[tuple[str | None, Word]]:
+    """Return ``(directory, file)`` for each file *user* may find open on descriptor *number*.
+
+    What a copy of the descriptor may reach (``>&3``, ``/dev/fd/3``):
+    the files that *user* itself, a group around it (a function call's
+    too) or a command without a command word (``exec 3>f``) opens on it,
+    in any order, and those of the descriptors it is made a copy of in
+    turn (``3>&4``, the move ``3>&4-``).  The descriptors are compared
+    as bash numbers them (``03>f`` opens descriptor 3).  A descriptor
+    none of them opens is the tool's own: no file.  One that a piped
+    group, or a bare ``exec`` in it, makes a copy of another may be the
+    pipe (``{ cat >&3; } 3>&1 | tee f``): a file only the shell knows.
+    """
+    nodes: list[SimpleCommand | Group] = [
+        command for command in commands if command.redirections and not command.argv()]
+    around: SimpleCommand | Group | None = user
+    while around is not None:
+        nodes.append(around)
+        around = around.group
+    files: list[tuple[str | None, Word]] = []
+    seen: set[str] = set()
+    pending = [number]
+    while pending:
+        current = pending.pop()
+        if current in seen:
+            continue
+        seen.add(current)
+        for node in nodes:
+            for fd, operator, operand in node.redirections:
+                if current not in (("1", "2") if operator in _BOTH_OPERATORS
+                                   else (descriptor(fd, operator),)):
+                    continue
+                copied = duplicated(operator, operand)
+                alias = _descriptor(node.cwd, operand) if copied is None else copied
+                if alias == "-":  # closed: no file
+                    continue
+                if alias is not None:
+                    pending.append(alias)
+                    if node is not user and _piped(node):
+                        files.append((node.cwd, Word(f"&{alias}", False)))
+                elif operator in _FILE_OPENERS or operator in ("<&", ">&"):
+                    files.append((node.cwd, operand))
+    return files
+
+
+def _piped(node: SimpleCommand | Group) -> bool:
+    """Return whether the output of the group *node*, or of one around it, goes down a pipe.
+
+    For a command, of a group it is in: a bare ``exec`` at the top of
+    the text copies the descriptors of the tool, in a stage those of
+    the stage.
+    """
+    around = node if isinstance(node, Group) else node.group
+    while around is not None:
+        if around.reader is not None:
+            return True
+        around = around.group
+    return False
 
 
 def _names_a_file(cwd: str | None, word: Word) -> bool:
@@ -1953,42 +2216,63 @@ def _names_a_file(cwd: str | None, word: Word) -> bool:
     return path is not None and not ("/" + path.lstrip("/")).startswith(_DESCRIPTOR_ALIASES)
 
 
-def _stdout_sink(node: SimpleCommand | Group) -> Word | str:
+def _stdout_sink(node: SimpleCommand | Group, bash: bool = True) -> Word | str:
     """Return where the standard output of *node* ends once its redirections are applied.
 
     The redirections are replayed in order over the descriptors they
-    name (the operator's default when unnumbered: ``0`` for ``<``,
-    ``1`` for ``>``), so a duplication (``2>&1``, ``1>&3``, ``1<&3``)
-    copies what its source holds then.  A literal file :class:`Word` is
-    a sink the scan can name; ``"stream"`` is the pipe or standard
-    output the shell gave the command (where ``3>&1 >/dev/null 1>&3``
-    ends again); ``"unknown"`` is anything else: a descriptor alias such
-    as ``/dev/stdout``, a word only the shell knows, a closed descriptor,
-    one nothing opened, a here-document or a here-string, and both
-    standard descriptors after a ``01<&3``, ``11>x`` or ``{name}>x``
-    (bash's descriptor 1, 11 or a new one; sh's default one).
+    are of (:func:`~kiss.agents.sorcar.shell_scan.descriptor`: ``01>``
+    is ``1>``), so a duplication (``2>&1``, ``1>&3``, ``1<&3``, the
+    move ``1>&3-``) copies what its source holds then, as does opening
+    the name of one (``> /dev/stdout``, ``> /dev/fd/3``).  A
+    :class:`Word` is the file a redirection opened: a sink the scan can
+    name (:func:`_names_a_file`), or a file only the shell knows
+    (``3>"$X" >&3``, a relative name in an unknown directory), which
+    may be the stream under another name; ``"stream"`` is the
+    pipe or standard output the shell gave the command (where ``3>&1
+    >/dev/null 1>&3`` ends again); ``"unknown"`` is anything else:
+    ``/dev/tty``, a descriptor only the shell numbers, a closed one, a
+    here-document or a here-string.  ``"&3"`` is a copy of descriptor 3
+    as the command found it: what the shell or a group around it opened
+    (:func:`_descriptor_files`).  ``>&file`` is ``&>file``: both
+    standard descriptors.  With *bash* unset the descriptors are read
+    as sh reads them: more than one character before an operator
+    (``11>x``, ``{name}>x``) is a word, and the redirection is of the
+    operator's default descriptor.
     """
-    table: dict[str, Word | str] = {"1": "stream", "2": "stream"}
+    table: dict[str, Word | str] = {"1": "stream"}
     for fd, operator, operand in node.redirections:
+        copied = duplicated(operator, operand)
+        both = operator in _BOTH_OPERATORS or (operator == ">&" and copied is None)
+        opens = both or operator in _FILE_OPENERS
+        alias = _descriptor(node.cwd, operand) if opens else copied
         value: Word | str = "unknown"
-        targets: tuple[str, ...] = ("1", "2")
-        if len(fd) <= 1:
-            if operator in ("<&", ">&") and (operand.text.isdigit() or operand.text == "-"):
-                value = table.get(operand.text, "unknown")
-            elif operator in _FILE_OPENERS and _names_a_file(node.cwd, operand):
-                value = operand
-            default = "0" if operator.startswith("<") else "1"
-            targets = ("1", "2") if operator in _BOTH_OPERATORS else (fd or default,)
-        for target in targets:
+        if alias not in (None, "-"):
+            value = table.get(alias, f"&{alias}")
+        elif opens and (resolve(node.cwd, operand) is None or _names_a_file(node.cwd, operand)):
+            value = operand  # not a descriptor's name the scan cannot number (``/dev/tty``)
+        number = descriptor(fd if bash or len(fd) <= 1 else "", operator)
+        for target in ("1", "2") if both else (number,):
             table[target] = value
     return table["1"]
+
+
+def _stdout_sinks(node: SimpleCommand | Group) -> list[Word | str]:
+    """Return each sink the standard output of *node* may end in (:func:`_stdout_sink`).
+
+    The one bash gives it, and the one sh does where the two read a
+    redirection differently: a guard must hold under both.
+    """
+    sinks = [_stdout_sink(node)]
+    if any(len(fd) > 1 for fd, _, _ in node.redirections):
+        sinks.append(_stdout_sink(node, bash=False))
+    return sinks
 
 
 def _copies_to_files(reader: SimpleCommand, commands: list[SimpleCommand]) -> bool:
     """Return whether *reader* copies its input into files the scan can name, and nowhere else.
 
     Its output, followed as :func:`_output_files` follows it, must end
-    in files (:func:`_stdout_sink`; ``tee``'s operands too); a shell
+    in such files (:func:`_stdout_sink`; ``tee``'s operands too); a shell
     or interpreter it reaches runs the text, a process substitution
     (``>(bash)``) or a word only the shell knows may be one, a
     substitution hands it to another command as a word, and the
@@ -1998,15 +2282,14 @@ def _copies_to_files(reader: SimpleCommand, commands: list[SimpleCommand]) -> bo
     while node is not None:
         if isinstance(node, SimpleCommand):
             program = node.program()
-            if program not in _COPIERS:
+            if program not in _COPIERS or node.unknown:
                 return False
             if program == "tee" and not all(
-                    _names_a_file(node.cwd, word)
-                    for word in node.argv()[1:] if word.text[:1] != "-"):
+                    _names_a_file(node.cwd, word) for word in _tee_files(node)):
                 return False
-        sink = _stdout_sink(node)
-        if sink != "stream":
-            return isinstance(sink, Word)
+        sinks = _stdout_sinks(node)
+        if any(sink != "stream" for sink in sinks):
+            return all(isinstance(sink, Word) and _names_a_file(node.cwd, sink) for sink in sinks)
         if isinstance(node.reader, Group):
             return all(_copies_to_files(member, commands)
                        for member in _input_readers(node.reader, commands))
@@ -2033,6 +2316,7 @@ def _input_readers(group: Group, commands: list[SimpleCommand]) -> list[SimpleCo
 def _heredoc_writes(
     command: str, cwd: str | None, copies_only: bool,
     isdir: Callable[[str], bool] | None = None,
+    cdpath: Callable[[], str] = inherited_cdpath,
 ) -> list[tuple[str | None, Word]]:
     """Return ``(directory, file)`` for each file a here-document pipeline of *command* writes.
 
@@ -2048,13 +2332,202 @@ def _heredoc_writes(
         copies_only: Whether only ``cat``/``tee`` copies count.
         isdir: Whether a path is a directory where the command runs
             (:func:`heredoc_guard`).
+        cdpath: The ``CDPATH`` the command's shell inherits there
+            (:func:`heredoc_guard`).
     """
     writes: list[tuple[str | None, Word]] = []
-    commands = simple_commands(command, cwd, isdir=isdir)
+    # the guard follows a function's body where a call runs it: its input is the call's
+    commands = simple_commands(command, cwd, isdir=isdir, derived=copies_only, cdpath=cdpath)
     for reader in commands:
         if reader.reads_heredoc():
-            writes.extend(_output_files(reader, copies_only, commands))
+            files = _output_files(reader, copies_only, commands)
+            writes.extend(files)
+            if copies_only and files:
+                writes.extend(_renamed(files, _given_names(reader, commands)))
     return writes
+
+
+# The programs that give a file another name.  ``cp`` makes a new file, unless an option
+# has it link (``-l``, ``-s``, ``--link``, ``--symbolic-link``).
+_MOVERS = frozenset({"ln", "mv", "link", "rename", "cp"})
+_LINK_OPTION = re.compile(r"-[A-Za-z]*[ls]|--[ls]")
+# Their options that name the directory elsewhere than last (``-t``) or keep the file that
+# was there under a name they compute (``-b``, ``-S``, ``--backup``, ``--suffix``).
+_NAMING_OPTION = re.compile(r"-[A-Za-z]*[tbS]|--(?:t|b|su)")
+_BACKUP_OPTION = re.compile(r"-[A-Za-z]*[bS]|--(?:b|su)")
+# Programs that run the command their operands name (``setsid ln``, ``busybox mv``, ``git
+# mv``), and how many operands of its own each takes before it (``flock FILE``, ``uv run``).
+_RUNNERS = {
+    **dict.fromkeys((
+        "busybox", "toybox", "setsid", "ionice", "strace", "ltrace", "time", "unshare",
+        "nsenter", "fakeroot", "numactl", "setpriv", "prlimit", "pkexec", "eatmydata",
+        "unbuffer", "dumb-init", "tini", "firejail", "systemd-run", "caffeinate", "valgrind",
+        "proxychains", "torsocks", "xvfb-run", "watch", "parallel", "uvx", "npx", "bunx",
+        "git"), 0),
+    **dict.fromkeys((
+        "flock", "chrt", "taskset", "chroot", "gosu", "uv", "poetry", "pipenv", "pipx"), 1),
+}
+# The global options of ``git`` that take the next word as their value; no other does.
+_GIT_VALUE_OPTIONS = frozenset({
+    "-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix", "--config-env",
+    "--attr-source"})
+# The primaries of ``find`` that run the command after them.
+_FIND_RUNS = frozenset({"-exec", "-execdir", "-ok", "-okdir"})
+# The programs that give the command they run operands of their own.
+_SUPPLIERS = frozenset({"find", "xargs", "parallel"})
+
+
+def _mover_indexes(command: SimpleCommand, named: list[str]) -> list[int]:
+    """Return where in its argv *command* may name a mover it runs.
+
+    *named* holds the program each word of the argv names.  The command
+    word is one (``mv a b``, ``"$BIN/ln" a b``), as is the command of a
+    program that runs its operands (:data:`_RUNNERS`, ``find -exec``):
+    the word after that program's options and own operands.  A word
+    after an option may be its value or the command (``strace -o log
+    ln``, ``setsid -w ln``), so each word that may be the command
+    counts.  A mover's name anywhere else is data (``grep -c mv
+    README.md``, ``which ln``, ``git grep mv``).
+    """
+    if named[0] in _MOVERS:
+        return [0]
+    argv = command.argv()
+    if named[0] == "find":
+        return [at for at in range(1, len(argv))
+                if named[at] in _MOVERS and argv[at - 1].text in _FIND_RUNS]
+    # the fewest and the most operands of its own the runner may still take
+    least = most = _RUNNERS.get(named[0], -1)
+    found: list[int] = []
+    for at in range(1, len(argv)):
+        if most < 0:  # the command is behind: the rest are its arguments
+            break
+        before = argv[at - 1].text
+        if argv[at].text.startswith("-"):
+            continue
+        if least <= 0 and named[at] in _MOVERS:
+            found.append(at)
+        least -= 1
+        valued = before.startswith("-") and before != "--" and "=" not in before and (
+            named[0] != "git" or before in _GIT_VALUE_OPTIONS)
+        if not valued:
+            most -= 1
+    return found
+
+
+def _moved(command: SimpleCommand) -> list[str | None]:
+    """Return the names the movers *command* may run give files; none when it runs no mover.
+
+    The last operand is the name it gives (``mv a b dir``), or the
+    file's own name in the directory (``ln -s ../notes.md``); with an
+    option that names the directory, each operand and the value of a
+    ``--option=`` counts.  After ``--`` every word is an operand (``ln
+    -s -- notes.md -n``), as is ``-``.  ``None`` stands for a name only
+    the shell knows and for those a mover computes (``rename``, a
+    backup's) or is given by the program that runs it (``find -exec
+    mv``, ``xargs ln``, ``setsid ln a b``; not ``git mv a b``, which
+    names its operands here).  A mover without operands moves nothing.
+    """
+    argv = command.argv()
+    named = [posixpath.basename(word.text) if word.literal or word.path else "" for word in argv]
+    supplied = any(posixpath.basename(word.text) in _SUPPLIERS for word in command.words)
+    names: list[str | None] = []
+    for at in _mover_indexes(command, named) if argv else []:
+        options: list[Word] = []
+        operands: list[Word] = []
+        ended = False
+        for word in argv[at + 1:]:
+            if ended or word.text == "-" or not word.text.startswith("-"):
+                operands.append(word)
+            elif word.text == "--":
+                ended = True
+            else:
+                options.append(word)
+        if not (operands or supplied) or (named[at] == "cp" and not any(
+                _LINK_OPTION.match(word.text) for word in options)):
+            continue
+        given = not supplied and (at == 0 or (at == 1 and named[0] == "git"))
+        if not given or named[at] == "rename" or any(
+                _BACKUP_OPTION.match(word.text) for word in options):
+            names.append(None)
+        if any(_NAMING_OPTION.match(word.text) for word in options):
+            operands += [Word(value, word.literal) for word in options
+                         if (value := word.text.partition("=")[2])]
+        elif len(operands) == 1:
+            operands = [Word(posixpath.basename(operands[0].text), operands[0].literal)]
+        else:
+            operands = operands[-1:]
+        names.extend(resolve(command.cwd, word) for word in operands)
+    return names
+
+
+def _around(
+    command: SimpleCommand, owners: dict[int, SimpleCommand],
+) -> Iterator[SimpleCommand | Group]:
+    """Yield *command* and each node it runs in, from the inside out.
+
+    Its groups, and for a command of a text or of a function's body the
+    command that runs it in place of the text's group (*owners*: each by
+    the identity of its :attr:`SimpleCommand.script`).
+    """
+    node: SimpleCommand | Group | None = command
+    while node is not None:
+        yield node
+        node = owners.get(id(node.group), node.group)
+
+
+def _given_names(reader: SimpleCommand, commands: list[SimpleCommand]) -> list[str | None]:
+    """Return the names the movers that may run before *reader* writes were given.
+
+    A name one of :data:`_MOVERS` was given (:func:`_moved`) may be a
+    file that existed before the command, under a name that did not
+    (``ln -s notes.md n; cat > n``).  A mover written before *reader*
+    counts, where the commands of a text or of a function's body stand
+    at the command that runs them (those of a shell's here-document
+    script too, which the scan reads last).  One written after it counts
+    when *reader* may run after it all the same: in a loop, which may
+    run it again, in a list the shell does not wait for (``&``, a
+    coprocess), with the mover in a later stage of its pipeline, or with
+    the mover in a substitution, which bash runs before the redirections
+    of the command that holds it (``cat $(ln -s notes.md n) > n``, the
+    body of an expanded here-document).
+    What any other program does to the file system is not read.
+    """
+    owners = {id(command.script): command for command in commands if command.script is not None}
+    index = {id(command): at for at, command in enumerate(commands)}
+    around = list(_around(reader, owners))
+    anytime = any(node.asynchronous or (isinstance(node, Group) and node.kind in _LOOPS)
+                  for node in around)
+    stages: set[int] = set()
+    for node in around:
+        while node.reader is not None:
+            node = node.reader
+            stages.add(id(node))
+    written = [index[id(node)] for node in reversed(around) if isinstance(node, SimpleCommand)]
+    names: list[str | None] = []
+    for command in commands:
+        moved = _moved(command)
+        if not moved:
+            continue
+        nodes = list(_around(command, owners))
+        early = any(id(node) in stages or (isinstance(node, Group) and node.kind in _SUBSTITUTIONS)
+                    for node in nodes)
+        if anytime or early or written > [
+                index[id(node)] for node in reversed(nodes) if isinstance(node, SimpleCommand)]:
+            names.extend(moved)
+    return names
+
+
+def _renamed(
+    files: list[tuple[str | None, Word]], names: list[str | None],
+) -> list[tuple[str | None, Word]]:
+    """Return those of *files* at or under one of *names*, as files only the shell knows."""
+    renamed: list[tuple[str | None, Word]] = []
+    for directory, word in files:
+        path = None if directory == _UNKNOWN_READER else resolve(directory, word)
+        if path is not None and any(name is None or f"{posixpath.normpath(path)}/".startswith(
+                f"{posixpath.normpath(name)}/".replace("//", "/")) for name in names):
+            renamed.append((directory, Word(word.text, False)))
+    return renamed
 
 
 def heredoc_targets(command: str) -> list[str]:
@@ -2072,6 +2545,7 @@ def heredoc_targets(command: str) -> list[str]:
 def heredoc_guard(
     command: str, cwd: str | None, guarded: Callable[[str], bool],
     isdir: Callable[[str], bool] | None = None,
+    cdpath: Callable[[], str] = inherited_cdpath,
 ) -> str | None:
     """Refuse a ``cat``/``tee`` here-document copy into a guarded file, or one that may be.
 
@@ -2082,7 +2556,9 @@ def heredoc_guard(
     log.  A target holding an expansion the command did not assign
     itself (``"$OUT"``, ``~/x``; ``T=tmp/x && cat > $T/f`` names
     ``tmp/x/f``), or a relative one after a ``cd`` only the shell can
-    resolve, cannot be checked and is refused too.  ``/dev/`` targets
+    resolve, cannot be checked and is refused too, as is a
+    here-document read by a command only the shell knows (``$X <<EOF``,
+    one after ``eval "$X"``): it may be such a copy.  ``/dev/`` targets
     are not files.
 
     Args:
@@ -2099,18 +2575,32 @@ def heredoc_guard(
             leaves a directory only the shell can resolve
             (:func:`~kiss.agents.sorcar.shell_scan.simple_commands`);
             without it the directory is the one the text names.
+        cdpath: The ``CDPATH`` the command's shell inherits there (``""``
+            for none): this process's own by default, which the host
+            tool hands its shell; a container's or an exec bridge's from
+            the caller.  With one, a ``cd dir`` may enter a directory of
+            that list, so a relative target after it is only the
+            shell's to resolve, unless the command assigned ``CDPATH``
+            itself (``CDPATH= cd dir``) or wrote ``cd ./dir``.
 
     Returns:
-        :data:`HEREDOC_VERDICT` or :data:`HEREDOC_UNRESOLVED_VERDICT`, or
-        ``None`` when the command may run.
+        :data:`HEREDOC_VERDICT` or :data:`HEREDOC_UNRESOLVED_VERDICT` for
+        the first such file, else :data:`HEREDOC_UNKNOWN_VERDICT` when a
+        command only the shell knows reads a here-document, or ``None``
+        when the command may run.
     """
-    for directory, target in _heredoc_writes(command, cwd, copies_only=True, isdir=isdir):
+    unknown = None
+    for directory, target in _heredoc_writes(
+            command, cwd, copies_only=True, isdir=isdir, cdpath=cdpath):
+        if directory == _UNKNOWN_READER:
+            unknown = unknown or HEREDOC_UNKNOWN_VERDICT.format(command=target.text)
+            continue
         path = resolve(directory, target)
         if path is None:
             return HEREDOC_UNRESOLVED_VERDICT.format(path=target.text)
         if not path.startswith("/dev/") and guarded(path):
             return HEREDOC_VERDICT.format(path=path)
-    return None
+    return unknown
 
 
 def numbered_region(content: str, start_line: int, end_line: int) -> str:

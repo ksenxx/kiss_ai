@@ -26,7 +26,7 @@ serialised by a lock: two merges into the same memory could otherwise
 each compare against the same old page and the older copy win the race
 of renames.  Every memory merge, here and on the
 peers, also holds the memory's own mutation lock so no agent's write is
-lost under it (:func:`memory_delta.memory_locks`).
+lost under it (``merge_memory_pages.memory_locks``).
 
 Page stamps come from the clock of whichever machine wrote them, and
 after the pull wave this machine holds pages from every peer's clock, so

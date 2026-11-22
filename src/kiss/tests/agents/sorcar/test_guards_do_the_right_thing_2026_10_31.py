@@ -514,20 +514,38 @@ def test_rewrites_on_another_machine_are_refused_not_applied(
 # --- proposal 5: sleeps -------------------------------------------------------
 
 
-def test_long_sleep_waits_on_the_running_job_and_runs_the_rest(tools: UsefulTools) -> None:
+def test_long_sleep_waits_on_the_running_job_and_runs_the_rest(
+    tools: UsefulTools, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # under sshd too, in a shell that is not the top one (it reads no ~/.bashrc), and with
+    # inherited shell options that expand no prompt
+    for name, value in (("SSH_CLIENT", "sshd"), ("SHLVL", "1"), ("SHELLOPTS", "hashall")):
+        monkeypatch.setenv(name, value)
     job = _job_id(tools.Bash("sleep 1; echo done", "slow", background=True))
     before = time.monotonic()
     out = tools.Bash("sleep 60; echo after", "poll", timeout_seconds=100)
     assert time.monotonic() - before < 10
-    waited = f"Waited on job {job} for up to 60 s instead of sleeping (exited with code 0).\n"
+    waited = f"\nWaited on job {job} for up to 60 s instead of sleeping (exited with code 0).\n"
     assert out == "after\n" + waited  # the note after the result, whose head readers parse
-    # ...the last started running job, in any spelling the text search finds
+    # ...the last started running job, for the sleep by its path at the head of a list
     first = _job_id(tools.Bash("sleep 30", "slow", background=True))
     last = _job_id(tools.Bash("sleep 0.5", "quick", background=True))
-    command = "echo before && nohup /bin/sleep '1' 1m >/dev/null && echo after"
-    out = tools.Bash(command, "poll", timeout_seconds=100)
-    waited = f"Waited on job {last} for up to 61 s instead of sleeping (exited with code 0).\n"
-    assert out == "before\nafter\n" + waited
+    out = tools.Bash("/bin/sleep 61 && echo after 2>&1", "poll", timeout_seconds=100)
+    waited = f"\nWaited on job {last} for up to 61 s instead of sleeping (exited with code 0).\n"
+    assert out == "after\n" + waited
+    # The note starts a line of its own (audit 2026-11-21 G1): it was glued to output that
+    # ends no line, to the tool's own line of a failed command and to an ``until`` verdict.
+    last = _job_id(tools.Bash("sleep 0.5", "quick", background=True))
+    waited = f"\nWaited on job {last} for up to 40 s instead of sleeping (exited with code 0).\n"
+    out = tools.Bash("sleep 40; printf out; exit 2", "poll", timeout_seconds=100)
+    assert out == "Error (exit code 2):\nout" + waited
+    assert tools.Bash("sleep 0.5", "quick", background=True)
+    assert tools.Bash("sleep 40; exit 2", "poll", timeout_seconds=100).startswith(
+        "Error (exit code 2):\nWaited on job ")
+    assert tools.Bash("sleep 0.5", "quick", background=True)
+    out = tools.Bash("sleep 40; printf out", "poll", timeout_seconds=100, until="out")
+    assert out.startswith("out\n[until 'out' matched after 1 run(s) and "), out
+    assert " s]\nWaited on job " in out and out.endswith(" (exited with code 0).\n"), out
     tools.bash_job(first, action="kill")
     report = tools.bash_job(first, action="wait", timeout_seconds=10)
     assert report.startswith(f"Job {first}: killed")
@@ -551,11 +569,109 @@ def test_long_sleep_without_a_running_job_runs_as_written(tools: UsefulTools) ->
     # a loop's sleep with no job: as written, with the same note
     command = "for i in 1; do timeout 1 sleep 31; done; echo ran"
     assert tools.Bash(command, "poll", timeout_seconds=100) == "ran\n" + sleep_alternative(31)
-    # a sleep the text search cannot take out runs as written, job or not, without the note
+    # a sleep the command does not begin with runs as written under a job too, without the note
     job = _job_id(tools.Bash("sleep 5", "slow", background=True))
     out = tools.Bash("timeout 1 sleep 6'0'; echo ran", "poll", timeout_seconds=100)
     assert out == "ran\n"
     tools.bash_job(job, action="kill")
+
+
+def _exported(functions: str) -> dict[str, str]:
+    """Return the environment entries this host's bash exports the *functions* it defines as."""
+    shown = subprocess.run(
+        ["bash", "-c", f"{functions}; env -0"], capture_output=True, text=True, check=True,
+    ).stdout
+    entries = (entry.partition("=") for entry in shown.split("\0"))
+    return {name: value for name, _, value in entries if "BASH_FUNC" in name}
+
+
+def test_only_a_plain_sleep_the_command_begins_with_is_spent_on_the_job(
+    tools: UsefulTools, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Any other sleep is the shell's to run as written, whatever job is running.
+
+    S16/F3: with its time taken out, a sleep that fails, ends early or
+    is not the system's program (an operand sleep rejects, ``timeout``,
+    ``xargs``, a function, an alias or a trap of the script, another
+    ``sleep`` on ``PATH``, a list in the background that is killed) no
+    longer did what it does, and the ``&&`` after it ran.  Text of the
+    environment that the shell runs first is known from the
+    environment alone: asked, the shell said what that text made it
+    say (review of FX01c).  With no such text the question has no
+    scenario for a hang or for an answer printed by a shell that
+    fails: both took a startup file, and no shell is asked then.
+    """
+    fake = tmp_path / "1" / "sleep"
+    fake.parent.mkdir()
+    # no shell script: a /bin/sh that is bash (macOS) takes xtrace and PS4 from the environment
+    # too, and its trace of the script followed the command's in the last case below
+    fake.write_text(
+        f'#!{sys.executable}\nimport sys\nsys.exit(7 if sys.argv[1:] == ["31"] else 0)\n')
+    fake.chmod(0o755)
+    # it outlives the sleeps below that a bash which runs no text of the environment sleeps
+    job = _job_id(tools.Bash("sleep 120", "slow", background=True))
+    for command in (
+        "sleep 31 invalid && echo SHOULD-NOT-RUN",
+        'X=invalid; sleep 31 "$X" && echo SHOULD-NOT-RUN',
+        'sleep "$NO_SUCH_SECONDS" 31 && echo SHOULD-NOT-RUN',  # an operand only the shell knows
+        "sleep \u0663\u0661 && echo SHOULD-NOT-RUN",  # digits, but none sleep reads
+        "timeout 1 sleep 31 && echo SHOULD-NOT-RUN",
+        "echo invalid | xargs sleep 31 && echo SHOULD-NOT-RUN",
+        "builtin sleep 31 && echo SHOULD-NOT-RUN",
+        "/definitely/missing/sleep 31 && echo SHOULD-NOT-RUN",
+        "sleep() { return 7; }; sleep 31 && echo SHOULD-NOT-RUN",
+        "function sleep { return 7; }; sleep 31 && echo SHOULD-NOT-RUN",
+        "nohup () { return 7; }; nohup sleep 31 && echo SHOULD-NOT-RUN",
+        "shopt -s expand_aliases; alias sleep=false\nsleep 31 && echo SHOULD-NOT-RUN",
+        "timeout 1 bash -c 'sleep 31' && echo SHOULD-NOT-RUN",
+        "bash() { return 7; }; bash -c 'sleep 31' && echo SHOULD-NOT-RUN",
+        "PATH=/definitely/missing; sleep 31 && echo SHOULD-NOT-RUN",
+        f"PATH={fake.parent}; sleep 31 && echo SHOULD-NOT-RUN",
+        "trap 'sleep() { return 7; }' DEBUG; sleep 31 && echo SHOULD-NOT-RUN",
+        "sleep 31 && echo SHOULD-NOT-RUN & sleep 0.3; pkill -P $!; wait; false",
+        "sleep 31 && echo SHOULD-NOT-RUN \\>& sleep 0.3; pkill -P $!; wait; false",
+    ):
+        out = tools.Bash(command, "poll", timeout_seconds=35)
+        assert out.startswith("Error (exit code "), (command, out)
+        assert "SHOULD-NOT-RUN" not in out and "Waited on job" not in out, (command, out)
+    looked_up = tools.Bash("command -v sleep 31", "poll", timeout_seconds=35)
+    assert looked_up.endswith("/sleep\n"), looked_up
+    # ...and so is a sleep the command's shell does not take from the system: another
+    # program first on PATH (by a relative entry too, which the work dir resolves), an
+    # exported function (with a ``command`` that says otherwise), and whatever text of the
+    # environment the shell runs first, which tells the question ($0 is sh) from the
+    # command: a startup file (one hides itself, one prints the answer of the question it
+    # fails, one hangs the question), a prompt xtrace expands (its arithmetic makes ``1``
+    # the command's PATH).  Each with the results of the command as written.
+    failing = "sleep() { return 7; }; export -f sleep"
+    failed = "Error (exit code 7):"
+    hides, answers, hangs, bashrc = (
+        tmp_path / name for name in ("hides.sh", "answers.sh", "hangs.sh", ".bashrc"))
+    hides.write_text('unset BASH_ENV SSH_CLIENT\n[ "$0" = sh ] || sleep() { return 7; }\n')
+    answers.write_text("echo /bin/sleep\nsleep() { return 7; }\n")
+    hangs.write_text('[ "$0" != sh ] || exec /bin/sleep 20\nsleep() { return 7; }\n')
+    bashrc.write_text(hides.read_text())
+    for extra, results in (
+        ({"PATH": f"{fake.parent}{os.pathsep}{os.environ['PATH']}"}, (failed,)),
+        ({"PATH": f"1{os.pathsep}{os.environ['PATH']}"}, (failed,)),
+        (_exported(failing), (failed,)),
+        (_exported(f"{failing}; command() {{ echo /bin/sleep; }}; export -f command"), (failed,)),
+        ({"BASH_ENV": str(hides)}, (failed,)),
+        ({"BASH_ENV": str(answers)}, (f"{failed}\n/bin/sleep\n",)),
+        ({"BASH_ENV": str(hangs)}, (failed,)),
+        # the ~/.bashrc a bash built for it reads when sshd started the shell: any other
+        # sleeps and goes on
+        ({"HOME": str(tmp_path), "SSH_CLIENT": "sshd", "SHLVL": "0"}, (failed, "SHOULD-NOT-RUN\n")),
+        # root's bash takes no PS4 from the environment: it traces the system's sleep
+        ({"SHELLOPTS": "xtrace", "PS4": "$(( ${#0} == 2 ? 0 : (PATH=1) ))+ "},
+         (f"{failed}\n1+ sleep 31\n", "+ sleep 31\n+ echo SHOULD-NOT-RUN\nSHOULD-NOT-RUN\n")),
+    ):
+        with monkeypatch.context() as environment:
+            for name, value in extra.items():
+                environment.setenv(name, value)
+            out = tools.Bash("sleep 31 && echo SHOULD-NOT-RUN", "poll", timeout_seconds=35)
+        assert out in results, (extra, out)
+    assert tools.bash_job(job, action="kill").startswith(f"Job {job}: killed")
 
 
 def test_sleep_pacing_a_loop_runs_as_written_even_with_a_job(tools: UsefulTools) -> None:
@@ -570,11 +686,10 @@ def test_sleep_pacing_a_loop_runs_as_written_even_with_a_job(tools: UsefulTools)
         out = tools.Bash(command, "poll", timeout_seconds=100)
         assert out == "ran\n", (command, out)
         assert time.monotonic() - before >= 1.9, command
+    # ...and so does one in a conditional
+    out = tools.Bash("if true; then timeout 1 sleep 60; fi; echo ran", "poll", timeout_seconds=100)
+    assert out == "ran\n"
     tools.bash_job(job, action="kill")
-    # a sleep in a conditional, not a loop, is still spent on the job
-    job = _job_id(tools.Bash("sleep 0.5", "quick", background=True))
-    out = tools.Bash("if true; then sleep 60; fi; echo ran", "poll", timeout_seconds=100)
-    assert out.startswith("ran\n") and f"Waited on job {job} for up to 60 s" in out
 
 
 def test_sleep_longer_than_the_timeout_is_refused_naming_bash_job(

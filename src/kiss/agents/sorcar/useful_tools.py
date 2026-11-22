@@ -6,6 +6,7 @@
 
 import codecs
 import collections
+import contextvars
 import difflib
 import errno
 import functools
@@ -28,7 +29,7 @@ import tempfile
 import threading
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from contextlib import suppress
 from dataclasses import dataclass
@@ -61,7 +62,6 @@ from kiss.agents.sorcar.edit_guards import (
 from kiss.agents.sorcar.edit_matching import (
     nearest_region,
     reindent,
-    split_lines,
     tolerant_matches,
 )
 from kiss.agents.sorcar.fanout_guard import parse_tasks_json
@@ -72,7 +72,6 @@ from kiss.agents.sorcar.git_worktree import (
 from kiss.agents.sorcar.shell_guards import refuse_or_lift
 from kiss.agents.sorcar.shell_scan import (
     UV_VALUED_OPTIONS,
-    SimpleCommand,
     TooDeepError,
     Word,
     bash_path,
@@ -81,7 +80,7 @@ from kiss.agents.sorcar.shell_scan import (
     walks,
 )
 from kiss.core import tool_interrupt
-from kiss.core.config import DEFAULT_CONFIG, kiss_home
+from kiss.core.config import DEFAULT_CONFIG, kiss_home, run_overlay_env
 from kiss.core.kiss_tmp import kiss_tmp_dir
 from kiss.core.locked import locked_call
 from kiss.core.models.model import (
@@ -97,7 +96,7 @@ from kiss.core.processes import (
     popen_process_group,
     run_process_group,
 )
-from kiss.core.secret_redaction import StreamRedactor, redact_secrets
+from kiss.core.secret_redaction import StreamRedactor, _secrets, redact_secrets
 from kiss.core.tool_verdict import ToolRedirect, followup_result
 from kiss.core.utils import unlink_waiting_for_holders
 
@@ -761,13 +760,16 @@ def _suggest_close_path(resolved: Path) -> str:
     return ""
 
 
-def _outline(file_path: str, lines: list[str], size: int) -> str | None:
+def _outline(file_path: str, total: int, chars: int, found: int, entries: list[str]) -> str | None:
     """Build the outline a whole-file ``Read`` of a long file returns.
 
     Args:
         file_path: The path as the model passed it (for the header).
-        lines: The file's lines.
-        size: The file size in characters.
+        total: The file's lines.
+        chars: The file's characters.
+        found: Its definitions and headings.
+        entries: The first :data:`_OUTLINE_MAX_ENTRIES` of them, each
+            ``line: text`` (:func:`_scan_text`).
 
     Returns:
         The line count plus a ``line: symbol`` list of definitions and
@@ -775,22 +777,13 @@ def _outline(file_path: str, lines: list[str], size: int) -> str | None:
         too few recognisable symbols for an outline to be useful (the
         caller then returns the first window as before).
     """
-    pattern = (
-        _OUTLINE_HEADING_RE
-        if Path(file_path).suffix.lower() in _MARKDOWN_SUFFIXES
-        else _OUTLINE_SYMBOL_RE
-    )
-    entries = [
-        f"{number}: {line.strip()}" for number, line in enumerate(lines, 1) if pattern.match(line)
-    ]
-    if len(entries) < _OUTLINE_MIN_ENTRIES:
+    if found < _OUTLINE_MIN_ENTRIES:
         return None
-    shown = entries[:_OUTLINE_MAX_ENTRIES]
-    more = len(entries) - len(shown)
+    more = found - len(entries)
     return (
-        f"{file_path}: {len(lines):,} lines, {size:,} chars. Too long to send "
-        f"whole; outline of its {len(entries)} definitions/headings (line: text):\n"
-        + "\n".join(shown)
+        f"{file_path}: {total:,} lines, {chars:,} chars. Too long to send "
+        f"whole; outline of its {found} definitions/headings (line: text):\n"
+        + "\n".join(entries)
         + (f"\n... {more} more entries" if more else "")
         + "\n\nRead a range with Read(file_path, start_line=N, max_lines=M), or "
         'locate text with Bash("grep -n PATTERN FILE").'
@@ -855,6 +848,19 @@ def _truncate_output(output: str, max_chars: int, spilled_to: str = "", dropped:
     if tail:
         return output[:head] + msg + output[-tail:]
     return output[:head] + msg
+
+
+def _redacted_start(text: str) -> str:
+    """Return *text*, the start of something longer, with its secrets replaced, ready to be cut.
+
+    An end of *text* that may be the start of a secret whose rest was
+    not read is left out, the way a
+    :class:`~kiss.core.secret_redaction.StreamRedactor` holds it back:
+    what is returned shows no part of a secret, cut where it may be.
+    """
+    shown: list[str] = []
+    StreamRedactor(shown.append).feed(text)
+    return "".join(shown)
 
 
 _CAPTURE_CHARS = 1_000_000
@@ -1096,16 +1102,20 @@ _LOG_SCAN_BYTES = 8_000_000
 """The most of a job log ``bash_job(until=...)`` searches (its end, when the log is longer)."""
 
 
-def _read_end(path: Path, max_bytes: int) -> str:
-    """Return the text of the last *max_bytes* of *path*, from the first line start in them.
+_LINE_BREAK = re.compile(rb"\r\n|[\r\n]")
+
+
+def _read_end_bytes(path: Path, max_bytes: int, lead: int = 0) -> tuple[bytes, bytes]:
+    """Return the last *max_bytes* of *path* from the first line start in them, after their lead.
 
     When the read starts mid-file the partial first line is dropped: a
     line starts after ``\\n``, ``\\r\\n`` or a lone ``\\r`` (a progress
     bar rewrites one line for a whole run).  A window holding no line
     start at all is the end of one line and is kept as such, so a log
-    of one long line is not reported as empty.  Invalid UTF-8 is
-    replaced.  Bytes appended after the size was taken (a job log
-    grows) are not read.
+    of one long line is not reported as empty.  Its lead, the first
+    value, is what that line holds before the window, as far back as
+    *lead* bytes and one; a window that begins a line has none.  Bytes
+    appended after the size was taken (a job log grows) are not read.
 
     Raises:
         OSError: When the file cannot be read.
@@ -1113,14 +1123,18 @@ def _read_end(path: Path, max_bytes: int) -> str:
     with open(path, "rb") as f:
         size = f.seek(0, os.SEEK_END)
         start = max(0, size - max_bytes)
-        # One byte before the window tells whether the window starts
-        # on a line boundary (that byte is a line break) or mid-line.
-        f.seek(max(0, start - 1))
-        data = f.read(size - max(0, start - 1))
-    if start > 0:
-        line_break = re.search(rb"\r\n|[\r\n]", data)
-        data = data[line_break.end():] if line_break else data[1:]
-    return data.decode("utf-8", errors="replace")
+        first = max(0, start - 1 - lead)
+        f.seek(first)
+        data = f.read(size - first)
+    if start == 0:
+        return b"", data
+    # One byte before the window tells whether the window starts
+    # on a line boundary (that byte is a line break) or mid-line.
+    before = start - 1 - first
+    line_break = _LINE_BREAK.search(data, before)
+    if line_break:
+        return b"", data[line_break.end():]
+    return _LINE_BREAK.split(data[: before + 1])[-1], data[before + 1 :]
 
 
 def _log_matches(log_path: Path, pattern: re.Pattern[str]) -> bool:
@@ -1135,9 +1149,10 @@ def _log_matches(log_path: Path, pattern: re.Pattern[str]) -> bool:
     and delay a Stop.
     """
     try:
-        return pattern.search(_read_end(log_path, _LOG_SCAN_BYTES)) is not None
+        end = _read_end_bytes(log_path, _LOG_SCAN_BYTES)[1]
     except OSError:
         return False
+    return pattern.search(end.decode("utf-8", errors="replace")) is not None
 
 
 def _match_log_until(log_path: str, pattern: str) -> None:
@@ -1359,7 +1374,7 @@ def _searched(
         daemon=True,
     )
     try:
-        owner.start()
+        tool_interrupt.call_without_injection(owner.start)
         while owner.is_alive():
             owner.join(0.2)
     finally:
@@ -1386,8 +1401,9 @@ def _until_pattern(until: str) -> re.Pattern[str] | str:
 
 
 FOREGROUND_SLEEP_MAX_SECONDS = 30
-# A literal ``sleep`` operand: a number with GNU sleep's optional unit suffix.
-_SLEEP_OPERAND = re.compile(r"(\d+(?:\.\d*)?|\.\d+)([smhd]?)")
+# A literal ``sleep`` operand: a number with GNU sleep's optional unit suffix.  Its digits
+# are the ASCII ones: ``\d`` took those of any script, which sleep rejects.
+_SLEEP_OPERAND = re.compile(r"([0-9]+(?:\.[0-9]*)?|\.[0-9]+)([smhd]?)")
 _SLEEP_UNIT_SECONDS = {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400}
 
 
@@ -1409,8 +1425,8 @@ def _sleep_seconds(operands: list[Word]) -> float:
     return total
 
 
-def long_sleep(command: str, limit: float) -> tuple[float, list[str], bool] | None:
-    """Return the first ``sleep`` of *command* longer than *limit*: its seconds, operands, looped.
+def long_sleep(command: str, limit: float) -> float | None:
+    """Return the seconds of the first ``sleep`` of *command* longer than *limit*, if any.
 
     Every ``sleep`` the shell runs counts (read with
     :func:`~kiss.agents.sorcar.shell_scan.simple_commands`: in a loop,
@@ -1419,34 +1435,18 @@ def long_sleep(command: str, limit: float) -> tuple[float, list[str], bool] | No
     counts too: the child keeps the call's output pipe, so the call
     blocks until the sleep ends all the same.  Text that only mentions
     a sleep (quoted, a here-document body outside its substitutions)
-    does not.  *looped* tells whether the sleep paces a ``for``/
-    ``while``/``until``/``select`` loop.
+    does not.
 
     Args:
         command: The shell command text.
         limit: Seconds a sleep may take without counting.
     """
     for simple in simple_commands(command, None):
-        if simple.program() != "sleep":
-            continue
-        operands = simple.argv()[1:]
-        seconds = _sleep_seconds(operands)
-        if seconds > limit:
-            return seconds, [word.text for word in operands], _in_loop(simple)
+        if simple.program() == "sleep":
+            seconds = _sleep_seconds(simple.argv()[1:])
+            if seconds > limit:
+                return seconds
     return None
-
-
-_LOOPS = frozenset({"for", "while", "until", "select"})
-
-
-def _in_loop(simple: SimpleCommand) -> bool:
-    """Whether *simple* runs in the body of a loop (at any depth)."""
-    group = simple.group
-    while group is not None:
-        if group.kind in _LOOPS:
-            return True
-        group = group.group
-    return False
 
 
 def sleep_guard(command: str) -> str | None:
@@ -1460,8 +1460,8 @@ def sleep_guard(command: str) -> str | None:
     Args:
         command: The shell command text.
     """
-    sleep = long_sleep(command, FOREGROUND_SLEEP_MAX_SECONDS)
-    return None if sleep is None else sleep_refusal(sleep[0])
+    seconds = long_sleep(command, FOREGROUND_SLEEP_MAX_SECONDS)
+    return None if seconds is None else sleep_refusal(seconds)
 
 
 def sleep_refusal(seconds: float, job_id: str = "") -> str:
@@ -1482,41 +1482,49 @@ def sleep_refusal(seconds: float, job_id: str = "") -> str:
     )
 
 
-# A ``sleep`` and its operands as written, to take out of a command: the
-# program (by its path too), then operands with at most simple quotes.
-_SLEEP_TEXT = re.compile(
-    r"(?<![\w.-])(?:[\w./-]*/)?sleep((?:[ \t]+(?:'[^']*'|\"[^\"]*\"|[^\s;&|<>()'\"]+))+)"
+# The one ``sleep`` a wait on a job may stand for (:func:`wait_instead_of_sleep`): the
+# command begins with it, spelled plainly with whole seconds, and it ends there (``;``, a
+# newline, the end of the text) or starts a list (``&&``, ``||``).
+_LEADING_SLEEP = re.compile(
+    r"[ \t\n]*(?P<program>(?:(?:/usr)?/bin/)?sleep)[ \t]+(?P<seconds>[0-9]+)[ \t]*"
+    r"(?:(?P<list>&&|\|\|)|[;\n]|\Z)"
 )
+# The ``&`` that cannot end a list, putting it in the background: those of ``&&`` and of
+# ``>&``/``<&``, as written with no backslash before them (``\&&`` and ``\>&`` end one).
+_NO_BACKGROUND = re.compile(r"(?<![\\&])&&(?!&)|(?<!\\)[<>]&(?!&)")
+SLEEP_PROBE = (
+    "POSIXLY_CORRECT=1; unset -f command; "
+    'case ":$PATH:" in *::* | *:[!/]*) exit 1 ;; esac; command -v -- "$1"'
+)
+"""Shell text that prints what the shell running it runs for the word ``$1``.
+
+It fails, printing nothing, when its ``PATH`` holds a relative entry
+(an empty one is the directory of the moment), and prints the name
+alone for a function the environment exports.  The answer is the
+shell's own where the shell ran no text of its environment first
+(:func:`_runs_environment_text`): POSIX mode finds ``unset`` and
+``exit`` before a function of their name, and ``command`` is then none.
+"""
+_SYSTEM_SLEEPS = ("/bin/sleep\n", "/usr/bin/sleep\n")
 
 
-def _sleeps(command: str) -> list[list[str]]:
-    """Return the operands of every ``sleep`` the shell runs in *command*, in order."""
-    return [
-        [word.text for word in simple.argv()[1:]]
-        for simple in simple_commands(command, None) if simple.program() == "sleep"
-    ]
+def _runs_environment_text(env: dict[str, str]) -> bool:
+    """Return whether the bash started with *env* runs text *env* names before its command.
 
-
-def _without_sleep(command: str, operands: list[str]) -> str | None:
-    """Return *command* with its first ``sleep`` taking *operands* replaced by ``true``.
-
-    ``None`` when the sleep is spelled in a way the text search does
-    not find (then the command runs as written).  A match the shell
-    does not run as that sleep (the words of a quoted argument, a
-    here-document body) is passed over: ``true`` there would change
-    that text and leave the sleep in, so the match taken is the one
-    whose removal leaves the other sleeps as they are.
+    A startup file (``BASH_ENV``; the ``~/.bashrc`` bash reads under
+    ``SSH_CLIENT`` unless ``SHLVL`` says another shell started it) or
+    the prompt ``xtrace`` expands before each command (``PS4``).  Such
+    text sees what the shell was asked (``$0``, ``$1``), so it may
+    answer :data:`SLEEP_PROBE` one way and run the command another,
+    and it changes what the shell knows of it (``unset BASH_ENV``):
+    only the environment the shell is started with tells.
     """
-    sleeps = _sleeps(command)
-    sleeps.remove(operands)
-    for match in _SLEEP_TEXT.finditer(command):
-        words = [word.strip("'\"") for word in match.group(1).split()]
-        if words != operands:
-            continue
-        rewritten = command[:match.start()] + "true" + command[match.end():]
-        if _sleeps(rewritten) == sleeps:
-            return rewritten
-    return None
+    nested = re.fullmatch("[1-9][0-9]?", env.get("SHLVL", ""))
+    return bool(
+        env.get("BASH_ENV")
+        or "xtrace" in env.get("SHELLOPTS", "").split(":")
+        or (not nested and not {"SSH_CLIENT", "SSH2_CLIENT"}.isdisjoint(env))
+    )
 
 
 def wait_instead_of_sleep(
@@ -1524,22 +1532,33 @@ def wait_instead_of_sleep(
     timeout_seconds: float,
     running_job: Callable[[], str | None],
     wait: Callable[[str, float], str],
+    probe: Callable[[str], str],
 ) -> tuple[str | None, str, str]:
     """Settle a long foreground ``sleep`` of *command* before it runs.
 
     The one rule of the host and the container ``Bash`` tools.  A
     ``sleep`` of at most :data:`FOREGROUND_SLEEP_MAX_SECONDS` runs as
     written.  A longer one past *timeout_seconds* is refused: the wait
-    belongs in ``bash_job``.  While a background job runs, the sleep is
-    spent waiting on the one started last and the command runs with
-    that sleep taken out (``sleep 60; tail log`` waits, then runs
-    ``tail log``): refusing it only made the model poll with shorter
-    sleeps, each a turn.  With no running job, or when the sleep paces
-    a loop (taking it out would spin the loop), the sleep runs as
-    written; with no running job the note names what to do instead
-    (:func:`sleep_alternative`): ``Bash(until=...)`` polls a condition
-    inside one call, and a process a call leaves running is adopted as
-    a job to ``bash_job(<id>, "wait")`` on.
+    belongs in ``bash_job``.  With no running job it runs as written
+    and the note names what to do instead (:func:`sleep_alternative`).
+    While a job runs, the sleep is spent waiting on the one started
+    last and the command runs with the sleep's seconds written ``0``
+    (``sleep 60; tail log`` waits, then runs ``sleep 0; tail log``),
+    but only when the wait is all that can differ:
+
+    * the command begins with the sleep (:data:`_LEADING_SLEEP`), so
+      nothing of the script (a function, an alias, a trap, ``PATH``, a
+      background process) precedes it, and it runs in the foreground,
+      unpiped and unredirected: a list it starts (``&&``, ``||``) is
+      taken only from a text with no ``&`` that may end the list
+      (:data:`_NO_BACKGROUND`);
+    * the shell that will run the command runs no text of its
+      environment first (:func:`_runs_environment_text`) and, asked
+      with *probe*, runs the system's sleep for that word
+      (:data:`_SYSTEM_SLEEPS`).
+
+    Any other sleep runs as written: a missed wait costs time, a
+    sleep taken out wrongly changes what the command does.
 
     Args:
         command: The shell command text.
@@ -1548,6 +1567,10 @@ def wait_instead_of_sleep(
             started last, or ``None``; called only for a long sleep.
         wait: ``wait(job_id, seconds)`` blocks until that job exits or
             the seconds pass and returns its status line.
+        probe: ``probe(word)`` runs :data:`SLEEP_PROBE` for *word* with
+            the shell and the environment the command gets and returns
+            what it printed (``""`` when no answer came or that shell
+            runs text of its environment first).
 
     Returns:
         ``(refusal, note, command)``: the refusal (``None`` when the
@@ -1555,21 +1578,27 @@ def wait_instead_of_sleep(
         to wait with instead when the sleep ran with no job known
         (``""`` otherwise), and the command to run.
     """
-    sleep = long_sleep(command, FOREGROUND_SLEEP_MAX_SECONDS)
-    if sleep is None:
+    seconds = long_sleep(command, FOREGROUND_SLEEP_MAX_SECONDS)
+    if seconds is None:
         return None, "", command
-    seconds, operands, looped = sleep
     job_id = running_job()
     if seconds > timeout_seconds:
         return sleep_refusal(seconds, job_id or ""), "", command
     if job_id is None:
         return None, sleep_alternative(seconds), command
-    rest = None if looped else _without_sleep(command, operands)
-    if rest is None:
+    leading = _LEADING_SLEEP.match(command)
+    if (
+        leading is None
+        or float(leading["seconds"]) != seconds
+        or (leading["list"] and "&" in _NO_BACKGROUND.sub("", command))
+        or probe(leading["program"]) not in _SYSTEM_SLEEPS
+    ):
         return None, "", command
     status = wait(job_id, seconds)
-    note = f"Waited on job {job_id} for up to {seconds:.10g} s instead of sleeping ({status}).\n"
-    return None, note, rest
+    # On a line of its own, as every note of a result: it follows output that may end no
+    # line, an exit code or an ``until`` verdict, and the readers of a result go by lines.
+    note = f"\nWaited on job {job_id} for up to {seconds:.10g} s instead of sleeping ({status}).\n"
+    return None, note, command[:leading.start("seconds")] + "0" + command[leading.end("seconds"):]
 
 
 def sleep_alternative(seconds: float) -> str:
@@ -1749,7 +1778,10 @@ def _lines_within_budget(lines: list[str], budget: int) -> list[str]:
 
     At least one line is kept; a first line longer than the budget (a
     one-line JSON or log file) is clipped to it with a marker, so no
-    file can put more than *budget* characters into the context.
+    file can put more than *budget* characters into the context.  It
+    is clipped with its secrets replaced (:func:`_redacted_start`): cut
+    before, a secret left a start of itself that no later pass
+    recognises.  The line may be only the start read of a longer one.
     """
     kept: list[str] = []
     size = 0
@@ -1758,7 +1790,7 @@ def _lines_within_budget(lines: list[str], budget: int) -> list[str]:
             break
         if not kept and len(line) > budget:
             note = f"\n[line clipped to {budget} chars; grep or cut for the rest]\n"
-            return [line[:budget] + note]
+            return [_redacted_start(line)[:budget] + note]
         kept.append(line)
         size += len(line)
     return kept
@@ -1836,6 +1868,8 @@ def _clean_env(work_dir: str | None = None, private_dir: str | None = None) -> d
             not find /tmp" and had no temp directory.
     """
     env = os.environ.copy()
+    # The API keys of the run's project replace the daemon's.
+    env.update(run_overlay_env())
     env.pop("VIRTUAL_ENV", None)
     if work_dir:
         env["KISS_WORKDIR"] = work_dir
@@ -2012,6 +2046,26 @@ def _host_runs(program: str) -> bool:
     return all(map(os.path.isabs, entries)) and shutil.which(program) is not None
 
 
+def _host_sleep_probe(cwd: str | None, private_dir: str | None, word: str) -> str:
+    """Return what the shell of a command of this host prints for :data:`SLEEP_PROBE` and *word*.
+
+    The shell is the command's, in the environment the command gets
+    (*cwd* and *private_dir* as for :func:`_clean_env`); ``""`` when
+    that shell runs text of the environment first
+    (:func:`_runs_environment_text`) or no answer came (no shell, one
+    that hangs or fails).
+    """
+    env = _clean_env(cwd, private_dir)
+    if _runs_environment_text(env):
+        return ""
+    try:
+        asked = run_process_group(
+            [_BASH or "/bin/sh", "-c", SLEEP_PROBE, "sh", word], _SHADOW_PROBE_SECONDS, env=env)
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return asked.stdout if asked.returncode == 0 else ""
+
+
 def _sed_replaces_link(path: str) -> bool:
     """Return whether a ``sed -i`` on the host *path* changes other files than an ``Edit`` of it.
 
@@ -2133,6 +2187,28 @@ CommandRunner = Callable[[str, threading.Event], tuple[int | None, str, float]]
 NOT_STARTED = "Not started: the task was stopped."
 
 
+def _run_in_context(
+    context: contextvars.Context, run_one: CommandRunner, command: str, cancel: threading.Event,
+) -> tuple[int | None, str, float]:
+    """Return ``run_one(command, cancel)``, run in *context* (what a pool worker is given)."""
+    return context.run(run_one, command, cancel)
+
+
+def _commands_ended(
+    futures: list[Future[Any]], cancel: threading.Event, stop_event: threading.Event | None,
+) -> bool:
+    """Wait up to 0.2 s for the commands of :func:`run_commands_pool`; whether all have ended.
+
+    A stop asked for by now sets *cancel*, which ends the running
+    commands, and cancels those no worker has taken yet.
+    """
+    if _stop_requested(stop_event):
+        cancel.set()
+        for future in futures:
+            future.cancel()
+    return not wait(futures, timeout=0.2).not_done
+
+
 def run_commands_pool(
     commands: str,
     run_one: CommandRunner,
@@ -2193,15 +2269,24 @@ def run_commands_pool(
             # (``_run_one_command`` starts no shell) instead of after the
             # first slice of the wait below, when they would already run.
             cancel.set()
-        futures = [pool.submit(run_one, command, cancel) for command in command_list]
-        while not all(f.done() for f in futures):
-            if _stop_requested(stop_event):
-                cancel.set()
-                for f in futures:
-                    f.cancel()
-            # Short slices keep this loop in Python, where an injected
-            # KeyboardInterrupt / ToolCallInterrupted lands.
-            wait(futures, timeout=0.2)
+        # Each worker runs in a copy of this thread's context, as the
+        # one command of a ``Bash`` call does (``_spawn_owned``).  A
+        # Stop raised as the pool or a future takes one of its locks
+        # (the stdlib's ``Condition``) left that lock held, a worker
+        # blocked on it for good and the interpreter's exit waiting for
+        # that worker: it is held back for each submit and each slice.
+        futures = [
+            tool_interrupt.call_without_injection(
+                pool.submit, _run_in_context, contextvars.copy_context(), run_one, command, cancel,
+            )
+            for command in command_list
+        ]
+        # Short slices keep this loop in Python, where an injected
+        # KeyboardInterrupt / ToolCallInterrupted lands.
+        while not tool_interrupt.call_without_injection(
+            _commands_ended, futures, cancel, stop_event,
+        ):
+            pass
     except BaseException:
         cancel.set()
         pool.shutdown(wait=False, cancel_futures=True)
@@ -2361,8 +2446,11 @@ class BackgroundJob:
     def returncode(self) -> int | None:
         """Return the shell's exit status without reaping it, ``None`` while it runs."""
         status = exit_status_unreaped(self.process)
-        if status is None and self.ended.done():
-            return self.ended.result()  # read while the watcher was reaping the shell
+        # A wait polls this: a Stop raised as the future takes its lock
+        # left it held, and the watcher never got its verdict in.
+        if status is None and tool_interrupt.call_without_injection(self.ended.done):
+            # Read while the watcher was reaping the shell.
+            return tool_interrupt.call_without_injection(self.ended.result)
         return status
 
     def status(self) -> str:
@@ -2380,22 +2468,34 @@ def _tail_lines(path: Path, lines: int, max_chars: int) -> str:
     """Return the last *lines* lines of *path* that fit *max_chars* characters, whole lines only.
 
     A build or training log can be gigabytes long, so only its end is
-    read (:func:`_read_end`): four bytes per character of the budget,
-    the most UTF-8 needs, so a line that fits the budget is never lost
-    to its byte count.  A last line longer than the budget is left out;
-    the end of a log that is one line without any line break (a
-    minified blob, a progress bar still being rewritten) is cut to the
-    budget instead, so the log is not reported as empty.
+    read (:func:`_read_end_bytes`): four bytes per character of the
+    budget, the most UTF-8 needs, so a line that fits the budget is
+    never lost to its byte count.  A last line longer than the budget
+    is left out; the end of a log that is one line without any line
+    break (a minified blob, a progress bar still being rewritten) is
+    cut to the budget instead, so the log is not reported as empty.
+    That cut is made in the line's end with its secrets replaced: made
+    before, it left the end of a secret it parted in the report, as did
+    the start of the bytes read.  The line's end is therefore read with
+    a lead of twice the longest secret, and what the first half of a
+    lead read whole shows (the end of a secret begun before it, after
+    the bytes left of the character it begins in) is never part of the
+    result.
     """
     if lines <= 0 or max_chars <= 0:
         return ""
+    longest = max(map(len, _secrets().names), default=0)
     try:
-        text = _read_end(path, 4 * max_chars)
+        lead, end = _read_end_bytes(path, 4 * max_chars, 8 * longest)
     except OSError as e:
         return f"(log unreadable: {e})"
+    text = end.decode("utf-8", errors="replace")
     pieces = text.splitlines(keepends=True)[-lines:]
     if pieces == [text] and not text.endswith(("\n", "\r")):
-        return text[-max_chars:]
+        line = (lead + end).decode("utf-8", errors="replace")
+        # Parted in its first character, a secret shows two characters more than it has.
+        unsafe = longest + 2 if len(lead) > 8 * longest > 0 else 0
+        return redact_secrets(line)[len(redact_secrets(line[:unsafe])) :][-max_chars:]
     kept: list[str] = []
     size = 0
     for line in reversed(pieces):
@@ -2599,20 +2699,38 @@ def _spawn_owned(
     """
     handoff: Future[subprocess.Popen] = Future()
     ended: Future[int | None] = Future()
-    threading.Thread(target=_own_child, args=(spawn, own, handoff, ended), daemon=True).start()
+    # *spawn* runs in a copy of this thread's context: the child's
+    # environment is the calling run's (``_clean_env``).
+    spawn_in_context = functools.partial(contextvars.copy_context().run, spawn)
+    owner = threading.Thread(
+        target=_own_child, args=(spawn_in_context, own, handoff, ended), daemon=True,
+    )
+    # A Stop raised as the start takes the lock of the thread's event
+    # would leave the owner blocked for good, its child never spawned.
+    tool_interrupt.call_without_injection(owner.start)
     return tool_interrupt.result_interruptible(handoff), ended
 
 
 def _spawn_job(
     popen_kwargs: dict[str, Any], log_path: Path, cwd: str | None, private_dir: str | None = None,
+    followed: list[IO[bytes]] | None = None,
 ) -> subprocess.Popen:
     """Start a background job's shell: stdout and stderr on *log_path*, stdin ``/dev/null``.
 
     A launch that fails leaves no log behind.  *private_dir* is the
     sub-agent's private folder, if the job is one's (:func:`_clean_env`).
+    *followed* is the list of a caller that reads the job's output as it
+    grows (:meth:`UsefulTools._run_then_detach`): it receives the log,
+    open for reading before the shell runs.  Opened by its name once the
+    shell ran, the log of a command that deletes it (``rm -rf "$TMPDIR"``
+    deletes the folder it is in) was not found whenever the shell got
+    there first, as it did on a busy machine: the call failed and the
+    command was killed half done.
     """
     try:
         with open(log_path, "wb") as log_file:
+            if followed is not None:
+                followed.append(open(log_path, "rb"))
             return popen_process_group(
                 **popen_kwargs,
                 stdout=log_file,
@@ -2622,6 +2740,8 @@ def _spawn_job(
                 cwd=cwd,
             )
     except BaseException:
+        if followed:
+            followed.pop().close()  # before the unlink: Windows deletes no file held open
         log_path.unlink(missing_ok=True)
         raise
 
@@ -2697,7 +2817,10 @@ def _unstopped[**P, T](fn: Callable[P, T]) -> Callable[P, T]:
     caller leaves only once it has, or with the work cancelled where a
     Stop took it out of the thread's start: a Stop still finds the file
     whole, and :data:`_FILE_WRITE_LOCK`, which the caller holds, still
-    covers the write.
+    covers the write.  The Stop is held back for the start and for each
+    call on the future, the wait for the work included (no Stop cut that
+    one short before either): raised as one of them takes its lock, it
+    left the thread blocked on that lock for good.
     """
 
     @functools.wraps(fn)
@@ -2706,11 +2829,12 @@ def _unstopped[**P, T](fn: Callable[P, T]) -> Callable[P, T]:
         work = functools.partial(fn, *args, **kwargs)
         worker = threading.Thread(target=_run_unstopped, args=(work, result), daemon=True)
         try:
-            worker.start()
-            return result.result()
+            tool_interrupt.call_without_injection(worker.start)
+            return tool_interrupt.call_without_injection(result.result)
         finally:
-            if not result.cancel():  # the work has begun: wait for its end
-                result.exception()
+            # Not cancelled: the work has begun, wait for its end.
+            if not tool_interrupt.call_without_injection(result.cancel):
+                tool_interrupt.call_without_injection(result.exception)
 
     return call_unstopped
 
@@ -2734,6 +2858,112 @@ def _read_regular(resolved: Path) -> str | None:
         return None
     with open(fd, encoding="utf-8", newline="") as f:
         return f.read()
+
+
+def _pieces(f: IO[str]) -> Iterator[str]:
+    """Yield the text of *f* in pieces: each the end of a line, or a part of a longer one.
+
+    A line ends with its ``\\n``; a ``\\r\\n`` comes as ``\\n``, and a
+    lone ``\\r`` stays in its line, which ends where grep and sed end
+    it.  A piece has :data:`_READ_CHARS` characters and one at most, so
+    a file of one line is never held whole, and only a line longer
+    than that comes in more than one piece.
+    """
+    held = ""  # the ``\r`` a full piece ended with: half of a ``\r\n`` when ``\n`` is read next
+    while read := f.readline(_READ_CHARS):
+        piece, held = held + read, ""
+        if piece.endswith("\r\n"):
+            piece = piece[:-2] + "\n"
+        elif piece.endswith("\r") and len(read) == _READ_CHARS:  # a shorter one ends the file
+            piece, held = piece[:-1], "\r"
+        yield piece
+    if held:
+        yield held
+
+
+def _cut_line(piece: str, pieces: Iterator[str], limit: float) -> tuple[str, int]:
+    """Return the line *piece* begins, cut, and its length; its other pieces come from *pieces*.
+
+    Of a line longer than *limit* characters the first *limit* are
+    kept, wherever its pieces end, and the rest is read and counted
+    (under a negative *limit* nothing is kept): a line costs what is
+    shown of it, however long it is.
+    """
+    parts: list[str] = []
+    size = 0
+    while piece:
+        if size < limit:
+            parts.append(piece[: int(min(limit - size, len(piece)))])
+        size += len(piece)
+        piece = "" if piece.endswith("\n") else next(pieces, "")
+    return "".join(parts), size
+
+
+@_unstopped
+def _scan_text(
+    resolved: Path, start_line: int, max_lines: int, budget: float,
+    outline_lines: int, file_path: str,
+) -> tuple[list[str], int, str | None] | None:
+    """Read the regular file *resolved* for ``Read``; ``None`` when it is not a regular file.
+
+    The file is read once (:func:`_pieces`).  A line is kept only when
+    the window has it or an outline may list it, and then cut
+    (:func:`_cut_line`) to *budget* characters plus the
+    :data:`_READ_CHARS` a clip after its secrets are replaced is made
+    from.  An outline lists a line whose kept part is a definition
+    however the line goes on; the entry of a line that was cut, or
+    that is longer than *budget*, is clipped to it and says so.
+
+    Args:
+        resolved: The path to read (:func:`_open_regular`).
+        start_line: The first line of the window, counted from 1.
+        max_lines: The most lines of the window.
+        budget: The characters after which no line is added to the
+            window; ``math.inf`` keeps every line of it whole.
+        outline_lines: The lines past which the file gets an outline
+            (:func:`_outline`); 0 for none.
+        file_path: The path as the model passed it, for the outline.
+
+    Returns:
+        The window's lines, the file's line count and its outline
+        (``None`` when it gets none).
+
+    Raises:
+        OSError: When the file cannot be opened.
+        UnicodeDecodeError: When it is not UTF-8 text, wherever in it.
+    """
+    fd = _open_regular(resolved, os.O_RDONLY)
+    if fd is None:
+        return None
+    pattern = None  # what a line an outline lists starts with
+    if outline_lines:
+        markdown = Path(file_path).suffix.lower() in _MARKDOWN_SUFFIXES
+        pattern = _OUTLINE_HEADING_RE if markdown else _OUTLINE_SYMBOL_RE
+    window: list[str] = []
+    entries: list[str] = []
+    total = kept = chars = found = 0  # lines; characters of the window, of the file; entries
+    with open(fd, encoding="utf-8", newline="\n") as f:
+        pieces = _pieces(f)
+        for piece in pieces:
+            total += 1
+            windowed = start_line <= total < start_line + max_lines and kept <= budget
+            limit = budget + _READ_CHARS if windowed or pattern else -1
+            line, size = _cut_line(piece, pieces, limit)
+            chars += size
+            if windowed:
+                window.append(line)
+                kept += len(line)
+            # ``function`` ends no definition when the part cut off begins with a letter
+            if pattern and pattern.match(line) and (len(line) == size or pattern.match(line + "x")):
+                found += 1
+                if len(entries) < _OUTLINE_MAX_ENTRIES:
+                    text = line.strip()
+                    if len(text) > budget or len(line) < size:
+                        cut = int(budget)
+                        text = f"{_redacted_start(text)[:cut]} [line clipped to {cut} chars]"
+                    entries.append(f"{total}: {text}")
+    outlined = 0 < outline_lines < total
+    return window, total, _outline(file_path, total, chars, found, entries) if outlined else None
 
 
 @_unstopped
@@ -2760,20 +2990,25 @@ def _write_regular(resolved: Path, content: str, flags: int) -> None:
 
     The file is created when missing; *flags* say where the text goes
     (``os.O_TRUNC`` replaces the file's text, ``os.O_APPEND`` follows
-    it).
+    it).  The text is encoded before the file is opened: the open is
+    what empties the file, and a text UTF-8 cannot encode (a lone
+    surrogate) left it empty behind the error.
 
     Raises:
         OSError: When the file cannot be opened, or is not a regular
             file (:func:`_open_regular`): a write into a FIFO or a
             device could block for good.
+        UnicodeEncodeError: When *content* is not text UTF-8 encodes
+            (nothing is opened, nothing written).
     """
+    data = content.encode("utf-8")
     fd = _open_regular(resolved, os.O_WRONLY | os.O_CREAT | flags)
     if fd is None:
         raise OSError(
             f"{resolved} is not a regular file (FIFO/device/socket); refusing to write to it"
         )
-    with open(fd, "w", encoding="utf-8", newline="") as f:
-        f.write(content)
+    with open(fd, "wb") as f:
+        f.write(data)
 
 
 def _not_regular_error(file_path: str) -> str:
@@ -2784,6 +3019,64 @@ def _not_regular_error(file_path: str) -> str:
         f"Use Bash (which has a timeout) if you really need its "
         f"contents."
     )
+
+
+_INODE_XATTRS = ("security.", "trusted.")
+"""The extended attributes only the inode itself keeps (:func:`_copy_xattrs`)."""
+_KEPT_XATTRS = ("user.", "system.posix_acl_access", *_INODE_XATTRS)
+"""The extended attributes a rewritten file keeps: the user's own, the ACL and the inode's."""
+
+
+def _xattrs(path: Path) -> dict[str, bytes]:
+    """Return the extended attributes of *path* that a rewrite of it has to keep.
+
+    Those of :data:`_KEPT_XATTRS`: any other is the file system's own
+    (an NFSv4 ACL made from the mode, a layout) and no two files hold
+    the same.  None where the system keeps none.
+
+    Raises:
+        OSError: When they cannot be listed or read.
+    """
+    if sys.platform != "linux":  # pragma: no cover — ``os.listxattr`` is Linux's
+        return {}
+    try:
+        names = os.listxattr(path)
+    except OSError as error:  # pragma: no cover — a file system that lists none (FUSE, 9p)
+        if error.errno != errno.ENOTSUP:
+            raise
+        return {}
+    return {name: os.getxattr(path, name) for name in names if name.startswith(_KEPT_XATTRS)}
+
+
+def _copy_xattrs(source: Path, target: Path) -> None:
+    """Give *target*, a new file beside *source*, the extended attributes of *source*.
+
+    The ``user.*`` attributes and the POSIX ACL of *target* become
+    those of *source*: the ones that differ are set, and an ACL
+    *target* got from the directory's default one is removed where
+    *source* has none.  A ``security.*`` or ``trusted.*`` attribute (a
+    label, a capability, a hash of the content) is the kernel's or the
+    administrator's to give: it is left alone, and is in order where
+    *target* was made with the value *source* holds (the label of the
+    directory's files).
+
+    Raises:
+        PermissionError: When a ``security.*`` or ``trusted.*``
+            attribute differs: only the inode of *source* keeps it.
+        OSError: When an attribute cannot be read, set or removed.
+    """
+    if sys.platform != "linux":  # pragma: no cover — ``os.setxattr`` is Linux's
+        return
+    wanted, held = _xattrs(source), _xattrs(target)
+    for name in wanted.keys() | held.keys():
+        if wanted.get(name) == held.get(name):
+            continue
+        if name.startswith(_INODE_XATTRS):
+            raise PermissionError(errno.EPERM, "no new file can be given the attribute", name)
+        if name in wanted:
+            os.setxattr(target, name, wanted[name])
+        else:
+            os.removexattr(target, name)
 
 
 def _write_file(resolved: Path, content: str) -> None:
@@ -2802,11 +3095,16 @@ def _write_file(resolved: Path, content: str) -> None:
     rename over it is refused as busy), and one this user may not write
     (the rename takes the directory's permission only: a read-only file
     is refused, as the shell's ``>`` refuses it).  The temporary file
-    is given the owner and group of the file it replaces; where that is
-    refused the file is written in place too.  Any other failure (a
-    full disk) leaves the old text.  The temporary name does not carry
-    the file's: a name near the file system's limit leaves no room for
-    a longer sibling.
+    is given the owner, the group and the extended attributes of the
+    file it replaces (:func:`_copy_xattrs`: a rename dropped its ACL,
+    which may deny a user what the mode allows); where that is refused
+    or not supported the file is written in place too.  Until it has
+    them the temporary file of an existing file is its owner's alone:
+    made with the mode of a new file, it held the new text of a private
+    file where others could read it.  Any other failure (a full disk)
+    leaves the old text.  The temporary name does not carry the file's:
+    a name near the file system's limit leaves no room for a longer
+    sibling.
     """
     try:
         st: os.stat_result | None = resolved.stat()
@@ -2816,17 +3114,21 @@ def _write_file(resolved: Path, content: str) -> None:
         _write_regular(resolved, content, os.O_TRUNC)
         return
     tmp = resolved.with_name(f".{uuid.uuid4().hex}.tmp")
+    # ``os.open`` itself is the opener: no frame of this thread holds the bare descriptor.
+    private = None if st is None else functools.partial(os.open, mode=0o600)
     try:
-        with open(tmp, "x", encoding="utf-8", newline="") as f:
+        with open(tmp, "x", encoding="utf-8", newline="", opener=private) as f:
             f.write(content)
         if st is not None:
             made = tmp.stat()
             if (made.st_uid, made.st_gid) != (st.st_uid, st.st_gid):
                 os.chown(tmp, st.st_uid, st.st_gid)
+            _copy_xattrs(resolved, tmp)
             os.chmod(tmp, stat.S_IMODE(st.st_mode))
         os.replace(tmp, resolved)
     except OSError as error:
-        if not isinstance(error, PermissionError) and error.errno != errno.EBUSY:
+        in_place = isinstance(error, PermissionError) or error.errno in (errno.EBUSY, errno.ENOTSUP)
+        if not in_place:
             raise
         _write_regular(resolved, content, os.O_TRUNC)
     finally:
@@ -3159,7 +3461,8 @@ class UsefulTools:
         return None
 
     def _start_background_job(
-        self, command: str, cwd: str | None, machine: str = ""
+        self, command: str, cwd: str | None, machine: str = "",
+        followed: list[IO[bytes]] | None = None,
     ) -> tuple[BackgroundJob | None, str]:
         """Start *command* detached and register it as a background job.
 
@@ -3184,6 +3487,10 @@ class UsefulTools:
                 command's guards ran (see :meth:`_spawn`).
             machine: Name or address of a registered SSH machine to run
                 on; empty runs locally.
+            followed: The empty list of a caller that follows the job's
+                output (:meth:`_run_then_detach`): it receives the log
+                of a job that started, open for reading since before the
+                shell ran (:func:`_spawn_job`), for the caller to close.
 
         Returns:
             The registered job and the model-facing text giving its id,
@@ -3215,7 +3522,9 @@ class UsefulTools:
             try:
                 log_path = _tools_dir(self.scratch_dir, JOB_LOG_DIR) / f"{job_id}.log"
                 process, ended = _spawn_owned(
-                    functools.partial(_spawn_job, popen_kwargs, log_path, cwd, self.private_dir),
+                    functools.partial(
+                        _spawn_job, popen_kwargs, log_path, cwd, self.private_dir, followed,
+                    ),
                     functools.partial(
                         _watch_job, self.stop_event, settled=settled, registered=registered,
                         interrupt=tool_interrupt.current_tool_interrupt_event(),
@@ -3295,7 +3604,7 @@ class UsefulTools:
             )
         try:
             if matcher is not None:
-                matcher.start()
+                tool_interrupt.call_without_injection(matcher.start)
             while job.returncode() is None:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0 or _stop_requested(self.stop_event):
@@ -3359,6 +3668,11 @@ class UsefulTools:
             if resolved.exists() and not resolved.is_file():
                 return _not_regular_error(file_path)
 
+            # No range asked for: keep the default output budget, the
+            # way Bash does, so a 200 KB file does not land whole in
+            # the context; the note says where to continue.
+            whole_file_requested = start_line == 1 and max_lines >= 2000
+            budget = DEFAULT_CONFIG.tool_output_default_chars
             mime_type, _ = mimetypes.guess_type(str(resolved))
             try:
                 if (
@@ -3367,7 +3681,10 @@ class UsefulTools:
                 ):
                     # Refused by size before the text attempt reads it whole.
                     return self._read_binary(file_path, resolved)
-                text = _read_regular(resolved)
+                scan = _scan_text(
+                    resolved, start_line, max_lines, budget if whole_file_requested else math.inf,
+                    DEFAULT_CONFIG.read_outline_lines if whole_file_requested else 0, file_path,
+                )
             except UnicodeDecodeError:
                 logger.debug("Binary file detected", exc_info=True)
                 shown = self._read_binary(file_path, resolved)
@@ -3377,37 +3694,22 @@ class UsefulTools:
             except FileNotFoundError:
                 suggestion = _suggest_close_path(resolved)
                 return f"Error: File not found: {file_path}.{suggestion}"
-            if text is None:
+            if scan is None:
                 return _not_regular_error(file_path)
 
-            if text == "":
+            window, total, outline = scan
+            if not total:
                 self._mark_read(resolved)
                 return "(file is empty)"
 
-            # ``\r\n`` is shown as ``\n``; a lone ``\r`` stays in its line, which ends
-            # where grep and sed end it.
-            text = text.replace("\r\n", "\n")
-            lines = split_lines(text)
-            total = len(lines)
             if start_line > total:
                 return (
                     f"Error: start_line={start_line} is past EOF "
                     f"(file has {total} line{'s' if total != 1 else ''})."
                 )
             self._mark_read(resolved)  # not above: a Read past the end shows nothing of it
-            outline_limit = DEFAULT_CONFIG.read_outline_lines
-            whole_file_requested = start_line == 1 and max_lines >= 2000
-            outline = (
-                _outline(file_path, lines, len(text))
-                if whole_file_requested and 0 < outline_limit < total
-                else None
-            )
-            window = lines[start_line - 1 : start_line - 1 + max_lines]
             if whole_file_requested:
-                # No range asked for: keep the default output budget, the
-                # way Bash does, so a 200 KB file does not land whole in
-                # the context; the note says where to continue.
-                window = _lines_within_budget(window, DEFAULT_CONFIG.tool_output_default_chars)
+                window = _lines_within_budget(window, budget)
             last = start_line - 1 + len(window)
             remaining = total - last
             if outline is not None:
@@ -3873,11 +4175,12 @@ class UsefulTools:
         return f"{job.status()}; the wait ended early: {ended}" if ended else job.status()
 
     def _wait_instead_of_sleep(
-        self, command: str, timeout_seconds: float,
+        self, command: str, timeout_seconds: float, cwd: str | None,
     ) -> tuple[str | None, str, str]:
-        """Settle a long ``sleep`` of *command* before it runs (:func:`wait_instead_of_sleep`)."""
+        """Settle a long ``sleep`` of *command*, run in *cwd* (:func:`wait_instead_of_sleep`)."""
         return wait_instead_of_sleep(
             command, timeout_seconds, self._last_running_job_id, self._wait_on_job,
+            functools.partial(_host_sleep_probe, cwd, self.private_dir),
         )
 
     def _not_started(self, max_output_chars: int) -> str | None:
@@ -4032,7 +4335,7 @@ class UsefulTools:
                 return applied
         if background:
             return self._start_background_job(command, cwd, machine)[1] + note
-        refused, waited, command = self._wait_instead_of_sleep(command, timeout_seconds)
+        refused, waited, command = self._wait_instead_of_sleep(command, timeout_seconds, cwd)
         if refused is not None:
             return refused
         # The wait a long sleep was spent on ends on a Stop: the rest is not started either.
@@ -4242,13 +4545,17 @@ class UsefulTools:
             directory) on the auto-detach path: the command then runs in
             the foreground as before.
         """
-        job, started = self._start_background_job(command, cwd)
+        followed: list[IO[bytes]] = []
+        job, started = self._start_background_job(command, cwd, followed=followed)
         if job is None:
             return None if grace_seconds else started
         wait_seconds = grace_seconds or timeout_seconds
         capture = _Capture(max_output_chars, self._new_spill)
         try:
-            finished = self._follow_job(job, wait_seconds, capture)
+            # Closed as the wait ends, before the log is deleted below: Windows
+            # deletes no file that is held open.
+            with followed[0] as log:
+                finished = self._follow_job(job, log, wait_seconds, capture)
         except BaseException:
             if grace_seconds:
                 # The model asked for a foreground command: the tool panel's
@@ -4291,9 +4598,14 @@ class UsefulTools:
             returncode, output, max_output_chars, capture.spilled_to, capture.dropped,
         )
 
-    def _follow_job(self, job: BackgroundJob, seconds: float, capture: _Capture) -> bool:
+    def _follow_job(
+        self, job: BackgroundJob, log: IO[bytes], seconds: float, capture: _Capture,
+    ) -> bool:
         """Wait up to *seconds* for *job* as :meth:`_wait_for_job` does, reading its growing log.
 
+        *log* is that log, open since before the shell ran
+        (:func:`_spawn_job`): what the command does to its name since
+        (it may delete the scratch dir) changes nothing to the reading.
         Every new piece of the log goes to *capture* and, with the key
         store's secrets redacted, to ``stream_callback``, so the tool
         panel shows the output live as it does a foreground command's;
@@ -4321,24 +4633,23 @@ class UsefulTools:
             codecs.getincrementaldecoder("utf-8")(errors="replace"), translate=True
         )
         redactor = StreamRedactor(self.stream_callback)
-        with open(job.log_path, "rb") as log:
-            while True:
-                exited = job.returncode() is not None
-                piece = decoder.decode(log.read(_READ_CHARS))
-                if not piece and exited:
-                    piece = decoder.decode(b"", final=True)  # a cut-off last character
-                if piece:
-                    capture.append(piece)
-                    redactor.feed(piece)
-                elif exited:
-                    finished = True
-                    break
-                remaining = deadline - time.monotonic()
-                if _stop_requested(self.stop_event) or remaining <= 0:
-                    finished = False
-                    break
-                if not piece:
-                    time.sleep(min(remaining, 0.2))
+        while True:
+            exited = job.returncode() is not None
+            piece = decoder.decode(log.read(_READ_CHARS))
+            if not piece and exited:
+                piece = decoder.decode(b"", final=True)  # a cut-off last character
+            if piece:
+                capture.append(piece)
+                redactor.feed(piece)
+            elif exited:
+                finished = True
+                break
+            remaining = deadline - time.monotonic()
+            if _stop_requested(self.stop_event) or remaining <= 0:
+                finished = False
+                break
+            if not piece:
+                time.sleep(min(remaining, 0.2))
         redactor.flush()
         tool_interrupt.raise_if_interrupted()
         return finished
@@ -4567,7 +4878,9 @@ class UsefulTools:
         wait, so the loop keeps returning to Python: that is where an
         asynchronously injected exception — the task Stop's
         ``KeyboardInterrupt`` — can land and reach :meth:`Bash`'s
-        process-group kill.
+        process-group kill.  It is held back for the slice itself: raised
+        as ``Queue.get`` takes the queue's lock, it left that lock held
+        and the reader blocked in its ``put`` for good.
 
         Returns:
             True when the EOF sentinel was received, False on deadline,
@@ -4579,7 +4892,7 @@ class UsefulTools:
                 return False
             remaining = min(remaining, 0.2)
             try:
-                line = out_queue.get(timeout=remaining)
+                line = tool_interrupt.call_without_injection(out_queue.get, timeout=remaining)
             except queue.Empty:
                 continue
             if line is None:
@@ -4664,9 +4977,10 @@ class UsefulTools:
                 functools.partial(self._spawn, command, cwd),
                 functools.partial(_stop_monitor, stops, done=done),
             )
-            threading.Thread(
+            reader = threading.Thread(
                 target=_drain_stdout, args=(process.stdout, out_queue, abandoned), daemon=True,
-            ).start()
+            )
+            tool_interrupt.call_without_injection(reader.start)
             deadline = time.monotonic() + timeout_seconds
             eof = self._consume_stream(out_queue, capture, redactor, deadline, until_stop=True)
             if not eof:

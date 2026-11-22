@@ -30,7 +30,7 @@ from kiss.agents.sorcar.container_jobs import (
     LOST_STATUS,
     ContainerJobs,
 )
-from kiss.agents.sorcar.docker_manager import DockerManager
+from kiss.agents.sorcar.docker_manager import DockerManager, ToolScript
 
 IMAGE = "python:3.11-slim"
 
@@ -66,11 +66,14 @@ def _lose(manager: DockerManager, jobs: ContainerJobs, seconds: int) -> str:
 
     The job's shell is among them (its command line holds the command), so no exit file is
     written.  The image has no ``pkill``: the processes are found by their command lines,
-    the pattern's last character bracketed so the killing shell is not one of them.
+    the pattern's last character bracketed so the killing shell is not one of them.  The
+    job's shell goes first: listed after its command (pids 99 and 100 are, by their names
+    in ``/proc``), it would outlive it for long enough to record its death as the exit code.
     """
     job_id, report = jobs.start(f"sleep {seconds}")
     assert job_id is not None, report
     manager.Bash(
+        f"kill -KILL $(cat {JOBS_DIR}/{job_id}.pid); "
         f"for d in /proc/[0-9]*; do tr '\\0' ' ' < $d/cmdline 2>/dev/null | grep -qE -- "
         f"'sleep {str(seconds)[:-1]}[{str(seconds)[-1]}]' && kill -KILL ${{d#/proc/}}; done; true",
         "pkill -f", 30, 500)
@@ -195,7 +198,7 @@ def test_background_jobs_in_a_container() -> None:
         manager.Bash(f"echo {other} > {JOBS_DIR}/{job2}.pid", "recycle the pid", 30, 500)
         assert "status: exited 3" in jobs.bash_job(job2, "kill")
         assert "sleep 299" in _ps(manager, "sleep 299")
-        swept = manager.Bash(KILL_ALL_SCRIPT, "kill every job", 30, 5000).split()
+        swept = manager.Bash(ToolScript(KILL_ALL_SCRIPT), "kill every job", 30, 5000).split()
         assert job2 not in swept and job4 in swept, swept
         assert "sleep 299" in _ps(manager, "sleep 299")
         deadline = time.monotonic() + 10
@@ -207,7 +210,7 @@ def test_background_jobs_in_a_container() -> None:
         # shell's complaint about it (the sweep's caller reads job ids).
         manager.Bash(f"echo 999999 > {JOBS_DIR}/{job2}.pid", "a pid nobody has", 30, 500)
         assert "No such file" not in jobs.bash_job(job2, "kill")
-        swept = manager.Bash(KILL_ALL_SCRIPT, "kill every job", 30, 5000).split()
+        swept = manager.Bash(ToolScript(KILL_ALL_SCRIPT), "kill every job", 30, 5000).split()
         assert all(JOB_ID.fullmatch(word) for word in swept), swept
         # A fresh registry (a later session of the task) still addresses the job
         # through its files in the container; a malformed id never reaches a script.
@@ -305,7 +308,7 @@ def test_adopted_process_is_a_job() -> None:
         # (the earlier jobs' pids count too: pid 1 of this container reaps no zombie).
         third_id, _ = jobs.adopt(third, "sleep 31", "")
         assert third_id is not None
-        killed = manager.Bash(KILL_ALL_SCRIPT, "kill all", 30, 2000).split()
+        killed = manager.Bash(ToolScript(KILL_ALL_SCRIPT), "kill all", 30, 2000).split()
         assert third_id in killed
         deadline = time.monotonic() + 10
         while "sleep 31" in _ps(manager, "sleep 31"):
@@ -345,7 +348,7 @@ def test_adopted_process_is_a_job() -> None:
             assert time.monotonic() < deadline, "the exec'd parent or its child survived the kill"
             time.sleep(0.2)
         assert "sleep 35" in _ps(manager, "sleep 35") and "sleep 34" in _ps(manager, "sleep 34")
-        killed = manager.Bash(KILL_ALL_SCRIPT, "kill all", 30, 2000).split()
+        killed = manager.Bash(ToolScript(KILL_ALL_SCRIPT), "kill all", 30, 2000).split()
         assert parents[1][1] in killed and parents[0][1] not in killed, killed
         deadline = time.monotonic() + 10
         while "sleep 35" in _ps(manager, "sleep 35") or "sleep 34" in _ps(manager, "sleep 34"):
@@ -448,14 +451,16 @@ def test_a_job_whose_files_are_gone_is_unknown_not_running() -> None:
         live.remove(force=True)
 
 
-def _leader(manager: DockerManager, seconds: int) -> int:
+def _leader(manager: DockerManager, seconds: int, reaped: bool = True) -> int:
     """Start a session leader that, once told to go, leaves a ``sleep <seconds>`` in its
-    process group and exits (its waiting parent reaps it); return the leader's pid.  It
+    process group and exits (its waiting parent reaps it; nothing does unless *reaped*, and
+    it stays a zombie: pid 1 of the container reaps none); return the leader's pid.  It
     carries no exec token: its group is the only handle on what it leaves."""
     script = (f"echo \\$\\$ > /tmp/lead{seconds}; while [ ! -e /tmp/go{seconds} ]; do sleep 0.1; "
               f"done; sleep {seconds} & exit 0")
+    lead = f"env -u KISS_EXEC_TOKEN setsid sh -c \"{script}\""
     return int(manager.Bash(
-        f"sh -c 'env -u KISS_EXEC_TOKEN setsid sh -c \"{script}\" & wait' "
+        (f"sh -c '{lead} & wait' " if reaped else f"{lead} ") +
         "> /dev/null 2>&1 < /dev/null & "
         f"for i in $(seq 50); do [ -s /tmp/lead{seconds} ] && break; sleep 0.1; done; "
         f"cat /tmp/lead{seconds}", "lead", 30, 500).split()[-1])
@@ -491,9 +496,111 @@ def test_the_group_of_an_adopted_leader_that_ended_is_still_killed() -> None:
         jobs.bash_job(job, "kill")
         assert _ps(manager, "sleep 281") == "" and "sleep 282" in _ps(manager, "sleep 282")
         manager.Bash(f"echo {stranger} > {JOBS_DIR}/{job}.pid", "pid", 30, 500)
-        swept = manager.Bash(KILL_ALL_SCRIPT, "sweep", 30, 500).split()
+        swept = manager.Bash(ToolScript(KILL_ALL_SCRIPT), "sweep", 30, 500).split()
         assert job not in swept and orphaned[282][0] in swept
         assert _ps(manager, "sleep 282") == "" and "sleep 283" in _ps(manager, "sleep 283")
+    finally:
+        manager.close()
+        live.remove(force=True)
+
+
+def test_a_zombie_under_a_job_s_pid_is_its_leader_only_by_its_start_time() -> None:
+    """Audit 2026-11-21 (S2-F2): a zombie has no command line to know it by, and any zombie
+    under a job's recorded pid passed for the job's ended leader.  Once the kernel had given
+    the pid to the leader of another session, which left a child and ended, a job stopped
+    from outside counted as running while that child lived, and ``bash_job`` and the
+    end-of-task sweep killed the child.  A zombie is the job's leader by its start time: the
+    group of an adopted leader that ended, unreaped, is the job's as before."""
+    live = _live_container()
+    if live is None:
+        pytest.skip("Docker is not available")
+    manager = DockerManager(f"container:{live.id}", workdir="/tmp")
+    try:
+        manager.open()
+        jobs = ContainerJobs(manager.Bash)
+        own, stranger = _leader(manager, 261, reaped=False), _leader(manager, 262, reaped=False)
+        mine, _ = jobs.adopt(own, "leader 261", "")
+        assert mine is not None
+        states = manager.Bash(
+            "touch /tmp/go261 /tmp/go262; for i in $(seq 100); do "
+            f"s=$(sed 's/.*) //' /proc/{own}/stat /proc/{stranger}/stat | cut -c1 | tr -d '\\n'); "
+            "[ \"$s\" = ZZ ] && break; sleep 0.1; done; echo \"$s\"", "the leaders end", 30, 500)
+        assert states.split()[-1] == "ZZ", states
+        # The records of two jobs that ended, a started one and an adopted leader of its
+        # own group, whose pid the stranger has now.
+        lost = _lose(manager, jobs, 263)
+        manager.Bash("env -u KISS_EXEC_TOKEN setsid sleep 264 > /dev/null 2>&1 < /dev/null &",
+                     "a leader", 30, 500)
+        ended = _pid_of(manager, "sleep 264")
+        gone, _ = jobs.adopt(ended, "sleep 264", "")
+        assert gone is not None
+        assert manager.Bash(f"cat {JOBS_DIR}/{gone}.group", "group", 30, 500).split() == [
+            str(ended)]
+        manager.Bash(f"kill -KILL {ended}", "the adopted leader ends", 30, 500)
+        assert "status: exited (exit code unknown: adopted process)" in jobs.bash_job(
+            gone, "wait", timeout_seconds=30)
+        manager.Bash(f"echo {stranger} | tee {JOBS_DIR}/{lost}.pid > {JOBS_DIR}/{gone}.pid",
+                     "recycle the pid", 30, 500)
+        assert f"status: exited {LOST_STATUS}" in jobs.bash_job(lost)
+        for job in (lost, gone):
+            jobs.bash_job(job, "kill")
+            assert "sleep 262" in _ps(manager, "sleep 262"), f"killed as job {job}"
+        assert "sleep 261" in _ps(manager, "sleep 261")
+        jobs.bash_job(mine, "kill")
+        assert _ps(manager, "sleep 261") == ""
+        swept = manager.Bash(ToolScript(KILL_ALL_SCRIPT), "sweep", 30, 500).split()
+        assert lost not in swept and gone not in swept, swept
+        assert "sleep 262" in _ps(manager, "sleep 262")
+    finally:
+        manager.close()
+        live.remove(force=True)
+
+
+def _up(jobs: ContainerJobs, command: str) -> str:
+    """Start *command*, which prints ``up`` once it has got going, as a job; return its id."""
+    job, report = jobs.start(command)
+    assert job is not None, report
+    report = jobs.bash_job(job, "wait", timeout_seconds=30, until="^up$")
+    assert "status: running" in report and report.rstrip().endswith("up"), report
+    return job
+
+
+def test_a_job_with_no_start_time_on_record_is_still_killed() -> None:
+    """Review of 2026-11-21 (S2-F2): a job started before start times were recorded has no
+    ``.born`` file, and its own leader, once a zombie, passed for a stranger.  ``bash_job``
+    and the end-of-task sweep, whose TERM ends the job's shell, sent no KILL after it to a
+    command that ignores a TERM; a job whose shell had ended or been killed was not
+    signalled at all, and counted as stopped from outside while its command ran on.  A start
+    time not on record says nothing: the zombie is the leader's, as it was to the version
+    that started the job.  A later registry acts on the records, as the upgraded daemon does."""
+    live = _live_container()
+    if live is None:
+        pytest.skip("Docker is not available")
+    manager = DockerManager(f"container:{live.id}", workdir="/tmp")
+    try:
+        manager.open()
+        started, later = ContainerJobs(manager.Bash), ContainerJobs(manager.Bash)
+        forget = f"rm {JOBS_DIR}/*.born"
+        deaf = _up(started, "trap '' TERM; echo up; exec sleep 251")
+        orphaned = _up(started, "echo up; sleep 252")
+        manager.Bash(f"{forget}; kill -KILL $(cat {JOBS_DIR}/{orphaned}.pid)",
+                     "records as before the upgrade; one job's shell is killed", 30, 500)
+        assert "status: exited killed" in later.bash_job(deaf, "kill")
+        assert _ps(manager, "sleep 251") == ""
+        assert "status: running" in later.bash_job(orphaned)
+        assert "status: exited killed" in later.bash_job(orphaned, "kill")
+        assert _ps(manager, "sleep 252") == ""
+        # The sweep: a command that ignores the TERM, and what a job that ended left running
+        # (told to go once its launcher has returned: its shell is then init's to reap).
+        deaf = _up(started, "trap '' TERM; echo up; exec sleep 253")
+        ended, _ = started.start("while [ ! -e /tmp/go ]; do sleep 0.1; done; "
+                                 "sleep 254 > /dev/null 2>&1 < /dev/null & exit 0")
+        assert ended is not None
+        manager.Bash(f"{forget}; touch /tmp/go", "records as before the upgrade", 30, 500)
+        assert "status: exited 0" in started.bash_job(ended, "wait", timeout_seconds=30)
+        swept = manager.Bash(ToolScript(KILL_ALL_SCRIPT), "sweep", 30, 500).split()
+        assert deaf in swept and ended in swept, swept
+        assert _ps(manager, "sleep 253") == "" and _ps(manager, "sleep 254") == ""
     finally:
         manager.close()
         live.remove(force=True)
@@ -541,7 +648,7 @@ def test_what_an_adopted_process_that_ended_left_running_is_still_killed() -> No
         assert _ps(manager, "sleep 271") == ""
         jobs.bash_job(ended[273], "kill")
         assert all(f"sleep {n}" in _ps(manager, f"sleep {n}") for n in (270, 272, 273, 274))
-        swept = manager.Bash(KILL_ALL_SCRIPT, "sweep", 30, 500).split()
+        swept = manager.Bash(ToolScript(KILL_ALL_SCRIPT), "sweep", 30, 500).split()
         assert swept == [kept]
         assert all(_ps(manager, f"sleep {n}") == "" for n in (272, 273, 274))
         assert "sleep 270" in _ps(manager, "sleep 270")

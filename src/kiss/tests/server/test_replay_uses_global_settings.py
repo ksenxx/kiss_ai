@@ -327,8 +327,9 @@ class TestExtraForReplayUnit(unittest.TestCase):
 
 
 class TestSubagentReplayStripsGlobalSettings(unittest.TestCase):
-    """Loading a parent task that fans out to sub-agents reopens every
-    persisted sub-agent tab with its own ``task_events`` broadcast.
+    """Loading a parent task that fans out to sub-agents announces the
+    tab of every sub-agent that still runs, and each of those tabs
+    fetches its own ``task_events`` broadcast.
     Those broadcasts must also strip the global-setting keys from
     ``extra`` so a sub-agent's per-task snapshot of model / toggles
     cannot leak into the live model picker when the user later
@@ -386,6 +387,10 @@ class TestSubagentReplayStripsGlobalSettings(unittest.TestCase):
                 },
                 task_id=sub_id,
             )
+            agent_state.register(agent_state.AgentState(
+                sub_id, chat_id=chat_id, tab_id=f"owner-{sub_id}", parent_task_id=parent_id,
+                server_owned=True, is_task_active=True,
+            ))
             sub_ids.append(sub_id)
 
         server, events, lock = make_recording_server()

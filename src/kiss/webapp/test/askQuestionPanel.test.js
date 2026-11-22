@@ -22,7 +22,7 @@ const {
   typeInto,
   ofType,
 } = require('./simplify2_harness');
-const {makeRunner, key, pickTabMenuItem} = require('./ui_antipattern_harness');
+const {makeRunner, key} = require('./ui_antipattern_harness');
 const {paste, settle, typeAndSend} = require('./attachment_helpers');
 const {tabEl} = require('./subagent_tab_helpers');
 const {
@@ -414,12 +414,16 @@ test('opening a file tab and coming back keeps the question answerable', () => {
   clickTab(win, fileTab);
   assert.strictEqual(win._testApi.getActiveTabId(), fileTab);
   assert.ok(!answering(win), 'answer mode is off on the file tab');
-  // ... and closing the asking chat while its file tab is up leaves
-  // nothing to answer. With the file tab up the strip lists the file
-  // alone: its menu closes every other tab.
+  // ... and the asking chat closing while its file tab is up leaves
+  // nothing to answer: the daemon's tab list has the chat, then (closed
+  // from another surface) no longer does.
   const fileEl = tabEl(win, fileTab);
   assert.ok(fileEl, 'the file tab is on its strip');
-  pickTabMenuItem(win, fileEl, 'Close Others');
+  send(win, {
+    type: 'tabs_state',
+    tabs: [{tabId: tab, chatId: 'chat-q', title: 'chat', workDir: ''}],
+  });
+  send(win, {type: 'tabs_state', tabs: []});
   assert.ok(
     !win._testApi.openTabs().some(t => t.id === tab),
     'the asking chat is closed',
@@ -741,6 +745,67 @@ test('the send button answers too', () => {
   posted.length = 0;
   typeAndSend(win, 'clicked');
   assert.strictEqual(ofType(posted, 'userAnswer').length, 1);
+});
+
+test('an answer too large for one frame stays in the answer box, with the reason, until it is shortened or the question ends', () => {
+  const {win, posted, tab} = makePage(true);
+  const inp = win.document.getElementById('task-input');
+  const reasons = () =>
+    Array.from(
+      win.document.querySelectorAll('#file-chips .file-chip.error'),
+      chip => chip.textContent,
+    );
+  // The daemon reads at most 64 MiB of one frame and drops the
+  // connection over a longer one.
+  const MIB = 1024 * 1024;
+  const refused = (id, question, answer) => {
+    send(win, {type: 'askUser', question, questionId: id, tabId: tab});
+    posted.length = 0;
+    // Twice: the reason is given once.
+    for (let i = 0; i < 2; i++) {
+      inp.value = answer;
+      pressEnter(win);
+      assert.strictEqual(
+        ofType(posted, 'userAnswer').length,
+        0,
+        id + ': BUG: a frame the daemon cannot read was sent',
+      );
+      assert.strictEqual(inp.value.length, answer.length, 'the answer stays');
+      assert.ok(answering(win), 'and the question is still to be answered');
+      assert.strictEqual(reasons().length, 1, JSON.stringify(reasons()));
+      assert.ok(reasons()[0].includes('Too large to send'), reasons()[0]);
+    }
+  };
+
+  // The answer alone is too long.  Shortened, it goes; the reason with it.
+  refused('q1', 'Which log?', 'x'.repeat(64 * MIB));
+  inp.value = 'the last lines';
+  pressEnter(win);
+  assert.deepStrictEqual(
+    ofType(posted, 'userAnswer').map(a => [a.answer, a.questionId]),
+    [['the last lines', 'q1']],
+  );
+  assert.strictEqual(inp.value, '');
+  assert.ok(!answering(win));
+  assert.deepStrictEqual(reasons(), []);
+
+  // The answer is too long with the question that travels with it.
+  // Another surface answers: the reason goes with the question, and
+  // what was typed stays.
+  refused('q2', 'q'.repeat(33 * MIB), 'x'.repeat(33 * MIB));
+  send(win, {type: 'askUserDone', tabId: tab});
+  assert.deepStrictEqual(reasons(), []);
+  assert.strictEqual(inp.value.length, 33 * MIB);
+
+  // So it does while the user is on another tab.
+  inp.value = '';
+  refused('q3', 'Which log?', 'x'.repeat(64 * MIB));
+  inp.value = '';
+  win._testApi.createNewTab();
+  assert.deepStrictEqual(reasons(), [], "another tab's composer");
+  send(win, {type: 'askUserDone', tabId: tab});
+  clickTab(win, tab);
+  assert.deepStrictEqual(reasons(), []);
 });
 
 test('a question is never folded by the streaming collapse pass, answered or not', () => {

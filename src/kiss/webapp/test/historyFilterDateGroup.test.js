@@ -5,10 +5,10 @@
 
 'use strict';
 
-// The History filter's From and To controls each keep their label, date
+// The Date submenu's From and To controls each keep their label, date
 // box and calendar button on one line: the trio shares one parent that
-// the stylesheet lays out as a single non-wrapping inline flex item of
-// the filter bar.
+// the stylesheet lays out as a single non-wrapping flex row of the
+// submenu.
 
 const assert = require('assert');
 const {loadMainCss, makePage} = require('./simplify2_harness');
@@ -36,9 +36,15 @@ function assertTrioNeverWraps(win, which) {
     `the "${which}" trio never splits across lines; ` +
       `got flex-wrap=${style.flexWrap} white-space=${style.whiteSpace}`,
   );
-  assert.ok(
-    style.display === 'inline-flex' || style.display === 'inline-block',
-    `the "${which}" trio is one item of the filter bar; got display=${style.display}`,
+  assert.strictEqual(
+    style.display,
+    'flex',
+    `the "${which}" trio is one row of the Date submenu`,
+  );
+  assert.strictEqual(
+    group.parentElement,
+    doc.querySelector('.fg-submenu[data-fg="date"]'),
+    `the "${which}" trio is in the Date submenu`,
   );
 }
 

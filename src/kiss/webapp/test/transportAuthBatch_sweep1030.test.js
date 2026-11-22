@@ -15,6 +15,12 @@
 //          daemon unreachable), the close only scheduled another backoff
 //          reconnect: Unlock, Cancel and Escape were dead until a later
 //          reconnect reached the server, up to a minute after it was back.
+//
+//  SERIAL  An Unlock while the socket's `auth` frame was unanswered sent a
+//          second frame at once and took the place of the first password:
+//          `auth_ok` for the first stored the second and stamped it on
+//          every later frame, and the server, which reads a frame after an
+//          accepted `auth` as a command, shut the session out for it.
 
 const assert = require('assert');
 const {makeRunner} = require('./ui_antipattern_harness');
@@ -162,7 +168,13 @@ async function main() {
       const s = openNextSocket(sockets, timers, 0);
       s.fireOpen(); // the quiet reconnect sends the empty probe
       await unlock(doc, 'typed-pw'); // second auth of the same socket
+      assert.strictEqual(frames(s).length, 1, 'it waits for the answer');
       s.fireMessage({type: 'auth_required'}); // answers the probe
+      assert.deepStrictEqual(frames(s)[1], {
+        type: 'auth',
+        password: 'typed-pw',
+        parts: true,
+      });
       assert.strictEqual(errorLine(doc), '');
       s.fireMessage({type: 'auth_ok'});
       assert.strictEqual(window.localStorage.getItem('sorcar-remote-pwd'), 'typed-pw');
@@ -183,6 +195,89 @@ async function main() {
     assert.deepStrictEqual(frames(s), [{type: 'auth', password: '', parts: true}]);
     page.window.close();
   });
+
+  await test(
+    'SERIAL: a password typed while an earlier one awaits its answer is not ' +
+      'sent; auth_ok stores the accepted one and later frames carry it',
+    async () => {
+      const page = newPage();
+      const {doc, sockets, timers, window} = page;
+      window.acquireTransport().postMessage({type: 'ready'});
+      await unlockWhileServerUnreachable(page);
+      const s = openNextSocket(sockets, timers, 2);
+      s.fireOpen(); // the quiet retry sends typed-pw
+      await unlock(doc, 'newer-pw'); // the re-armed dialog, before the answer
+      s.fireMessage({type: 'auth_ok'}); // the server accepted typed-pw
+      assert.deepStrictEqual(frames(s), [
+        {type: 'auth', password: 'typed-pw', parts: true},
+        {password: 'typed-pw', type: 'ready'},
+        {password: 'typed-pw', type: 'ping'},
+      ]);
+      assert.strictEqual(
+        window.localStorage.getItem('sorcar-remote-pwd'),
+        'typed-pw',
+      );
+      assert.ok(!dialogShown(doc), 'auth_ok closes the dialog');
+      window.close();
+    },
+  );
+
+  await test(
+    'SERIAL: when the earlier password is refused the newer one goes out ' +
+      'once, as the second auth of the socket',
+    async () => {
+      const page = newPage();
+      const {doc, sockets, timers} = page;
+      await unlockWhileServerUnreachable(page);
+      const s = openNextSocket(sockets, timers, 2);
+      s.fireOpen();
+      await unlock(doc, 'newer-pw');
+      s.fireMessage({type: 'auth_required'}); // typed-pw was wrong
+      assert.deepStrictEqual(frames(s), [
+        {type: 'auth', password: 'typed-pw', parts: true},
+        {type: 'auth', password: 'newer-pw', parts: true},
+      ]);
+      assert.strictEqual(errorLine(doc), '', 'newer-pw is not called wrong');
+      const refusal = 'That password is not correct. Try again.';
+      s.fireMessage({type: 'error', code: 'auth_failed', text: refusal});
+      assert.strictEqual(errorLine(doc), refusal);
+      s.fireClose();
+      const next = openNextSocket(sockets, timers, 3);
+      next.fireOpen();
+      assert.deepStrictEqual(frames(next), [
+        {type: 'auth', password: '', parts: true},
+      ]);
+      page.window.close();
+    },
+  );
+
+  await test(
+    "SERIAL: a password typed while another tab's stored one is probed is " +
+      'dropped when the probe is accepted',
+    async () => {
+      const page = newPage();
+      const {doc, sockets, timers, window} = page;
+      window.acquireTransport().postMessage({type: 'ready'});
+      sockets[0].fireOpen();
+      sockets[0].fireMessage({type: 'auth_required'});
+      sockets[0].fireClose(); // idle unauthenticated socket dropped
+      window.localStorage.setItem('sorcar-remote-pwd', 'other-tab-pw');
+      const s = openNextSocket(sockets, timers, 0);
+      s.fireOpen(); // the quiet reconnect probes with it
+      await unlock(doc, 'typed-pw');
+      s.fireMessage({type: 'auth_ok'});
+      assert.deepStrictEqual(frames(s), [
+        {type: 'auth', password: 'other-tab-pw', parts: true},
+        {password: 'other-tab-pw', type: 'ready'},
+        {password: 'other-tab-pw', type: 'ping'},
+      ]);
+      assert.strictEqual(
+        window.localStorage.getItem('sorcar-remote-pwd'),
+        'other-tab-pw',
+      );
+      window.close();
+    },
+  );
 
   report('transportAuthBatch_sweep1030');
 }

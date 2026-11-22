@@ -17,13 +17,16 @@ call into the SEA file.
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import shutil
+import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
-from types import ModuleType
+from types import FrameType, ModuleType
 from typing import Any
 
 import pytest
@@ -41,6 +44,7 @@ from kiss.core.brand import HOME_DIR, render_brand
 from kiss.core.kiss_tmp import kiss_tmp_dir
 from kiss.core.tool_verdict import ALLOW
 from kiss.core.utils import rmtree_force
+from kiss.scripts import sync_kiss_notes
 from kiss.tests.agents.seas.conftest import (
     commit,
     fake_checkout,
@@ -805,7 +809,8 @@ def test_write_autorouter_evidence_rewrites_the_kiss_home_file(
     assert "model-x" not in prompt and "model-y | 3" in prompt
     # A caller that repeats the stamp line does not duplicate it; a long
     # bullet is wrapped; a table row that does not fit is refused; an
-    # empty text is refused; nothing partial is left behind.
+    # empty text is refused; nothing partial is left behind (the lock
+    # file is that of whoever replaces the note: it stays).
     repeated = f"{sea.STAMP_PREFIX}, refreshed 2020-01-01 by /rsi7d._\n\n- " + "word " * 40
     assert sea.write_autorouter_evidence(repeated).startswith("Wrote ")
     prompt = _prompt_of(path)
@@ -816,7 +821,7 @@ def test_write_autorouter_evidence_rewrites_the_kiss_home_file(
     assert refused.startswith("Error: a line of the new text is longer than 92 characters")
     assert sea.write_autorouter_evidence("  \n") == "Error: the evidence text is empty"
     assert "word word" in _prompt_of(path)
-    assert sorted(p.name for p in home.iterdir()) == ["AUTOROUTER.md"]
+    assert sorted(p.name for p in home.iterdir()) == ["AUTOROUTER.md", "AUTOROUTER.md.lock"]
     # The file goes into every autorouter prompt, so the stamped text is
     # capped at the size the autorouter cuts at; a text that would exceed
     # it is refused and the file kept.  A file over the cap written by
@@ -848,6 +853,115 @@ def test_write_autorouter_evidence_rewrites_the_kiss_home_file(
     path.unlink()
     refused = sea.write_autorouter_evidence("x")
     assert refused.startswith("Error: 'autorouter' is not an editable SEA")
+
+
+def _refresh_at_rename(
+    refreshes: list[tuple[threading.Thread, bool]],
+    text: str,
+    _frame: FrameType,
+    event: str,
+    arg: object,
+) -> None:
+    """Profile function of a notes merge: a thread refreshes the evidence as the merge renames.
+
+    Or as it truncates the note, where it rewrites the note in place instead: off Linux, where
+    Python cannot tell whether a new file can stand in for it (``sync_kiss_notes.replace_note``).
+    *refreshes* gets that thread and whether it was still at work a second later.
+    """
+    writes = arg is os.replace or getattr(arg, "__qualname__", "") == "TextIOWrapper.truncate"
+    if event == "c_call" and writes and not refreshes:
+        refresh = threading.Thread(target=sea.write_autorouter_evidence, args=(text,))
+        refresh.start()
+        refresh.join(timeout=1.0)
+        refreshes.append((refresh, refresh.is_alive()))
+
+
+@posix_only("an open note is renamed over")
+@pytest.mark.parametrize("linked", [False, True])
+def test_an_evidence_refresh_during_a_notes_merge_waits_for_it_and_is_kept(
+    checkout: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, linked: bool
+) -> None:
+    """A refresh that meets a notes sync merging AUTOROUTER.md lands after the merge, whole.
+
+    Both rename a new file over the note.  The refresh took no lock, so one that landed between
+    the merge's read and its rename was replaced by the merge of the older texts: the week's
+    evidence was gone and both writers had reported success.  Here a real merge is at its rename
+    when the refresh starts: the refresh waits for it, and the note is the refreshed text once
+    both are done.  The same where the note is a symlink: the merge replaces the file it leads
+    to and the refresh the link, and the merge holds the lock file of both.
+    """
+    note = tmp_path / "home" / "AUTOROUTER.md"
+    monkeypatch.setenv("KISS_HOME", str(note.parent))
+    table = "| model | tasks |\n|---|---|\n"
+    assert sea.write_autorouter_evidence(table + "| local-model | 110 |").startswith("Wrote ")
+    stamp = note.read_text(encoding="utf-8").split("\n\n")[0]
+    target = tmp_path / "AUTOROUTER.md"
+    if linked:
+        note.rename(target)
+        note.symlink_to(target)
+    refreshes: list[tuple[threading.Thread, bool]] = []
+    sys.setprofile(functools.partial(_refresh_at_rename, refreshes, table + "| fresh-model | 7 |"))
+    try:
+        merged = sync_kiss_notes.merge_into_file(
+            "AUTOROUTER.md", str(note), f"{stamp}\n\n{table}| remote-model | 90 |\n"
+        )
+    finally:
+        sys.setprofile(None)
+    [(refresh, waited)] = refreshes
+    refresh.join(timeout=30)
+    assert merged == "updated" and waited and not refresh.is_alive()
+    assert note.read_text(encoding="utf-8").split("\n\n")[1] == table + "| fresh-model | 7 |\n"
+    assert not note.is_symlink() and target.exists() == linked
+    assert [beside.name for beside in note.parent.glob("AUTOROUTER.md?*")] == ["AUTOROUTER.md.lock"]
+
+
+@posix_only("permission bits and symbolic links")
+def test_an_evidence_refresh_replaces_a_note_it_could_not_write_into(
+    checkout: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A refresh renames the new evidence over whatever is at the note's path, as it always did.
+
+    The rename needs the folder, not the note.  A refresh that opened the old note to lock it
+    failed on a note its user may not write ("Permission denied") and on a symlink to a file in
+    a folder that does not exist ("No such file or directory"), and wrote through a symlink it
+    used to replace.  Here each of them ends as a regular, writable file that holds the new
+    evidence, and the link's target is as it was.
+
+    The new text is staged under a name nothing has.  Staged in ``AUTOROUTER.md.tmp``, it
+    emptied the note that was a link to that file before it replaced it, and with a link to the
+    note at that name it left the note a link to itself.  The lock file may be anything, a named
+    pipe for one: the refresh and a notes merge still write.
+    """
+    note = tmp_path / "home" / "AUTOROUTER.md"
+    monkeypatch.setenv("KISS_HOME", str(note.parent))
+    table = "| model | tasks |\n|---|---|\n| model-x | 12 |"
+    note.parent.mkdir()
+    note.write_text("old\n", encoding="utf-8")
+    note.chmod(0o444)
+    assert sea.write_autorouter_evidence(table).startswith("Wrote ")
+    assert note.read_text(encoding="utf-8").endswith(f"\n\n{table}\n") and os.access(note, os.W_OK)
+    staging = note.with_name("AUTOROUTER.md.tmp")
+    staging.write_text("old\n", encoding="utf-8")
+    for target in (tmp_path / "nowhere" / "AUTOROUTER.md", tmp_path / "AUTOROUTER.md", staging):
+        note.unlink()
+        note.symlink_to(target)
+        assert sea.write_autorouter_evidence(table).startswith("Wrote ")
+        assert not note.is_symlink() and target.exists() == (target == staging)
+        assert note.read_text(encoding="utf-8").endswith(f"\n\n{table}\n")
+    assert staging.read_text(encoding="utf-8") == "old\n"
+    staging.unlink()
+    staging.symlink_to(note)
+    lock = note.with_name("AUTOROUTER.md.lock")
+    lock.unlink()
+    os.mkfifo(lock)
+    assert sea.write_autorouter_evidence(table).startswith("Wrote ")
+    assert not note.is_symlink() and note.read_text(encoding="utf-8").endswith(f"\n\n{table}\n")
+    assert sync_kiss_notes.merge_into_file("AUTOROUTER.md", str(note), "") == "unchanged"
+    assert sorted(p.name for p in note.parent.iterdir()) == [
+        "AUTOROUTER.md",
+        "AUTOROUTER.md.lock",
+        "AUTOROUTER.md.tmp",
+    ]
 
 
 def test_wrap_markdown_wraps_prose_and_keeps_tables_and_code() -> None:

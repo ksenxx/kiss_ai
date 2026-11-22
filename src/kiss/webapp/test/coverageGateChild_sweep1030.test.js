@@ -31,7 +31,7 @@
 // that leave a process to kill are skipped on Windows.  A last case
 // checks that this harness keeps output written after the process exits.
 //
-// The gate's own CHILD_TIMEOUT_MS kill (90 s) is exercised, on a copy
+// The gate's own CHILD_TIMEOUT_MS kill (8 min) is exercised, on a copy
 // with the timeout lowered, by runAllRetiresSuiteGroup_wave3.test.js.
 
 'use strict';

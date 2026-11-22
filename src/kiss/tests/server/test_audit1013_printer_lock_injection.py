@@ -33,6 +33,7 @@ import subprocess
 import sys
 import threading
 from collections.abc import Callable
+from typing import Any
 
 import pytest
 
@@ -42,7 +43,14 @@ from kiss.server.agent_state import AgentState
 from kiss.server.json_printer import JsonPrinter
 from kiss.server.task_runner import _TaskRunnerMixin
 from kiss.server.web_server import WebPrinter
-from kiss.tests.lock_injection import INJECTIONS, hammer, lock_is_free
+from kiss.tests.lock_injection import (
+    INJECTIONS,
+    hammer,
+    lock_is_free,
+    stop_as_it_takes_its_lock,
+    stranded_threads,
+)
+from kiss.tests.server._memory_printer import MemoryPrinter
 
 # The core and sorcar hammers still import the helpers under these
 # names; they live in ``kiss.tests.lock_injection`` now.
@@ -268,3 +276,50 @@ class TestReentrantHold:
         hammer(section, {"lock": lock})
         assert section.inner_calls > INJECTIONS
         assert section.outer_lost == 0
+
+
+def _stream_under_profile(
+    printer: JsonPrinter, profile: Any, raised: list[BaseException],
+) -> None:
+    """Thread body: buffer a second bash fragment under the profile hook, noting what it raises."""
+    printer._thread_local.task_id = "fx44b-flush-timer"
+    printer.print("first\n", type="bash_stream")  # sent at once
+    sys.setprofile(profile)
+    try:
+        printer.print("second\n", type="bash_stream")  # buffered: starts the flush timer
+    except BaseException as exc:  # noqa: BLE001 — the injected Stop is expected
+        raised.append(exc)
+    finally:
+        sys.setprofile(None)
+
+
+def test_a_stop_as_the_bash_flush_timer_starts_still_sends_the_output() -> None:
+    """The forced Stop landing where the flush timer's start has taken its lock strands no timer.
+
+    A burst of a command's output is buffered on the task's thread and
+    a 0.1 s timer started to send it.  ``Thread.start()`` ends in a wait
+    for the thread to come up, which enters a ``threading.Condition``:
+    the Stop raised as its ``__enter__`` returns left the lock held
+    (gh-74174), so the timer's thread never ran and stayed for good, and
+    the buffered output waited for the command's end, no other timer
+    being started while one is set.
+    """
+    printer = MemoryPrinter()
+    printer.subscribe_tab("fx44b-flush-timer", "tab-fx44b")
+    raised: list[BaseException] = []
+    before = threading.enumerate()
+    profile = stop_as_it_takes_its_lock(
+        threading.Event.wait, threading.Thread.start, JsonPrinter._append_bash_fragment,
+    )
+    worker = threading.Thread(
+        target=_stream_under_profile, args=(printer, profile, raised), daemon=True,
+    )
+    worker.start()
+    worker.join(20)
+    assert not worker.is_alive()
+    assert [type(exc) for exc in raised] == [KeyboardInterrupt]
+    assert stranded_threads(before) == []
+    sent = "".join(
+        event.get("text", "") for event in printer.emitted if event.get("type") == "system_output"
+    )
+    assert "second\n" in sent

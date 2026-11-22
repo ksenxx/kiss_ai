@@ -28,6 +28,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
+import time
 from collections import Counter
 from fnmatch import fnmatchcase
 
@@ -38,7 +40,6 @@ from playwright.sync_api import sync_playwright
 
 from kiss.tests.conftest import (
     TRANSIENT_REPLACE_READ_ERRORS,
-    click_row_menu_item,
     goto_retrying_network_change,
 )
 from kiss.tests.server.test_scm_worktrees_and_actions import (
@@ -359,6 +360,7 @@ def test_explorer_folder_menu_and_root_guards(browser, harness, worktree):
         assert labels == [
             "New File...",
             "New Folder...",
+            "Sort",
             "Find in Folder...",
             "Cut",
             "Copy",
@@ -390,6 +392,86 @@ def test_explorer_folder_menu_and_root_guards(browser, harness, worktree):
         page.keyboard.press("Escape")
     finally:
         context.close()
+
+
+# The names of the entries the Explorer lists in the folder `sortme`,
+# top to bottom (a JS expression).
+_SORTME_NAMES_JS = """Array.from(document.querySelectorAll('.explorer-row'))
+  .map(row => row.dataset.explorerPath.split(/[\\\\/]/))
+  .filter(parts => parts[parts.length - 2] === 'sortme')
+  .map(parts => parts[parts.length - 1])"""
+_SORT_ITEMS = "#sidebar-context-submenu .tree-ctx-item"
+_SORT_ITEMS_JS = "els => els.map(e => [e.textContent.trim(), e.getAttribute('aria-checked')])"
+
+
+def _open_sort_submenu(page, folder) -> None:
+    """Right-click the Explorer row *folder* and rest the mouse on Sort."""
+    _panel_click(folder, button="right")
+    _menu_labels(page)
+    _menu_item(page, "Sort").hover()
+    page.wait_for_selector("#sidebar-context-submenu:not([hidden])", timeout=10000)
+
+
+def _wait_sortme(page, names: list[str]) -> None:
+    """Wait until the folder `sortme` lists *names*, in that order."""
+    listed = json.dumps(names, separators=(",", ":"))  # as JSON.stringify writes it
+    page.wait_for_function(
+        f"JSON.stringify({_SORTME_NAMES_JS}) === {json.dumps(listed)}", timeout=10000,
+    )
+
+
+def test_folder_sort_submenu_orders_the_folder_and_is_remembered(browser, harness, worktree):
+    folder = harness.work_dir / "sortme"
+    (folder / "sub").mkdir(parents=True)
+    now = time.time()
+    # Created a, b, c; last modified b, a, c.  The modification times
+    # are after the creation: macOS moves a file's creation time back
+    # to a modification time set before it.
+    for name, later in (("a.txt", 2000), ("b.txt", 1000), ("c.txt", 3000)):
+        (folder / name).write_text(name)
+        os.utime(folder / name, (now + later, now + later))
+        time.sleep(0.05)
+    context, page, frames = _open_page(browser, harness)
+    try:
+        _open_explorer(page)
+        row = page.locator(_explorer_row_sel("/sortme", ".is-dir"))
+        row.click()
+        _wait_sortme(page, ["sub", "a.txt", "b.txt", "c.txt"])
+        # The submenu offers the six orders and ticks the one in use.
+        _open_sort_submenu(page, row)
+        assert page.eval_on_selector_all(_SORT_ITEMS, _SORT_ITEMS_JS) == [
+            ["Alphabetical (Ascending)", "true"], ["Alphabetical (Descending)", "false"],
+            ["Created (Ascending)", "false"], ["Created (Descending)", "false"],
+            ["Modified (Ascending)", "false"], ["Modified (Descending)", "false"],
+        ]
+        page.keyboard.press("Escape")
+        page.keyboard.press("Escape")
+        # A pick lists the folder anew in that order, folders first.
+        for label, files in (
+            ("Alphabetical (Descending)", ["c.txt", "b.txt", "a.txt"]),
+            ("Modified (Ascending)", ["b.txt", "a.txt", "c.txt"]),
+            ("Created (Ascending)", ["a.txt", "b.txt", "c.txt"]),
+            ("Created (Descending)", ["c.txt", "b.txt", "a.txt"]),
+            ("Modified (Descending)", ["c.txt", "a.txt", "b.txt"]),
+        ):
+            _open_sort_submenu(page, row)
+            page.locator(_SORT_ITEMS, has_text=label).click()
+            _wait_sortme(page, ["sub", *files])
+        assert _sent(frames, "listDir")[-1]["sort"] == "modified-desc"
+        # The pick is ticked, and a reloaded page still lists by it.
+        _open_sort_submenu(page, row)
+        assert page.locator(_SORT_ITEMS + "[aria-checked='true']").inner_text().strip() == (
+            "Modified (Descending)"
+        )
+        page.reload()
+        page.wait_for_selector("#task-input", state="visible", timeout=30000)
+        _open_explorer(page)
+        if not page.locator(_explorer_row_sel("/sortme/sub")).count():
+            _panel_click(row)
+        _wait_sortme(page, ["sub", "c.txt", "a.txt", "b.txt"])
+    finally:
+        context.close()
+        shutil.rmtree(folder)
 
 
 def test_new_file_rename_and_delete_act_on_disk(browser, harness, worktree):
@@ -2593,12 +2675,12 @@ def test_history_groups_tasks_by_chat_with_day_separators(browser, harness, work
         pre_tab_ids = page.evaluate("window._testApi.openTabs().map(t => t.id)")
         # Chat panels are collapsed by default (nothing is running):
         # the header of a chat not yet summarised shows the chat's FIRST
-        # task; the "Show details" line of its "…" menu opens the panel.
+        # task; the fold button on its line opens the panel.
         group_a = page.locator(f".history-chat-group[data-chat-id='{chat_a}']")
         assert "collapsed" in (group_a.get_attribute("class") or "")
         header_a = group_a.locator(".history-chat-header")
         assert header_a.locator(".history-chat-title").inner_text() == "alpha one"
-        click_row_menu_item(header_a, ".history-chat-collapse")
+        header_a.locator(":scope > .history-chat-collapse").click()
         assert "collapsed" not in (group_a.get_attribute("class") or "")
         page.locator(".sidebar-item", has_text="alpha one").click()
         # Opening a history task creates a fresh REGISTERED tab; the
@@ -2685,12 +2767,10 @@ def test_history_click_survives_mid_press_refresh(browser, harness, worktree):
         page.wait_for_selector("#history-list .history-chat-group", timeout=15000)
         # Open the collapsed chat panel so its row can be pressed; the
         # explicit expand survives the parked rebuild below.
-        click_row_menu_item(
-            page.locator(
-                f".history-chat-group[data-chat-id='{chat_a}'] .history-chat-header"
-            ),
-            ".history-chat-collapse",
-        )
+        page.locator(
+            f".history-chat-group[data-chat-id='{chat_a}']"
+            " .history-chat-header > .history-chat-collapse"
+        ).click()
         row = page.locator(".sidebar-item", has_text="hold target")
         row.scroll_into_view_if_needed()
         box = row.bounding_box()

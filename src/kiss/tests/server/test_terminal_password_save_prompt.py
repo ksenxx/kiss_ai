@@ -22,14 +22,20 @@ for consumers loading the shim without that HTML. A synchronous exception from
 constructing a valid PasswordCredential or calling an available credentials.store
 requires a broken/replaced browser API, so it is not manufactured here. Real
 promise rejection (cross-origin iframe) and missing API (Firefox) are covered.
+
+The last test puts a TCP relay (:class:`_Link`) where a remote visitor's
+tunnel stands: the browser's own WebSocket and the daemon exchange their own
+bytes through it, late or not at all, as over a slow or a dead link.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import shutil
+import socket
 import subprocess
 import threading
 from collections.abc import Iterator
@@ -43,6 +49,7 @@ from playwright.sync_api import (
     Page,
     Request,
     Route,
+    WebSocket,
     expect,
     sync_playwright,
 )
@@ -50,6 +57,7 @@ from playwright.sync_api import (
 from kiss.core.user_config import save_config
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.server.conftest import FORWARDED_VISITOR
+from kiss.tests.webapp.test_sidebar_menus import _show_panel
 
 _PASSWORD = "terminal-regression-secret"
 _CM_SAVE = "CM API save a credential:"
@@ -174,7 +182,10 @@ async def _disconnect_clients(server: RemoteAccessServer) -> None:
 
 
 def _open_terminal(page: Page, index: int) -> Locator:
-    """Open a Terminal through the "..." menu; return its view, the *index*-th on the page.
+    """Open a Terminal from the task-info strip; return its view, the *index*-th on the page.
+
+    A tab that opens slides the task-info panel away on the desktop:
+    the panel is brought back before the press.
 
     xterm.js is downloaded from jsDelivr when the terminal opens
     (``terminalTab.js``, 15 s budget).  Under full-suite load that
@@ -185,7 +196,7 @@ def _open_terminal(page: Page, index: int) -> Locator:
     again, three attempts in all, as ``test_remote_terminal_tab`` does.
     """
     for attempt in range(3):
-        page.locator("#more-btn").click()
+        _show_panel(page)
         page.locator("#terminal-btn").click()
         terminal = page.locator(".terminal-view").nth(index)
         expect(
@@ -367,3 +378,163 @@ def test_browser_refusing_credential_storage_does_not_block_authentication(
     expect(frame.locator("#auth-modal-input")).to_have_value("")
     expect(frame.locator("#task-input")).to_be_visible()
     assert not errors
+
+
+class _Link:
+    """A remote visitor's link to the daemon: a TCP relay on loopback.
+
+    Each side's own bytes pass through it.  While ``answers`` is clear it
+    keeps back what the daemon sends on a WebSocket after its answer to the
+    upgrade (a slow link); while ``down`` is set every new connection ends
+    as it is made (a dead link, see :meth:`cut`).
+    """
+
+    def __init__(self, daemon_port: int) -> None:
+        self._daemon_port = daemon_port
+        self.answers = threading.Event()
+        self.answers.set()
+        self.down = threading.Event()
+        self._lock = threading.Lock()
+        self._sockets: list[socket.socket] = []
+        self._listener = socket.create_server(("127.0.0.1", 0))
+        self.url = f"http://127.0.0.1:{self._listener.getsockname()[1]}"
+        threading.Thread(target=self._accept, daemon=True).start()
+
+    def _accept(self) -> None:
+        while True:
+            try:
+                browser, _ = self._listener.accept()
+            except OSError:
+                return  # closed
+            with self._lock:
+                if self.down.is_set():
+                    browser.close()
+                    continue
+                daemon = socket.create_connection(("127.0.0.1", self._daemon_port))
+                self._sockets += [browser, daemon]
+            for source, sink in ((browser, daemon), (daemon, browser)):
+                threading.Thread(
+                    target=self._carry, args=(source, sink, source is daemon), daemon=True,
+                ).start()
+
+    def _carry(self, source: socket.socket, sink: socket.socket, from_daemon: bool) -> None:
+        """Pass what *source* sends on to *sink* until either ends, then end both."""
+        head = b""
+        try:
+            while data := source.recv(65536):
+                if b"\r\n\r\n" not in head:
+                    head += data  # HTTP, to the end of the connection's first header
+                elif from_daemon and head.startswith(b"HTTP/1.1 101"):
+                    self.answers.wait()  # a WebSocket frame of the daemon
+                sink.sendall(data)
+        except OSError:
+            pass
+        _hang_up(source, sink)
+        source.close()
+
+    def cut(self) -> None:
+        """Take the link down: its connections end, and each new one as it is made."""
+        with self._lock:
+            self.down.set()
+            _hang_up(*self._sockets)
+            self._sockets.clear()
+
+    def close(self) -> None:
+        """End the relay: its connections, what it kept back, and its listener."""
+        self.cut()
+        self.answers.set()
+        _hang_up(self._listener)
+        self._listener.close()
+
+
+def _hang_up(*sockets: socket.socket) -> None:
+    """Shut *sockets* down both ways, which wakes the threads blocked on them."""
+    for sock in sockets:
+        with contextlib.suppress(OSError):
+            sock.shutdown(socket.SHUT_RDWR)
+
+
+# One WebSocket's frames as Chromium reports them: (direction, type, password).
+_SocketLog = list[tuple[str, str, str]]
+
+
+def _log_socket(logs: list[_SocketLog], ws: WebSocket) -> None:
+    """Start the log of *ws*, a socket the page just made, at the end of *logs*."""
+    log: _SocketLog = []
+    logs.append(log)
+    ws.on("framesent", partial(_log_frame, log, "sent"))
+    ws.on("framereceived", partial(_log_frame, log, "received"))
+
+
+def _log_frame(log: _SocketLog, direction: str, payload: str | bytes) -> None:
+    frame = json.loads(payload)
+    log.append((direction, frame.get("type", ""), frame.get("password", "")))
+
+
+def _wait_for_frame(page: Page, logs: list[_SocketLog], line: tuple[str, str, str]) -> _SocketLog:
+    """Let *page*'s events arrive until its newest socket has logged *line*; return that log."""
+    for _ in range(300):
+        if line in logs[-1]:
+            return logs[-1]
+        page.wait_for_timeout(100)
+    raise AssertionError(f"no {line} on the newest socket: {logs}")
+
+
+@pytest.mark.timeout(120)
+@pytest.mark.parametrize("first", [_PASSWORD, "mistyped-secret"], ids=["accepted", "refused"])
+def test_password_typed_while_an_earlier_one_is_unanswered_waits_for_the_answer(
+    password_server: RemoteAccessServer, first: str,
+) -> None:
+    """A second Unlock never overtakes the password a reconnect has just sent.
+
+    The link dies under the open dialog, so the first Unlock's password goes
+    out when the link is back, on a new socket, with the dialog armed again;
+    a second Unlock follows while the daemon's answer is still on the link.
+    The daemon judges one ``auth`` at a time and reads a frame after an
+    accepted one as a command, whose wrong password ends the session: the
+    newer password is sent only once the first is refused (as the socket's
+    second ``auth``), and the accepted one is stored and goes with the frames
+    that follow.  The newer one used to go out at once, and to be stored when
+    the first was the one accepted.
+    """
+    newer = "typed-meanwhile" if first == _PASSWORD else _PASSWORD
+    with contextlib.closing(_Link(password_server.port)) as link, sync_playwright() as p:
+        browser = p.chromium.launch()
+        try:
+            context = browser.new_context()
+            _as_forwarded_visitor(context)
+            page = context.new_page()
+            logs: list[_SocketLog] = []
+            page.on("websocket", partial(_log_socket, logs))
+            page.goto(link.url)
+            dialog, field = page.locator("#auth-modal"), page.locator("#auth-modal-input")
+            expect(dialog).to_be_visible()
+            with page.expect_websocket():  # the page noticed: it tries again
+                link.cut()
+            field.fill(first)
+            page.locator("#auth-modal-ok").click()
+            expect(page.locator("#auth-modal-error")).to_have_text(
+                "Cannot reach the server; retrying ...",
+            )
+            link.answers.clear()
+            link.down.clear()
+            log = _wait_for_frame(page, logs, ("sent", "auth", first))
+            field.fill(newer)
+            page.locator("#auth-modal-ok").click()
+            expect(dialog).to_be_visible()
+            assert log == [("sent", "auth", first)], "only its answer may release the newer one"
+            link.answers.set()
+            expect(dialog).to_be_hidden()
+            expect(field).to_have_value("")
+            assert _wait_for_frame(page, logs, ("received", "pong", "")) is log, (
+                "the daemon ended the session"
+            )
+            handshake = [line for line in log if line[1].startswith("auth")]
+            refused = [("sent", "auth", first), ("received", "auth_required", "")]
+            accepted = [("sent", "auth", _PASSWORD), ("received", "auth_ok", "")]
+            assert handshake == (accepted if first == _PASSWORD else refused + accepted)
+            later = {password for way, kind, password in log if way == "sent" and kind != "auth"}
+            assert later == {_PASSWORD}
+            assert page.evaluate("localStorage.getItem('sorcar-remote-pwd')") == _PASSWORD
+        finally:
+            browser.close()

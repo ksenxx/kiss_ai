@@ -23,9 +23,13 @@ const os = require('os');
 const path = require('path');
 
 const MEDIA = path.join(__dirname, '..', 'media');
-// Below run-all.js's 120 s suite limit, so a hung suite is killed and
-// reported here (and its coverage directory removed) first.
-const CHILD_TIMEOUT_MS = 90 * 1000;
+// Below run-all.js's 10 min suite limit, so a hung suite is killed and
+// reported here (and its coverage directory removed) first.  A limit
+// for a slow machine that also runs other tests: the heaviest suite,
+// historyProjects.test.js, takes 33 s under coverage alone on an idle
+// 80-core box and 78 s on a 10-core laptop under load (2026-11), where
+// a full test run made suites of 20 s to 35 s take over 90 s.
+const CHILD_TIMEOUT_MS = 8 * 60 * 1000;
 // How long the cleanup of a killed gate (`removeCoverageOnceGone`) waits
 // for the suite's process group to be gone.
 const CLEANUP_TIMEOUT_MS = 5 * 1000;
@@ -317,15 +321,19 @@ function measure(target, mark, reports, everyByte) {
 }
 
 /**
- * Run the gate: spawn `opts.testFile` under coverage and require 100% line
- * coverage of every `opts.mark` region in each of `opts.targets`
- * (`{file, sourceUrl, regions | minRegions}`; `file` is relative to media/).
- * `opts.label` names the feature in the report; `opts.everyByte` demands
- * that every non-whitespace byte of each line ran, not just one.  Exits 1
- * on any miss.
+ * Run the gate: spawn `opts.testFile` (one suite, or a list of suites run
+ * in turn) under coverage and require 100% line coverage of every
+ * `opts.mark` region in each of `opts.targets`
+ * (`{file, sourceUrl, regions | minRegions | wholeFile}`; `file` is
+ * relative to media/).  `opts.label` names the feature in the report;
+ * `opts.everyByte` demands that every non-whitespace byte of each line
+ * ran, not just one.  Exits 1 on any miss.
  */
 function gateRegions(opts) {
-  const reports = runCovered(opts.testFile, opts.mark);
+  let reports = [];
+  for (const testFile of [].concat(opts.testFile)) {
+    reports = reports.concat(runCovered(testFile, opts.mark));
+  }
   const results = opts.targets.map(t =>
     measure(t, opts.mark, reports, opts.everyByte),
   );

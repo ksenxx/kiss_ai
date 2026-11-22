@@ -29,6 +29,22 @@ thread could still block past its deadline or leak a reaper:
    failed transiently (a dropped daemon connection) while the start was
    still delayed gave up, and the start that then landed ran unwatched.
    Only a ``NotFound`` (the exec or container gone) ends the watch.
+6. (audit 2026-11-21, S4/F1) A kill sweep the daemon refused (every exec
+   into a paused container is) counted as a sweep that ran: the reaper of
+   an exec whose shell had already exited retired, and the background
+   children of that shell ran on once the container was unpaused.  The
+   reaper retires only after a sweep that ran to its end, or once the
+   container is stopped, which leaves nothing to sweep.
+7. (audit 2026-11-21, FX07 open item) A Stop raised where the wait for
+   the output (``Queue.get``) or for the first sweep (``Event.wait``)
+   had just taken its lock left that lock held: the worker never got
+   out of its ``put``, the reaper never past ``swept.set()``.  Each
+   slice now holds the Stop until it has returned.
+8. (audit 2026-11-21, FX44 review) A Stop raised by the wait for the
+   first sweep while ``_exec`` cleaned up after an ordinary error (a
+   failing output callback) was caught for the retry of the
+   cancellation and then dropped: ``Bash`` raised the error, not the
+   Stop.  A Stop that cuts the cleanup short is the one raised.
 
 Each test runs a real exec in a real container; the latency shims
 replace a method on the real docker-py client or container object,
@@ -36,6 +52,8 @@ exactly as the other timeout tests in this directory do, and the
 interrupt is the real ``tool_interrupt.inject_async_exception``.
 """
 
+import functools
+import queue
 import sys
 import threading
 import time
@@ -84,11 +102,15 @@ def _run_bash_profiled(
 
 
 def _stop_at_worker_start(frame: FrameType, event: str, arg: Any) -> None:
-    """Profile hook: inject the task Stop as the exec worker's ``Thread.start()`` returns."""
-    caller = frame.f_back
+    """Profile hook: inject the task Stop as the exec worker's ``Thread.start()`` returns.
+
+    The start is made with the Stop held back, which is raised as that hold ends.
+    """
+    held = frame.f_back
     if (
         event == "return" and frame.f_code is threading.Thread.start.__code__
-        and caller is not None and caller.f_code is DockerManager._exec.__code__
+        and held is not None and held.f_code is tool_interrupt.call_without_injection.__code__
+        and cast(FrameType, held.f_back).f_code is DockerManager._exec.__code__
     ):
         sys.setprofile(None)
         tool_interrupt.inject_async_exception(threading.get_ident(), KeyboardInterrupt)
@@ -99,6 +121,30 @@ def _stop_inside_cancel(frame: FrameType, event: str, arg: Any) -> None:
     if event == "return" and frame.f_code is _ExecRun._mark_cancelled.__code__ and arg:
         sys.setprofile(None)
         tool_interrupt.inject_async_exception(threading.get_ident(), KeyboardInterrupt)
+
+
+def _stop_as_a_wait_takes_its_lock(
+    wait: Any, frame: FrameType, event: str, arg: Any,
+    stop: type[BaseException] = KeyboardInterrupt, then: Any = None,
+) -> None:
+    """Profile hook: inject *stop* where *wait* (``Queue.get``, ``Event.wait``) has its lock.
+
+    ``Condition.__enter__`` has just returned to *wait* with the lock, ahead
+    of the ``with`` block that releases it (CPython gh-74174).  A second
+    passes first, so whoever publishes for the wait (the worker its output,
+    the reaper its first sweep) is waiting for that lock by then.  The
+    event ``Thread.start()`` waits on is not one of the exec's.  *then* is
+    the profile hook that takes over, for a second Stop.
+    """
+    waiter = frame.f_back
+    if (
+        event == "return" and frame.f_code is threading.Condition.__enter__.__code__
+        and waiter is not None and waiter.f_code is wait.__code__
+        and cast(FrameType, waiter.f_back).f_code is not threading.Thread.start.__code__
+    ):
+        sys.setprofile(then)
+        time.sleep(1)
+        tool_interrupt.inject_async_exception(threading.get_ident(), stop)
 
 
 def _wait_for_thread_count(expected: int, seconds: float) -> int:
@@ -367,6 +413,78 @@ class TestExecCancelBounded(unittest.TestCase):
         self.stop_armed_at = time.monotonic()
         self.stop.set()
 
+    def _fail_on_output(self, text: str) -> None:
+        """Stream callback: an ordinary error on the task thread once the command has printed."""
+        raise ValueError(f"cannot show {text!r}")
+
+    def _pause_then_stop(self, text: str) -> None:
+        """Stream callback: once the exec's shell has exited, pause the container and stop."""
+        del text
+        if not self.stop.is_set():
+            self._wait_until_exec_finished(self.watched_exec_id)
+            self.container.pause()
+            self.stop.set()
+
+    def test_a_sweep_a_paused_container_refused_is_repeated_after_the_unpause(self) -> None:
+        """(6) The reaper of a finished exec sweeps again once the paused container runs.
+
+        The shell has exited and left ``sleep 49`` behind; the container
+        is paused when the Stop arrives, so the daemon refuses both of
+        the reaper's sweeps.  The container stays paused for 2 s more,
+        long after the old reaper had taken the second refusal for a
+        sweep and retired; unpaused, the child must still be killed,
+        and the reaper must end once it is.
+        """
+        self._watch_next_exec()
+        self.stop = threading.Event()
+        self.env.stop_event = self.stop
+        self.env.stream_callback = self._pause_then_stop
+        try:
+            result = self.env.Bash("sleep 49 & echo started", "orphan, paused", timeout_seconds=30)
+            self.assertIn("Killed: the task was stopped.", result)
+            time.sleep(2)
+        finally:
+            self.env.stream_callback = None
+            self.env.stop_event = None
+            if self.api.inspect_container(self.container.id)["State"]["Paused"]:
+                self.container.unpause()
+        self._wait_until_no_process("sle", "ep 49")
+        reaper = f"docker-exec-reaper-{self.watched_token[:8]}"
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and any(t.name == reaper for t in threading.enumerate()):
+            time.sleep(0.1)
+        self.assertNotIn(reaper, [t.name for t in threading.enumerate()])
+
+    def test_a_failed_sweep_is_repeated_until_the_container_is_stopped(self) -> None:
+        """(6) A sweep that failed in a running container is no sweep; a stopped container ends it.
+
+        ``/bin/sh``, which runs the sweep, fails in this test's own
+        container: every sweep exits 1 and has killed nothing.  The
+        reaper keeps at it while the container runs, and ends once the
+        container is stopped: its processes are gone with it, and no
+        sweep ever runs there again.
+        """
+        env = DockerManager("python:3.11-slim", workdir="/tmp", mount_shared_volume=False)
+        env.open()
+        self.addCleanup(env.close)
+        env.Bash("ln -sf /bin/false /bin/sh", "make every sweep fail")
+        self.stop = threading.Event()
+        env.stop_event = self.stop
+        env.stream_callback = self._stop_once_output_arrives
+        before = set(threading.enumerate())
+        result = env.Bash("sleep 48 & echo started", "orphan, failed sweeps", timeout_seconds=30)
+        self.assertIn("Killed: the task was stopped.", result)
+        reapers = [
+            thread for thread in threading.enumerate()
+            if thread not in before and thread.name.startswith("docker-exec-reaper-")
+        ]
+        self.assertEqual(len(reapers), 1, reapers)
+        time.sleep(3)  # past the 2 s the daemon may hold the inspect of the exited shell
+        self.assertTrue(reapers[0].is_alive(), "the reaper took a failed sweep for a sweep")
+        cast(Any, env.container).kill()
+        reapers[0].join(timeout=15)
+        self.assertFalse(reapers[0].is_alive(), "the reaper outlived its container's processes")
+
     def test_timeout_wins_over_a_slow_exit_code_inspect(self) -> None:
         """(3) A deadline that expires while the exit code is awaited is a timeout.
 
@@ -466,12 +584,15 @@ class TestExecCancelBounded(unittest.TestCase):
             self.assertIn("timed out", result)
             self.assertLess(elapsed, 1 + _KILL_WAIT_S + 1)
 
-    def _assert_stop_kills_the_command(self, profile: Any, marker: str, sleep: str) -> None:
+    def _assert_stop_kills_the_command(
+        self, profile: Any, marker: str, sleep: str,
+        raised: type[BaseException] = KeyboardInterrupt,
+    ) -> None:
         """Run a command whose side effect lands at 3 s; a Stop placed by *profile* must prevent it.
 
-        The Stop is the real injected ``KeyboardInterrupt``; ``Bash`` must
-        propagate it, and neither the command (``sleep <sleep>`` after the
-        marker) nor its side effect may outlive the call.
+        The Stop is the real injected exception; ``Bash`` must propagate
+        it as *raised*, and neither the command (``sleep <sleep>`` after
+        the marker) nor its side effect may outlive the call.
         """
         outcome: dict[str, Any] = {}
         command = f"printf ready; sleep 3; touch /tmp/{marker}; sleep {sleep}"
@@ -484,7 +605,7 @@ class TestExecCancelBounded(unittest.TestCase):
         self.env.stop_event = None
         self.env.stream_callback = None
         self.assertFalse(thread.is_alive())
-        self.assertIsInstance(outcome.get("error"), KeyboardInterrupt, outcome)
+        self.assertIs(type(outcome.get("error")), raised, outcome)
         self._wait_until_no_process("sle", "ep " + sleep)
         present = self.env.Bash(f"test -e /tmp/{marker} && echo present || echo absent", "")
         self.assertEqual(present.strip(), "absent", "the command's side effect outlived the Stop")
@@ -512,6 +633,60 @@ class TestExecCancelBounded(unittest.TestCase):
         self.env.stop_event = self.stop
         self.env.stream_callback = self._stop_once_output_arrives
         self._assert_stop_kills_the_command(_stop_inside_cancel, "s11-reaper-marker", "46")
+
+    def test_stop_as_a_wait_takes_its_lock_strands_neither_worker_nor_reaper(self) -> None:
+        """(7) A Stop landing as the output wait or the kill wait takes its lock leaves it free.
+
+        The output wait is the first thing ``_exec`` does; the kill wait
+        is reached through the task Stop that fires once the command has
+        printed.  Raised right there, the injected Stop left the lock
+        held: the worker stayed in ``put`` with its thread and the exec's
+        connection, or the reaper in ``swept.set()``, ahead of the watch
+        that kills a start the daemon delayed.
+        """
+        for wait, marker in ((queue.Queue.get, "output"), (threading.Event.wait, "sweep")):
+            with self.subTest(wait=wait.__qualname__):
+                self.stop = threading.Event()
+                self.env.stop_event = self.stop
+                self.env.stream_callback = self._stop_once_output_arrives
+                before = set(threading.enumerate())
+                profile = functools.partial(_stop_as_a_wait_takes_its_lock, wait)
+                self._assert_stop_kills_the_command(profile, f"s44-{marker}-marker", "44")
+                left = [
+                    thread for thread in threading.enumerate()
+                    if thread not in before and thread.name.startswith("docker-exec-")
+                ]
+                for thread in left:
+                    thread.join(15)
+                self.assertEqual([thread.name for thread in left if thread.is_alive()], [])
+
+    def test_stop_cutting_the_cleanup_short_is_raised_unless_a_task_stop_began_it(self) -> None:
+        """(8) A Stop raised by the kill wait of ``_exec``'s cleanup is not dropped.
+
+        The cleanup begins for an ordinary error (the output callback
+        fails on the task thread) or for the task Stop (raised by the
+        output wait), and a Stop lands in its wait for the first sweep.
+        The handler retried the cancellation and then raised what it had
+        begun for: after an error, the Stop was gone.  The task Stop
+        still outranks the tool call's that follows it.
+        """
+        for begun_by, cut, raised in (
+            (ValueError, KeyboardInterrupt, KeyboardInterrupt),
+            (ValueError, ToolCallInterrupted, ToolCallInterrupted),
+            (KeyboardInterrupt, ToolCallInterrupted, KeyboardInterrupt),
+        ):
+            with self.subTest(begun_by=begun_by.__name__, cut=cut.__name__):
+                profile = functools.partial(
+                    _stop_as_a_wait_takes_its_lock, threading.Event.wait, stop=cut,
+                )
+                if begun_by is ValueError:
+                    self.env.stream_callback = self._fail_on_output
+                else:
+                    profile = functools.partial(
+                        _stop_as_a_wait_takes_its_lock, queue.Queue.get, then=profile,
+                    )
+                marker = f"s44b-{begun_by.__name__}-{cut.__name__}-marker"
+                self._assert_stop_kills_the_command(profile, marker, "43", raised)
 
     def test_refused_start_creates_no_reaper(self) -> None:
         """(4) An ``exec_start`` the daemon rejects is propagated and leaves no reaper thread."""

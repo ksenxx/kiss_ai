@@ -9,6 +9,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -225,16 +226,177 @@ def test_a_changed_conftest_selects_every_test_below_it(tmp_path: Path) -> None:
     """pytest loads a ``conftest.py`` for the tests under its directory without an import."""
     src = _tree(tmp_path)
     tests = src / "kiss" / "tests"
-    for rel in ("conftest.py", "sub/conftest.py", "sub/test_below.py", "sub/deep/test_deeper.py"):
+    for rel in ("conftest.py", "sub/conftest.py", "sub/test_below.py", "sub/deep/test_deeper.py",
+                "side/test_beside.py"):
         (tests / rel).parent.mkdir(parents=True, exist_ok=True)
         (tests / rel).write_text("")
     below = ["test_below.py", "test_deeper.py"]
     hit = script.impacted_tests([tests / "sub" / "conftest.py"], src, depth=1)
     assert sorted(p.name for p in hit) == below
     # The suite's conftest and the repository's own (above src) reach every test.
-    everything = sorted([*below, "test_core.py", "test_mid.py", "test_other.py", "test_top.py"])
+    everything = sorted([*below, "test_beside.py", "test_core.py", "test_mid.py", "test_other.py",
+                         "test_top.py"])
     for conftest in (tests / "conftest.py", Path("conftest.py")):
         assert sorted(p.name for p in script.impacted_tests([conftest], src)) == everything
+    # A conftest that imports a changed module stands for the tests below it, which
+    # are one hop further than it is: core -> mid -> sub/conftest.py -> sub's tests.
+    (tests / "sub" / "conftest.py").write_text("import kiss.mid\n")
+    core, mid = src / "kiss" / "core" / "core.py", src / "kiss" / "mid.py"
+    names = lambda paths: sorted(p.name for p in paths)  # noqa: E731
+    assert names(script.impacted_tests([mid], src, depth=1)) == ["test_mid.py"]
+    assert names(script.impacted_tests([mid], src)) == [*below, "test_mid.py", "test_top.py"]
+    assert names(script.impacted_tests([core], src)) == ["test_core.py", "test_mid.py"]
+    assert names(script.impacted_tests([core], src, depth=0)) == [
+        "test_below.py", "test_core.py", "test_deeper.py", "test_mid.py", "test_top.py",
+    ]
+    # Importing kiss.mid runs kiss/__init__.py first, for the conftest's tests as for it.
+    package = script.impacted_tests([src / "kiss" / "__init__.py"], src)
+    assert names(package) == [name for name in everything if name != "test_beside.py"]
+
+
+def _fixture(signature: str, body: str, options: str = "") -> str:
+    """Return the source of a fixture ``def signature`` that runs *body*."""
+    return f"import pytest\n@pytest.fixture{options}\ndef {signature}:\n    {body}\n"
+
+
+def _test(asks: str = "") -> str:
+    """Return the source of a test that passes once it has the fixtures it *asks* for."""
+    return f"def test_it({asks}):\n    pass\n"
+
+
+_LAZY = _fixture("value()", "import kiss.helper")
+_WRAPPED = _fixture("wrapped(value)", "return value")
+_ANNOTATED = "def annotation():\n    import kiss.helper\ndef unused() -> annotation():\n    pass\n"
+_CONFTEST_TREE = {
+    "helper.py": "raise AssertionError('kiss.helper is broken')\n",
+    "fixtures.py": _WRAPPED,
+    "shared.py": _fixture("outer(inner)", "pass"),
+    # Audit X1/F2: what a conftest imports as it loads, every test below it runs.
+    "tests/eager/conftest.py": (
+        "from kiss.helper import VALUE\n" + _fixture("value()", "return VALUE")
+    ),
+    "tests/eager/test_fails.py": _test("value"),
+    # The six trees of the FX21b review.  A helper nothing names runs for no test, ...
+    "tests/unused/conftest.py": "def unused():\n    import kiss.helper\n",
+    "tests/unused/test_passes.py": _test(),
+    # ... a fixture for the tests that ask for it, by its ``name=``, ...
+    "tests/renamed/conftest.py": (
+        _fixture("_optional()", "import kiss.helper", "(name='optional')")
+    ),
+    "tests/renamed/test_fails.py": _test("optional"),
+    "tests/renamed/test_passes.py": _test(),
+    # ... or through a fixture of a conftest below (``values`` is another word).
+    "tests/child/conftest.py": _LAZY,
+    "tests/child/test_passes.py": _test("values=()"),
+    "tests/child/deep/conftest.py": _WRAPPED,
+    "tests/child/deep/test_fails.py": _test("wrapped"),
+    "tests/child/deep/test_passes.py": _test(),
+    # An annotation is evaluated as the conftest loads, whatever function it is on (from
+    # Python 3.14 only when something reads it, so there the selection is to spare), ...
+    "tests/annotation/conftest.py": _ANNOTATED,
+    f"tests/annotation/test_{'fails' if sys.version_info < (3, 14) else 'spare'}.py": _test(),
+    # ... unless the module postpones its annotations: spared too, as something may read
+    # them later (FX21c review: a header may be evaluated, it need not be).
+    "tests/postponed/conftest.py": "from __future__ import annotations\n" + _ANNOTATED,
+    "tests/postponed/test_spare.py": _test(),
+    # A default is evaluated as the conftest loads, and may call a function by its name in a
+    # string (FX21c review); the fixture's own ``name=`` above is no such call.
+    "tests/literal/conftest.py": (
+        "import sys\ndef load():\n    import kiss.helper\n"
+        "def unused(x=getattr(sys.modules[__name__], 'load')()):\n    pass\n"
+    ),
+    "tests/literal/test_fails.py": _test(),
+    # A test asks through a fixture it imports from a module that names the conftest's.
+    "tests/imported/conftest.py": _LAZY,
+    "tests/imported/test_fails.py": "from kiss.fixtures import wrapped\n" + _test("wrapped"),
+    "tests/imported/test_passes.py": _test(),
+    # pytest runs a hook, and an autouse fixture with all it asks for, for every test below.
+    "tests/hook/conftest.py": "def pytest_runtest_setup(item):\n    import kiss.helper\n",
+    "tests/hook/test_fails.py": _test(),
+    "tests/auto/conftest.py": (
+        _fixture("_auto(_check)", "pass", "(scope='function', autouse=True)")
+        + _fixture("_check(_really)", "pass")
+        + _fixture("_really()", "import kiss.helper")
+    ),
+    "tests/auto/test_fails.py": _test(),
+    # A mark asks for a fixture, as does the string another fixture hands to pytest.  The
+    # default written out, ``autouse=False``, runs it for no other test (FX21c review).
+    "tests/asked/conftest.py": (
+        _fixture("value()", "import kiss.helper", "(autouse=False)")
+        + _fixture("twice(request)", "request.getfixturevalue('value')")
+    ),
+    "tests/asked/test_fails.py": "import pytest\n@pytest.mark.usefixtures('twice')\n" + _test(),
+    "tests/asked/test_passes.py": _test(),
+    # An import for type checkers never runs; the ``else`` of one always does.
+    "tests/typed/conftest.py": (
+        "from typing import TYPE_CHECKING\nif TYPE_CHECKING:\n    import kiss.helper\n"
+    ),
+    "tests/typed/test_passes.py": _test(),
+    "tests/typed/untyped/conftest.py": (
+        "import typing\nif typing.TYPE_CHECKING:\n    pass\nelse:\n    import kiss.helper\n"
+    ),
+    "tests/typed/untyped/test_fails.py": _test(),
+    # A fixture of the same name in another directory is another fixture.
+    "tests/plain/conftest.py": _fixture("value()", "return 1"),
+    "tests/plain/test_passes.py": _test("value"),
+    # Spared, not ruled out: another decorator may run the function it is handed, and a
+    # conftest that imports a module naming the fixture may hold a fixture that asks for it.
+    "tests/decorated/conftest.py": (
+        "import contextlib\n@contextlib.contextmanager\ndef unused():\n"
+        "    import kiss.helper\n    yield\n"
+    ),
+    "tests/decorated/test_spare.py": _test(),
+    "tests/registered/conftest.py": (
+        "from kiss.shared import outer\n" + _fixture("inner()", "import kiss.helper")
+    ),
+    "tests/registered/test_fails.py": _test("outer"),
+    "tests/registered/test_spare.py": _test(),
+    # The repository's own conftest, above src (written apart): a fixture as any other.
+    "tests/above/test_fails.py": _test("from_above"),
+    "tests/above/test_passes.py": _test(),
+}
+"""Files under ``src/kiss`` in which ``kiss.helper`` cannot be imported: real pytest fails each
+``test_fails.py``, passes the others, and the selector cannot rule out a ``test_spare.py``."""
+
+
+def test_a_conftest_import_selects_the_tests_that_run_it(tmp_path: Path) -> None:
+    """A conftest's import of a changed module selects the tests below it that run the import.
+
+    Real pytest says which those are, on :data:`_CONFTEST_TREE`: the selector names every
+    test a broken ``helper.py`` fails and, of those that pass, only the spared ones.  Before,
+    it named none (the import graph ends at a conftest), then every test below the conftest.
+    """
+    src = tmp_path / "src"
+    tests = src / "kiss" / "tests"
+    for rel, text in _CONFTEST_TREE.items():
+        path = src / "kiss" / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+        (path.parent / "__init__.py").touch()
+    (tmp_path / "conftest.py").write_text(_fixture("from_above()", "import kiss.helper"))
+    ran = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-rfE", "-p", "no:cacheprovider", "-o", "addopts=",
+         "--continue-on-collection-errors", f"--rootdir={tmp_path}", f"--confcutdir={tmp_path}",
+         str(tests)],
+        cwd=tmp_path, capture_output=True, text=True, timeout=300, check=False,
+        env={**os.environ, "PYTHONPATH": str(src), "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+             "PYTEST_ADDOPTS": "", "COLUMNS": "200"},
+    )
+    every = {p.relative_to(tests).as_posix() for p in tests.rglob("test_*.py")}
+    fails = {test for test in every if test.endswith("test_fails.py")}
+    spare = {test for test in every if test.endswith("test_spare.py")}
+    # What fails names its module: a test, or the directory of a conftest that cannot load.
+    error = r"^ERROR src/kiss/tests/(\S+?)(?:::\w+)? - AssertionError: kiss\.helper is broken$"
+    nodes = re.findall(error, ran.stdout, re.MULTILINE)
+    failed = {test for test in every for node in nodes if f"{test}/".startswith(f"{node}/")}
+    assert failed == fails, ran.stdout + ran.stderr
+    assert f"{len(every - fails)} passed, {len(nodes)} errors" in ran.stdout
+    helper = [src / "kiss" / "helper.py"]
+    for depth in (script.DEFAULT_DEPTH, 0):
+        selected = script.impacted_tests(helper, src, depth)
+        assert {p.relative_to(tests).as_posix() for p in selected} == fails | spare, depth
+    # The conftest is one hop from the module, the tests it stands for are two.
+    assert script.impacted_tests(helper, src, depth=1) == []
 
 
 def _cli(env: dict[str, str], *command: str) -> subprocess.CompletedProcess[str]:

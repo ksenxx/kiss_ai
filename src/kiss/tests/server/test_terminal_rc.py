@@ -526,3 +526,143 @@ def test_zsh_login_shell_whose_zshrc_turns_rcs_off_is_still_cleaned_up(
         )
     finally:
         tabs.close()
+
+
+_ZSH_DOTFILES = (".zshenv", ".zprofile", ".zshrc", ".zlogin")
+# What a start-up left: the user's files that ran, ZDOTDIR (unset, or its value
+# and attributes; whether a child process gets it, now and once it is assigned:
+# under posix_builtins an unset one still has the attributes it was given there),
+# the two options the tab's functions set for themselves, and the tab's variables
+# and functions still there.  (`command -p`: a case may leave no PATH.)
+_ZSH_STATE = (
+    'print -r -- "files=<${FILES-}> zdotdir=<${ZDOTDIR-unset}> type=${(t)ZDOTDIR-none} '
+    'env=$(command -p env | command -p grep -c "^ZDOTDIR=") '
+    'assigned=$( { setopt posix_builtins; ZDOTDIR=x;'
+    ' command -p env | command -p grep -c "^ZDOTDIR=x"; } 2>/dev/null ) '
+    'options=${options[posixbuiltins]}/${options[localoptions]} '
+    'private=$(typeset + | command -p grep -c -e KISS_TERMINAL -e KISS_USER)'
+    '+$(typeset +f | command -p grep -c __kiss_terminal)"'
+)
+_READ_ONLY = 'typeset -r ZDOTDIR="$HOME/cfg"'
+# Per case: ZDOTDIR in the environment (None: not there), and the line a dotfile of ~ runs.
+_ZSH_CASES: dict[str, tuple[str | None, str, str]] = {
+    # An empty ZDOTDIR is not an unset one: zsh then looks for /.zshrc.
+    "empty-in-the-environment": ("", ".zshenv", ""),
+    "emptied-by-zshenv": (None, ".zshenv", 'ZDOTDIR=""'),
+    # An exported empty one is in the environment, which takes no PATH to find out.
+    "empty-and-exported-without-a-path": (
+        None, ".zshenv", 'export ZDOTDIR=""; PATH=/nonexistent',
+    ),
+    # Exported while unset, it is empty but not in the environment
+    # (whatever posix_builtins says when it is put back) ...
+    "exported-while-unset": (None, ".zshrc", "export ZDOTDIR"),
+    "exported-while-unset-before-posix-builtins": (
+        None, ".zshrc", "export ZDOTDIR; setopt posix_builtins",
+    ),
+    # ... and under posix_builtins still unset, to be exported once it is assigned
+    # (with the option off again too: it shows when the option is back on).
+    "exported-while-unset-under-posix-builtins": (
+        None, ".zshenv", "setopt posix_builtins nounset; export ZDOTDIR",
+    ),
+    "exported-while-unset-under-posix-builtins-since-off": (
+        None, ".zshenv", "setopt posix_builtins; export ZDOTDIR; unsetopt posix_builtins",
+    ),
+    # A read-only ZDOTDIR cannot be pointed back at the tab's files.
+    **{f"read-only-from{name}": (None, name, _READ_ONLY) for name in _ZSH_DOTFILES},
+    "read-only-while-unset": (None, ".zshenv", "setopt posix_builtins; readonly ZDOTDIR"),
+    "read-only-while-unset-under-posix-builtins-since-off": (
+        None, ".zshenv", "setopt posix_builtins; readonly ZDOTDIR; unsetopt posix_builtins",
+    ),
+    # Nor can one that is no plain scalar (zsh itself reads an array's elements joined).
+    "an-array": (None, ".zshenv", 'ZDOTDIR=("$HOME/cfg")'),
+    # Nor does it count in the sh and ksh emulations: zsh reads the files of ~ then.
+    "sh-emulation": (None, ".zshenv", "emulate sh"),
+    "ksh-emulation": (None, ".zprofile", "emulate ksh"),
+    # The tab's own functions set no variable the user is warned about.
+    "warned-about-globals": (None, ".zshenv", "setopt warn_create_global warn_nested_var"),
+    # Nor do the user's export options decide what those functions export.
+    "unexported-under-allexport": (
+        None, ".zshenv",
+        'unsetopt global_export; setopt allexport; ZDOTDIR="$HOME"; typeset +x ZDOTDIR',
+    ),
+}
+
+
+def _zsh_start(login: bool, shimmed: bool, command: str = _ZSH_STATE) -> tuple[int, str, str]:
+    """Start a real interactive zsh, plain or as a tab does; return its exit code and output."""
+    shell = [shutil.which("zsh") or "zsh", *(["-l"] if login else [])]
+    argv, extra = with_persistent_history(shell) if shimmed else (shell, {})
+    # -d: without the machine's /etc/zshrc and the like.
+    done = subprocess.run(
+        [*argv, "-d", "-ic", command], env={**os.environ, **extra},
+        stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60,
+    )
+    return done.returncode, done.stdout, done.stderr
+
+
+@pytest.mark.skipif(shutil.which("zsh") is None, reason="zsh is not installed")
+@pytest.mark.parametrize("login", [False, True], ids=["interactive", "login"])
+@pytest.mark.parametrize(
+    ("env_zdotdir", "dotfile", "line"), list(_ZSH_CASES.values()), ids=list(_ZSH_CASES),
+)
+def test_zsh_starts_as_a_plain_zsh_does(
+    home: Path, monkeypatch: pytest.MonkeyPatch,
+    login: bool, env_zdotdir: str | None, dotfile: str, line: str,
+) -> None:
+    """The tab's zsh runs the files a plain zsh runs and ends with the same ZDOTDIR.
+
+    Every dotfile of ``~`` and of ``~/cfg`` records that it ran, and
+    *dotfile* of ``~`` runs *line* as well.  Nothing but those files
+    writes to the terminal, and nothing of the tab's is left behind.
+    """
+    for folder in (home, home / "cfg"):
+        folder.mkdir(exist_ok=True)
+        for name in _ZSH_DOTFILES:
+            extra = line if (folder, name) == (home, dotfile) else ""
+            (folder / name).write_text(
+                f'FILES="${{FILES-}} {folder.name}/{name}"\n{extra}\n', encoding="utf-8",
+            )
+    if env_zdotdir is not None:
+        monkeypatch.setenv("ZDOTDIR", env_zdotdir)
+    plain = _zsh_start(login, shimmed=False)
+    assert plain[0] == 0 and "private=0+0" in plain[1]
+    assert _zsh_start(login, shimmed=True) == plain
+
+
+@pytest.mark.skipif(shutil.which("zsh") is None, reason="zsh is not installed")
+def test_zsh_made_restricted_by_a_dotfile_starts_as_a_plain_zsh_does(home: Path) -> None:
+    """A restricted shell is left to zsh from there on, without a word.
+
+    It lets the tab's files neither try ZDOTDIR in silence (no
+    ``2>/dev/null``) nor set ``HISTFILE``.
+    """
+    (home / ".zshrc").write_text("setopt restricted\n", encoding="utf-8")
+    show = (
+        'print -r -- "zdotdir=<${ZDOTDIR-unset}> histfile=<${HISTFILE-unset}> '
+        'private=<${(Mk)parameters:#KISS_(TERMINAL|USER)*}${(Mk)functions:#__kiss_terminal*}>"'
+    )
+    for login in (False, True):
+        plain = _zsh_start(login, False, show)
+        assert plain[0] == 0 and "private=<>" in plain[1]
+        assert _zsh_start(login, True, show) == plain
+
+
+@pytest.mark.skipif(shutil.which("zsh") is None, reason="zsh is not installed")
+def test_zsh_history_file_derived_from_the_tabs_zdotdir_is_the_users(
+    home: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``HISTFILE`` under the tab's ZDOTDIR is the user's before their ``.zshrc`` runs.
+
+    macOS's /etc/zshrc derives it (``${ZDOTDIR:-$HOME}/.zsh_history``)
+    before ``.zshrc``, while ZDOTDIR is the tab's; the environment
+    stands in for that file here.
+    """
+    show = 'print -r -- "seen=<${SEEN-}> histfile=<$HISTFILE>"'
+    users = f"{home}/.zsh_history"
+    # This .zshrc ends the tab's part of the start-up: the file is the user's by then.
+    (home / ".zshrc").write_text(f'SEEN="$HISTFILE"\n{_READ_ONLY}\n', encoding="utf-8")
+    monkeypatch.setenv("HISTFILE", str(rc_dir() / "zdotdir" / ".zsh_history"))
+    assert _zsh_start(False, True, show) == (0, f"seen=<{users}> histfile=<{users}>\n", "")
+    # With an empty ZDOTDIR too the file is ~'s, as that rc has it.
+    monkeypatch.setenv("ZDOTDIR", "")
+    assert _zsh_start(False, True, show) == (0, f"seen=<> histfile=<{users}>\n", "")

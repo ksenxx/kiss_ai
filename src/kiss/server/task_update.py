@@ -15,6 +15,12 @@ then whenever the update is older than :data:`UPDATE_INTERVAL_S` or is
 explicitly refreshed — never more than one run per task at a time, and
 never for a task nobody is looking at (a poll is what triggers a run).
 
+The question also asks for the time left until the task finishes.  That
+last sentence of the answer is cut out of the text the panel shows
+(:func:`_split_estimate`) and published as three finish times (``etaAt``,
+``etaLowAt``, ``etaHighAt``) the panel counts down to; an update with an
+estimate is refreshed after half of the estimated time left.
+
 :func:`run_task_update_sea` runs the agent in-process the way
 :func:`~kiss.agents.sorcar.merge_conflict_resolver.run_merge_sea` runs the merge
 agent: as a sub-agent of the task, in the task's own chat, so it opens as
@@ -25,7 +31,9 @@ task's; its spend is attributed to the task.
 from __future__ import annotations
 
 import dataclasses
+import html
 import logging
+import re
 import threading
 import time
 from collections.abc import Callable, Iterable
@@ -36,17 +44,42 @@ from kiss.agents.sorcar.persistence import TASK_USAGE_LOCK, task_start_ms, usage
 from kiss.agents.sorcar.sea_commands import evaluate_sea
 from kiss.core import stop_signal
 from kiss.core.locked import _race_delay, locked_call
+from kiss.core.tool_interrupt import call_without_injection
 from kiss.server import agent_state
 from kiss.server.json_printer import stamp_event_ts
 
 log = logging.getLogger(__name__)
 
-# The question the panel asks the ``/ask`` agent about the task.
-UPDATE_QUESTION = "What has this task done so far, and what are its partial results?"
+# The question the panel asks the ``/ask`` agent about the task: what it did,
+# then the time left in one fixed sentence that :func:`_split_estimate` reads.
+# The wording was measured on past tasks (see :data:`ETA_RANGE_WIDENING`), so
+# a change of it needs a new measurement.
+UPDATE_QUESTION = (
+    "What has this task done so far, and what are its partial results? "
+    "After the answer, add a last sentence of exactly this form: "
+    '"Time left: <low>-<high> min, most likely <best> min." '
+    "It is your estimate of the time from now until the task finishes. "
+    "This estimate is a judgement, so give numbers even when unsure: work it out from the "
+    "task's request and plan, what is done and what clearly remains (reviews, test runs, "
+    "fixes, merges and the final report count too), the pace so far, and whatever the task "
+    "is waiting on right now. "
+    'Write "Time left: unknown." instead only when no estimate is possible, as when the '
+    "task is waiting for the user."
+)
 # A task's first update runs this long after the task started.
 FIRST_UPDATE_DELAY_S = 60.0
 # How long an update stays fresh before a poll triggers the next run.
 UPDATE_INTERVAL_S = 600.0
+# The factor the agent's own low-high range is widened by (low / 1.75,
+# high * 1.75).  Measured on 2026-11-20 by asking the question at 70
+# checkpoints of 35 finished tasks, each task's context rebuilt as it was
+# at the checkpoint: the range as stated held the real time left at 50% of
+# them on claude-fable-5-2-max and 46% on claude-opus-5-5-medium; widened
+# by 1.5 at 79% and 83%, by 1.75 at 89% and 90%, by 2 at 90% and 90%.  The
+# most likely value was off by a median factor of about 1.9 on both.
+# gpt-6.1-sol and gemini-4-carbon underestimate more: their range widened by
+# 1.75 held at 57% and 51% of 47 of those checkpoints.
+ETA_RANGE_WIDENING = 1.75
 # USD cap of one run.
 UPDATE_BUDGET_USD = 1.0
 # Updates of tasks that stopped being polled are dropped after this long.
@@ -63,8 +96,14 @@ class TaskUpdate:
     """The task-info panel's update for one task.
 
     Attributes:
-        text: The agent's answer (HTML), ``""`` before the first run
-            completes.  A failed run keeps the previous answer.
+        text: The agent's answer (HTML) without its time-left sentence,
+            ``""`` before the first run completes.  A failed run keeps
+            the previous answer and its estimate.
+        eta_at: ``time.time()`` at which the task most likely finishes,
+            by the estimate of the last run that answered (0 = none:
+            that answer gave no estimate or said the time is unknown).
+        eta_low_at: The earliest plausible finish (0 = no estimate).
+        eta_high_at: The latest plausible finish (0 = no estimate).
         error: The failure of the last run, ``""`` when it succeeded.
         finished_at: ``time.time()`` when the last run ended (0 = never).
         cost: USD spent by the last run.
@@ -75,6 +114,9 @@ class TaskUpdate:
     """
 
     text: str = ""
+    eta_at: float = 0.0
+    eta_low_at: float = 0.0
+    eta_high_at: float = 0.0
     error: str = ""
     finished_at: float = 0.0
     cost: float = 0.0
@@ -88,15 +130,28 @@ class TaskUpdate:
 
         The task's start plus :data:`FIRST_UPDATE_DELAY_S` until the
         first run has ended, then the last run's end plus
-        :data:`UPDATE_INTERVAL_S`.
+        :data:`UPDATE_INTERVAL_S`, or, when that run estimated the time
+        left, plus half of it (at least :data:`FIRST_UPDATE_DELAY_S`, at
+        most the interval): the relative error of an estimate that is
+        counted down grows as the end nears, so it is refreshed sooner
+        there.  A failed run waits the whole interval, whatever the
+        estimate it kept.
         """
-        if self.finished_at:
-            return self.finished_at + UPDATE_INTERVAL_S
-        return self.started_at + FIRST_UPDATE_DELAY_S
+        if not self.finished_at:
+            return self.started_at + FIRST_UPDATE_DELAY_S
+        wait = UPDATE_INTERVAL_S
+        if self.eta_at and not self.error:
+            half_left = (self.eta_at - self.finished_at) / 2
+            wait = min(max(half_left, FIRST_UPDATE_DELAY_S), UPDATE_INTERVAL_S)
+        return self.finished_at + wait
 
     @property
     def sig(self) -> str:
-        """Return a fingerprint that changes whenever the panel must repaint."""
+        """Return a fingerprint that changes whenever the panel must repaint.
+
+        The answer and its estimate change only when a run ends, which
+        changes ``finished_at``.
+        """
         return f"{self.finished_at:.3f}:{int(self.running)}"
 
     def payload(self) -> dict[str, Any]:
@@ -105,6 +160,9 @@ class TaskUpdate:
         ``exists`` is true from the first poll on: before the first run
         the panel shows when that run is due (``dueAt``), so a task that
         is seconds old does not look like a task without an update.
+        ``etaAt``, ``etaLowAt`` and ``etaHighAt`` (epoch milliseconds)
+        are the estimated finish and its plausible range, all ``0``
+        without an estimate; the panel counts down to them.
         """
         return {
             "exists": True,
@@ -114,6 +172,9 @@ class TaskUpdate:
             "cost": self.cost,
             "updatedAt": int(self.finished_at * 1000),
             "dueAt": int(self.due_at * 1000),
+            "etaAt": int(self.eta_at * 1000),
+            "etaLowAt": int(self.eta_low_at * 1000),
+            "etaHighAt": int(self.eta_high_at * 1000),
             "sig": self.sig,
         }
 
@@ -123,9 +184,9 @@ def mark_legacy_updates_as_side_channels() -> int:
 
     Rows written by earlier releases of :func:`run_task_update_sea`
     (which ran the ``/task_update`` agent with its prompt template)
-    carry ``is_side_channel = 0``, so every reload of a chat re-opened
-    each finished update as a dead sub-agent tab.  The daemon calls this
-    once at startup; it is idempotent.
+    carry ``is_side_channel = 0``, so a task digest lists each of them
+    among the task's worker sub-agents.  The daemon calls this once at
+    startup; it is idempotent.
 
     Returns:
         The number of rows newly stamped.
@@ -598,11 +659,14 @@ def _bank_remote_charge(agent: Any, charge: int, budget: float, tokens: int, ste
     and the mark, the bank and its publication of the agent's offsets
     happen under the offsets' publish lock: no other publication of
     the task's totals lands in between, so every usage event the task
-    persists carries offsets at most those totals (published before)
-    or at least them plus the charge (published after).  That is what
-    lets the row's orphan recovery tell, from its last persisted usage
-    event alone, whether the event's totals hold the charge
-    (:func:`~kiss.agents.sorcar.persistence._charges_held_by_usage_event`),
+    stamps with its ledger carries offsets at most those totals
+    (published before) or at least them plus the charge (published
+    after), and the run's closing event carries the ledger itself.
+    That is what lets the row's orphan recovery tell, for each
+    persisted usage event, which charges its totals hold
+    (:func:`~kiss.agents.sorcar.persistence._charges_held_by_usage_event`
+    — exact on stamped events and the closing event, conservative on
+    an unstamped one from an intermediate build before the stamp),
     whenever the process died: before the mark (unmarked, never
     banked), between the mark and the bank (marked, no event holds
     it) or after the bank.  The ledger counts the charge's key once,
@@ -636,9 +700,8 @@ def run_task_update_sea(parent_agent: Any, task_id: str) -> tuple[str, float]:
     ``_subagent_info``) and resumed on *parent_agent*'s chat, so the
     frontend opens it as a nested tab of the task's tab and its history
     row nests under the task's row in the same chat.  The stamp marks it
-    a side channel: its tab is open only while it runs — a reload never
-    re-opens the finished tab, because its answer lives in the task-info
-    panel, not in the tab.  It is configured exactly like a ``/ask``
+    a side channel: its answer lives in the task-info panel, not in its
+    tab.  It is configured exactly like a ``/ask``
     typed into the task's chat (:mod:`~kiss.agents.seas.ask.ask_sea`'s
     getters: its base system prompt and playbook suffix, the
     ``task_context`` tool and ``finish`` only, no memory, browser or
@@ -678,6 +741,7 @@ def run_task_update_sea(parent_agent: Any, task_id: str) -> tuple[str, float]:
             attributed), with that spend in USD as its
             ``task_update_cost`` attribute.
     """
+    from kiss.agents.sorcar.agent_dispatch import model_snapshot
     from kiss.agents.sorcar.chat_sorcar_agent import (
         ChatSorcarAgent,
         _extract_result_summary,
@@ -710,15 +774,15 @@ def run_task_update_sea(parent_agent: Any, task_id: str) -> tuple[str, float]:
     sub_tab_id = f"task-{task_id}__update-{int(time.time() * 1000)}"
     ask = evaluate_sea([AskSea()], UPDATE_QUESTION, task_id)
     ask_settings = ask.settings
-    model_name = str(ask_settings.get("model") or parent_agent.model_name)
+    # One snapshot of the parent's model and configuration: its ``set_model``
+    # may be running on the task's thread.  Its record of whose endpoint
+    # that is is not taken: the child has no ``set_model`` or ``run_agent``.
+    parent_model, parent_config, _ = model_snapshot(parent_agent)
+    model_name = str(ask_settings.get("model") or parent_model)
     agent = ChatSorcarAgent("Task update")
     agent._tab_id = sub_tab_id
     # A side channel like the ``/ask`` answerer: its answer lands in the
-    # task-info panel, so the finished child has no tab worth reopening.
-    # The daemon replays a finished side channel as ``subagentDone``
-    # instead of ``openSubagentTab`` (see ``server._is_side_channel_row``);
-    # without the stamp every reload re-opened one finished tab per
-    # periodic update.
+    # task-info panel.
     agent._subagent_info = {
         "parent_task_id": task_id,
         "parent_tab_id": parent_tab_id,
@@ -744,10 +808,7 @@ def run_task_update_sea(parent_agent: Any, task_id: str) -> tuple[str, float]:
             append_basic_tools=False,
             tool_profile=ask_settings["tool_profile"],
             max_budget=UPDATE_BUDGET_USD,
-            model_config=(
-                getattr(parent_agent, "model_config", None)
-                if model_name == parent_agent.model_name else None
-            ),
+            model_config=parent_config if model_name == parent_model else None,
             system_prompt_hook=ask.system_prompt_hook,
             web_tools=ask_settings["use_web_tools"],
             use_memory=ask_settings["use_memory"],
@@ -814,8 +875,268 @@ class _ChildStopEvent(threading.Event):
                 slice_s = min(slice_s, deadline - time.monotonic())
                 if slice_s <= 0:
                     return False
-            super().wait(slice_s)
+            # The update's thread waits here, and its Stop is injected: raised
+            # as a slice takes the event's lock, it would leave that lock held.
+            call_without_injection(super().wait, slice_s)
         return True
+
+
+# The time-left sentence is looked for in a copy of the answer of the same
+# length (:func:`_mask`) in which every character says what it is: a tag is
+# one of the kind characters below followed by padding, a character reference
+# is the character it stands for followed by padding, and any other character
+# is itself.  An offset in the copy is an offset in the answer, and nothing
+# inside a tag or a comment can match.
+_PAD = "\x00"
+_INLINE_OPEN = "\x01"
+_INLINE_CLOSE = "\x02"
+_BLOCK_CLOSE = "\x03"
+_BLOCK_OPEN = "\x04"
+# A comment or a doctype; also an element whose content is not markup,
+# together with the rest of the answer.
+_BREAK = "\x05"
+# The tags a sentence runs on through (the elements that mark up words: text
+# level, edits, and the formatting elements HTML keeps); any other tag ends it.
+_INLINE_TAGS = frozenset(
+    "a abbr b bdi bdo big cite code data del dfn em font i ins kbd mark nobr q s samp small span"
+    " strike strong sub sup time tt u var".split()
+)
+# The elements whose content is not read as the markup of the answer's text.
+_OPAQUE_TAGS = (
+    "script|style|textarea|title|xmp|iframe|noembed|noframes|noscript|plaintext|template|svg|math"
+)
+# The white space of HTML markup, which a browser collapses.
+_HTML_SPACE = "\t\n\f\r "
+# A tag after its name, as the HTML tokenizer reads it: a quoted attribute
+# value may hold anything but its quote, an unquoted one ends at white space
+# or ">", and a quote anywhere else is an ordinary character.  A tag that is
+# not closed runs to the end of the answer.
+_TAG_REST = (
+    rf"(?:[{_HTML_SPACE}/]++|[^{_HTML_SPACE}/>][^{_HTML_SPACE}/>=]*+"
+    rf"(?:[{_HTML_SPACE}]*+=[{_HTML_SPACE}]*+"
+    rf"""(?:"[^"]*+"?|'[^']*+'?|[^{_HTML_SPACE}>"'][^{_HTML_SPACE}>]*+)?+)?+)*+>?"""
+)
+# What the copy replaces, in this order: a comment (one that is not closed
+# runs to the end of the answer); an opaque element and all that follows it;
+# a tag; a doctype or what a browser reads as a comment ("<?xml ...>",
+# "</3>"); a character reference, with or without its semicolon; a control
+# character other than the white space of HTML (the copy's own alphabet is
+# made of them, and Python takes some of them for white space).
+_MARKUP = re.compile(
+    r"<!--(?:-?>|.*?(?:--!?>|\Z))"
+    rf"|(?ai:<(?:{_OPAQUE_TAGS}))(?=[{_HTML_SPACE}/>]).*"
+    rf"|<(?P<close>/?)(?P<name>[a-zA-Z][^{_HTML_SPACE}/>]*+){_TAG_REST}"
+    r"|<(?:[!?]|/(?!\Z))[^>]*+>?"
+    r"|&(?:#[0-9]++|#[xX][0-9a-fA-F]++|[a-zA-Z][a-zA-Z0-9]*+);?"
+    r"|[\x00-\x08\x0b\x0e-\x1f\x7f-\x9f]",
+    re.DOTALL,
+)
+# A decimal reference: its leading zeros and its digits after the eighth do
+# not change what it stands for (no character has a number that long), and
+# ``int`` refuses a number of more than 4300 digits.
+_LONG_DECIMAL = re.compile(r"&#0*([0-9]{1,8})[0-9]*")
+# One tag of the copy.
+_TAG = re.compile(f"[{_INLINE_OPEN}-{_BREAK}]{_PAD}*")
+_TAG_NAME_END = re.compile(f"[{_HTML_SPACE}/>]")
+# What displays nothing between two characters of the text: padding and
+# inline tags.  The parts below look through it, so that they read the text
+# as it is displayed (``<b>Time left:</b> 5-10 min``).
+_INLINE = f"{_PAD}{_INLINE_OPEN}{_INLINE_CLOSE}"
+# Between two parts of the sentence: white space or nothing.
+_GAP = rf"[\s{_INLINE}]"
+# Between two words of the sentence: white space.
+_SPACE = rf"[{_INLINE}]*+\s{_GAP}*+"
+# A sentence ends at a tag that is not inline, at a comment, and at a stop
+# unless a letter, a digit or an underscore comes next: that stop is inside
+# a word ("1.6 h", "run.sh", "self._lock").  Closing quotes and brackets
+# after the stop belong to the sentence it ends.
+_SENTENCE_BREAK = f"{_BLOCK_CLOSE}{_BLOCK_OPEN}{_BREAK}"
+_STOP = "[.!?]"
+_CLOSERS = r""")\]}"'\u2019\u201d"""
+# Where a word of the sentence ends: white space, punctuation, a tag that is
+# not inline or the end of the answer comes next.  A letter does not ("m" is
+# no unit in "m<b>onths</b>"), and neither does a character that displays
+# nothing or joins the letter before it (a zero-width space, a combining mark).
+_WORD_END = (
+    rf"(?![{_INLINE}]*+[^\s{_SENTENCE_BREAK}!-/:-@\[-^`{{-~\u2010-\u2027\u2212])"
+)
+# A hyphen or a dash, as it joins the bounds of the range.
+_DASH = "[-\u2010-\u2015\u2212]"
+_ETA_NUMBER = r"([0-9]++(?:\.[0-9]++)?+)"
+_ETA_UNIT = rf"(s|secs?|seconds?|m|mins?|minutes?|h|hrs?|hours?|d|days?){_WORD_END}"
+# "<low>-<high> min, most likely <best> min": a hyphen, a dash or "to" between
+# the bounds; <low> may have a unit of its own, else it has <high>'s.  Each
+# number stands right after the part before it and right before a unit, a
+# dash or "to", so it is never the digits after a sign ("-7 min") and never
+# a part of the digits displayed ("1<b>5</b> min").
+_ETA_RANGE = (
+    rf"{_ETA_NUMBER}{_GAP}*+(?:{_ETA_UNIT}{_GAP}*+)?(?:{_DASH}|to){_GAP}*+"
+    rf"{_ETA_NUMBER}{_GAP}*+{_ETA_UNIT}{_GAP}*+(?:,{_GAP}*+)?most{_SPACE}likely{_SPACE}"
+    rf"{_ETA_NUMBER}{_GAP}*+{_ETA_UNIT}"
+)
+# The whole answer, when its last sentence is the time-left sentence.  Every
+# repeated part keeps what it took and no two neighbours can take the same
+# character, so an answer of any shape costs linear time.
+_ETA_SENTENCE = re.compile(
+    # All that stands before the sentence, up to where the one before it ends
+    # (at the last of its stops).
+    rf"(?s:.*)(?:\A|[{_SENTENCE_BREAK}]{_PAD}*+|{_STOP}[{_CLOSERS}{_INLINE}]*+(?![\w.!?]))"
+    # The sentence (group 1) with the white space before it: the label,
+    # "unknown" or the range, whatever the agent added, its stops.
+    rf"({_GAP}*+Time{_SPACE}left{_GAP}*+:{_GAP}*+(?:unknown{_WORD_END}|{_ETA_RANGE})"
+    rf"(?:[^.!?{_SENTENCE_BREAK}]|{_STOP}[{_INLINE}]*+(?=\w))*+[.!?{_PAD}]*+)"
+    # Nothing but closing tags and white space up to the end of the answer.
+    rf"[\s{_PAD}{_INLINE_CLOSE}{_BLOCK_CLOSE}]*+\Z",
+    re.IGNORECASE,
+)
+# Seconds per unit, by the unit's first letter, case-folded: ignoring case,
+# Python reads the long s (U+017F) as an "s" too.
+_UNIT_SECONDS = {"s": 1.0, "m": 60.0, "h": 3600.0, "d": 86400.0}
+# No estimate reaches further (and a number of any length stays finite).
+_ETA_MAX_S = 365 * 86400.0
+_NO_ESTIMATE = (0.0, 0.0, 0.0)
+
+
+def _mask(part: re.Match[str]) -> str:
+    """Return what stands for *part* in the copy of the answer that is searched.
+
+    Args:
+        part: A match of :data:`_MARKUP` in the answer.
+
+    Returns:
+        As many characters as *part* has: for a tag its kind and padding;
+        for a character reference the character it stands for, padding,
+        and what the name goes on with after the reference ("&nbspleft"
+        is a space and "left"; a name that is no reference stays as it
+        is written); U+FFFD for a control character.
+    """
+    text = part.group()
+    if text[0] == "&":
+        char = html.unescape(_LONG_DECIMAL.sub(r"&#\1", text)) or "\ufffd"
+        return char[0] + _PAD * (len(text) - len(char)) + char[1:]
+    if text[0] != "<":
+        return "\ufffd"
+    name = part.group("name")
+    if name is None:
+        kind = _BREAK
+    elif name.lower() in _INLINE_TAGS:
+        kind = _INLINE_CLOSE if part.group("close") else _INLINE_OPEN
+    else:
+        kind = _BLOCK_CLOSE if part.group("close") else _BLOCK_OPEN
+    return kind + _PAD * (len(text) - 1)
+
+
+def _tag_name(tag: str) -> str:
+    """Return the lower-case name of the opening or closing tag *tag*."""
+    return _TAG_NAME_END.split(tag.lstrip("</"), maxsplit=1)[0].lower()
+
+
+def _opening_tag(answer: str, masked: str, end: int, name: str) -> int:
+    """Return where the opening tag *name* that ends at *end* starts in *answer*, else -1."""
+    start = end - 1
+    while start > 0 and masked[start] == _PAD:
+        start -= 1
+    opening = end and masked[start] in (_INLINE_OPEN, _BLOCK_OPEN)
+    return start if opening and _tag_name(answer[start:end]) == name else -1
+
+
+def _cut_sentence(answer: str, masked: str, start: int, end: int) -> str:
+    """Return *answer* without the text of its last sentence, ``answer[start:end]``.
+
+    The sentence's tags stay, and so does what follows it (closing tags
+    and white space), except the elements this leaves empty: a closing
+    tag that meets its own opening tag with nothing kept between them
+    goes with it, from the innermost outwards, and so does the white
+    space (:data:`_HTML_SPACE`) before the opening tag.  An element that
+    was empty before is not looked at.  One pass over the tags from
+    *start* on, as they are written: no element tree is built.
+
+    Args:
+        answer: The agent's answer (HTML).
+        masked: Its copy (:func:`_mask`).
+        start: Where the sentence starts, the white space before it included.
+        end: Where it ends; only closing tags and white space follow.
+
+    Returns:
+        The answer without the sentence; when no tag is left after it,
+        also without the white space that ended the answer.
+    """
+    kept, tail = start, end
+    # The tags kept after ``answer[:kept]``; the last ``opened`` of them are
+    # opening tags of the sentence that nothing has closed yet.
+    after: list[str] = []
+    opened = 0
+    for tag in _TAG.finditer(masked, start):
+        text = answer[tag.start():tag.end()]
+        if masked[tag.start()] == _INLINE_OPEN:
+            after.append(text)
+            opened += 1
+        elif opened and _tag_name(after[-1]) == _tag_name(text):
+            after.pop()
+            opened -= 1
+        elif not after and (below := _opening_tag(answer, masked, kept, _tag_name(text))) >= 0:
+            kept = below
+            while kept and answer[kept - 1] in _HTML_SPACE:
+                kept -= 1
+        else:
+            after.append(answer[tail:tag.start()] + text)
+            opened = 0
+        tail = max(end, tag.end())
+    return answer[:kept] + "".join(after) + (answer[tail:] if after else "")
+
+
+def _split_estimate(answer: str, asked_at: float) -> tuple[str, tuple[float, float, float]]:
+    """Take the time-left sentence off the end of *answer* and date its estimate.
+
+    The estimate is the answer's last sentence or it is nothing.  The
+    sentence is the one :data:`UPDATE_QUESTION` asks for, "Time left:
+    <low>-<high> min, most likely <best> min." or "Time left: unknown.",
+    as the answer displays it: white space, inline tags and character
+    references may stand between its words (``<b>Time left:</b>
+    5&ndash;10&nbsp;min, most likely 7 min.``), the numbers may be
+    decimals in seconds, minutes, hours or days, and what the agent adds
+    to the sentence belongs to it ("Time left: unknown (the user has not
+    answered).").  It starts where the sentence before it ends and only
+    closing tags and white space follow it.  Anything else is ordinary
+    text, wherever it stands and whatever it looks like: a label in the
+    middle of a sentence, a sentence that text, an opening tag or a
+    comment follows, a label followed by another form (a word that a tag
+    or a character reference continues, "7 m<b>onths</b>", is the word
+    it displays).  Nothing inside a tag or a comment is read.
+
+    Args:
+        answer: The agent's answer (HTML).
+        asked_at: ``time.time()`` when the question was asked: the "now"
+            the estimate counts from.
+
+    Returns:
+        ``(content, (low_at, best_at, high_at))``.  Without the sentence
+        at its end, ``content`` is *answer* unchanged and the times are
+        three zeros.  With it, ``content`` is *answer* without that
+        sentence (:func:`_cut_sentence`) and the times are the earliest,
+        most likely and latest finish as ``time.time()`` values, the
+        stated range widened by :data:`ETA_RANGE_WIDENING`; three zeros
+        when the sentence says "unknown" or its numbers are not ``low <=
+        best <= high``, none beyond :data:`_ETA_MAX_S`.
+    """
+    masked = _MARKUP.sub(_mask, answer)
+    found = _ETA_SENTENCE.match(masked)
+    if found is None:
+        return answer, _NO_ESTIMATE
+    content = _cut_sentence(answer, masked, *found.span(1))
+    low, low_unit, high, high_unit, best, best_unit = found.groups()[1:]
+    if best is None:
+        return content, _NO_ESTIMATE
+    low_s = float(low) * _UNIT_SECONDS[(low_unit or high_unit)[0].casefold()]
+    high_s = float(high) * _UNIT_SECONDS[high_unit[0].casefold()]
+    best_s = float(best) * _UNIT_SECONDS[best_unit[0].casefold()]
+    if not low_s <= best_s <= high_s <= _ETA_MAX_S:
+        return content, _NO_ESTIMATE
+    return content, (
+        asked_at + low_s / ETA_RANGE_WIDENING,
+        asked_at + best_s,
+        asked_at + high_s * ETA_RANGE_WIDENING,
+    )
 
 
 class TaskUpdateRunner:
@@ -911,10 +1232,13 @@ class TaskUpdateRunner:
             del self._updates[tid]
 
     def _run(self, task_id: str, parent_agent: Any) -> None:
-        """Thread body: run the agent and record its answer."""
+        """Thread body: run the agent and record its answer and its estimate."""
         text, cost, error = "", 0.0, ""
+        eta = _NO_ESTIMATE
+        asked_at = time.time()
         try:
-            text, cost = self._run_sea(parent_agent, task_id)
+            answer, cost = self._run_sea(parent_agent, task_id)
+            text, eta = _split_estimate(answer, asked_at)
         except KeyboardInterrupt as exc:
             # The task (or this update alone) was stopped while the update
             # ran: the child's stop event observes the task's and ends with it.
@@ -932,8 +1256,15 @@ class TaskUpdateRunner:
             # never be restarted by ``poll`` nor pruned.
             with self._lock:
                 upd = self._updates.setdefault(task_id, TaskUpdate())
+                # An answer that is empty, or nothing but its time-left
+                # sentence, reports nothing new: the last report stays
+                # (the panel shows no estimate without one).
                 if text:
                     upd.text = text
+                if not error:
+                    # A run that answered replaces the estimate even when
+                    # its answer has none: an older one would contradict it.
+                    upd.eta_low_at, upd.eta_at, upd.eta_high_at = eta
                 upd.error = error
                 upd.cost = cost
                 upd.running = False

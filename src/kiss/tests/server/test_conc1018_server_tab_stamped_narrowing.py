@@ -142,8 +142,13 @@ class TestTabStampedNarrowing(unittest.IsolatedAsyncioTestCase):
         for got in (got_a, got_b, got_c):
             self.assertIn("tabs_state", [e["type"] for e in got])
 
-    async def test_unscoped_replay_skips_peers_that_addressed_only_other_tabs(self) -> None:
-        task_id, chat_id = th._add_task("replayed task")
+    async def _unscoped_replays(
+        self, chat_id: str, task_id: str | None,
+    ) -> list[list[dict[str, Any]]]:
+        """The transcripts of *chat_id* peers A, B and C get when A resumes it into tab-a.
+
+        Peer B addressed only tab-b and the silent peer C no tab.
+        """
         reader_a, writer_a = await self._connect()
         reader_b, writer_b = await self._connect()
         reader_c, _writer_c = await self._connect()
@@ -157,20 +162,37 @@ class TestTabStampedNarrowing(unittest.IsolatedAsyncioTestCase):
 
         # No ``scoped`` and no ``replayConnId``: a history click, whose
         # transcript every surface showing tab-a must get.
-        await self._send(writer_a, {
-            "type": "resumeSession", "chatId": chat_id, "taskId": task_id,
-            "tabId": "tab-a",
-        })
+        resume = {"type": "resumeSession", "chatId": chat_id, "tabId": "tab-a"}
+        if task_id:
+            resume["taskId"] = task_id
+        await self._send(writer_a, resume)
 
-        got_a, got_b, got_c = await asyncio.gather(
+        got = await asyncio.gather(
             self._collect(reader_a, 1.5),
             self._collect(reader_b, 1.5),
             self._collect(reader_c, 1.5),
         )
-        replays = [
-            [e for e in got if e["type"] == "task_events" and e.get("task_id") == task_id]
-            for got in (got_a, got_b, got_c)
+        return [
+            [e for e in events if e["type"] == "task_events" and e.get("chat_id") == chat_id]
+            for events in got
         ]
+
+    async def test_unscoped_replay_skips_peers_that_addressed_only_other_tabs(self) -> None:
+        task_id, chat_id = th._add_task("replayed task")
+        replays = await self._unscoped_replays(chat_id, task_id)
+        self.assertEqual([len(r) for r in replays], [1, 0, 1])
+        self.assertEqual(replays[0][0]["task_id"], task_id)
+        self.assertEqual(replays[0][0]["tabId"], "tab-a")
+
+    async def test_unscoped_replay_of_a_run_without_a_row_skips_those_peers_too(self) -> None:
+        """A run still in its setup (no row, nothing recorded) is replayed to the same peers."""
+        agent_state.register(
+            agent_state.AgentState(
+                "provisional", chat_id="pre-row-chat", tab_id="owner", server_owned=True,
+                is_task_active=True,
+            ),
+        )
+        replays = await self._unscoped_replays("pre-row-chat", None)
         self.assertEqual([len(r) for r in replays], [1, 0, 1])
         self.assertEqual(replays[0][0]["tabId"], "tab-a")
 

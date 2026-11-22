@@ -14,6 +14,7 @@ Covers the ``~/.kiss/MY_MODELS.json`` CRUD helpers in
 from __future__ import annotations
 
 import json
+import os
 import threading
 import unittest
 from pathlib import Path
@@ -271,6 +272,19 @@ class TestCustomModelCrud(_MyModelsFileCase):
         error = mi.delete_custom_model("m")
         assert error is not None
         self.assertIn("unreadable", error)
+
+    @posix_only("symlinks need no privilege")
+    def test_a_link_naming_no_file_refuses_writes_and_is_preserved(self) -> None:
+        # An edit follows the registry's link only to a file (the one its
+        # lock then guards); a link naming none is refused as it stands.
+        mi.USER_MY_MODELS_PATH.symlink_to(Path(self._tmp.name) / "absent.json")
+        error = mi.save_custom_model("m", endpoint="http://a/v1")
+        assert error is not None
+        self.assertIn("unreadable", error)
+        self.assertTrue(mi.USER_MY_MODELS_PATH.is_symlink())
+        self.assertEqual(
+            sorted(os.listdir(self._tmp.name)), [".MY_MODELS.json.kiss.lock", "MY_MODELS.json"]
+        )
 
     def test_non_object_json_reads_as_none(self) -> None:
         mi.USER_MY_MODELS_PATH.parent.mkdir(parents=True, exist_ok=True)

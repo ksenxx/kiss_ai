@@ -168,10 +168,10 @@ function testChatLastLaunchedLine() {
     byChat[g.dataset.chatId] = g;
   });
   // The label follows the buttons of the header's action strip (the
-  // "Show details" chevron, the chat's favourite star, the rename
-  // pencil and the delete control: the trash button and its hidden
-  // Delete / Cancel strip), where a task panel shows its age label;
-  // the chat's machine ends the strip.
+  // chat's favourite star and its pin, the rename pencil and the
+  // delete control: the trash button and its hidden Delete / Cancel
+  // strip), where a task panel shows its age label; the chat's
+  // machine ends the strip.
   const lineA = byChat['chat-a'].querySelector(
     ':scope > .history-chat-header > .history-chat-actions > .history-chat-launched',
   );
@@ -180,15 +180,15 @@ function testChatLastLaunchedLine() {
   assert.deepStrictEqual(
     strip,
     [
-      'sidebar-item-collapse history-chat-collapse',
       'sidebar-item-favorite history-chat-favorite',
+      'sidebar-item-pin history-chat-pin',
       'sidebar-item-edit history-chat-rename',
       'sidebar-item-delete',
       'sidebar-item-confirm',
       'history-chat-launched',
       'sidebar-item-machine sidebar-item-machine-local history-chat-machine',
     ],
-    'chevron, star, rename pencil, delete control, the label, then the machine',
+    'star, pin, rename pencil, delete control, the label, then the machine',
   );
   assert.strictEqual(
     byChat['chat-a'].querySelector(':scope > .history-chat-header')

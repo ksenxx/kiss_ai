@@ -997,8 +997,8 @@ function testSubagentDoneShowsTheParentsOwnNumbers() {
   });
 
   // The parent is hidden now. Its child finishes (subagentDone closes
-  // the sub-agent tab on screen; a collapse alone never closes a running
-  // sub-agent's tab), then the parent's finished transcript replays.
+  // the sub-agent tab on screen), then the parent's finished transcript
+  // replays.
   send(win, {type: 'subagentDone', tab_id: subId});
   assert.strictEqual(
     win._testApi.getActiveTabId(),

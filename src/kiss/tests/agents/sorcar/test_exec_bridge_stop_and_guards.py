@@ -74,6 +74,11 @@
   died of it, an ``IndexError``; the kill it then could not post raised
   in its place, as did a request thread that could not start (audit
   2026-11-12, B4).
+* A Stop raised where the start of a helper thread (a request's
+  deadline timer, the thread ``bridge_exec`` makes its request on, the
+  one that posts its kill) has taken the lock of the thread's
+  ``_started`` event strands no thread: each start is a step the Stop
+  waits for (audit 2026-11-21, L3 O1).
 """
 
 from __future__ import annotations
@@ -81,11 +86,13 @@ from __future__ import annotations
 import dis
 import inspect
 import json
+import queue
 import socket
 import sys
 import threading
 import time
 from collections.abc import Callable, Iterator
+from concurrent.futures import Future
 from contextlib import ExitStack, contextmanager
 from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -98,14 +105,17 @@ from kiss.agents.sorcar.docker_manager import _KILL_WAIT_S, MAX_OUTPUT_CHARS, ST
 from kiss.agents.sorcar.exec_bridge import (
     _REPLY_MARGIN_S,
     ExecBridge,
+    _kill_bounded,
     _request,
     bridge_alive,
     bridge_exec,
 )
 from kiss.agents.sorcar.shell_guards import DESTRUCTIVE_VERDICT
 from kiss.core.kiss_error import KISSError
+from kiss.core.tool_interrupt import inject_async_exception
 from kiss.tests.conftest import nproc_limit_lowered_to_one, thread_start_can_be_starved
-from kiss.tests.server.pause import Pause
+from kiss.tests.lock_injection import stop_as_it_takes_its_lock, stranded_threads
+from kiss.tests.server.pause import Pause, Pauses
 
 #: A JSON reply nested deeper than the decoder recurses.
 _DEEP_JSON = b"[" * 100_000 + b"]" * 100_000
@@ -433,7 +443,7 @@ def test_run_commands_parallel_reports_an_unreachable_bridge_as_not_run() -> Non
 
 
 @pytest.mark.parametrize(
-    "url", ["http://127.0.0.1:notaport", "http://127.0.0.1:99999", "http://[::1"],
+    "url", ["http://127.0.0.1:notaport", "http://127.0.0.1:99999", "http://[::1", "http://:1"],
 )
 def test_a_bridge_url_that_names_no_endpoint_is_an_unreachable_bridge(url: str) -> None:
     assert bridge_alive(url) is False
@@ -544,3 +554,270 @@ def test_a_reply_dropped_after_exec_was_accepted_kills_the_command() -> None:
         assert time.monotonic() - started < _KILL_WAIT_S + 1.0
         assert server.commands == ["sleep 30"]
         assert server.kills == server.tokens == [server.tokens[0]]
+
+
+def _is_a_name_lookup(frame_locals: dict[str, Any]) -> bool:
+    """Whether the ``getaddrinfo`` being entered asks the resolver for ``localhost``."""
+    return frame_locals["host"] == "localhost" and not frame_locals["flags"]
+
+
+def test_a_name_lookup_that_hangs_ends_at_the_deadline_and_holds_one_thread() -> None:
+    """Audit 2026-11-21 S5/F4: nothing bounds the resolver, so a request to a bridge named by
+    a host name waited in ``getaddrinfo`` past its deadline (``bridge_alive`` past its ten
+    seconds).  The lookup is a helper thread's: each request gives up at its own deadline, the
+    requests for the name share the lookup in progress, and the bridge answers once it ends.
+
+    Not landed here: a Ctrl-C (the main thread's own, which nothing holds back) that takes a
+    request between the start of its lookup thread and the thread's entry in the table of
+    lookups; ``_look_up`` then finds no entry of its own to remove, the one branch of it no
+    test without a fault injector takes."""
+    with _bridge() as (server, _):
+        url = f"http://localhost:{server.server_port}"
+        errors: list[KISSError] = []
+        with Pause(socket.getaddrinfo.__code__, _is_a_name_lookup) as resolver:
+            for _ in range(2):
+                requester = threading.Thread(
+                    target=_request_through, args=(url, errors), daemon=True)
+                requester.start()
+                requester.join(5)
+                assert not requester.is_alive(), "the request still waits for the resolver"
+            assert resolver.paused.is_set()
+            assert len(errors) == 2 and all("unreachable" in str(error) for error in errors)
+            assert sum(t.name == "exec-bridge-lookup" for t in threading.enumerate()) == 1
+        ended = time.monotonic() + 5
+        while _thread_alive("exec-bridge-lookup") and time.monotonic() < ended:
+            time.sleep(0.01)
+        assert not _thread_alive("exec-bridge-lookup")
+        assert bridge_alive(url) is True
+
+
+def _is_a_lookup_thread(frame_locals: dict[str, Any]) -> bool:
+    """Whether the thread coming up (in ``Thread._bootstrap_inner``) is a name lookup's."""
+    return bool(frame_locals["self"].name == "exec-bridge-lookup")
+
+
+def _hold_a_name_lookup(
+    held: list[threading.Thread], go: threading.Event, frame_locals: dict[str, Any],
+) -> bool:
+    """``Pause`` matcher at ``getaddrinfo``: every lookup of ``localhost`` waits there for *go*."""
+    if _is_a_name_lookup(frame_locals):
+        held.append(threading.current_thread())
+        go.wait(60)
+    return False
+
+
+def _call_until_stopped(
+    call: Callable[[], object], stopped: list[bool], profile: Any = None,
+) -> None:
+    """Make *call* (under the *profile* hook, if any); record whether a Stop ended it."""
+    sys.setprofile(profile)
+    try:
+        call()
+        stopped.append(False)
+    except KeyboardInterrupt:
+        stopped.append(True)
+    finally:
+        sys.setprofile(None)
+
+
+def test_a_stop_as_the_lookup_thread_starts_leaves_the_lookup_to_the_next_request() -> None:
+    """Audit 2026-11-21 S5/F4, review: the lookup thread was started before its lookup was
+    entered in the table, and ``Thread.start`` waits for the thread to come up, where an
+    injected Stop is raised.  A request stopped there left a resolver no later request found:
+    every request for the name stopped that way, and the one after it, started one more
+    thread.  The start and the entry are now one step, which a Stop waits for."""
+    with _bridge() as (server, _):
+        url = f"http://localhost:{server.server_port}"
+        resolvers: list[threading.Thread] = []
+        resolve = threading.Event()
+        stopped: list[bool] = []
+        errors: list[KISSError] = []
+        bootstrap = threading.Thread._bootstrap_inner.__code__  # type: ignore[attr-defined]
+        coming_up = Pause(bootstrap, _is_a_lookup_thread)
+        hung = Pause(socket.getaddrinfo.__code__, partial(_hold_a_name_lookup, resolvers, resolve))
+        stopped_one = threading.Thread(
+            target=_call_until_stopped, args=(partial(bridge_alive, url), stopped), daemon=True)
+        next_one = threading.Thread(target=_request_through, args=(url, errors), daemon=True)
+        try:
+            with Pauses(coming_up, hung):
+                stopped_one.start()
+                assert coming_up.paused.wait(5), "the request started no lookup thread"
+                # The request is in ``Thread.start``, which the held thread has yet to answer.
+                assert inject_async_exception(cast(int, stopped_one.ident), KeyboardInterrupt) == 1
+                coming_up.release()
+                stopped_one.join(5)
+                assert stopped == [True], "the Stop did not end the request"
+                held_by = time.monotonic() + 5
+                while not resolvers and time.monotonic() < held_by:
+                    time.sleep(0.01)
+                next_one.start()
+                next_one.join(5)
+                assert not next_one.is_alive(), "the next request still waits for the resolver"
+                assert len(errors) == 1 and "unreachable" in str(errors[0]), errors
+                assert len(resolvers) == 1, "the next request started a lookup of its own"
+        finally:
+            resolve.set()
+        ended = time.monotonic() + 5
+        while _thread_alive("exec-bridge-lookup") and time.monotonic() < ended:
+            time.sleep(0.01)
+        assert not _thread_alive("exec-bridge-lookup")
+        assert bridge_alive(url) is True
+
+
+class _HeldAsItsWaitTakesTheLookup:
+    """A profile hook for a requesting thread: hold it where its wait for the name's lookup
+    (``Future.result``) has taken the lookup's condition, ahead of the ``with`` block that
+    would release it (CPython gh-74174), until the test has injected the Stop."""
+
+    def __init__(self) -> None:
+        self.at_lock: queue.SimpleQueue[None] = queue.SimpleQueue()
+        self.injected: queue.SimpleQueue[None] = queue.SimpleQueue()
+
+    def __call__(self, frame: FrameType, event: str, arg: object) -> None:
+        if (
+            event == "return"
+            and frame.f_code is threading.Condition.__enter__.__code__
+            and cast(FrameType, frame.f_back).f_code is Future.result.__code__
+        ):
+            sys.setprofile(None)
+            self.at_lock.put(None)
+            self.injected.get()
+
+
+def test_a_stop_as_a_request_begins_its_wait_for_the_lookup_leaves_the_lookup_usable() -> None:
+    """The wait for the name's lookup takes the lookup's condition.  A Stop raised right after
+    that left the condition held for good: the lookup's thread never published its answer, the
+    lookup stayed in the table, and every later request for the name hung on it, whatever its
+    deadline.  The wait is made in slices a Stop is held for."""
+    with _bridge() as (server, _):
+        url = f"http://localhost:{server.server_port}"
+        hook = _HeldAsItsWaitTakesTheLookup()
+        stopped: list[bool] = []
+        requester = threading.Thread(
+            target=_call_until_stopped,
+            args=(partial(bridge_alive, url), stopped, hook), daemon=True)
+        with Pause(socket.getaddrinfo.__code__, _is_a_name_lookup) as resolver:
+            requester.start()
+            hook.at_lock.get(timeout=5)
+            assert inject_async_exception(cast(int, requester.ident), KeyboardInterrupt) == 1
+            hook.injected.put(None)
+            requester.join(5)
+            assert stopped == [True], "the Stop did not end the request"
+            assert resolver.paused.is_set()
+        ended = time.monotonic() + 5
+        while _thread_alive("exec-bridge-lookup") and time.monotonic() < ended:
+            time.sleep(0.01)
+        assert not _thread_alive("exec-bridge-lookup"), "the lookup's thread never published"
+        assert bridge_alive(url) is True
+
+
+@pytest.mark.parametrize(
+    "starter", [_request, bridge_exec, _kill_bounded],
+    ids=["deadline-timer", "request-thread", "killer"],
+)
+def test_a_stop_as_a_helper_thread_starts_strands_no_thread(
+    starter: Callable[..., object],
+) -> None:
+    """``Thread.start`` waits for the new thread to come up, on the event's condition: a Stop
+    raised as it had taken that lock left it held (gh-74174), and the thread blocked on it for
+    good before it ran anything.  *starter* is the function whose helper thread the Stop lands
+    in the start of; the kill's is started for the task's Stop, set here as the bridge
+    replies.  The command is killed whichever start the Stop lands in."""
+    cancel = threading.Event()
+    with _bridge(stop_on_exec=cancel) as (server, bridge):
+        call = (
+            partial(bridge_alive, bridge.url) if starter is _request
+            else partial(bridge_exec, bridge.url, "true", 30, cancel)
+        )
+        hook = stop_as_it_takes_its_lock(threading.Event.wait, threading.Thread.start, starter)
+        stopped: list[bool] = []
+        before = threading.enumerate()
+        caller = threading.Thread(
+            target=_call_until_stopped, args=(call, stopped, hook), daemon=True)
+        caller.start()
+        caller.join(20)
+        assert stopped == [True], "the Stop did not end the call"
+        assert stranded_threads(before) == []
+        assert set(server.kills) == set(server.tokens)
+
+
+@contextmanager
+def _silent_listeners() -> Iterator[int]:
+    """Listen on one port of ``127.0.0.1`` and ``::1`` with full backlogs; yield the port.
+
+    A connect to either gets no answer.  The test is skipped where
+    ``localhost`` does not name both addresses, or the kernel answers a
+    connect to a full backlog.
+    """
+    with ExitStack() as opened:
+        port = 0
+        for family, address in ((socket.AF_INET, "127.0.0.1"), (socket.AF_INET6, "::1")):
+            listener = opened.enter_context(socket.socket(family))
+            try:
+                listener.bind((address, port))
+            except OSError:
+                pytest.skip(f"cannot listen on {address}")
+            listener.listen(0)
+            port = listener.getsockname()[1]
+            opened.enter_context(socket.create_connection((address, port), 5))  # fills it
+            try:
+                socket.create_connection((address, port), 0.3).close()
+            except TimeoutError:
+                continue
+            except OSError:
+                pass
+            pytest.skip("a connect to a full backlog is answered here")
+        named = {info[4][0] for info in socket.getaddrinfo(
+            "localhost", port, type=socket.SOCK_STREAM)}
+        if not {"127.0.0.1", "::1"} <= named:
+            pytest.skip("localhost does not name both loopback addresses")
+        yield port
+
+
+def test_the_addresses_of_a_name_share_the_requests_deadline() -> None:
+    """Audit 2026-11-21 S5/F4: each address of a name got the whole timeout in turn, so a
+    bridge named ``localhost`` that answered on neither loopback address held a request for
+    twice its deadline."""
+    with _silent_listeners() as port:
+        started = time.monotonic()
+        with pytest.raises(KISSError, match="unreachable"):
+            _request(f"http://localhost:{port}", "/ping", None, 1.5)
+        assert time.monotonic() - started < 2.5
+
+
+def _link_local_listener() -> socket.socket:
+    """Return a socket listening on a link-local IPv6 address of this host (else skip)."""
+    for interface, _ in socket.if_nameindex():
+        try:
+            with socket.socket(socket.AF_INET6, socket.SOCK_DGRAM) as probe:
+                probe.connect(("ff02::1", 9, 0, interface))  # sends nothing: names the source
+                address = probe.getsockname()[0]
+            if address.startswith("fe80:"):
+                return socket.create_server((address, 0, 0, interface), family=socket.AF_INET6)
+        except OSError:
+            continue
+    pytest.skip("no link-local IPv6 address to listen on")
+
+
+def _answer_a_ping(listener: socket.socket) -> None:
+    """Accept one connection on *listener* and answer its request as a bridge alive does."""
+    connection, _ = listener.accept()
+    with connection:
+        connection.recv(65536)
+        connection.sendall(b'HTTP/1.1 200 OK\r\nContent-Length: 12\r\n\r\n{"ok": true}')
+
+
+def test_a_bridge_on_a_link_local_address_is_dialled_on_its_interface() -> None:
+    """Audit 2026-11-21 S5/F4: the request looks its addresses up itself before it connects,
+    and a link-local IPv6 one without its interface is no address (``EINVAL``).
+
+    The URL names the interface as the host writes it: by its name (``%en0``) on POSIX, by
+    its index (``%4``) on Windows, whose resolver takes no interface name there.
+    """
+    with _link_local_listener() as listener:
+        address, port, _, interface = listener.getsockname()
+        zone = interface if sys.platform == "win32" else socket.if_indextoname(interface)
+        answering = threading.Thread(target=_answer_a_ping, args=(listener,), daemon=True)
+        answering.start()
+        assert bridge_alive(f"http://[{address}%{zone}]:{port}") is True
+        answering.join(5)

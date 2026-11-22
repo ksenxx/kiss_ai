@@ -18,6 +18,7 @@ import sqlite3
 import tempfile
 import threading
 import unittest
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
@@ -157,7 +158,7 @@ class TestHistoryFailedFlag(unittest.TestCase):
         close_db()
         db_path = Path(self._tmp) / "legacy.db"
         th._DB_PATH = db_path  # type: ignore[attr-defined]
-        with sqlite3.connect(str(db_path)) as legacy:
+        with closing(sqlite3.connect(str(db_path))) as legacy, legacy:
             legacy.execute(
                 "CREATE TABLE task_history ("
                 "id TEXT PRIMARY KEY, timestamp REAL NOT NULL, task TEXT NOT NULL,"

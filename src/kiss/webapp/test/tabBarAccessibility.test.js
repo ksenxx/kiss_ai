@@ -7,7 +7,7 @@
 // the tab strip: the add-tab, theme, and settings controls, the tabs
 // on the group strip (#tab-list: the chat on screen and its sub-agent
 // tabs -- there is no row of chat tabs, the Chats panel lists those),
-// and each tab's close control must be reachable from the keyboard,
+// and each content tab's close control must be reachable from the keyboard,
 // expose an accessible role and name, and activate on Enter/Space
 // exactly like a click -- exactly once, with the default Space scroll
 // suppressed.  The tabs implement the WAI-ARIA tabs pattern with a
@@ -175,11 +175,12 @@ function testAddTabControlIsAccessibleButton() {
 }
 
 function testSettingsControlIsAccessibleButton() {
-  // The Settings control now lives in the "..." overflow menu.  It must
-  // be a real accessible NATIVE <button> (so Enter/Space activate it in
-  // a real browser without bespoke keydown handlers) named "Settings",
-  // reachable through the "..." button, and a click must open the
-  // settings panel exactly once and close the overflow menu.
+  // The Settings control lives on the strip under the Chats list.  It
+  // must be a real accessible NATIVE <button> (so Enter/Space activate
+  // it in a real browser without bespoke keydown handlers) named
+  // "Settings", and a click must open the settings panel exactly once.
+  // The composer's "..." button stays an accessible menu button; a
+  // click on Settings, outside its menu, closes the open menu.
   const {win, posted} = makePage();
   const panel = win.document.getElementById('settings-panel');
   assert.ok(panel, 'settings panel missing from chat.html');
@@ -213,15 +214,20 @@ function testSettingsControlIsAccessibleButton() {
   );
 
   const settingsBtn = win.document.getElementById('settings-btn');
-  assert.ok(settingsBtn, 'settings control missing from the "..." menu');
+  assert.ok(settingsBtn, 'settings control missing');
+  assert.ok(
+    win.document.getElementById('sidebar-footer').contains(settingsBtn),
+    'the settings control must live on the strip under the Chats list',
+  );
   assert.strictEqual(
     settingsBtn.tagName,
     'BUTTON',
     'the settings control must be a native <button> so Enter/Space ' +
       'activate it without bespoke keydown handlers',
   );
-  assert.ok(
-    (settingsBtn.textContent || '').indexOf('Settings') !== -1,
+  assert.strictEqual(
+    settingsBtn.getAttribute('aria-label'),
+    'Settings',
     'settings control must be named "Settings"',
   );
 
@@ -241,7 +247,7 @@ function testSettingsControlIsAccessibleButton() {
   );
   assert.ok(
     !moreMenu.classList.contains('open'),
-    'activating a menu item must close the "..." menu',
+    'a click outside the "..." menu must close it',
   );
 }
 
@@ -306,11 +312,11 @@ function testChatTabIsKeyboardActivatable() {
   );
 }
 
-function testRovingTabindexFollowsActiveTab() {
+async function testRovingTabindexFollowsActiveTab() {
   // FINDING 2a: the tablist must use a roving tabindex -- exactly the
   // active tab is a Tab stop (tabindex=0), every other tab has
-  // tabindex=-1, and the stop follows activation.  Close controls keep
-  // tabindex=0 so they stay directly Tab-reachable.
+  // tabindex=-1, and the stop follows activation.  The close controls
+  // of content tabs keep tabindex=0 so they stay directly Tab-reachable.
   const {win} = makePage();
   openGroup(win, ['sub-1', 'sub-2']);
 
@@ -329,8 +335,11 @@ function testRovingTabindexFollowsActiveTab() {
     'the Tab stop must follow the active tab',
   );
 
-  const closers = win.document.querySelectorAll('#tab-list .chat-tab-close');
-  assert.strictEqual(closers.length, 3, 'every strip entry has a close');
+  const files = await openFiles(true, ['one.txt', 'two.txt', 'three.txt']);
+  const closers = files.win.document.querySelectorAll(
+    '#tab-list .chat-tab-close',
+  );
+  assert.strictEqual(closers.length, 3, 'every file strip entry has a close');
   for (const closeEl of closers) {
     assert.strictEqual(
       closeEl.getAttribute('tabindex'),
@@ -401,7 +410,7 @@ function testArrowKeysMoveFocusBetweenTabs() {
   );
 }
 
-function testRoutineRepaintKeepsTheKeyboardFocus() {
+async function testRoutineRepaintKeepsTheKeyboardFocus() {
   // A routine status update (a running indicator flip, the selected
   // tab unchanged) repaints the strip.  A keyboard user focused on a
   // tab must stay on that tab, Tab stop included, instead of falling to
@@ -435,12 +444,15 @@ function testRoutineRepaintKeepsTheKeyboardFocus() {
   pressKey(win, win.document.activeElement, 'ArrowRight');
   assert.strictEqual(focusedTab(), 'sub-2');
 
-  // A focused close control is put back too.
-  tabEl(win, 'sub-2').querySelector('.chat-tab-close').focus();
-  send(win, {type: 'status', tabId: 'parent', running: false});
+  // A focused close control (a content tab has one) is put back too.
+  const files = await openFiles(true, ['notes.txt', 'other.txt']);
+  const closeEl = () =>
+    fileTab(files.win, 'other.txt').querySelector('.chat-tab-close');
+  closeEl().focus();
+  ui.send(files.win, {type: 'status', tabId: 'a1', running: false});
   assert.strictEqual(
-    win.document.activeElement,
-    tabEl(win, 'sub-2').querySelector('.chat-tab-close'),
+    files.win.document.activeElement,
+    closeEl(),
     'the focus stays on the close control',
   );
 
@@ -464,7 +476,7 @@ function testRepaintKeepsEachTabsNode() {
     return [
       el,
       el.querySelector('.chat-tab-label'),
-      el.querySelector('.chat-tab-close'),
+      el.querySelector('.subagent-indicator'),
     ];
   };
   const pressed = {
@@ -501,7 +513,7 @@ function testRepaintKeepsEachTabsNode() {
   assertKept(['parent', 'sub-1', 'sub-2'], 'status and title repaints');
 
   // A tab leaves and another arrives: the rest stay where they were.
-  send(win, {type: 'closeSubagentTab', tab_id: 'sub-1'});
+  send(win, {type: 'subagentDone', tab_id: 'sub-1'});
   assert.ok(!pressed['sub-1'][0].isConnected, 'the closed tab took its node');
   send(win, {
     type: 'openSubagentTab',
@@ -525,17 +537,17 @@ function testRepaintKeepsEachTabsNode() {
   assertKept(['parent', 'sub-2'], 'a selection change');
 }
 
-function testCloseControlIsAccessibleAndDoesNotSwitchTabs() {
-  // The per-tab close control must be focusable with an accessible
+async function testCloseControlIsAccessibleAndDoesNotSwitchTabs() {
+  // A content tab's close control must be focusable with an accessible
   // name, close exactly one tab on Enter/Space exactly like a click,
   // and must NOT also activate a tab switch.
-  const {win} = makePage();
-  openGroup(win, ['sub-1', 'sub-2', 'sub-3']);
+  const {win} = await openFiles(true, ['one.txt', 'two.txt', 'three.txt']);
+  const [, two, three] = tabBarIds(win);
 
-  tabEl(win, 'sub-3').click();
-  assert.strictEqual(activeTabId(win), 'sub-3');
+  fileTab(win, 'three.txt').click();
+  assert.strictEqual(activeTabId(win), three);
 
-  const close1 = tabEl(win, 'sub-1').querySelector('.chat-tab-close');
+  const close1 = fileTab(win, 'one.txt').querySelector('.chat-tab-close');
   assert.ok(close1, 'close control missing');
   const role = assertFocusable(close1, 'the tab close control');
   assert.strictEqual(role, 'button', 'close control must be a button');
@@ -546,28 +558,28 @@ function testCloseControlIsAccessibleAndDoesNotSwitchTabs() {
   );
 
   // Enter on a background tab's close: closes exactly that tab, does
-  // NOT switch to it first (active tab must stay sub-3).
+  // NOT switch to it first (active tab must stay three.txt).
   pressKey(win, close1, 'Enter');
   assert.deepStrictEqual(
     tabBarIds(win),
-    ['parent', 'sub-2', 'sub-3'],
+    [two, three],
     'Enter on the close control must close exactly one tab like a click',
   );
   assert.strictEqual(
     activeTabId(win),
-    'sub-3',
+    three,
     'closing a background tab via keyboard must not switch to it',
   );
 
   // Space works too, and must suppress the default page scroll.
-  const close2 = tabEl(win, 'sub-2').querySelector('.chat-tab-close');
+  const close2 = fileTab(win, 'two.txt').querySelector('.chat-tab-close');
   const spaceEv = pressKey(win, close2, ' ');
   assert.deepStrictEqual(
     tabBarIds(win),
-    ['parent', 'sub-3'],
+    [three],
     'Space on the close control must close exactly one tab like a click',
   );
-  assert.strictEqual(activeTabId(win), 'sub-3');
+  assert.strictEqual(activeTabId(win), three);
   assert.ok(
     spaceEv.defaultPrevented,
     'Space on the close control must preventDefault (or the page scrolls)',
@@ -623,11 +635,14 @@ async function testFocusSurvivesClosingTheFocusedTab() {
   closeByKey(split.win, left);
   assert.strictEqual(focusId(split.win), 'task-input', 'no file left');
 
-  // A sub-agent tab closed under its chat: the strip goes with it.
+  // A focused sub-agent tab closed under its chat (its sub-agent
+  // finished): the strip goes with it.
   const {win} = makePage();
   openGroup(win, ['sub-1']);
   win._testApi.endLaunch();
-  closeByKey(win, tabEl(win, 'sub-1'));
+  pressKey(win, tabEl(win, 'parent'), 'ArrowRight');
+  assert.strictEqual(win.document.activeElement, tabEl(win, 'sub-1'));
+  send(win, {type: 'subagentDone', tab_id: 'sub-1'});
   assert.strictEqual(focusId(win), 'task-input', 'no strip left');
 }
 
@@ -716,7 +731,7 @@ function testRenamedTabKeepsAccessibleNameInSync() {
 
 function testRemoteControlOrderAndThemeAccessibility() {
   // The footer must read, in order: burger menu, Task info drawer
-  // toggle, New chat (+), inject, then the "..." overflow control on
+  // toggle, New chat (+), the mic, then the "..." overflow control on
   // the left; model picker, spinner, send, stop on the right.  The
   // theme toggle lives in the "..." menu and must be a named,
   // keyboard-activatable native button.
@@ -731,10 +746,10 @@ function testRemoteControlOrderAndThemeAccessibility() {
       'menu-btn',
       'meta-drawer-btn',
       'new-chat-btn',
-      'tricks-btn',
+      'dictate-btn',
       'more-menu-wrap',
     ],
-    'footer tools must keep the order burger, Task info, +, inject, "..."',
+    'footer tools must keep the order burger, Task info, +, mic, "..."',
   );
 
   const actions = Array.from(

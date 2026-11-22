@@ -188,7 +188,8 @@ def test_a_stop_before_the_output_reader_starts_leaves_the_tunnel_reusable(
     tunnel = mach.SshTunnel(LOGIN, 12345)
     source, first_line = inspect.getsourcelines(mach.SshTunnel._forward)
     start_line = first_line + next(
-        i for i, text in enumerate(source) if text.strip() == "self._reader.start()"
+        i for i, text in enumerate(source)
+        if text.strip() == "call_without_injection(self._reader.start)"
     )
     paused, release = threading.Event(), threading.Event()
     outcome: list[str] = []

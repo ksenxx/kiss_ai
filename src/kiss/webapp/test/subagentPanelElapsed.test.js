@@ -33,7 +33,6 @@ const {
   makePage: makeChatPage,
   send,
   clickTab: activateTab,
-  parsePanelTimeMs,
 } = require('./simplify2_harness');
 const {bootParallelRun} = require('./subagent_tab_helpers');
 const {trackWindow, runTests} = require('./workdir_helpers');
@@ -178,6 +177,10 @@ function testReplayedSubagentPanelsShowDurations() {
 // the same elapsed label the visible tab's panels do.
 function testLiveSubagentPanelsShowElapsed() {
   const {win, taskId, subTabId} = bootSubagent();
+  // The page's clock is the test's: the unstamped tool call below takes
+  // exactly the 2.5 s the clock moves, however long the process pauses.
+  let now = Date.now();
+  win.Date.now = () => now;
   send(win, {
     type: 'task_events',
     tabId: subTabId,
@@ -193,6 +196,7 @@ function testLiveSubagentPanelsShowElapsed() {
   send(win, stamp({type: 'thinking_delta', text: 'pondering'}));
   send(win, stamp({type: 'thinking_end'}));
   send(win, stamp({type: 'tool_call', name: 'Bash', command: 'echo hi'}));
+  now += 2500;
   send(win, stamp({type: 'tool_result', content: 'hi', is_error: false}));
 
   activateTab(win, subTabId);
@@ -201,9 +205,10 @@ function testLiveSubagentPanelsShowElapsed() {
   assert.ok(tc, 'live tool_call panel exists');
   const tcLabel = elapsedLabel(tc);
   assert.ok(tcLabel, 'live sub-agent tool_call shows elapsed');
-  assert.ok(
-    parsePanelTimeMs(tcLabel.textContent) < 60000,
-    'live elapsed is wall-clock small, got ' + tcLabel.textContent,
+  assert.strictEqual(
+    tcLabel.textContent,
+    '2.5s',
+    'live elapsed is the page-clock time between the call and its result',
   );
   assert.strictEqual(tc.dataset.timeDone, '1', 'frozen on result');
   const thoughts = out.querySelector('.llm-panel');

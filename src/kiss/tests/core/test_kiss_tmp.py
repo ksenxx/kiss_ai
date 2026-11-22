@@ -243,12 +243,15 @@ def test_marker_of_an_earlier_boot_that_cannot_be_deleted_either_is_an_error(
     path = kiss_tmp_dir()
     marker = path / ".boot"
     marker.write_text("the boot before this one")
-    os.chflags(marker, stat.UF_IMMUTABLE)
+    # ``os.chflags`` exists on BSD/macOS only: looked up by name so the type
+    # checkers pass on every platform without a platform-dependent ignore.
+    chflags = getattr(os, "chflags")
+    chflags(marker, stat.UF_IMMUTABLE)
     try:
         with pytest.raises(PermissionError, match=r"kiss-tmp/\.boot"):
             kiss_tmp_dir()
     finally:
-        os.chflags(marker, 0)
+        chflags(marker, 0)
 
 
 @pytest.mark.skipif(not hasattr(os, "chflags"), reason="needs a file its owner cannot delete")
@@ -257,7 +260,8 @@ def test_what_cannot_be_deleted_stays_for_the_next_reboot(temp_dir: Path) -> Non
     held = path / "held.txt"
     held.write_text("old")
     (path / "stray.log").write_text("old")
-    os.chflags(held, stat.UF_IMMUTABLE)
+    chflags = getattr(os, "chflags")  # BSD/macOS only, as above
+    chflags(held, stat.UF_IMMUTABLE)
     try:
         (path / ".boot").write_text("the boot before this one")
         assert kiss_tmp_dir() == path
@@ -265,7 +269,7 @@ def test_what_cannot_be_deleted_stays_for_the_next_reboot(temp_dir: Path) -> Non
         assert not (path / "stray.log").exists()
         assert (path / ".boot").read_text() == _boot_id()
     finally:
-        os.chflags(held, 0)
+        chflags(held, 0)
 
 
 def test_processes_that_start_together_after_a_reboot_keep_each_others_files(

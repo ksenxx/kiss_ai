@@ -16,13 +16,13 @@
 //
 // These tests drive the real page end to end: the daemon's frames come
 // in as window messages, the user's part is a click (a panel header,
-// a tab's close button, the share button, a history row) or a prompt
-// typed into the composer, and what is checked is the page (its
-// panels, its tabs, its composer) and the commands it posts.  The
-// frames are the daemon's own pieces of the transcripts below, copied
-// from server/lazy_replay.py's output; what the page builds from
-// pieces the daemon makes on the spot is compared with a whole replay
-// in tests/webapp/test_lazy_chat_loading_jsdom.py.
+// the share button, a history row) or a prompt typed into the
+// composer, and what is checked is the page (its panels, its tabs,
+// its composer) and the commands it posts.  The frames are the
+// daemon's own pieces of the transcripts below, copied from
+// server/lazy_replay.py's output; what the page builds from pieces
+// the daemon makes on the spot is compared with a whole replay in
+// tests/webapp/test_lazy_chat_loading_jsdom.py.
 
 'use strict';
 
@@ -50,11 +50,6 @@ const {
 } = require('./simplify2_harness');
 const {loadHistory, historyRows, makeRow} = require('./history_helpers');
 const {shareWithTasks} = require('./share_helpers');
-const {
-  clickClose,
-  openSubTabIds,
-  spawnSubagent,
-} = require('./subagent_tab_helpers');
 
 const TASK = 'task-1';
 const CHAT = 'chat-1';
@@ -568,45 +563,6 @@ function summaries(root) {
   return Array.from(root.querySelectorAll('.tc-summary'));
 }
 
-/**
- * The daemon announces sub-agent *n* of the task in tab *parentTabId*,
- * finished unless *fields* say otherwise (server.py's
- * _subagent_announcement).
- */
-function announce(win, parentTabId, n, fields) {
-  send(
-    win,
-    Object.assign(
-      {
-        type: 'openSubagentTab',
-        tab_id: 'sub-' + n,
-        parent_tab_id: parentTabId,
-        description: 'child ' + n,
-        task_id: 'child-' + n,
-        parent_task_id: TASK,
-        taskIndex: n - 1,
-        isSubagentTab: true,
-        isDone: true,
-        startTs: 0,
-      },
-      fields || {},
-    ),
-  );
-}
-
-/**
- * Click the header of fan-out *panel*: the sub-agent tasks the page
- * asks the daemon to open again.
- */
-function reopenedBy(page, panel) {
-  const from = page.posted.length;
-  click(page.win, header(panel));
-  return page.posted
-    .slice(from)
-    .filter(m => m.type === 'resumeSession' && m.reopen)
-    .map(m => m.taskId);
-}
-
 /** How long a panel's footer says it took. */
 function elapsed(panel) {
   return panel.querySelector('.panel-elapsed').textContent;
@@ -1066,180 +1022,6 @@ function testRunningTaskOutlineThenLiveStream() {
   console.log('  ok - a running task is its outline, then its live stream');
 }
 
-// The fan-outs a piece leaves out are counted (`fanouts`), so a
-// fan-out panel keeps its number among the transcript's: when the
-// daemon replays the tab, the open tab of a sub-agent goes to the
-// panel that replaced the one it was under.  A sub-agent spawned now
-// joins the fan-out that runs, whatever the daemon still holds.
-function testFanOutKeepsItsNumber() {
-  const now = runningPage();
-  const spawned = spawnSubagent(now, now.tabId, 'child-3', 'three', 0);
-  clickClose(now.win, spawned);
-  assert.ok(
-    now.O.querySelector('.tc-run-parallel').classList.contains('collapsed'),
-    'the fan-out that runs took the sub-agent: it folds with its last tab',
-  );
-  now.win.close();
-
-  const page = runningPage();
-  const {win, tabId, O} = page;
-  const subTab = spawnSubagent(page, tabId, 'child-3', 'three', 0);
-  assert.deepStrictEqual(openSubTabIds(win), [subTab]);
-
-  replay(win, tabId, running(TASK));
-  const fanOut = O.querySelector('.tc-run-parallel');
-  assert.ok(!fanOut.classList.contains('collapsed'), 'a running fan-out is open');
-  assert.deepStrictEqual(openSubTabIds(win), [subTab], 'its sub-agent runs on');
-  // The user closes the tab: the fan-out left with no tab folds.
-  clickClose(win, subTab);
-  assert.deepStrictEqual(openSubTabIds(win), []);
-  assert.ok(
-    fanOut.classList.contains('collapsed'),
-    'the panel on the page is the one the tab was under',
-  );
-  win.close();
-
-  // A sub-agent that runs when the page loads the task is announced
-  // with the replay: started while the fan-out on the page ran, it is
-  // that panel's, after the next replay and announcement too.
-  const late = runningPage();
-  const runs = {isDone: false, startTs: T0 + 9500};
-  announce(late.win, late.tabId, 3, runs);
-  assert.deepStrictEqual(openSubTabIds(late.win), ['sub-3'], 'its tab opens');
-  replay(late.win, late.tabId, running(TASK));
-  announce(late.win, late.tabId, 3, runs);
-  assert.deepStrictEqual(openSubTabIds(late.win), ['sub-3']);
-  clickClose(late.win, 'sub-3');
-  assert.ok(
-    late.O.querySelector('.tc-run-parallel').classList.contains('collapsed'),
-    'the fan-out on the page folds with its last tab',
-  );
-  late.win.close();
-  console.log('  ok - a fan-out keeps its number in a piece');
-}
-
-// Sub-agents are announced while their fan-out panel is still with the
-// daemon.  Finished ones stay closed, as the folded panel would keep
-// them, and join the panel when its piece is loaded: the one whose
-// call ran when the sub-agent started or, for a sub-agent without a
-// start time, the one a whole transcript settles on, once nothing of
-// the transcript is left with the daemon.
-function testFinishedChildrenWaitForTheirFanOut() {
-  const page = finishedPage();
-  const {win, tabId, stub} = page;
-  // The task above is on the page as well and is never opened: its
-  // panels are another task's, and none of these sub-agents waits
-  // for them.
-  loadTaskAbove(page, finished('task-0'));
-  // The page's own replay says closed history; the replay another
-  // surface asked for is broadcast without it.
-  announce(win, tabId, 1, {startTs: T0 + 3500, closedHistory: true});
-  announce(win, tabId, 2);
-  assert.deepStrictEqual(openSubTabIds(win), [], 'no tab for a finished one');
-
-  load(page, stub, outline(TASK));
-  const [first, second] = summaries(stub);
-  load(page, first, segment0());
-  const fanOut = body(first).querySelector('.tc-run-parallel');
-  assert.ok(fanOut.classList.contains('collapsed'), 'the fan-out is folded');
-  assert.deepStrictEqual(openSubTabIds(win), [], 'and its sub-agents closed');
-  // Expanding a fan-out asks for its sub-agents again.
-  assert.deepStrictEqual(
-    reopenedBy(page, fanOut),
-    ['child-1'],
-    'the sub-agent that started while the call ran is the panel\'s',
-  );
-  toggle(page, fanOut);
-  assert.deepStrictEqual(openSubTabIds(win), [], 'folding closes its tab');
-
-  load(page, second, segment1());
-  assert.deepStrictEqual(
-    reopenedBy(page, fanOut),
-    ['child-1', 'child-2'],
-    'the other joins once the whole transcript is on the page',
-  );
-  win.close();
-  console.log('  ok - finished sub-agents wait for their fan-out panel');
-}
-
-// A sub-agent can outlive its call (a dispatch that does not wait for
-// it), and a summary folds the call while it still runs.  Announced
-// with the replay, it has its tab at once and waits for its panel as a
-// finished one does.  The panel takes it when its piece is loaded and
-// stays folded: a running sub-agent keeps its tab without it.  When
-// the sub-agent ends, its tab closes, and expanding the panel asks for
-// it again.
-function testRunningChildWaitsForItsFanOut() {
-  const page = runningPage();
-  const {win, tabId, O} = page;
-  announce(win, tabId, 1, {isDone: false, startTs: T0 + 3500});
-  assert.deepStrictEqual(openSubTabIds(win), ['sub-1'], 'it runs: a tab');
-
-  const summary = summaries(O)[0];
-  load(page, summary, segment0([gap('tool_call', {ts: T0 + 6500, fanouts: 1})]));
-  const own = body(summary).querySelector('.tc-run-parallel');
-  assert.ok(own.classList.contains('collapsed'), 'its panel stays folded');
-  assert.deepStrictEqual(openSubTabIds(win), ['sub-1'], 'and its tab open');
-
-  send(win, {type: 'subagentDone', tab_id: 'sub-1'});
-  assert.deepStrictEqual(openSubTabIds(win), [], 'its end closes the tab');
-  assert.deepStrictEqual(
-    reopenedBy(page, own),
-    ['child-1'],
-    'the panel loaded since is the one that took it',
-  );
-  win.close();
-  console.log('  ok - a running sub-agent waits for its fan-out panel too');
-}
-
-// A finished sub-agent a user opened again is open on every surface:
-// its tab opens here too, although its panel is with the daemon.  The
-// fan-out on the page is not its panel and leaves the tab alone; its
-// own panel, once loaded, unfolds as the one the user expanded did,
-// and folding that one closes the tab.
-function testReopenedChildKeepsItsTab() {
-  const page = runningPage();
-  const {win, posted, tabId, O} = page;
-  // A close the page posts closes the tab on every surface.
-  const closes = () => ofType(posted, 'closeTab').map(m => m.tabId);
-  const child = {startTs: T0 + 3500, reopened: true, incarnation: 7};
-  announce(win, tabId, 1, child);
-  assert.deepStrictEqual(openSubTabIds(win), ['sub-1'], 'its tab is open');
-  const newest = O.querySelector('.tc-run-parallel');
-  toggle(page, newest);
-  assert.ok(newest.classList.contains('collapsed'));
-  assert.deepStrictEqual(
-    openSubTabIds(win),
-    ['sub-1'],
-    'folding the running fan-out does not close it',
-  );
-
-  const after = [gap('tool_call', {ts: T0 + 6500, fanouts: 1})];
-  const summary = summaries(O)[0];
-  load(page, summary, segment0(after));
-  const own = body(summary).querySelector('.tc-run-parallel');
-  assert.ok(!own.classList.contains('collapsed'), 'its own panel unfolds');
-  assert.deepStrictEqual(openSubTabIds(win), ['sub-1']);
-
-  // The daemon replays the tab and announces the sub-agent again: the
-  // panel the tab was under went with the old transcript, and the one
-  // loaded in its place takes the tab over the same way.
-  replay(win, tabId, running(TASK));
-  announce(win, tabId, 1, child);
-  assert.deepStrictEqual(openSubTabIds(win), ['sub-1'], 'the tab stays open');
-  const again = summaries(O)[0];
-  load(page, again, segment0(after));
-  const ownAgain = body(again).querySelector('.tc-run-parallel');
-  assert.deepStrictEqual(openSubTabIds(win), ['sub-1'], 'loading keeps it');
-  assert.deepStrictEqual(closes(), [], 'on every surface');
-  assert.ok(!ownAgain.classList.contains('collapsed'), 'and unfolds the panel');
-  toggle(page, ownAgain);
-  assert.deepStrictEqual(openSubTabIds(win), [], 'folding it closes the tab');
-  assert.deepStrictEqual(closes(), ['sub-1']);
-  win.close();
-  console.log('  ok - a reopened sub-agent keeps its tab until its panel folds');
-}
-
 // The task above the one on screen, loaded by scrolling past the top,
 // comes in pieces as well: its Trajectory panel, in the neighbour's
 // own container, loads on a click by the neighbour's handle, and the
@@ -1308,12 +1090,10 @@ function testNeighbourTaskLoadsItsOwnPieces() {
 // A panel belongs to the tab whose transcript holds it, on screen or
 // not: its piece is asked for that tab, from the machine the tab's
 // task ran on, and the answer fills the transcript where it is parked.
-// A sub-agent that waited for a fan-out of the piece joins it there.
 function testPanelOfABackgroundTab() {
   const page = runningPage();
   const {win, posted, tabId, O} = page;
   send(win, {type: 'tabMachine', tabId, machine: 'gpu-box'});
-  announce(win, tabId, 1, {startTs: T0 + 3500});
   const lazy = summaries(O)[0];
   const req = open(page, lazy);
   assert.deepStrictEqual(
@@ -1354,11 +1134,6 @@ function testPanelOfABackgroundTab() {
     kinds(lazy),
     ['prompt', 'thoughts', 'bash', 'fan-out', 'thoughts'],
     'filled while its tab was in the background',
-  );
-  assert.deepStrictEqual(
-    reopenedBy(page, body(lazy).querySelector('.tc-run-parallel')),
-    ['child-1'],
-    'its fan-out took the sub-agent of its own tab',
   );
   win.close();
   console.log('  ok - a panel of a background tab is asked for and filled there');
@@ -1613,6 +1388,45 @@ function testShareExportLoadsTheScreenFirst() {
   assert.ok(shareWithTasks(slow, []), 'the next click exports');
   assert.strictEqual(ofType(slow.posted, 'shareChat').length, 1, 'once');
   slow.win.close();
+
+  // An export given up on can still be answered: the history of a
+  // chat on a registered machine is forwarded in the background, and
+  // may come after the failsafe.  By then the tab shows a chat of this
+  // daemon whose own export waits for its panel.  The late answer is
+  // not that export's, which is sent, once, when its panel is loaded.
+  // (Audit 2026-11-21, W11 F1.)
+  const late = openPage();
+  send(late.win, {type: 'tabMachine', tabId: late.tabId, machine: 'box'});
+  replay(late.win, late.tabId, [SETTINGS, PROMPT], {
+    chat_id: 'chat-on-box',
+    task_id: 'task-on-box',
+  });
+  const givenUp = recordTimers(late.win, 120000);
+  click(late.win, byId(late.win, 'share-btn'));
+  const old = lastMsg(late.posted, 'shareChatTasks');
+  assert.strictEqual(old.machine, 'box', "the machine's history is asked for");
+  fireTimers(givenUp);
+  send(late.win, {type: 'tabMachine', tabId: late.tabId, machine: ''});
+  replay(late.win, late.tabId, stoppedFinished(TASK));
+  assert.strictEqual(shareWithTasks(late, []), undefined, 'the export waits');
+  send(late.win, {
+    type: 'share_tasks',
+    tabId: old.tabId,
+    chatId: old.chatId,
+    machine: 'box',
+    tasks: [],
+    truncated: false,
+  });
+  answer(late.win, requests(late.posted).pop(), stoppedOutline());
+  const exports = ofType(late.posted, 'shareChat');
+  assert.strictEqual(
+    exports.length,
+    1,
+    'BUG - the late answer to an export given up on ended the one held',
+  );
+  assert.strictEqual(exports[0].chatId, CHAT, 'the chat on screen');
+  assert.ok(exports[0].html.includes('Let me look.'), 'with the loaded panel');
+  late.win.close();
   console.log('  ok - the share export loads the screen the daemon left out');
 }
 
@@ -1769,10 +1583,6 @@ testStaleAnswersAreDropped();
 testPieceForAPanelFoldedAgain();
 testDisconnectAsksAgain();
 testRunningTaskOutlineThenLiveStream();
-testFanOutKeepsItsNumber();
-testFinishedChildrenWaitForTheirFanOut();
-testRunningChildWaitsForItsFanOut();
-testReopenedChildKeepsItsTab();
 testNeighbourTaskLoadsItsOwnPieces();
 testPanelOfABackgroundTab();
 testShareExportFillsUnloadedPanels();

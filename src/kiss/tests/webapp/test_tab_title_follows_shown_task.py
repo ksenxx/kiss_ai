@@ -315,7 +315,7 @@ def test_subagent_tab_keeps_numbered_title(_browser) -> None:
         sub_id = parent + "__sub_7"
         _post(page, {"type": "openSubagentTab", "tab_id": sub_id,
                      "parent_tab_id": parent, "task_id": "7",
-                     "description": _PREVIEW_TASK, "isDone": False})
+                     "description": _PREVIEW_TASK})
         _click_tab(page, sub_id)
         assert _own_panel_text(page) == _PREVIEW_TASK
         label = _label(page, sub_id)

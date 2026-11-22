@@ -306,11 +306,20 @@ def test_shell_exit_is_reported_even_when_a_background_child_keeps_the_pty(
     exits, so no EOF arrives on the master: the reader must notice the
     exit through ``waitpid`` instead."""
     svc, printer = service
+    pid_file = tmp_path / "background.pid"
+    background = f"(sleep 300 & echo $! > {shlex.quote(str(pid_file))})"
     svc.open("tab-f", "conn-1", str(tmp_path), 80, 24)
-    svc.input("tab-f", "conn-1", "(sleep 300 &) ; echo bg-started; exit 5\n")
-    printer.wait_for(lambda: printer.of_type("terminalExit"), timeout=15)
-    assert printer.of_type("terminalExit")[0]["code"] == 5
-    assert "bg-started" in printer.output("tab-f")
+    svc.input("tab-f", "conn-1", f"{background} ; echo bg-started; exit 5\n")
+    printer.wait_for(lambda: pid_file.exists() and pid_file.read_text().strip().isdigit())
+    background_pid = int(pid_file.read_text())
+    try:
+        printer.wait_for(lambda: printer.of_type("terminalExit"), timeout=15)
+        assert printer.of_type("terminalExit")[0]["code"] == 5
+        assert "bg-started" in printer.output("tab-f")
+    finally:
+        # Nothing else ends the child: it outlives its shell by design.
+        if _alive(background_pid):
+            os.kill(background_pid, signal.SIGKILL)
 
 
 def test_dropped_connection_keeps_the_shell_for_a_reattach(
@@ -402,16 +411,20 @@ def test_streaming_background_child_does_not_hide_the_shell_exit(
     """A child that keeps printing after the shell exited must neither
     keep the tab alive nor starve the exit report."""
     svc, printer = service
+    pid_file = tmp_path / "loop.pid"
+    loop = "(trap '' HUP; while :; do echo tick; sleep 0.05; done)"
     svc.open("tab-k", "conn-1", str(tmp_path), 80, 24)
-    svc.input(
-        "tab-k", "conn-1",
-        "(trap '' HUP; while :; do echo tick; sleep 0.05; done) & exit 5\n",
-    )
-    printer.wait_for(lambda: printer.of_type("terminalExit"), timeout=15)
-    assert printer.of_type("terminalExit")[0]["code"] == 5
-    assert session_count(svc) == 0
-    # Stop the stray printer loop this test left behind.
-    os.system("pkill -f 'sleep 0.05' >/dev/null 2>&1")
+    svc.input("tab-k", "conn-1", f"{loop} & echo $! > {shlex.quote(str(pid_file))}; exit 5\n")
+    printer.wait_for(lambda: pid_file.exists() and pid_file.read_text().strip().isdigit())
+    loop_pid = int(pid_file.read_text())
+    try:
+        printer.wait_for(lambda: printer.of_type("terminalExit"), timeout=15)
+        assert printer.of_type("terminalExit")[0]["code"] == 5
+        assert session_count(svc) == 0
+    finally:
+        # Nothing else ends the loop: it ignores the hang-up by design.
+        if _alive(loop_pid):
+            os.kill(loop_pid, signal.SIGKILL)
 
 
 def test_an_earlier_disconnect_timer_cannot_expire_a_later_grace_period(

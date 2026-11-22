@@ -754,7 +754,11 @@
     loadPdfJs()
       .then(show)
       .catch(err => {
-        if (!state.disposed) fail(err);
+        if (state.disposed) return;
+        fail(err);
+        // Nothing of this document will be drawn: its worker is
+        // stopped now, not when the tab is closed.
+        stopWorker();
       });
 
     function dispose() {

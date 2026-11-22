@@ -563,6 +563,13 @@ def test_stubs_are_references_the_table_expands() -> None:
     assert other.startswith(f"{ARGUMENT_STUB_PREFIX} #2:")
     assert make_stub(BIG, table=table) == result_stub
     assert table.originals == {1: BIG, 2: FILE_TEXT}
+    # The text itself is the key: an equal text built anew shares the id, and a
+    # text no encoding takes (a lone surrogate from a JSON escape) gets its own.
+    lone = "lone \ud83d " * 100
+    ids = CompactionTable()
+    assert [ids.add(text) for text in (BIG, "".join(list(BIG)), lone, lone[:-1], lone)] == [
+        1, 1, 2, 3, 2]
+    assert ids.originals == {1: BIG, 2: lone, 3: lone[:-1]}
     # A whole-argument stub (the model copied what it saw) is expanded, with a
     # note; a preview the model cut short is still the stub.
     args, notes, refusal = expand_stubs(

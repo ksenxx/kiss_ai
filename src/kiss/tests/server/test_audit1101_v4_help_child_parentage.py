@@ -26,6 +26,7 @@ from __future__ import annotations
 import sqlite3
 import threading
 import time
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
@@ -93,7 +94,7 @@ def test_help_only_child_is_persisted_under_its_parent(tmp_path: Path) -> None:
                 )
 
         _wait_until(child_finished, DEADLINE_S)
-        with sqlite3.connect(persistence._DB_PATH) as db:
+        with closing(sqlite3.connect(persistence._DB_PATH)) as db:
             rows = db.execute(
                 "SELECT id, parent_task_id, task, result FROM task_history "
                 "WHERE chat_id = ? AND task = ?", (chat_id, "/sh help"),

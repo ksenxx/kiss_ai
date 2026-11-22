@@ -117,9 +117,9 @@ def get_weather(city: str) -> str:
 class WeatherSea(WorkerSea):  # a worker: no worktree tools, classifier, browser or memory
     def description(self) -> str:
         return (
-            "Reports the current weather in San Francisco from wttr.in; "
-            "pass its path as sea_path or send `/weather now` "
-            "(any text after the command) once its parent folder is listed "
+            "Reports the current weather in a city (San Francisco when none "
+            "is given) from wttr.in; pass its path as sea_path or send "
+            "`/weather Paris` once its parent folder is listed "
             "in $KISS_HOME/SEAS.md."
         )
 
@@ -472,16 +472,22 @@ from kiss.agents.seas.sh.sh_sea import ShSea          # or: sea_class("sh")
 
 class StrictShSea(ShSea):
     def description(self) -> str:
-        return "Runs a shell command like /sh, read-only, on a small budget."
+        return (
+            "Runs a shell command like /sh on a small budget; "
+            "refuses one that contains `rm `."
+        )
 
     def settings(self, settings: dict[str, Any]) -> dict[str, Any]:
         return settings | {"max_budget": 0.25}          # ShSea's keys stay
 
     def tool_call_hook(self, name: str, args: dict[str, Any]) -> Verdict:
         if name == "Bash" and "rm " in str(args.get("command", "")):
-            return refuse("Blocked: read-only run")
+            return refuse("Blocked: the command contains `rm `")
         return ALLOW
 ```
+
+The hook shows the mechanism only: a substring test is not a read-only
+shell or a sandbox (`printf x > file`, `mv` and `truncate` pass it).
 
 The launcher applies every class of the inheritance chain that defines
 a method, base class first (`sea_commands._chain` walks the MRO), so a
@@ -623,6 +629,70 @@ because it either won or was refused.  A `tools=review(inferred)`
 says nobody named the profile and the sub-agent got `review` because
 it is a reviewer (see `run_parallel`'s `tool_profile`).
 
+The last tier, the user's defaults, has two layers under the daemon.
+A chat can be in a project (the web app's Projects page; table
+`projects` of `history.db`, `chat_summaries.project_id`), and a run
+whose chat is in one reads the project's settings before
+`config.json` and the key store.  A project can override
+`default_work_dir`, `max_budget`, `use_web_browser`, `use_memory`,
+`compaction`, `chrome_bridge`, `claude_code_use_subscription` and
+`codex_use_subscription` (`projects.CONFIG_KEYS`) and any variable of
+the key store (`API_KEY_ENV_VARS`); it stores only what differs from
+the product's settings (`projects.settings_overrides`), so the rest
+keeps following them.  The task runner resolves them once the run
+knows its chat (`TaskRunner._enter_project`, after `_apply_sea` has
+written the SEA's settings on the command), so a `run()` argument, a
+`run_agent` option and a SEA's `settings()` win over the project, and
+the project wins over the Settings sheet: a `maxBudget` or
+`useWebTools` the command does not carry is the project's
+(`projects.config_with`), and so is an absent `useMemory`.  The
+Compaction switch, the API keys and the two subscription switches are
+not carried on the command: the run reads them through a `Config`
+overlay (`kiss.core.config.run_overlay`, filled from
+`projects.overlay_fields`; a context variable, so two tasks of
+different projects use different keys at the same time).  A project's
+Compaction switch therefore stands in for the daemon's global one for
+that run, which compacts only while that switch is on and its own
+`compaction` is not `false`; the run's model is built anew when the
+overlay differs from the one the agent's model was built under; and
+its shell commands and CLI children (`cc/`, `codex/`) find the
+project's keys in their environment in place of the daemon's
+(`run_overlay_env`).  A `run_agent` / `run_parallel` sub-task that
+inherits the caller's chat id runs under the same project.  `run()`
+has no project argument: a run is in the project its `chat_id` is in,
+and a new chat is in none.  The web page names a project for a new
+chat with `projectId` on its first `submit` (`""` for none; a project
+that is gone leaves the chat where it is), and names none for a task
+of a registered `machine`: projects are each daemon's own.  A
+headless `run_sea()` and a library run read no project.
+`default_work_dir` is never applied by the daemon: the web page
+switches the daemon-wide working directory when a chat is opened
+(through the `setWorkDir` of a pick in the chat header; not for a
+chat of a registered machine), so a run meets it only as the working
+directory it runs in.
+
+The Projects page speaks five commands.  `getProjects` is answered to
+the asking page with `projects` (every project, oldest first, as
+`{id, name, description, settings, isPinned, createdAt, updatedAt}`,
+plus `chatProjects`, chat id to project id).  `saveProject`
+(`project`: `id` for an update, `name`, `description`, `isPinned`,
+the whole `settings` form, which an update may leave out to keep the
+stored settings; `requestId`) is answered to its sender with
+`projectSaved` or, for a request without a name or for a project that
+is gone, `projectError` (`A project needs a name.`, `This project no
+longer exists.`), the name cut to 200 and the description to 2,000
+characters; `deleteProject` and `setProjectPinned` (`pinned`) name a
+`projectId`; each change is followed by a `projects` broadcast
+without `chatProjects`.  `setChatProject` (`chatId`, `projectId`,
+`""` for none) is broadcast as `chatProject`, and one that names a
+project that is gone is an `error` to its sender.  `projects` carries
+API keys, so it goes to this daemon's pages only and never to a
+daemon-link peer, which gets the list only as the reply to its own
+`getProjects` (`web_server.OWN_PAGES_EVENT_TYPES`).  `getHistory`
+with `project` (and `limit`, default `HISTORY_PROJECT_PAGE`, 200)
+returns the task rows of that project's chats that ran on this
+machine and echoes `project` and `limit`.
+
 Inheritance (`agent_dispatch.inherit_from_parent`) applies to every
 dispatched script that is not a channel, unless the call's `inherit`
 option is `false`: the `run_agent` or `run_parallel`
@@ -647,10 +717,13 @@ among the ones the caller's guard names before a finish or a merge
 removes the worktree under them (`live_agent_jobs`): an explicit `max_budget`, else the SEA's own
 `max_budget` setting (the value the daemon pins the inherited share
 to, `sea_apply.apply_run`, so that value, not the share, is what the
-sub-task can spend, up to the caller's remainder less what the live
-jobs of its other calls hold: the dispatch sends that bound as
-`budgetCap` (`agent_dispatch.budget_cap_of`,
-`daemon_client.run_command`; none for an `inherit: false` call) and
+sub-task can spend, up to what the caller has left after its other
+live jobs' reservations, the siblings of the job's own `run_parallel`
+call included, divided among the call's sub-tasks not yet admitted
+(`AgentJob.siblings`, `agent_dispatch._unreserved_share`): the
+dispatch sends that bound as `budgetCap`
+(`agent_dispatch.budget_cap_of`, `daemon_client.run_command`; none
+for an `inherit: false` call) and
 the daemon lowers the effective `maxBudget` to it after the SEA's
 settings have applied, `sea_apply.cap_budget`, whoever named the
 budget, the call, the SEA or the share, the SEA's settings, the
@@ -659,39 +732,38 @@ reservation is lowered with it and bounds the cap in turn, never
 more than what the job holds, since a remainder grown meanwhile may
 already be granted to a call registered since; the budget a call or
 its SEA names is admitted in the critical section that registers the
-job, `_register_and_start`, lowered to the remainder or the job
-refused there before its thread starts, finished with `Error: the
-<name> agent task could not run: <BudgetExceededError>`, so a request
-never counts against another call's admission before its own and two
-calls registered before either ran cannot refuse each other over one
-remainder; the children of one
-`run_parallel` call, which do not reserve against each other, are
-each capped at the same remainder), is on its `AgentJob.budget` from registration
+job, `_register_and_start`, lowered to its share of the unreserved
+remainder or the job refused there before its thread starts, finished
+with `Error: the <name> agent task could not run:
+<BudgetExceededError>`, so a request never counts against another
+call's admission before its own, two calls registered before either
+ran cannot refuse each other over one remainder, and the siblings of
+one `run_parallel` call that each name more than their part of the
+remainder share it instead of overrunning it), is on its `AgentJob.budget` from registration
 (`new_agent_job`), an inherited share once the job's thread resolves
 it, and `agent_dispatch._inherited_budget` reads the live jobs, sums
-their reservations (`reserved_budget`) and records the new share all
-under the job registry's lock, so two concurrent children never each
-get the whole remainder, the second one sees the first one's share,
-and a sub-task that finishes in between is re-read rather than counted
-twice or dropped; the children of one `run_parallel` call share an
-`AgentJob.call_id` and never reserve against each other, as the split
-already divides the remainder among them; a call made while running
+their reservations (`reserved_budget`, the siblings of the job's own
+`run_parallel` call included), divides what is left among the call's
+sub-tasks still without a budget plus one for the caller
+(`_unreserved_share`, capped at the call's even share of what other
+calls leave so what a capped review sibling does not take stays with
+the caller) and records the new share all under the job registry's
+lock, so two concurrent children never each get the whole remainder,
+the second one sees the first one's share, and a sub-task that
+finishes in between is re-read rather than counted twice or dropped;
+a call made while running
 children hold all of it is refused with `BudgetExceededError`; a
 read-only review the call gives no `max_budget` — `tool_profile="review"`,
 or no profile and a task that reads as a review without asking for
-changes — gets at most `fanout_guard.review_budget(work_dir)`, $5
-plus $5 per thousand lines changed in its work directory against
-`HEAD`, untracked files included (`changed_lines`: only the files
-under the work directory count, also when it is a subdirectory of
-its repository, and before the first commit the diff is against the
-empty tree), a cap on the inherited share
-(`budget_cap` of `inherit_from_parent`, applied only when the budget
-is inherited) that never raises it and that the dispatcher applies
-before the SEA's own `max_budget` setting, which still takes
-precedence; a review dispatched to another `machine` is not capped
-this way at all — its `work_dir` is a path on that machine, whose
-diff cannot be measured here, so it keeps the ordinary inherited
-share), its
+changes — gets at most `fanout_guard.review_budget(task_spend(parent))`,
+1/8 of what the calling task has spent so far (its own model calls,
+including the live session, plus the spend of every sub-agent that has
+ended) and at least $10, a cap on the inherited share (`budget_cap` of
+`inherit_from_parent`, applied only when the budget is inherited) that
+never raises it and that the dispatcher applies before the SEA's own
+`max_budget` setting, which still takes precedence; because the spend is
+the caller's, a review dispatched to another `machine` is capped the
+same way), its
 chat id (so the sub-task sees the conversation's earlier
 tasks and results), its own replacement system prompt and appended
 system-prompt text (the `system_prompt` / `add_to_system_prompt`
@@ -747,7 +819,7 @@ configured model of another family, the caller's model at the nearest
 other effort and the strong models of the caller's own family that
 the rule lets through as the sub-task would run it
 (`model_families.other_worker_model`: with its own `model_config`,
-else with the caller's when the name is the caller's launch model),
+else with the caller's when the name is the caller's current model),
 so no effort alias where that configuration sets the effort, never
 the caller's own name, and the clause ends at `effort.` where
 nothing configured differs) unless (i) the call is a fan-out of two or more tasks
@@ -1028,7 +1100,7 @@ keyed per call, so a retry or a stop never
 bills one twice and a session hand-off carries the record along; a
 child run on another machine, `machine=<name>`, keeps its row there,
 and what that row spends after the dispatch returned — an `/ask`
-answer, a Task update finishing after it — is fetched from the machine
+answer, a Task Progress update finishing after it — is fetched from the machine
 (`getTaskUsage`, `task_update.sync_remote_subtask_usage`, never
 periodic: run only when a first-page CHATS refresh, a Spend refresh or
 another daemon's usage request starts one, `start_remote_usage_sync`,
@@ -1195,7 +1267,8 @@ connecting while it runs gets
 the same `new_tab` from `RemoteTabs.replay_to`, and one connecting
 after the sub-agent finished gets its `subagentDone` again
 (`RemoteTab.closed_tabs`: kept per sub-agent tab from the relayed end,
-through the `closeTab` a page online answers it with, until the tab
+which also takes the tab off the stream, `RemoteTabs.end_sub_tab`, since
+no page answers a `subagentDone` with a `closeTab` any more, until the tab
 shows something else — a resume into it, a new chat, a bind — or the
 stream retires), since a page that was away when the child finished
 still has its tab and would otherwise show it spinning for good.  The result's `ran:`
@@ -1593,11 +1666,17 @@ removed: ...` for `add_to_system_prompt`, `add_to_prompt` and
   (`daemon_client.CRON_JOB_ENV`), so a script it runs gets a cron row
   without saying so, and the same script run by hand a plain one.
   Sent as `cronJob` and persisted as the history row's
-  `is_cron` flag, which the CHATS list hides unless its Cron chip is
-  on.  The run's end event carries it too, as `cron` (true as well
+  `is_cron` flag, which the CHATS list hides unless the Cron tasks
+  row of its Filter and group menu is set to Shown.  The run's end
+  event carries it too, as `cron` (true as well
   for a prompt job recognised by its preamble): the web app plays no
   victory sound for a `task_done` marked `cron`, as for a sub-agent's
-  (`subagent`).  The unattended verdict is decided on the text as submitted
+  (`subagent`).  The end event also names the run's chat as `chatId`:
+  a page finds the chat's project with it, whether or not it holds the
+  launching tab, and that project's own "Play a sound when a task
+  finishes" setting, when the project has one, decides instead of the
+  browser's.  The
+  unattended verdict is decided on the text as submitted
   (plus `appendToPrompt`), before the SEA a `/xxx` prompt turns into
   can replace the text (the scheduled `/recommendations now` does),
   and stamped on the
@@ -1793,7 +1872,9 @@ removed: ...` for `add_to_system_prompt`, `add_to_prompt` and
   for a `/xxx text` run, whose history keeps the `/xxx text` line the
   user typed.
 - **`use_web_tools`** — per-run browser-tool enablement.  `None`
-  falls back to the daemon's configured default (the settings panel's
+  falls back to the "Use web tools" setting of the project the run's
+  chat is in, when that project sets one (`projects.config_with`),
+  else to the daemon's configured default (the settings panel's
   "Use web tools" checkbox, persisted as `use_web_browser`).  Under
   the daemon the browser tools include `show_browser()`, which moves
   the page the agent is browsing into the Browser tab on every surface
@@ -2012,7 +2093,12 @@ removed: ...` for `add_to_system_prompt`, `add_to_prompt` and
   and token replace whatever the file named; a start failure is
   logged and the first tool call retries lazily; switching the key
   off takes effect at the next daemon start) and
-  `ChromeBridge.shutdown()` runs when the daemon stops.  With the key
+  `ChromeBridge.shutdown()` runs when the daemon stops.
+  `start_if_enabled(True)` also runs at the start of a task whose chat
+  is in a project that switches "Drive my Chrome" on
+  (`TaskRunner._enter_project`); the bridge is the process's one, so
+  it then serves every later task, and a project that switches the
+  setting off does not stop a running bridge.  With the key
   off, or in a CLI run, the first `use_my_chrome` call starts the
   bridge itself and waits up to 5 s for the extension to find the new
   config; a lazy start that finds another process's bridge still
@@ -2200,7 +2286,9 @@ removed: ...` for `add_to_system_prompt`, `add_to_prompt` and
   search itself once the cancel is set (`MemoryTools._search_one`:
   nobody reads an abandoned worker's hits).  `True`
   enables, `False` disables,
-  `None` falls back to the daemon's configured default (the settings
+  `None` falls back to the "Use persistent memory" setting of the
+  project the run's chat is in, when that project sets one, else to
+  the daemon's configured default (the settings
   panel's "Use persistent memory" checkbox, persisted as
   `use_memory`, or the daemon process's `KISS_USE_MEMORY` environment
   variable).  The override is inherited by `run_agent` / `run_parallel`
@@ -2877,6 +2965,16 @@ SEA's own `tool_call_hook` need not restate:
   output on, and a value once read stays covered while the daemon
   runs: a key rotated or removed mid-run, or a store that goes
   missing, does not uncover what a running command still prints.
+  The API keys of the Projects page are covered the same way, under
+  the same two exceptions: they are stored in `history.db` (table
+  `projects`), which a task can query, and are in the environment of
+  the commands of a project's tasks, so every `SorcarAgent` run
+  registers the keys of every stored project when it starts
+  (`projects.register_secrets`) and `saveProject` registers a
+  project's keys before it writes the row
+  (`secret_redaction.add_secrets`), which covers a task that is
+  already running; a registered value stays covered while the process
+  lives.
   Not covered: the spill files and job logs on disk
   (read back through a tool, they are redacted), a transformed copy
   of a value (base64, URL-encoding) and a value the model itself
@@ -3051,17 +3149,21 @@ SEA's own `tool_call_hook` need not restate:
   `Write` replaces the file atomically (a sibling temporary file,
   `.<hex>.tmp` — a name that does not carry the file's, which near the
   file system's limit leaves no room for a longer sibling — moved
-  over it with `os.replace`, its mode, owner and group kept,
-  `useful_tools._write_file`),
+  over it with `os.replace`, its mode, owner, group, `user.*` extended
+  attributes and POSIX ACL kept, `useful_tools._write_file` /
+  `_copy_xattrs`; the temporary file of an existing file is created
+  with mode `0600` until it has them),
   so a reader sees the old text or the new, never a half-written file;
   a file with other hard links, or one whose directory refuses the
   temporary file, is written in place instead (the rename would cut the
   file from its other names), without that guarantee; so is a file the
   user may not write (a read-only file is refused, as the shell's `>`
   refuses it), one the rename over is refused as busy (a mount point: a
-  single file bound into a sandbox or a container) or whose owner and
-  group the temporary file cannot be given; any other failure (a full
-  disk) leaves the old text.  `Write`
+  single file bound into a sandbox or a container) or whose owner,
+  group or extended attributes the temporary file cannot be given (such
+  as a differing `security.*` or `trusted.*` attribute, or a directory
+  that takes none); any other
+  failure (a full disk) leaves the old text.  `Write`
   refuses a path that exists and is not a regular file (`Error:
   <path> exists and is not a regular file (directory/FIFO/device/socket);
   refusing to write to it.`; `Edit` reports one as `Error: File not
@@ -3303,9 +3405,10 @@ SEA's own `tool_call_hook` need not restate:
   rewrite guard.  `background=True` hands the command to
   `ContainerJobs.start` as written; `on_timeout="background"` first
   applies the sleep rule (`wait_instead_of_sleep`: a `sleep` longer
-  than the deadline is refused, a shorter one outside a loop waits on
-  the running job instead, and a `sleep` with no job running or
-  pacing a loop stays as it is), then starts what is left as a job and
+  than the deadline is refused, a leading plain foreground `sleep`
+  confirmed by `sleep_probe` waits on the running job instead with its
+  seconds rewritten `0`, and any other `sleep` or one with no job
+  running stays as it is), then starts what is left as a job and
   waits for it through `bash_job`.
 - **Refused shell commands.**  `Bash` itself returns the refusal as
   its result (these are tool-side guards, not `tool_call_hook`
@@ -3445,7 +3548,13 @@ SEA's own `tool_call_hook` need not restate:
   `Bash` the error leaves the tool, so the result reads `Failed to
   call Bash with …: REFUSED: …` — since a guard
   must not let a write it cannot read through; for the
-  `optimistic` scan with the commands found so far), drops wrapper prefixes
+  `optimistic` scan with the commands found so far; the scan ends the
+  same way, with `UNREAD_VALUES_VERDICT`, once the values of the
+  command's variables, counted each time one is expanded, come to more
+  than 1,048,576 characters (`_MAX_READ`: a value costs its length in
+  every word that expands it, and values built from one another
+  double), and a directory that a chain of `cd` makes longer than
+  4,096 characters (`_MAX_PATH`) is one only the shell knows), drops wrapper prefixes
   with their option values (`sudo -u root`, `doas`, `env`, `nice`, `timeout
   -s KILL 5`, `stdbuf`, `xargs -I {}`) and reads a Windows drive path (`C:/x`) as
   the absolute path Git Bash spells `/c/x`, so a redirect inside a
@@ -3581,14 +3690,19 @@ SEA's own `tool_call_hook` need not restate:
   names the running background job to wait on when there is one).  A
   long sleep within the deadline is spent on a background job of the
   task instead, when one is running: `Bash` waits on the job started
-  last for the sleep's length, then runs the command with that sleep
-  replaced by `true` (`sleep 60; tail log` waits, then runs `tail
-  log`), and the result ends with `Waited on job <id> for up to N s
-  instead of sleeping (<status>).` (after the output, like every
-  note of a `Bash` result, host or container); with no running job, when the
-  sleep paces a `for`/`while`/`until`/`select` loop (taking it out
-  would spin the loop) or when the text search (`_without_sleep`)
-  does not find the sleep, the command runs as written — with no
+  last for the sleep's length, then runs the command with that sleep's
+  seconds written `0` (`sleep 60; tail log` waits, then runs `sleep 0;
+  tail log`), and the result ends with `Waited on job <id> for up to N
+  s instead of sleeping (<status>).` (on its own line after the
+  output, like every note of a `Bash` result, host or container), but
+  only when the command begins with that plain unpiped, unredirected
+  foreground sleep (`_LEADING_SLEEP`, with no `&` outside quotes when
+  chained with `&&` or `||`, `_NO_BACKGROUND`), the shell runs no
+  `BASH_ENV` / `ENV` startup text (`_runs_environment_text`), and
+  `probe` (`SLEEP_PROBE`) confirms in the command's shell and
+  environment that the invoked word resolves to the system's `sleep`
+  (`_SYSTEM_SLEEPS`); any other sleep, or one with no running job,
+  runs as written — with no
   running job the result then ends with `[note: the sleep of N s ran
   as written: no background job of this task is running. Wait in one
   call instead: Bash(command, until="<regex>", poll_seconds=N,
@@ -3619,8 +3733,14 @@ SEA's own `tool_call_hook` need not restate:
   files this host cannot see, skips the here-document guard and the
   rewrite-to-`Write`/`Edit` step.  The container and bridged `Bash`
   apply the same sleep rule (`wait_instead_of_sleep` with
-  `ContainerJobs.last_running` and `ContainerJobs.wait`, each one
-  script run in the container); their `run_commands_parallel` does
+  `ContainerJobs.last_running`, `ContainerJobs.wait` and
+  `DockerManager.sleep_probe` / `ExecBridge.sleep_probe`: in Docker
+  `sleep_probe` checks `_runs_environment_text` on the container and
+  exec environment and runs `sleep_probe_command` via `self._exec`,
+  reading stdout's first line with `probed_sleep`, while on an exec
+  bridge `sleep_probe` runs `sleep_probe_command` via `bridge_exec`
+  without the startup-env check since the client cannot inspect the
+  remote shell's environment); their `run_commands_parallel` does
   not (`docker_manager._refuse_or_lift` calls no `sleep_guard`), and
   the bundled coding SEA has no sleep rule of its own: its trials
   rely on the container `Bash`'s.  A
@@ -4001,8 +4121,14 @@ is retried on its own counter, and only twelve of them
 consecutive stalled streams`).  Both counters are reset by a
 step that completes (a switch to the fallback model resets the error
 count only), so a stall between two ordinary errors does not reset
-the error count, nor an ordinary error the stall count.  A Chat
-Completions reply the provider cut short is an error
+the error count, nor an ordinary error the stall count.  A request
+that a provider rejects because a reasoning block is "bound to a
+different conversation" is counted on neither while the agent has
+reasoning to remove: it removes the
+rejected reasoning from the conversation and the next step sends the
+request again; with none left to remove, the rejection is handled,
+and counted, like any other error (see "Context compaction" below).
+A Chat Completions reply the provider cut short is an error
 rather than a parsed result: a `finish_reason` of `length` (the
 output-token budget; the error advises raising `max_tokens` or
 lowering `reasoning_effort`), `content_filter` or `error` (a gateway
@@ -4296,7 +4422,9 @@ SEA's hooks, so a hook author knows what the model reads:
   `model_config` (`pinned_model_conflict` checks the SEA's effective
   settings too, since the daemon applies a SEA's `model` when the
   call names none: "Call the plain sub-agent (agent='') or a SEA that
-  names no model"), and a sub-task starting with a slash command,
+  names no model"), one that does not inherit from the caller
+  (`inherit: false` or a channel, which would run on the daemon's
+  defaults instead), and a sub-task starting with a slash command,
   whose SEA may pick its own model).
 - **Side calls.**  A model call made for the run outside its agent
   loop — the commit message, a `talk` synthesis, a `decide` call — is
@@ -4414,10 +4542,31 @@ SEA's hooks, so a hook author knows what the model reads:
   refuse the request, lose every thinking block at a clear; an
   earlier model keeps those of its newest reply, which the API
   requires before the pending tool results.
+  Every compaction, a whole-turn removal included, also removes
+  Claude's signed reasoning from a conversation that another adapter
+  holds (the base `Model.drop_stale_reasoning`): the thinking blocks
+  of a session that `set_model` or a fail-over handed from a Claude
+  model to another adapter, which leaves them out of its requests
+  while a hand-off back sends them again, and the `reasoning` items
+  of a Claude model on the Responses API (those whose `format` starts
+  with `anthropic`, as OpenRouter's do), which are sent back as they
+  are.  One kept after an edited message is dropped or refused in the
+  same way, whichever adapter made the edit.  When a provider still
+  rejects a request because a reasoning block is "bound to a
+  different conversation" (`kiss_agent._is_stale_reasoning_error`),
+  the agent removes the reasoning
+  (`drop_stale_reasoning(rejected=True)`: on the Anthropic adapter
+  every block from then on, the newest reply's too, whatever the
+  model's name says) and sends the request again on the next step;
+  the rejection does not count toward the three consecutive errors
+  that end a session, and with no reasoning left to remove it is
+  handled like any other error.
   Each compaction applied is a `compaction` event
   (`step`, `context_tokens`, `dropped_tokens`, `results`, `arguments`,
   `reasoning_blocks`, `target_tokens`; a whole-turn removal reports
-  `turns` with zero `results` and `arguments`), persisted with the task's
+  `turns` with zero `results` and `arguments`, and as
+  `reasoning_blocks` the Claude reasoning it removed from the turns
+  it kept), persisted with the task's
   events like the `gate_stage` records and the
   `context_edits` events (`step`, `edits`, `cleared_input_tokens`)
   an Anthropic model's server-side context editing reports when the
@@ -4435,7 +4584,7 @@ SEA's hooks, so a hook author knows what the model reads:
   until the switch is saved from the panel), which off stops every run
   on the daemon; and the run's own `compaction` option (the `run()`
   keyword, the SEA setting — a headless `run_sea()` and the in-process
-  Task update read it from the SEA's settings the same way — and the
+  Task Progress update read it from the SEA's settings the same way — and the
   `run_agent` option), which a run turns off for itself alone.
 - **Routine turns.**  The turn after a refused call, a `summary`,
   `memory_search`, `memory_pull`, `memory_read`, `memory_list`,
@@ -4753,8 +4902,8 @@ leaves the call's own token count as the context).
 Long prompts are priced by one of two rules in
 `model_info.calculate_cost`.  A catalog entry with `prompt_tiers`
 (`openrouter/*` entries only: the Claude Sonnet 4.5 and Haiku 5.5
-twins, Gemini 2.5 and 3.1 Pro, GPT-5.4 through GPT-6.1, Grok 4.x and
-`grok-build`, Qwen Plus, Flash and Coder Flash, Seed 2.0 Lite and
+twins, Gemini 2.5 and 3.1 Pro, GPT-5.4 through GPT-6.2, Grok 4.x,
+Qwen Plus, Flash and Coder Flash, Seed 2.0 Lite and
 Mini, Sakana Fugu Ultra, and the rolling `~*-latest` aliases that
 track one of them — `~openai/gpt-*-latest`,
 `~anthropic/claude-haiku-latest`, `~x-ai/grok-latest`; no
@@ -4799,8 +4948,9 @@ An entry without tiers falls back to the name-based rule
 family's multiples of its own short-context rates: Claude Sonnet 4.5
 bills a single request whose prompt exceeds 200,000 tokens at 2x the
 input and cache rates and 1.5x the output rate, Haiku 5.5 one over
-100,000 at 5x every rate, GPT-5.4 through GPT-6.1 (not the 5.4 mini
-and nano) one over 272,000 and Gemini 2.5 and 3.1 Pro one over
+100,000 at 5x every rate, GPT-5.4 through GPT-6.2 (every GPT-6 point
+release; not the 5.4 mini and nano) one over 272,000 and Gemini 2.5
+and 3.1 Pro one over
 200,000 at 2x input and cache and 1.5x output.  Neither rule applies
 to summed multi-request counts (`single_request=False`), which bill
 every token at the short-context rates, and the name-based rule is
@@ -4819,8 +4969,9 @@ and every other Claude model bill long prompts at their standard
 rates.
 
 An `openrouter/*` entry holds the prices of the model's record in
-OpenRouter's `/api/v1/models` listing, with one exception
-(`update_models.prefer_standard_endpoint_prices`).  The listing shows
+OpenRouter's `/api/v1/models` listing, with two exceptions.  The
+first is `update_models.prefer_standard_endpoint_prices`.  The
+listing shows
 the price of one of the model's endpoints, and for a closed-weight
 model (a record whose `hugging_face_id` is null or empty; a `~` alias
 through its `alias_target`) that can be a regional endpoint's
@@ -4834,7 +4985,14 @@ premium of at most 50% (`_MAX_REGIONAL_SURCHARGE`), takes that
 endpoint's whole price sheet instead: base, cache, image, audio and
 long-prompt tiers.  An open-weight model, a free or per-request-priced
 one and a `:variant` id keep the headline, and so does every model
-from the first endpoint listing that cannot be read.  For an
+from the first endpoint listing that cannot be read.  The second
+exception is a cap (`update_models._cap_cache_reads_at_input`): a
+cache-read price that a price sheet, the headline's or an endpoint's,
+puts above the input price it applies with is lowered to that input
+price, in the base sheet and in every long-prompt tier, so a cache
+hit never costs more than a fresh input token; a negative input
+price (a router priced per request) is no price to cap at and is
+left alone.  For an
 `openrouter/*` call these catalog prices are what the model picker
 shows and the estimate used when a response reports no cost; the cost
 recorded for a call is the one OpenRouter reports for it
@@ -5128,6 +5286,7 @@ def run(
     sea_command: str = "",
     attachments: list[dict[str, str]] | None = None,
     budget_cap: float | None = None,
+    model_owns_endpoint: bool | None = None,
     reconnect_seconds: float = 300.0,
 ) -> TaskResult
 ```
@@ -5144,6 +5303,7 @@ class TaskResult:
     task_id: str = ""  # persisted task_history row id
     settings: dict[str, Any] = field(default_factory=dict)  # the run's task_settings event payload
     reconnects: int = 0  # daemon connections lost mid-run and re-established
+    tasks: tuple[TaskResult, ...] = ()  # the run's tasks one by one (several <task> blocks)
 ```
 
 `settings` is the run's `task_settings` event (its effective model,
@@ -5151,11 +5311,31 @@ work directory, budget, SEA, kind, tool profile, timeout, inherited
 and overridden values; `kiss.agents.sorcar.run_config`), empty when
 the run ended before the daemon emitted it.
 
+`tasks` holds one `TaskResult` per task of the run whose spend the
+daemon reported under its own row (the `<task>` blocks of a prompt run
+one after the other, each with its own row, model and spend): that
+task's `task_id`, `settings`, `cost`, `tokens` and `steps`. When
+`tasks` is not empty, the result's own `cost`, `tokens` and `steps`
+are the sum of its entries; the task the run was cut in before its
+first report is listed too, with no spend. `tasks` is empty when no
+report named a row: the result then carries the totals of the reports
+that named none. `run_agent(machine=...)` records each entry for its
+caller (the result itself when there is none), so a charge a remote
+task receives after the run (an `/ask` answer, a task update) reaches
+the caller once and the Spend panel files each task's spend under its
+own model.
+
 `budget_cap` is the bound a `run_agent` dispatch puts on the run's
 budget — the caller's unreserved remainder and no more than the job's
 reservation (`agent_dispatch.budget_cap_of`; wire field `budgetCap`,
 sent only when not `None`); the daemon lowers the effective
 `maxBudget` to it after the SEA's settings apply.
+
+`model_owns_endpoint` is a `run_agent` dispatch's record of whose
+endpoint the inherited `model_config` names, the model's own
+`MY_MODELS.json` one or the run's (wire field `modelOwnsEndpoint`,
+sent only when not `None`); the daemon takes it for the configuration
+as sent, and reads its own registry otherwise.
 
 What `run()` raises (all in `kiss.agents.sorcar.daemon_client`):
 `ValueError` for an empty prompt or a `sea_path` that is not an
@@ -5177,7 +5357,7 @@ re-established with backoff — at once, then 1 s, 2 s, 4 s, ... up to
 window (300 s by default): the client re-attaches to its tab with a
 `resumeSession` flagged `recovery: true` — a transport recovery, not
 a user asking for the tab, so the daemon restores this connection's
-subscription and transcript but a tab the user closed while the run
+subscription and transcript but a tab a client closed while the run
 went on stays closed on every surface — naming the run by its task
 id or, before the first stamped event gave it one, by the
 client-minted run token the `run` carried as `taskId`
@@ -5193,7 +5373,7 @@ client that addressed it (`AgentServer._headless_client_task`,
 `WebPrinter.local_client_addressed`), marked headless so its
 copies reach no web app and the tab counts as no viewer, and the
 client still receives the `result`; a recovery re-attach leaves that
-tab closed as the user left it.  The window opens at the first drop and closes once
+tab closed as it was left.  The window opens at the first drop and closes once
 the run is replayed; `timeout` keeps running through it: a timeout
 that expires while the client is still trying ends the wait on time,
 as it would on a live connection (the attempts stop; with
@@ -5211,7 +5391,7 @@ handoff's `finish(success=False, is_continue=True)` result is
 answered by the executor with the next session while the task goes
 on, so the client keeps waiting) or the run was refused
 (`daemon_client._run_ended`) — so a task that may still run keeps
-its tab on every surface until a user closes it, while a sub-agent
+its tab on every surface until a client closes it, while a sub-agent
 run's tab is closed on every exit since no surface shows it), or, with
 `stop_on_timeout`, its subclasses `StoppedOnTimeoutError` (the daemon
 confirmed the stop; `.result` carries the stopped task's spend) and
@@ -5245,7 +5425,11 @@ the still-running job at its timeout, raises it as
 and for a lost connection alike, keeps it on the stored job as
 `running_task_id` even when the job was edited while it ran, and is
 not launched again by a tick or a "run now" while that row is
-unfinished, `_claimed_task_id`).
+unfinished, `_claimed_task_id`; a tick or a "run now" asked once the
+scheduler's host has begun stopping, `_host_stopping`, until a daemon
+host's event loop closes, is refused too — `job '<id>' is not started:
+the scheduler's host is shutting down` — and a refused tick leaves the
+occurrence due).
 Every other abort of the wait — above all the `KeyboardInterrupt`
 injected when the calling task is stopped inside a `run_agent`
 dispatch — also sends the daemon a `stop` for the dispatched task's
@@ -5297,21 +5481,29 @@ charge leaves, `persistence._record_model_charge` with its `model`,
 row already finished when the charge lands has its split refreshed
 then, and a row the orphan sweep finishes for a process that died
 mid-run, `persistence._backfill_orphan_progress`, gets the same
-record from its persisted events, its totals those of the newest
-parseable `usage_info` event: a text-less ledger publication (the
+record from its persisted events, its `steps`/`tokens`/`cost` raised
+(each column monotonically, never lowered) to the per-column maximum
+over every parseable `usage_info` publication plus the remote charges
+it does not hold: a text-less ledger publication (the
 bank of a side channel, a side call or a sub-agent's fold, the
 run's closing event, a late charge's), whose structured fields are
 the task's totals after the bank, or a per-step one whose text
 carries `Steps:` (`persistence._recovered_progress_from_events`
-scans the events backward and skips the live monitor's cross-task
-usage events, foreign-format and malformed ones; its end time is the
-newest persisted event of any type) — a bank publication, stamped
-`banked` with the ledger, holds exactly the remote charges banked
-before it was published, `_charges_held_by_usage_event` (an unstamped
-one from the intermediate, unreleased build before the stamp is read
+skips the live monitor's cross-task usage events, foreign-format and
+malformed ones, and the unstamped totals a finished row republishes
+after a late charge, told by their timestamp against the row's
+`swept_tasks.finished_ts`, and taking the maximum across all
+publications makes the result independent of event arrival order when
+deferred journals replay behind newer rows; its end time is the newest
+persisted event of any type, and the same rebuild runs again whenever
+a journal replay brings more of the row's events,
+`persistence._recover_usage`) — a bank publication, stamped `banked` with the ledger,
+holds the remote charges banked up to that stamp,
+`_charges_held_by_usage_event` (an unstamped one from the
+intermediate, unreleased build before the stamp is read
 conservatively from its totals and can lose a cost-only charge once,
-which the recovery logs), the others settled on top — and its `cost`
-then raised to at least what its records show
+which the recovery logs), the remaining remote charges added on top —
+and its `cost` then raised to at least what its records show
 (`_floor_orphan_costs_at_records`): its own `llm_call` and charge
 records plus its sub-agents' spend, a local sub-agent's row cost and
 a remote one's folded `remote_subtasks` record, the rows floored
@@ -5319,8 +5511,9 @@ deepest first so a parent counts the floored cost of a sub-agent
 recovered with it, the floor never lowering a cost (it covers a
 terminal `s10s -t` run that printed no usage event and the local
 sub-agents that died with the process; a record replayed from the
-event journal after the sweep floors the killed row and its killed
-ancestors again, `_refloor_killed_chain`), so the sidebar's Spend subpanel
+event journal after the sweep floors the swept row and its swept
+ancestors again, `_refloor_killed_chain`, tracked in `swept_tasks`
+whatever result text they carry), so the sidebar's Spend subpanel
 files a run that switched models with `set_model` under each model it
 actually called rather than under its launch model
 (`persistence._split_own_share`: spend no call accounts for stays
@@ -5419,8 +5612,8 @@ which the daemon then never answered.
   (`_publish`; an unchanged list is not re-broadcast to the clients,
   except after a Stop interrupted a broadcast before every subscriber
   had it, when the next rescan broadcasts whatever it finds,
-  `_forget_broadcast`).  Of the 35 bundled SEA folders (the
-  `base/` folder of the base classes is never a command), 33 register
+  `_forget_broadcast`).  Of the 36 bundled SEA folders (the
+  `base/` folder of the base classes is never a command), 34 register
   a command and two (`coding`, `sorcar`) are hidden: `/ask` (answers a question about the current task
   in two or three sentences from one `task_context` call over its
   status, spend, progress log and digested persisted events — the log
@@ -5451,17 +5644,43 @@ which the daemon then never answered.
   agent is gone (`JsonPrinter._persistence_task_id` files an
   `ask_answer` under its own stamp), while an answer with no task row
   to file it under is stamped with the asking `tabId` instead and
-  shown there once, never replayed, and the task-info panel's Task update is the same agent
+  shown there once, never replayed, and the task-info panel's Task Progress update is the same agent
   run in-process by `kiss.server.task_update`: it asks the SEA
   `task_update.UPDATE_QUESTION` ("What has this task done so far, and
-  what are its partial results?") on the parent's model (unless the ask
+  what are its partial results?", followed by the request to end the
+  answer with one sentence of the form
+  `Time left: <low>-<high> min, most likely <best> min.`, or
+  `Time left: unknown.` when no estimate is possible, as when the
+  task waits for the user) on the parent's model (unless the ask
   script's `settings()` names a `model`) in the parent's work dir, with the
   `task_context` tool and `finish` only, capped at
   `UPDATE_BUDGET_USD` ($1) per run and charged to the task as
-  side-channel usage; it runs on its own schedule while a surface shows
+  side-channel usage; `task_update._split_estimate` takes that
+  sentence out of the answer, only when it is the answer's last
+  sentence, and the `taskUpdate` reply carries the estimate as three
+  finish times in epoch milliseconds, counted from the moment the
+  question was asked: `etaAt` (the most likely one), `etaLowAt` and
+  `etaHighAt` (the agent's own range widened by `ETA_RANGE_WIDENING`,
+  1.75: the low end divided by it, the high end multiplied), all 0
+  when there is no estimate ("unknown", numbers that are not low <=
+  best <= high, or a time beyond 365 days); the page words them as
+  the time left ("About 12 min left (8 to 20 min), done around
+  10:50 AM") and counts it down between updates (the line is
+  rewritten every `META_ETA_TICK_MS`, 15 s, and reads "Less than a
+  minute left" once `etaAt` is under a minute away and "Taking longer
+  than estimated" once `etaHighAt` has passed); measured on
+  2026-11-20 at 70 checkpoints of 35 finished tasks, the most likely
+  value was off by a median factor of about 1.9, and the widened
+  range held the real time left at 89% of the checkpoints on
+  `claude-fable-5-2-max` and 90% on `claude-opus-5-5-medium` (at 57%
+  and 51% of 47 of them on `gpt-6.1-sol` and `gemini-4-carbon`, which
+  underestimate more); it runs on its own schedule while a surface shows
   the panel — the first run once the task is `FIRST_UPDATE_DELAY_S`
-  (60 s) old, then whenever a poll finds the last answer older than
-  `UPDATE_INTERVAL_S` (10 min), or at once on the panel's refresh
+  (60 s) old, then whenever a poll finds that the last run ended more
+  than `UPDATE_INTERVAL_S` (10 min) ago or, when that run estimated
+  the time left, more than half of that time ago (no sooner than
+  `FIRST_UPDATE_DELAY_S`, no later than `UPDATE_INTERVAL_S`; a failed
+  run waits the whole interval), or at once on the panel's refresh
   button — and never twice at once; the child runs under a stop event
   of its own that observes the task's (`task_update._ChildStopEvent`,
   re-checking the parent's every 0.1 s while blocked), so Stop on the
@@ -5510,7 +5729,7 @@ which the daemon then never answered.
   order, and `orbestrouter` starts on
   `openrouter/anthropic/claude-opus-5.5-medium`, works on
   `openrouter/anthropic/claude-fable-5.2-max`, writes on
-  `openrouter/google/gemini-4-carbon` and is reviewed by
+  `openrouter/google/gemini-4-neon` and is reviewed by
   `openrouter/openai/gpt-6-astra-xhigh`), `/ccxbestrouter` (the bestrouter on
   the Claude Code and Codex CLIs, so a Claude subscription and a ChatGPT
   subscription run it without API tokens: `ccxbestrouter_sea.SIMPLE_MODEL`
@@ -5958,7 +6177,11 @@ which the daemon then never answered.
   `persistence.tasks_matching`, which lists the newest history rows by
   id prefix and by the `sea` column, `discover_sea` here; a reference
   that matches no task or more than one is answered with the newest 20
-  runs to choose from).  The four files a run keeps in its scratch
+  runs to choose from; a task whose `sea` is not `discover_sea` but
+  that dispatched `/discover` sub-tasks, found by `child_tasks`, stands
+  for the newest of them, and the tool's reply opens with a note
+  listing them and naming the one animated, so a parent's own events
+  are never taken as evidence).  The four files a run keeps in its scratch
   directory (`pareto.md`, `explored-ideas.md`, `ideas.md`, `split.md`)
   differ in layout from run to run, so no code parses them; the model
   reads them and two tools, which `tools()` adds, keep it to what the
@@ -5973,8 +6196,7 @@ which the daemon then never answered.
   `<OS temp dir>/kiss-tmp/<task id>/`, each also in the main checkout
   once the run's worktree is gone) and the run's final result; a task none of whose calls
   wrote, read or named `pareto.md` or `explored-ideas.md` ran no loop
-  and is refused, with its `/discover` sub-tasks listed when it has
-  any, else the newest runs.  The model
+  and is refused, with the newest runs listed.  The model
   writes the run as a JSON story (`story.Story`: one round per
   evaluated point in the order evaluated, the baseline first, each
   with its parents, operator, draw, score, status, the `pareto.md`
@@ -6127,7 +6349,8 @@ which the daemon then never answered.
   `/machine list` shows each machine's address and reachability; once a
   machine is registered the Chats panel lists its tasks next to the
   local ones, de-duplicated by task id, in the same order as the local
-  list (running first, then latest finished first) and filterable by
+  list (running first, then pinned rows, then the rest, each latest
+  finished first) and filterable by
   machine name (the merge, `machines.merged_history`, waits
   `HISTORY_FANOUT_WAIT` seconds (2) for the machines' pages, fetched on
   a shared pool with one fetch per registration and view at a time, a
@@ -6179,14 +6402,18 @@ which the daemon then never answered.
   that adds the column, is closed when the backfill ends, done or
   failed, `_close_thread_db`, while a caller that already held one
   keeps it); the
-  favourite star and delete button of a remote machine's row, and the
-  favourite star, rename pencil and delete button of a chat whose rows
-  are all that machine's, act on that machine's `history.db`:
+  favourite star, pin and delete item of a remote machine's row, and
+  the favourite star, pin, retyped title and delete item of a chat
+  whose rows are all that machine's (items of the row's "…" menu),
+  act on that machine's `history.db`:
   `setFavorite`, `setChatSummary`, `setChatFavorite` (the chat's star,
   `chat_summaries.is_favorite`, which each history row carries as
   `chat_is_favorite` and the CHATS panel's Favorites filter honours
-  beside the task's own star), `deleteTask` and `deleteChat` stamped
-  `machine`
+  beside the task's own star), `setPinned` and `setChatPinned` (the
+  task's pin, `task_history.is_pinned`, and the chat's,
+  `chat_summaries.is_pinned`, which each history row carries as
+  `is_pinned` and `chat_is_pinned`), `deleteTask` and `deleteChat`
+  stamped `machine`
   (`sidebar_panels.MACHINE_HISTORY_WRITES`, `machine_history_write`)
   are forwarded on the machine's default link lane, in the order
   clicked per connection and machine, and followed by a
@@ -6196,7 +6423,33 @@ which the daemon then never answered.
   the command's `generation`; its `refused` carries the machine's
   refusal, `Cannot delete <what>: its task is still running. Stop it
   first.`), which, like an unreachable machine, is shown as a
-  `notice` on the requesting tab; the
+  `notice` on the requesting tab; the task-info panel's Tags row
+  reads and edits the `tags` column of the row of the task it shows:
+  `getTaskTags` (`taskId`) is answered to the sender alone with
+  `taskTags` (`taskId`, `tags`, `allTags`, which is
+  `task_metadata.ALL_TAGS`, the 22 names a task can carry, and
+  `editable`: the row has tags
+  and its task is over, `persistence._TAGS_EDITABLE`), and
+  `setTaskTags` (`taskId`, `tags`, the whole new set) stores the names
+  without repeats in the vocabulary's order and marks the row
+  `tags_edited`, after which no derivation replaces them
+  (`task_metadata.write_task_tags`, the `--refresh` of
+  `kiss.scripts.backfill_task_metadata`), then sends the `taskTags`
+  to every page and a `tasks_updated`; an empty set, a name outside
+  the vocabulary, a row that does not exist, has no tags yet or
+  belongs to a running task, and a history that cannot be written, is
+  refused to the sender alone, the
+  `taskTags` as stored carrying the reason as `error` (`A task keeps
+  at least one tag.`, `There is no tag named <tag>.`, `This task has
+  no tags to edit: it is still running or was deleted.`, `Could not
+  save the task's tags: <error>.`); stamped
+  `machine`, both are forwarded on the `panels` lane
+  (`sidebar_panels.machine_task_tags_reply`; the read waits in the
+  `tags` queue of `MACHINE_READ_QUEUES`, the write is queued with the
+  history writes and followed by the same `tasks_updated`), and for a
+  machine that cannot be asked the daemon answers a `taskTags` that
+  lists no `tags` and carries the `error`, for which the page leaves
+  its row as it is; the
   link to each machine keeps its sockets alive with
   WebSocket pings, so an idle hour does not drop it, and a request
   whose previously kept socket has closed is sent once more over a
@@ -6210,16 +6463,16 @@ which the daemon then never answered.
   earlier request is skipped rather than taken as the answer, and the
   daemon announces `echoesGeneration` in its `auth_ok` (its replies
   echo the stamp, read by `commands.request_generation` for
-  `myModelsData` and `machines` and by the `models` and `history`
-  handlers themselves; a page stamps
+  `myModelsData`, `machines` and `taskTags` and by the `models` and
+  `history` handlers themselves; a page stamps
   some of its own requests the same way — its machine adds, whose
   answers the Machines subpanel tells apart by generation, and its
   history and model-list requests — and a command that carries none
   gets its reply unstamped (a `history` reply says `generation: 0`);
   the stamp is echoed to the
   requester only, links and pages each counting from 0), after which a
-  `models`, `history`, `myModelsData`, `machines` or `historyDeleted`
-  reply without a
+  `models`, `history`, `myModelsData`, `machines`, `historyDeleted`
+  or `taskTags` reply without a
   `generation` (`machines.CORRELATED_REPLIES`: a list the daemon
   pushed to every connection unasked, for another client's edit or a
   registry change) is not read as the answer either — a daemon
@@ -6240,7 +6493,8 @@ which the daemon then never answered.
   peer is not held), and between two parts lets through a sidebar
   panel's reply waiting for the connection — `URGENT_REPLY_TYPES`:
   `history`, `machines`, `cronJobs`, `appsStatus`, `spendReport`,
-  `recommendations`, which `WebPrinter.broadcast` and
+  `recommendations`, `skills`, `skillSearch`, `skillInstall`, which
+  `WebPrinter.broadcast` and
   `RemoteAccessServer._reply_direct` queue on the ahead lane of the
   endpoint's `FifoSendLock` (`acquire(ahead=True)`, served before the
   waiters in turn; the owner of the lock sees them in `ahead_waiting`
@@ -6254,7 +6508,10 @@ which the daemon then never answered.
   `_DrainWatch` timer reads the peer's unsent bytes once a second,
   `_unsent_bytes`: the transport's write buffer plus, where it can be
   read, the kernel's send queue, `TIOCOUTQ` on Linux and other POSIX,
-  `SO_NWRITE` on macOS, the write buffer alone on Windows) but never one that
+  `SO_NWRITE` on macOS, the write buffer alone on Windows; the 30 s are
+  counted in looks, a tick each, never read off the clock, so a look the
+  daemon's own long event-loop step or a suspended machine delayed is
+  not charged to the peer) but never one that
   merely reads slowly; a stream socket's handshake (`MachineLink.open_connection`,
   a chat tab's or the machine's view stream) runs outside the link's
   lock, so it connects beside a request in flight on the shared socket
@@ -6329,8 +6586,8 @@ which the daemon then never answered.
   transcript (the page drops a binding it holds that the frame does
   not name: it ended while the page was away), and then the
   transcript of the one bound tab the `ready` names as shown (its
-  `tabId`), with the `openSubagentTab` of each sub-agent under it and
-  a `replay_deferred` offer in place of the sub-agent's transcript,
+  `tabId`), with the `openSubagentTab` of each running sub-agent under
+  it and a `replay_deferred` offer in place of the sub-agent's transcript,
   which the surface fetches with a `scoped` `resumeSession` of that
   tab when the user opens it, as a local replay does since
   `server._open_persisted_subagent_tabs` stopped sending the
@@ -6369,7 +6626,12 @@ which the daemon then never answered.
   show the machine's working directory and repository, and a file
   opened from them is read and saved there: every workspace command
   (`listDir`, `gitStatus`, `gitLog`, `gitShow`, `gitAction`,
-  `fsAction`, `openFile`, `saveFile`, `checkPaths`) stamped `machine` is forwarded to
+  `fsAction`, `openFile`, `saveFile`, `checkPaths`; `listDir` carries the
+  `sort` the folder's Explorer "Sort" submenu picked, one of
+  `explorer.DIR_SORT_ORDERS` — `name`, `created` (birth time,
+  `explorer.birth_time`: `st_birthtime`, or libc `statx` on Linux) or
+  `modified`, each `-asc` or `-desc`, folders still listed first and any
+  other value read as `name-asc`) stamped `machine` is forwarded to
   the machine's daemon over the link and its reply, stamped `machine`,
   sent back -- `sidebar_panels.MACHINE_WORKSPACE_REPLIES` (a command
   carrying a `token` gets it echoed on every reply, success, binary or
@@ -6427,7 +6689,71 @@ which the daemon then never answered.
   displaced (`TabRegistry.retitle_if_generation`, keyed on the
   `promptId` the forwarded submit was stamped with and echoed on
   `promptOpened`, and on the registry generation, so a late answer
-  never undoes a newer title); the
+  never undoes a newer title); the "Open in Browser" button of an
+  `.html` / `.htm` content tab sends `openInBrowser` (`path`, `workDir`,
+  `tabId`, `token`) only from a page on the daemon's machine whose
+  `configData` said `opensBrowser` (the daemon is not headless,
+  `browser_handoff.is_headless_environment`): the daemon resolves the
+  path as `openFile` does, hands an existing HTML file's `file://`
+  address to the default browser and answers the requester alone with
+  `openInBrowserResult` (`opened`, `path`, the `token` echoed); a remote
+  page, a headless daemon, a registered machine's file, or `opened`
+  false instead uploads the document the preview shows, pictures
+  inlined, with `stageHtmlView` (`token`, `html`, optional `name`; no
+  reply) and opens `/view/<token>/<name>` in a new tab, which
+  `html_views.HtmlViews` answers from memory (at most `MAX_DOCUMENTS` 8
+  documents and `MAX_BYTES` 64 MiB, the oldest dropped first; a request
+  that beats its upload waits up to `WAIT_SECONDS` 10 s, at most
+  `MAX_WAITERS` 8 at a time) under a `sandbox` Content-Security-Policy
+  without `allow-same-origin`, so the document's scripts cannot reach
+  the chat page's storage, cookies or WebSocket (`configData` also
+  carries `user`, the daemon's OS user shown at the left of the strip
+  under the Chats list); a file no tab can show, one that is neither a
+  PDF nor an image (`web_server._INLINE_BINARY_MIMES`) and holds a NUL
+  byte in its first 8192 bytes, is answered by `openFile` with
+  `unsupported: true` beside its `error` (`Cannot display binary file:
+  <path>`, or `File too large to display: <path>` for one over the
+  editor's `_OPEN_FILE_MAX_BYTES`, 2,000,000 bytes) and the resolved
+  `path` and `name`; the page opens it outside itself only for a reply
+  that echoes an `open:` token and may take the focus (a clicked link,
+  an Explorer row; not "Open to the Side", not a path-only prompt): a
+  page on the daemon's machine whose `configData` said `opensBrowser`,
+  for a file that is not a registered machine's, sends
+  `openWithDefaultApp` (the resolved `path`, `tabId`, a `token`), which
+  is never forwarded: the daemon resolves the path as `openFile` does
+  and hands the file to the platform's opener
+  (`browser_handoff.open_with_default_app`: `open` on macOS,
+  `os.startfile` on Windows, `xdg-open` elsewhere) unless it is a
+  program (`_is_program`: an extension of `_PROGRAM_SUFFIXES`, on
+  Windows of `%PATHEXT%` too, a native executable or `#!` script by
+  its first bytes, `_PROGRAM_MAGICS`, on macOS a file without an
+  extension that has an execute bit), and answers the requester alone
+  with `openWithDefaultAppResult` (`opened`, `path`, the `token`
+  echoed), `opened` false showing the `openFile` error as a
+  notification; every other page sends the `openFile` again with
+  `download: true`, answered for a file of at most
+  `_OPEN_BINARY_MAX_BYTES` (24 MiB) with `binary`, `mime`
+  (`web_server._download_mime`: the type its name says,
+  `application/octet-stream` for none and for HTML, SVG and every
+  other XML type), `size`, `base64` and `download: true`, which the
+  tab shows as a `Download <name>` link, and for a larger one with
+  `File too large to display: <path>`; the composer's Save button
+  keeps one text for every chat, window and browser in
+  `$KISS_HOME/saved_input.txt` of the daemon the page talks to
+  (`input_draft.save_reply`, `read_reply`; never forwarded to a
+  machine): `saveInputDraft` (`text`, the list `was`, the sender's
+  `seq`) writes the text, or with an empty `text` (sent when the saved
+  text is submitted or cleared) deletes the file only while it holds
+  one of the texts in `was`, so what another browser saved since
+  stays, and `getInputDraft`, which a starting page sends unless it
+  still owes a save, reads it; both are answered to the sender alone
+  with `inputDraft` (`text`, what the file holds now, and `path`; a
+  save's echoes its `seq` and carries an `error` when the file is as
+  it was: a text over `MAX_INPUT_DRAFT_BYTES`, 1,000,000 UTF-8 bytes,
+  gets `Not saved: the text is longer than 1 MB.`); the page keeps a
+  copy in `localStorage` (`kiss-saved-input`), posts a save the daemon
+  has not answered again when the connection is back, and puts the
+  text back once per page load, into an empty prompt box only; the
   settings sheet opens for the machine too, so its commands
   (`getConfig`, `saveConfig`, `getMyModels`, `getClaudeCodeStatus`,
   `getCodexStatus`, `startCodexLogin`, `saveMyModel`, `deleteMyModel` --
@@ -6449,7 +6775,15 @@ which the daemon then never answered.
   `run`, `stop`, `userAnswer`, `appendUserMessage`, `interruptTool`,
   `worktreeAction`, the Merge/Discard bar of a bound tab acting on the
   worktree its task left on the machine, whose `worktree_result` comes
-  back stamped with the tab, and `getAdjacentTask`, the chat's task
+  back stamped with the tab and, like every `worktree_result`, with the
+  `action` (merge or discard) it answers — a run's `clear` likewise
+  carries its starting `workDir`, and `WebPrinter` logs both per tab
+  (`_begin_tab_run`) so that a report a task wrote under `reports/` is
+  asked for with `openFile` `report: true` and `since` (the `ts` of its
+  `Write`) and served by `_resolve_report_file` only once
+  `WebPrinter.worktree_merged` knows every worktree it may have been
+  written in to be merged (a git-ignored file then is not, a file still
+  inside a worktree never is), or that the run made none, and `getAdjacentTask`, the chat's task
   before or after the one on screen, which only the machine's history
   can answer) bring the machine's own model
   list and default model and make a pick the machine's default (and
@@ -6483,9 +6817,11 @@ which the daemon then never answered.
   (`ServerApi._spawn_after`, `_pending_files`), and `recordFileUsage`
   has no reply (`MachineLink.request` with an empty reply type returns
   `{}` once the command is sent; a lost count is logged); the sidebar's
-  Schedule, Machines, Apps, Spend and Recommendations subpanels show
+  Schedule, Machines, Skills, Connectors (the `appsStatus` reply),
+  Spend and Recommendations subpanels show
   the machine too, their commands (`getCronJobs`, `cronAction`,
-  `getMachines`, `machineAction`, `getAppsStatus`, `getSpendReport`,
+  `getMachines`, `machineAction`, `getAppsStatus`, `getSkills`,
+  `searchSkills`, `installSkill`, `getSpendReport`,
   `getRecommendations` -- `sidebar_panels.MACHINE_PANEL_REPLIES`)
   forwarded the same way on a link lane of their own
   (`machines.link_for(machine, "panels")`, so the up-to-45-second app
@@ -6493,23 +6829,65 @@ which the daemon then never answered.
   reply is waited for `SSH_TIMEOUT + ENROLL_TIMEOUT +
   DNS_TIMEOUT_SECONDS` longer than the link's usual budget, since the
   machine pings its own machines first and an `add` enrolls the new
-  one), an unreachable or refusing machine answering with an empty
-  reply of the expected type plus the `error` (a `cronAction`'s or
-  `machineAction`'s reply, this daemon's own or a forwarded one, also
+  one; a `skillSearch` reply is waited for 30 s longer and a
+  `skillInstall` reply 900 s longer, `_SKILL_REPLY_SECONDS`, each on
+  a lane named like the reply, so that neither the other subpanels'
+  polls nor a search during an install wait for it), an unreachable
+  or refusing machine answering with an empty
+  reply of the expected type plus the `error` (a `cronAction`'s,
+  `machineAction`'s or `searchSkills`'s reply, this daemon's own or a
+  forwarded one, also
   echoes the command's `generation`, 0 when it had none: the Schedule
   subpanel stamps each save with one, so it closes its in-place form
   only on the reply to its own create or update whatever the order
-  two saves are answered in), so the Machines subpanel
+  two saves are answered in, and the Skills subpanel stamps each
+  search with one and shows the answer to its newest search only,
+  since two searches may ask for the same text), so the Machines subpanel
   shows and edits the registry of the machine it shows while the chat
   header's drop-down keeps listing this daemon's registry (the page
   asks an unstamped `getMachines` for it beside the forwarded one);
-  the "..." menu's Git Commit (`autocommitAction` stamped `machine`,
+  the Skills subpanel's three commands are `getSkills` (optional
+  `workDir`, else the daemon's work dir), answered with `skills` (rows
+  of `name`, `description` and `source`, sorted by name, and `error`),
+  `searchSkills` (`query`) with `skillSearch` (the `query`, at most 50
+  `results`, `skill_registry.SEARCH_LIMIT`, the most installed first,
+  each `id`, `name`, `source`, `installs`, `url` and `installed`, and
+  `error`) and `installSkill` (`id`, an `owner/repo/skill`; `force`
+  counts only as `true`) with `skillInstall` (`id`, a `status` of
+  `installed`, `review`, `blocked` or `error`, `name`, `message` and
+  `findings`, each `severity`, `rule`, `message`, `file` and `line`),
+  one with the status `installed` being followed by a fresh `skills`
+  (`skill_install.skills_reply`, `search_reply`, `install_reply`); a
+  search and an install are answered from background tasks, and
+  forwarded they are the user's own action and never dropped, while
+  the forwarded `getSkills` poll is deduplicated per `workDir`; a
+  forwarded `skillInstall` names the command's `id`, one that failed
+  on this daemon has the status `error` and repeats the error as its
+  `message`, and after a forwarded install (`status` `installed`) the
+  daemon asks the machine's `getSkills` and sends the new `skills`
+  list (`ServerApi._forwarded_reply`), as after an install here;
+  the Git commit button of the strip under the task-info panel
+  (`autocommitAction` stamped `machine`,
   `sidebar_panels.machine_autocommit`) commits the machine's folder:
   its daemon stages, writes the message and commits there and sends the
   link its own copy of the tab's `autocommit_done` (`replyTo`), which
   this daemon re-broadcasts to its clients as the toast and the event
   that re-arms the button, on a `commit` lane with a 900 s wait
-  (`MACHINE_COMMIT_TIMEOUT`); a daemon's
+  (`MACHINE_COMMIT_TIMEOUT`); the Create pull request button beside it
+  (`createPrAction` stamped `machine`,
+  `sidebar_panels.machine_create_pr`) pushes the branch of the
+  machine's folder and opens its pull request there: its daemon answers
+  the link with its own copy of the tab's `pr_done` (`success`,
+  `created`, `url`, `message`, `tabId`, `workDir`), which this daemon
+  re-broadcasts as the toast (one `notification` id per press,
+  `create-pr:<tabId>`, as `manual-commit:<tabId>` for a commit) and the
+  event that re-arms the button, on the same `commit` lane and 900 s
+  wait, so a pull request asked while the machine still commits for
+  this daemon waits for that commit; one press of a kind runs per tab,
+  and a second one is answered on its own connection alone with a
+  failed `autocommit_done` or `pr_done` (`A Git Commit of this tab is
+  already running.`, `A pull request of this tab is already being
+  created.`); a daemon's
   link is never a local client of the machine, whatever token it
   presents, so the machine answers these as it would a browser), the chat header's machine drop-down
   offers it (a machine registered by its address is shown by the host
@@ -6519,7 +6897,14 @@ which the daemon then never answered.
   from what is shown and sets its value only when it differs from the
   chosen machine, since iOS dismisses a native picker whose options
   are replaced under it, or keeps showing the old ones, so on a phone
-  the list opened by the first tap after a reload would never show),
+  the list opened by the first tap after a reload would never show; a
+  pick in it is one global setting, `setMachine`: persisted as
+  `config.json` `last_machine`, which `configData` carries in its
+  `config`, and broadcast as `machineChanged` to every client, a pick
+  `config.json` could not record being answered to the sender alone
+  with an `error` and a `machineChanged` naming the machine still in
+  force; the page opens a new chat when the pick differs from the
+  machine of the chat on screen),
   and `run_agent(machine=...)`
   can run a sub-task on it; with the `https://` form the password may be left out only for a
   daemon that has no remote password set and is reached on a loopback
@@ -6606,15 +6991,15 @@ which the daemon then never answered.
   within 30 days (`MAX_DAYS`), enough older tasks to review at least 20
   completed ones, 100 tasks at most; cron runs and its own runs are
   dropped), asks the auth-status probe which third-party
-  apps you are signed in to and memory what you did in them, picks ten
-  concrete follow-ups, at least three of them combining the signed-in
-  apps, or ten starter tasks for a new project when there are none,
-  and stores them in `$KISS_HOME/recommendations.json`, which the
-  sidebar's RECOMMENDATIONS subpanel shows (`save_recommendations`
-  takes exactly ten non-empty one-sentence prompts of at most
+  apps you are signed in to and memory what you did in them, picks
+  twenty concrete follow-ups, at least three of them combining the
+  signed-in apps, or twenty starter tasks for a new project when there
+  are none, and stores them in `$KISS_HOME/recommendations.json`, which
+  the sidebar's RECOMMENDATIONS subpanel shows (`save_recommendations`
+  takes exactly twenty non-empty one-sentence prompts of at most
   `MAX_SENTENCE_CHARS`, 160, characters each; the longer ones are
   named with their lengths, `Error: shorten these to at most 160
-  characters and call again with all 10: #3 (171 chars).`, so the
+  characters and call again with all 20: #3 (171 chars).`, so the
   model never counts characters itself); `/recommendations now` runs it
   once, and the 6-hourly default cron job keeps the file fresh; both
   default jobs come from `cron_agent.DEFAULT_JOBS`, seeded once per home
@@ -6812,6 +7197,70 @@ which the daemon then never answered.
   there: ~/<dir>`, and an answer that is empty, `.`, `..` or holds a
   `/` fails the peer in wave one),
   `/task_update` (reports what a running task has done so far),
+  `/timeline` (a `WorkerSea` that draws the sub-agents of a task as an
+  SVG Gantt chart and shows it in the result; `/timeline <task id>`
+  takes a task id or its first six or more characters
+  (`history.find_task`, over `persistence.tasks_matching`).
+  `history.read_run` reads every fact of the chart from the history,
+  in minutes after the task started: one bar per dispatched sub-agent
+  in start order (a child with no `end_ts`, still running or killed,
+  ends with the run and is drawn pale); a side-channel child is a task
+  update or an `/ask` question and becomes a dashed line, except the
+  merge-conflict resolver, whose task text starts with
+  `merge_conflict_resolver.CONFLICT_TASK_OPENING` and which gets a bar
+  in a role of its own; a `prompt` event with `steer` is a message the
+  user sent to the running task (an `/ask` question, split as the
+  daemon splits it, is not); and a wait is a stretch of over 10
+  minutes (`WAIT_MINUTES`) inside one returned tool call of the task
+  during which no sub-agent ran (`_waits`: a `tool_result` closes the
+  innermost open call, a stretch inside a wait already found is the
+  same wait, and a `bash_job` call is described by the `Bash` call
+  that started its job).  An event that holds no time (`_minute`
+  returns `None` for it) is left out: such a call is no wait and
+  such a message no input.  What each sub-agent was for is the one
+  fact the history lacks, so two tools, which `tools()` adds, leave
+  it to the model: `timeline_agents(task)` lists how the sub-agents'
+  task texts open, every number written as `#` (`history.mask`; the
+  letters beside it stay, as they tell `FIX2.md` from `REVIEW2.md`)
+  so that sub-agents dispatched from one template list as one line,
+  and `draw_timeline(task, roles, svg_file)` takes a JSON object of
+  role to openings, gives each sub-agent the role of the longest
+  opening its task text starts with, and refuses, writing nothing,
+  roles that are malformed, that leave a sub-agent out (it lists
+  their openings) or that number more than the 8 colours of
+  `chart.PALETTE`.  `chart.render` then writes the SVG, by default
+  `reports/timeline-<first 8 characters of the task id>.svg` in the
+  caller's work dir: numbered shaded bands for the waits and numbered
+  lines for the user's messages, each label under every earlier one
+  that reaches it (`_lanes`), so that no label hides another and no
+  line crosses one, one note per number under the legend, and every
+  text taken from the history escaped.  The chart cannot measure the
+  viewer's font, so `_text`, which writes every `<text>`, binds each
+  to the width the layout takes it to have (`textLength` with
+  `lengthAdjust="spacingAndGlyphs"`): `_width` sums the advance
+  widths of Helvetica for printable ASCII (`_ASCII`, the values of
+  Adobe's AFM, which Arial and Liberation Sans match) and states an
+  em for a wide character (CJK, emoji), nothing for a combining mark
+  and the width of a lowercase letter for any other.  A browser then
+  squeezes or stretches a text in another font or of unusual glyphs
+  to that width, and stretches one in the named fonts by what they
+  kern (about a pixel for a pair such as `AV` or `11`); no text ends
+  right of `EDGE`, 4 px inside the SVG, and a viewer that ignores
+  `textLength` (librsvg) draws the widths of its own font.  `_fit`
+  cuts the title, a note or a legend entry with an ellipsis where
+  that width passes its line (about 165 characters of prose), and
+  leaves out what does not print and, of the marks on one character,
+  all after the second (`MARKS`): fonts stack them, and nothing binds
+  the height of a text, whose lines are 14 or 16 px apart for the
+  11 px over and 3 px under the baseline that the named fonts take.
+  The tool returns the `<img>` tag whose `src` is that path,
+  percent-encoded, which the chat page loads through `openFile`, and
+  the model puts it first in its result.  Its `system_prompt()`
+  returns its own prompt, `prompt()` ends every task with
+  `ADD_TO_PROMPT`, and `settings()` adds `{"tool_profile":
+  "none", "max_budget": 2.0, "timeout": 600, "locked":
+  ["tool_profile"]}` to the worker defaults, so the run is on the
+  caller's model with `finish` and the two tools),
   `/write` (writes prose for a general audience in concise, professional
   American English that reads as human-written; it defines only
   `description()`, a `system_prompt()` that appends its style guide

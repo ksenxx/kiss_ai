@@ -56,7 +56,6 @@ Three conversation shapes carry tool results:
 
 from __future__ import annotations
 
-import hashlib
 import json
 import math
 import re
@@ -245,11 +244,10 @@ class CompactionTable:
 
     def add(self, text: str) -> int:
         """Return the id of *text*, keeping it (one id per distinct text)."""
-        digest = hashlib.sha256(text.encode("utf-8", errors="surrogatepass")).hexdigest()
-        stub_id = self._ids.get(digest)
+        stub_id = self._ids.get(text)
         if stub_id is None:
             stub_id = len(self.originals) + 1
-            self._ids[digest] = stub_id
+            self._ids[text] = stub_id
             self.originals[stub_id] = text
         return stub_id
 

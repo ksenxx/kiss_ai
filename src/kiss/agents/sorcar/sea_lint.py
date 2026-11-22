@@ -478,14 +478,18 @@ def lint_sea(path: Path, command: str | None = None) -> list[Finding]:
 def _known_model(name: str, script: Path) -> bool:
     """Return whether *name* is in the model catalogue or names a model-picker SEA.
 
+    The catalogue is read as a run reads it (``is_known_model``): with
+    the user's custom models as they are registered now, not as they
+    were when this process started.
+
     For a bundled *script* the SEA is the bundled command of that name,
     whatever ``SEAS.md`` registers in its place, so the checkout's own
     scripts lint alike on every machine; for any other script it is the
     registered command, which is what the script's run resolves the name to.
     """
-    from kiss.core.models.model_info import MODEL_INFO
+    from kiss.core.models.model_info import is_known_model
 
-    if name in MODEL_INFO:
+    if is_known_model(name):
         return True
     return model_sea(name, bundled=script.resolve() in bundled_seas()) is not None
 
@@ -834,8 +838,10 @@ def _base_rewrites(
 
     A base already as specific as *base* needs no edit.  A direct name
     is rewritten in place together with its import unless the old name
-    is used elsewhere in the script (a type annotation); otherwise
-    *base* is added to *needed* for a new import line.
+    is used elsewhere in the script (a type annotation, or a string
+    that names it: a quoted annotation, ``cast("BaseSea", ...)``,
+    ``__all__``; a docstring is no use); otherwise *base* is added to
+    *needed* for a new import line.
     """
     edits: list[tuple[int, int, str, str]] = []
     for node in tree.body:
@@ -855,7 +861,10 @@ def _base_rewrites(
                 return edits, True
             edits.append((start, end, base, note))
             used = old.id
-            uses = sum(1 for n in ast.walk(tree) if isinstance(n, ast.Name) and n.id == used)
+            named = re.compile(rf"\b{used}\b")
+            uses = sum(
+                1 for n in ast.walk(tree) if isinstance(n, ast.Name) and n.id == used
+            ) + sum(1 for n in _code_strings(tree) if named.search(str(n.value)))
             alias = next(
                 (
                     alias for imp in tree.body if isinstance(imp, ast.ImportFrom)

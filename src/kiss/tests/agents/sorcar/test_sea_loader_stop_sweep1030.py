@@ -309,7 +309,7 @@ def test_stop_in_a_returned_value_escapes_its_check(
 
 
 def _claim_boundary_offset() -> int:
-    """Return the offset of the ``STORE_FAST depth`` that follows the claim in ``_executing``.
+    """Return the offset of the store of ``depth`` that follows the claim in ``_executing``.
 
     The owner record is written and the lock released, the ``try`` is not
     entered: ``PyThreadState_SetAsyncExc`` delivers a Stop at the
@@ -321,7 +321,7 @@ def _claim_boundary_offset() -> int:
     return next(
         ins.offset
         for ins in reversed(instructions[:first_yield])
-        if ins.opname == "STORE_FAST" and ins.argval == "depth"
+        if ins.opname.startswith("STORE_FAST") and "depth" in ins.argval
     )
 
 
@@ -566,7 +566,10 @@ def _claim_stopped(tmp_path: Path, target: int) -> bool:
         _wait_until(_stopped_or_waiting, stop, inner_parked)
         if stop.injected:
             gate.set()  # the owner of ``outer`` now asks for ``inner``
-            _wait_until(_waiting_or_over, owner, sea_settings._module_name(inner))
+            _wait_until(
+                _waiting_or_over, owner,
+                f"{sea_settings._module_name(inner)}__{sea_settings.file_revision(inner)}",
+            )
         inner_gate.set()
         gate.set()
         owner.join(timeout=10)

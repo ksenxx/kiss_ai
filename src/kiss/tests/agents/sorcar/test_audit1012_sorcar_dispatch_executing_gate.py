@@ -48,7 +48,8 @@ _GATE_CODE = sea_settings._executing.__wrapped__.__code__  # type: ignore[attr-d
 def _after_lock_release_offset() -> int:
     """Return the offset of the instruction right after the claim's ``locked_call`` returns.
 
-    The ``STORE_FAST`` of ``depth``, just before the first ``yield``:
+    The store of ``depth`` (with the name the claim returns beside it),
+    just before the first ``yield``:
     the owner record is written and the lock released, the ``try`` is
     not entered.  ``PyThreadState_SetAsyncExc`` delivers an injected
     stop at the eval-breaker check that follows the ``locked_call``
@@ -59,7 +60,7 @@ def _after_lock_release_offset() -> int:
     store = next(
         ins
         for ins in reversed(instructions[:first_yield])
-        if ins.opname == "STORE_FAST" and ins.argval == "depth"
+        if ins.opname.startswith("STORE_FAST") and "depth" in ins.argval
     )
     return store.offset
 

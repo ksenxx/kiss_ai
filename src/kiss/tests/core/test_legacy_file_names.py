@@ -517,7 +517,11 @@ def test_a_history_db_abandoned_in_april_2026_does_not_hide_sorcar_db(kiss_dir: 
         if p.name.startswith("history.db.stale-") and not p.name.endswith(("-wal", "-shm"))
     ]
     assert stale_db.with_name(stale_db.name + "-wal").read_bytes() == b"stale wal"
-    kept = sqlite3.connect(stale_db).execute("SELECT task FROM task_history").fetchall()
+    stale = sqlite3.connect(stale_db)
+    try:
+        kept = stale.execute("SELECT task FROM task_history").fetchall()
+    finally:
+        stale.close()  # unclosed, it warned in whichever later test's collection freed it
     assert kept == [("from march 2026",)]
 
 

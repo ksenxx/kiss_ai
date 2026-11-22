@@ -17,12 +17,15 @@ the tool's result to ``finish``.  The Bash test kills a real ``sleep``.
 
 from __future__ import annotations
 
+import functools
 import json
+import queue
 import random
 import sys
 import threading
 import time
 from collections.abc import Callable, Iterator
+from concurrent.futures import Future
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, cast
@@ -40,7 +43,9 @@ from kiss.core.tool_interrupt import (
     interrupt_tool_call,
     new_tool_call,
     register_tool_call,
+    result_interruptible,
     unregister_tool_call,
+    wait_interruptible,
 )
 
 _MODEL = "gpt-4o-mini"
@@ -684,6 +689,114 @@ class TestRegistry:
         finally:
             over.append(True)
             worker.join(10)
+
+
+class _HeldAsAWaitTakesItsLock:
+    """A profile hook for a waiting thread: hold it where the wait's ``Condition.__enter__``
+    returns with the lock, ahead of the ``with`` block that would release it (CPython
+    gh-74174), until the test has injected the task Stop."""
+
+    def __init__(self) -> None:
+        self.at_lock: queue.SimpleQueue[None] = queue.SimpleQueue()
+        self.injected: queue.SimpleQueue[None] = queue.SimpleQueue()
+
+    def __call__(self, frame: Any, event: str, arg: object) -> None:
+        if event == "return" and frame.f_code is threading.Condition.__enter__.__code__:
+            sys.setprofile(None)
+            self.at_lock.put(None)
+            self.injected.get()
+
+
+def _wait_under(hook: Any, wait: Callable[[], object], outcome: list[object]) -> None:
+    """Thread body: run *wait* under the profile *hook*; record its result or exception class."""
+    sys.setprofile(hook)
+    try:
+        outcome.append(wait())
+    except BaseException as exc:
+        outcome.append(type(exc))
+    finally:
+        sys.setprofile(None)
+
+
+def _publish_when_told(told: queue.SimpleQueue[None], publish: Callable[[], object]) -> None:
+    """Thread body of the worker a wait is for: publish once the waiter has ended."""
+    told.get()
+    publish()
+
+
+def _outer_step(
+    inner_done: queue.SimpleQueue[None], injected: queue.SimpleQueue[None], steps: list[str],
+) -> None:
+    """A protected step with a protected call inside it, then work a Stop must not cut."""
+    tool_interrupt.call_without_injection(steps.append, "inner")
+    inner_done.put(None)
+    injected.get(timeout=10)
+    steps.append("outer")
+
+
+def _hold_twice(
+    inner_done: queue.SimpleQueue[None], injected: queue.SimpleQueue[None], steps: list[str],
+) -> None:
+    """Thread body: run :func:`_outer_step` with the Stop held back; note the Stop it ends in."""
+    try:
+        tool_interrupt.call_without_injection(_outer_step, inner_done, injected, steps)
+    except KeyboardInterrupt:
+        steps.append("stopped")
+
+
+class TestWaitSlices:
+    """``result_interruptible`` and ``wait_interruptible`` under a Stop injected into a slice."""
+
+    @pytest.mark.parametrize("waited_on", ["future", "event"])
+    def test_a_stop_landing_as_a_slice_takes_its_lock_strands_no_publisher(
+        self, waited_on: str
+    ) -> None:
+        """``Future.result`` and ``Event.wait`` take a condition.  A Stop raised right after
+        that left it held for good, and the worker publishing under it (``set_result``,
+        ``set``) never returned.  The Stop is raised once the slice has ended instead."""
+        future: Future[str] = Future()
+        event = threading.Event()
+        wait, publish = {
+            "future": (
+                functools.partial(result_interruptible, future),
+                functools.partial(future.set_result, "hit"),
+            ),
+            "event": (functools.partial(wait_interruptible, event, 30), event.set),
+        }[waited_on]
+        hook = _HeldAsAWaitTakesItsLock()
+        outcome: list[object] = []
+        told: queue.SimpleQueue[None] = queue.SimpleQueue()
+        # The worker exists while the waiter runs: a thread started after the waiter
+        # ended could get its ident, and with it the future's leaked reentrant lock.
+        publisher = threading.Thread(target=_publish_when_told, args=(told, publish), daemon=True)
+        publisher.start()
+        waiter = threading.Thread(target=_wait_under, args=(hook, wait, outcome), daemon=True)
+        waiter.start()
+        hook.at_lock.get(timeout=10)
+        assert tool_interrupt.inject_async_exception(cast(int, waiter.ident), KeyboardInterrupt)
+        hook.injected.put(None)
+        waiter.join(10)
+        told.put(None)
+        publisher.join(5)
+        assert outcome == [KeyboardInterrupt]
+        assert not publisher.is_alive(), "the stopped wait left its lock held under the worker"
+
+    def test_a_stop_after_a_nested_hold_ended_waits_for_the_outer_one(self) -> None:
+        """A protected call made inside another joins its hold.  The inner call's end ended
+        the hold, and a Stop injected after it cut the rest of the outer step short (the
+        spawn of a child inside a step that had taken a lock)."""
+        inner_done: queue.SimpleQueue[None] = queue.SimpleQueue()
+        injected: queue.SimpleQueue[None] = queue.SimpleQueue()
+        steps: list[str] = []
+        holder = threading.Thread(
+            target=_hold_twice, args=(inner_done, injected, steps), daemon=True,
+        )
+        holder.start()
+        inner_done.get(timeout=10)
+        assert tool_interrupt.inject_async_exception(cast(int, holder.ident), KeyboardInterrupt)
+        injected.put(None)
+        holder.join(10)
+        assert steps == ["inner", "outer", "stopped"]
 
 
 def _hold_without_share_delete(path: Path, seconds: float) -> None:

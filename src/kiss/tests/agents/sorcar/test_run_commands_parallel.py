@@ -15,15 +15,20 @@ raising on a vanished work_dir, so it needs a fault injection.
 
 from __future__ import annotations
 
+import concurrent.futures
 import os
 import re
+import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-from kiss.agents.sorcar.useful_tools import UsefulTools
+from kiss.agents.sorcar.useful_tools import UsefulTools, run_commands_pool
 from kiss.core.tool_interrupt import (
     ToolCallInterrupted,
     end_tool_call,
@@ -33,6 +38,7 @@ from kiss.core.tool_interrupt import (
     unregister_tool_call,
 )
 from kiss.tests.conftest import IS_WINDOWS
+from kiss.tests.lock_injection import stop_as_it_takes_its_lock, stranded_threads
 
 # Git bash prints MSYS paths (``/tmp/...``) for ``pwd``; ``-W`` asks for the
 # Windows spelling so the output can be compared with ``Path``.  A killed
@@ -237,6 +243,53 @@ class TestStop:
         # The shells were killed, not left to finish in the background.
         time.sleep(0.5)
         assert not marker.exists()
+
+
+def _run_under_profile(
+    tools: UsefulTools, commands: str, profile: Any, raised: list[BaseException],
+) -> None:
+    """Thread body: run *commands* in parallel under the profile hook, noting what it raises."""
+    sys.setprofile(profile)
+    try:
+        tools.run_commands_parallel(commands)
+    except BaseException as exc:  # noqa: BLE001 — the injected Stop is expected
+        raised.append(exc)
+    finally:
+        sys.setprofile(None)
+
+
+@pytest.mark.parametrize(
+    "taker,under",
+    [
+        (threading.Event.wait, (threading.Thread.start, ThreadPoolExecutor.submit)),
+        (threading.Event.wait, (concurrent.futures.wait, run_commands_pool)),
+    ],
+    ids=["submit", "wait-slice"],
+)
+def test_a_stop_as_the_pool_takes_a_lock_strands_no_worker(
+    tmp_path: Path, taker: Any, under: tuple[Any, ...],
+) -> None:
+    """The server's Stop landing where the pool or its wait has taken a lock strands no worker.
+
+    ``submit`` starts a worker and waits for it to come up, and the wait
+    for the commands waits on an event the last worker sets: each enters
+    a ``threading.Condition``, whose lock stays held when the Stop is
+    raised as ``__enter__`` returns (gh-74174).  The worker then blocked
+    on that lock for good, coming up or reporting its command's end.
+    """
+    tools = UsefulTools(work_dir=str(tmp_path))
+    raised: list[BaseException] = []
+    before = threading.enumerate()
+    thread = threading.Thread(
+        target=_run_under_profile,
+        args=(tools, '["sleep 30"]', stop_as_it_takes_its_lock(taker, *under), raised),
+        daemon=True,
+    )
+    thread.start()
+    thread.join(20)
+    assert not thread.is_alive()
+    assert [type(exc) for exc in raised] == [KeyboardInterrupt]
+    assert stranded_threads(before) == []
 
 
 class TestRegistration:

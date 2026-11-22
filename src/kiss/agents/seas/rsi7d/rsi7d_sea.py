@@ -156,6 +156,7 @@ from kiss.core.config import kiss_home
 from kiss.core.kiss_tmp import kiss_tmp_dir
 from kiss.core.memoryfield.evaluate import TASK_ERROR_RE, is_failed_result
 from kiss.core.utils import rmtree_force
+from kiss.scripts.sync_kiss_notes import rename_lock, replace_note
 from kiss.server.agent_state import current_agent
 
 DEFAULT_DAYS = 7
@@ -2685,8 +2686,11 @@ def write_autorouter_evidence(text: str) -> str:
     the autorouter SEA, so the stamped text is refused when it exceeds
     :data:`EVIDENCE_MAX_CHARS` characters.  Splicing the file means
     refreshing the evidence never edits a SEA file; the tool still refuses
-    when ``autorouter`` is not an editable SEA in the run's scope.  Returns
-    a one-line description.
+    when ``autorouter`` is not an editable SEA in the run's scope.  The
+    rename is that of a notes sync (``sync_kiss_notes.replace_note``), made
+    under the lock file a sync merges the file under (``rename_lock``), so
+    a merge at work cannot put the evidence it read back over the new one.
+    Returns a one-line description.
     """
     if _editable_path("autorouter") is None:
         return _not_editable("autorouter")
@@ -2711,9 +2715,8 @@ def write_autorouter_evidence(text: str) -> str:
         )
     path = kiss_home() / EVIDENCE_NAME
     path.parent.mkdir(parents=True, exist_ok=True)
-    partial = path.with_name(path.name + ".tmp")
-    partial.write_text(content, "utf-8")
-    partial.replace(path)
+    with rename_lock(str(path)):
+        replace_note(str(path), content)
     return (
         f"Wrote {path} ({len(body.splitlines())} lines, {len(content)} chars, refreshed {stamp})"
     )

@@ -145,11 +145,16 @@ async function run() {
     const wv = makePage();
     clickShare(wv);
     const req = requests(wv, 'shareChatTasks')[0];
+    // The tab loses the screen to a new one before the daemon answers.
+    // The reply echoes the tab and chat asked for (the export takes no
+    // other: audit 2026-11-21, W11 F1); its tasks would be spliced
+    // into the screen of the new tab.
+    wv.win._testApi.createNewTab();
     send(wv.win, {
       type: 'share_tasks',
-      tabId: 'some-other-tab',
+      tabId: req.tabId,
       chatId: req.chatId,
-      tasks: [],
+      tasks: [{task: 'list the files', task_id: 'task-1', events: []}],
       truncated: false,
     });
     assert.strictEqual(requests(wv, 'shareChat').length, 0, 'dropped');

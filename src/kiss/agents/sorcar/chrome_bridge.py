@@ -207,7 +207,7 @@ class ChromeBridgeError(Exception):
     """Raised when the bridge cannot reach or use the user's Chrome extension."""
 
 
-def start_if_enabled() -> None:
+def start_if_enabled(enabled: bool | None = None) -> None:
     """Start the process-wide bridge when the ``chrome_bridge`` setting is on.
 
     Called by the daemon at boot and after every settings save, so the
@@ -217,8 +217,15 @@ def start_if_enabled() -> None:
     failure is logged, never fatal: the first tool call retries lazily.
     An already running bridge is kept (switching the setting off takes
     effect at the next daemon start).
+
+    Args:
+        enabled: The setting's value for the caller (the task of a
+            project that switches the bridge on); ``None`` reads the
+            product's setting.
     """
-    if ChromeBridge._instance is not None or not load_config().get("chrome_bridge"):
+    if ChromeBridge._instance is not None:
+        return
+    if not (load_config().get("chrome_bridge") if enabled is None else enabled):
         return
     try:
         bridge = ChromeBridge.instance(takeover=True)
@@ -414,7 +421,7 @@ class ChromeBridge:
             target=_serve_until_closed, args=(server,), daemon=True
         )
         try:
-            self._server_thread.start()
+            tool_interrupt.call_without_injection(self._server_thread.start)
         except RuntimeError as e:
             raise ChromeBridgeError(f"cannot start the bridge server thread: {e}") from e
 
@@ -657,7 +664,7 @@ class ChromeBridge:
         settled = threading.Lock()
         watchdog = threading.Timer(budget, _cut_socket, (conn.ws.socket, cut, settled))
         try:
-            watchdog.start()
+            tool_interrupt.call_without_injection(watchdog.start)
             conn.ws.send(frame)
         except Exception as e:
             if self._conn is conn:
@@ -775,14 +782,18 @@ def _result_before(fut: Future, deadline: float) -> Any:
     injected ``KeyboardInterrupt`` (a task Stop) is not delivered: a Stop
     would wait out the whole command timeout.  Sliced like the lock
     acquisitions of :func:`~kiss.core.locked.locked_call`, the Stop lands
-    within :data:`~kiss.core.locked.ACQUIRE_SLICE_SECONDS`.
+    within :data:`~kiss.core.locked.ACQUIRE_SLICE_SECONDS`, between two
+    slices: raised as a slice takes the future's lock, it left that lock
+    held and the bridge's reader blocked for good setting the result.
 
     Raises:
         TimeoutError: *deadline* passed before the future completed.
     """
     while True:
         try:
-            return fut.result(min(max(deadline - time.monotonic(), 0.0), ACQUIRE_SLICE_SECONDS))
+            return tool_interrupt.call_without_injection(
+                fut.result, min(max(deadline - time.monotonic(), 0.0), ACQUIRE_SLICE_SECONDS),
+            )
         except TimeoutError:
             if time.monotonic() >= deadline:
                 raise

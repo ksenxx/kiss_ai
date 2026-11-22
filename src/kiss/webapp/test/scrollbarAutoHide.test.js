@@ -20,12 +20,10 @@
 'use strict';
 
 const assert = require('assert');
-const {
-  makePage,
-  recordTimers,
-  fireTimers,
-  sleep,
-} = require('./simplify2_harness');
+const {makePage, recordTimers, fireTimers} = require('./simplify2_harness');
+const {freezeClock} = require('./history_helpers');
+
+const FROZEN_NOW_MS = 1_700_500_000_000;
 
 const SCROLL_KEYS = [
   ' ',
@@ -57,11 +55,15 @@ function showsBar(scroller) {
   return scroller.classList.contains('scrolling');
 }
 
-async function testBarsShowOnlyWhileTheUserScrolls() {
-  // The bars' 1.2 s hide timers are recorded and fired by hand.
+function testBarsShowOnlyWhileTheUserScrolls() {
+  // The bars' 1.2 s hide timers are recorded and fired by hand, and the
+  // page's clock stands still: an input counts for a second of it, so a
+  // stalled run must not let the host's clock end that second between
+  // an input and its scroll (the test moves the clock itself).
   let timers;
   const {win} = makePage({
     beforeScripts: w => {
+      freezeClock(w, FROZEN_NOW_MS);
       timers = recordTimers(w, 1200);
     },
   });
@@ -120,9 +122,15 @@ async function testBarsShowOnlyWhileTheUserScrolls() {
     assert.ok(!showsBar(scroller), `${what}: the bar goes again`);
   });
 
+  // The user's last input, in the list, counts for a second: a scroll
+  // that long after it still shows the bar.
+  win.Date.now = () => FROZEN_NOW_MS + 1000;
+  scroll(win, list);
+  assert.ok(showsBar(list), 'a scroll a second after the input shows the bar');
+  fireTimers(timers);
   // More than a second after the user's last input a scroll is the
   // page's own again.
-  await sleep(1050);
+  win.Date.now = () => FROZEN_NOW_MS + 1001;
   scroll(win, chat);
   scroll(win, list);
   assert.strictEqual(
@@ -134,12 +142,9 @@ async function testBarsShowOnlyWhileTheUserScrolls() {
   console.log('  ok - a bar shows only while the user scrolls its scroller');
 }
 
-async function main() {
-  await testBarsShowOnlyWhileTheUserScrolls();
+function main() {
+  testBarsShowOnlyWhileTheUserScrolls();
   console.log('scrollbarAutoHide.test.js: all passed.');
 }
 
-main().catch(err => {
-  console.error(err);
-  process.exit(1);
-});
+main();

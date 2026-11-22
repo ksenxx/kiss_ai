@@ -56,9 +56,13 @@ def _frames_for(frames: list[Any], tab_id: str, types: set[str]) -> list[str]:
     return found
 
 
-def _announced(frames: list[Any], tab_id: str) -> list[str]:
-    """The sub-agent tab announcements of *tab_id* among *frames* (what opens it in a browser)."""
-    return _frames_for(frames, tab_id, {"openSubagentTab"})
+def _announced(frames: list[Any]) -> list[str]:
+    """The sub-agent tabs announced among *frames* (what opens them in a browser)."""
+    return [
+        str(frame["tab_id"])
+        for frame in (json.loads(raw) for raw in frames if isinstance(raw, str))
+        if frame.get("type") == "openSubagentTab"
+    ]
 
 
 class _Surface:
@@ -213,12 +217,13 @@ class ClosedTabKeepsApiClient(ReconnectHarness):
             surface.close()
             self.release.set()
 
-    def test_a_reconnect_does_not_reopen_a_closed_sub_agent_tab(self) -> None:
-        """A sub-agent dispatch's recovery leaves the ``__sub_`` tab the user closed closed.
+    def test_a_reconnect_of_a_sub_agent_dispatch_announces_no_sub_agent_tab(self) -> None:
+        """A sub-agent dispatch's recovery announces no ``__sub_`` tab.
 
-        Every chat page shows a sub-agent under ``{parent}__sub_{task}``;
-        the dispatch's own ``api-…`` tab was never closed, so its
-        recovered subscription is what it was.
+        Every chat page shows a sub-agent under ``{parent}__sub_{task}``,
+        opened from the spawn and from its own replays; the dispatch's
+        own ``api-…`` tab was never closed, so its recovered
+        subscription is what it was.
         """
         parent = daemon_client.run(
             PARENT_PROMPT,
@@ -243,14 +248,9 @@ class ClosedTabKeepsApiClient(ReconnectHarness):
         state = self._probe_state()
         self.assertTrue(state.is_subagent)
         tab, task_id = state.tab_id, str(state.task_id)
-        sub_tab = f"webtab-parent__sub_{task_id}"
-        server = self.server._agent_server
-        printer = server.printer
+        printer = self.server._agent_server.printer
         surface = _Surface(self)
         try:
-            surface.send({"type": "closeTab", "tabId": sub_tab})
-            self.assertTrue(wait_for(lambda: sub_tab in server._closed_subagent_tabs, timeout=10))
-            time.sleep(0.5)  # the close's own broadcasts land
             mark = len(surface.remote_payloads)
             self.relay.cut()
             self.assertTrue(
@@ -258,14 +258,13 @@ class ClosedTabKeepsApiClient(ReconnectHarness):
                 "the client never reconnected through the relay",
             )
             self.assertTrue(wait_for(lambda: tab in printer.viewer_tab_ids(task_id), timeout=30))
-            self.assertIn(sub_tab, server._closed_subagent_tabs)
             self.release.set()
             result = self._collect(worker, out)
             self.assertIsInstance(result, daemon_client.TaskResult, result)
             self.assertTrue(result.success, result)
             self.assertIn(SUMMARY, result.text)
             self.assertEqual(result.reconnects, 1)
-            self.assertEqual(_announced(surface.remote_payloads[mark:], sub_tab), [])
+            self.assertEqual(_announced(surface.remote_payloads[mark:]), [])
             # The dispatch's own tab is the viewer it was at dispatch:
             # its copies still take the browsers' send.
             self.assertIn("result", surface.fanned_out_for(tab, mark))

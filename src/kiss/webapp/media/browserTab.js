@@ -37,7 +37,7 @@
 // Coordinates: a frame is at most as large as the viewer, so it is
 // drawn with object-fit: contain; pointer positions are mapped through
 // the letterboxed image rectangle back to the page's CSS pixels
-// (ev.width x ev.height of the last frame).
+// (ev.width x ev.height of the frame the image shows).
 
 (function (global) {
   'use strict';
@@ -185,17 +185,28 @@
 
     // ---- frame -> page coordinate mapping -------------------------------
 
+    // CSS-pixel size of the page behind the frame the image showed when
+    // the last frame came: the frame it shows until it has loaded that
+    // last one.
+    let shownWidth = 0;
+    let shownHeight = 0;
+
     function pagePoint(e) {
       const box = screen.getBoundingClientRect();
-      const natW = img.naturalWidth || view.pageWidth;
-      const natH = img.naturalHeight || view.pageHeight;
+      // The page size goes with the picture on screen: the last frame's
+      // once the image has loaded it (img.complete), until then that of
+      // the frame before, whose picture the image still shows.
+      const pageWidth = img.complete ? view.pageWidth : shownWidth;
+      const pageHeight = img.complete ? view.pageHeight : shownHeight;
+      const natW = img.naturalWidth || pageWidth;
+      const natH = img.naturalHeight || pageHeight;
       if (
         !box.width ||
         !box.height ||
         !natW ||
         !natH ||
-        !view.pageWidth ||
-        !view.pageHeight
+        !pageWidth ||
+        !pageHeight
       ) {
         return {x: e.clientX - box.left, y: e.clientY - box.top};
       }
@@ -206,8 +217,8 @@
       const offX = box.left + (box.width - dispW) / 2;
       const offY = box.top + (box.height - dispH) / 2;
       return {
-        x: ((e.clientX - offX) / dispW) * view.pageWidth,
-        y: ((e.clientY - offY) / dispH) * view.pageHeight,
+        x: ((e.clientX - offX) / dispW) * pageWidth,
+        y: ((e.clientY - offY) / dispH) * pageHeight,
       };
     }
 
@@ -616,6 +627,10 @@
 
     view.frame = function (ev) {
       if (view.disposed || !ev.data) return;
+      if (img.complete) {
+        shownWidth = view.pageWidth;
+        shownHeight = view.pageHeight;
+      }
       view.pageWidth = ev.width || view.pageWidth;
       view.pageHeight = ev.height || view.pageHeight;
       img.src = 'data:image/jpeg;base64,' + ev.data;

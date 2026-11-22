@@ -337,6 +337,39 @@ function testSharePagePreviewMatches() {
   console.log('  ok - a shared page folds panels to the same headers');
 }
 
+// A folded panel's preview reads as its body does.  A block (an
+// argument row, a diff line, a block of raw HTML) is on lines of its
+// own: a space sets its text off from what is before and after it.  An
+// inline element continues the text it is in: the changed part of a
+// diff line, a code span in parentheses.  So it is on a shared page.
+function testPreviewSpacesBlocksNotInlineElements() {
+  const {win, posted} = harness.makePage({extraScripts: ['marked.min.js']});
+  harness.loadMainCss(win);
+  harness.startTask(win, posted, 'Inline preview');
+  send(win, {
+    type: 'text_delta',
+    text: '<div>block</div>tail\n\nsee (`code`)x',
+  });
+  send(win, {type: 'text_end'});
+  send(win, {
+    type: 'tool_call',
+    name: 'Edit',
+    path: '/tmp/e.py',
+    old_string: 'x = foo(1)',
+    new_string: 'x = foo(2)',
+  });
+  assert.strictEqual(
+    collapsedHeaderText(thoughtsPanels(win)[0]),
+    'Thinking block tail see (code)x',
+  );
+  const edit = 'Edit path: /tmp/e.py - x = foo(1) + x = foo(2)';
+  assert.strictEqual(collapsedHeaderText(output(win).querySelector('.tc')), edit);
+  const sw = shareTranscript(win);
+  assert.deepStrictEqual(foldedShareHeaders(sw), [edit], 'shared page');
+  sw.close();
+  console.log('  ok - a folded preview spaces blocks, not inline elements');
+}
+
 function testHeadersAreMixedCase() {
   const win = makePage();
   startTask(win, 'Mixed case headers');
@@ -407,6 +440,7 @@ function main() {
   testBashWithoutDescriptionPreviewsBody();
   testReadWriteCollapsedHeaderIsPath();
   testSharePagePreviewMatches();
+  testPreviewSpacesBlocksNotInlineElements();
   testHeadersAreMixedCase();
   console.log('panelHeadersBriefMixedCase: all tests passed');
 }

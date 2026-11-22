@@ -35,6 +35,8 @@ from pathlib import Path
 
 import pytest
 
+from kiss.tests.core.models import openai_sse_harness as sse
+
 ALL_LEVELS = ("low", "medium", "high", "xhigh")
 
 
@@ -502,8 +504,10 @@ def _http_status_server(
         thread.join(timeout=5)
 
 
-def _use_local_openai(monkeypatch: pytest.MonkeyPatch, endpoint: str) -> None:
-    """Route the OpenAI vendor, with a dummy key, to the local ``endpoint``.
+def _use_local_openai(
+    monkeypatch: pytest.MonkeyPatch, endpoint: str, vendor: str = "openai"
+) -> None:
+    """Route the OpenAI vendor (or ``vendor``), with a dummy key, to the local ``endpoint``.
 
     The registry fixes the vendor URL and OpenAI answers no 401, 403 or 503 on
     request; the SDK, adapters, probes and catalog writer stay the real ones.
@@ -514,11 +518,11 @@ def _use_local_openai(monkeypatch: pytest.MonkeyPatch, endpoint: str) -> None:
     from kiss.core.models import model_info
 
     providers = tuple(
-        dataclasses.replace(p, base_url=f"{endpoint}/v1") if p.name == "openai" else p
+        dataclasses.replace(p, base_url=f"{endpoint}/v1") if p.name == vendor else p
         for p in model_info.OPENAI_COMPATIBLE_PROVIDERS
     )
     monkeypatch.setattr(model_info, "OPENAI_COMPATIBLE_PROVIDERS", providers)
-    monkeypatch.setattr(config_module.DEFAULT_CONFIG, "OPENAI_API_KEY", "sk-test")
+    monkeypatch.setattr(config_module.DEFAULT_CONFIG, f"{vendor.upper()}_API_KEY", "sk-test")
 
 
 _CHAT_OK = b'data: {"choices":[{"index":0,"delta":{"content":"hello"},"finish_reason":"stop"}]}\n\n'
@@ -658,6 +662,28 @@ def test_responses_scan_keeps_an_update_committed_during_its_probes(
 _OWN_EFFORT = {"gpt-7": "low", "gpt-8": None}  # the only reasoning effort each model takes
 _TEXT_ITEM = {"type": "message", "content": [{"type": "output_text", "text": "ok"}]}
 _CALL_ITEM = {"type": "function_call", "call_id": "c", "name": "calculator", "arguments": "{}"}
+_UNSUPPORTED_EFFORT = {"error": {"message": "unsupported effort"}}
+
+
+def _answer_probe(request: sse.Request) -> sse.Reply:
+    """Serve one probe over Chat Completions or Responses; any other route answers 404.
+
+    The answer is text, or the ``calculator`` call while offered tools are not answered yet.
+    """
+    body = request.body
+    if request.path.endswith("/responses"):
+        answered = any(item.get("type") == "function_call_output" for item in body["input"])
+        item = _CALL_ITEM if "tools" in body and not answered else _TEXT_ITEM
+        done = sse.responses_event("response.completed", {"response": {"output": [item]}})
+        return sse.Reply(sse_chunks=[done])
+    if not request.path.endswith("/chat/completions"):
+        return sse.Reply(status=404, json_body={"error": {"message": "no such route"}})
+    if "tools" not in body:
+        return sse.Reply(sse_chunks=[_CHAT_OK])
+    function = {"name": "calculator", "arguments": "{}"}
+    call = {"index": 0, "id": "c", "type": "function", "function": function}
+    choice = {"index": 0, "delta": {"tool_calls": [call]}, "finish_reason": "tool_calls"}
+    return sse.Reply(sse_chunks=[sse.chat_chunk({"choices": [choice]})])
 
 
 def test_scan_probes_each_row_at_its_own_default_effort(
@@ -667,11 +693,10 @@ def test_scan_probes_each_row_at_its_own_default_effort(
 
     The endpoint takes a model at its own effort only, as a vendor does.  The runtime catalog
     says ``high`` for both models, which a probe that is given no row still requests
-    (``update_models.py`` probes the catalog it runs on).
+    (``update_models.py``'s, where its own run left the model's level unverified).
     """
     import kiss.scripts.update_responses_api_support as scan
     from kiss.core.models import model_info
-    from kiss.tests.core.models import openai_sse_harness as sse
 
     sent: set[tuple[str, str | None]] = set()
 
@@ -680,11 +705,8 @@ def test_scan_probes_each_row_at_its_own_default_effort(
         effort = body.get("reasoning", {}).get("effort")
         sent.add((body["model"], effort))
         if effort != _OWN_EFFORT[body["model"]]:
-            return sse.Reply(status=400, json_body={"error": {"message": "unsupported effort"}})
-        answered = any(item.get("type") == "function_call_output" for item in body["input"])
-        item = _CALL_ITEM if "tools" in body and not answered else _TEXT_ITEM
-        done = sse.responses_event("response.completed", {"response": {"output": [item]}})
-        return sse.Reply(sse_chunks=[done])
+            return sse.Reply(status=400, json_body=_UNSUPPORTED_EFFORT)
+        return _answer_probe(request)
 
     catalog = tmp_path / "MODEL_INFO.json"
     catalog.write_text(json.dumps({"gpt-7": _entry(thinking="low"), "gpt-8": _entry()}))
@@ -702,6 +724,209 @@ def test_scan_probes_each_row_at_its_own_default_effort(
     assert f"Written to {catalog}" in capsys.readouterr().out
 
 
+def test_capability_probe_verifies_responses_at_the_effort_it_publishes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Audit X3-1: Responses is asked for the effort the probed entry is about to be written with.
+
+    Chat Completions takes the models up to ``high``; Responses takes them at ``low`` or with
+    no effort.  It was asked for the runtime catalog's effort (the stored ``low`` of ``gpt-7``,
+    none for the new ``gpt-8``), so both entries got the flag beside a default of ``high``.
+    """
+    import kiss.scripts.update_models as mod
+    from kiss.core.models import model_info
+
+    v2_efforts: list[tuple[str, str | None]] = []
+
+    def answer(request: sse.Request) -> sse.Reply:
+        body = request.body
+        v2 = request.path.endswith("/responses")
+        effort = body.get("reasoning", {}).get("effort") if v2 else body.get("reasoning_effort")
+        if v2:
+            v2_efforts.append((body["model"], effort))
+        if effort == "xhigh" or (v2 and effort == "high"):
+            return sse.Reply(status=400, json_body=_UNSUPPORTED_EFFORT)
+        return _answer_probe(request)
+
+    catalog = tmp_path / "MODEL_INFO.json"
+    monkeypatch.setattr(mod, "MODEL_INFO_PATH", catalog)
+    for name, level in (("gpt-7", "low"), ("openrouter/anthropic/claude-9", "high")):
+        row = model_info._build_model_info_entry(_entry(thinking=level))
+        monkeypatch.setitem(model_info.MODEL_INFO, name, row)
+    with sse.ScriptedOpenAIServer(answer) as server:
+        endpoint = server.base_url.removesuffix("/v1")
+        _use_local_openai(monkeypatch, endpoint)
+        _use_local_openai(monkeypatch, endpoint, vendor="openrouter")
+        known = mod.test_model_capabilities("gpt-7")
+        new = mod._probe_new_models([_new_model("gpt-8", use_responses_api=True)])
+        mod.apply_updates_to_file([], new, [], {})
+        assert (known["thinking"], known["use_responses_api"]) == ("high", False)
+        assert _read(catalog)["gpt-8"] == {**_entry(thinking="high"), "comment": "NEW"}
+        # No ladder: no effort.  A top above ``high``: the ``high`` the base entry stores.  A
+        # ladder probe left unanswered: the stored level, which the probe of a slug asks for
+        # too (its level is its Claude twin's, and the sync that changes it settles the flag).
+        assert mod.test_responses_api("gpt-7", False, None) is True
+        assert mod.test_responses_api("gpt-7", False, "xhigh") is False
+        assert mod.test_responses_api("gpt-7", False, mod.UNVERIFIED) is True
+        slug = mod.test_model_capabilities("openrouter/anthropic/claude-9")
+        assert (slug["thinking"], slug["use_responses_api"]) == (None, False)
+    assert v2_efforts == [
+        ("gpt-7", "high"),
+        ("gpt-8", "high"),
+        ("gpt-7", None),
+        ("gpt-7", "high"),
+        ("gpt-7", "low"),
+        ("anthropic/claude-9", "high"),
+    ]
+
+
+def test_new_claude_slug_is_flagged_only_where_responses_passes_at_its_twins_level(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Audit X3-1: a new OpenRouter Claude slug's flag is a verdict at the level its twin gives it.
+
+    The slug's own probes carry no effort (its ladder probe is gated off).  The sync then gives
+    it its ``claude-*`` twin's level, and the flag was published beside a default of ``high``
+    that Responses had never been asked for.  Responses refuses ``opus`` at ``high``, takes
+    ``sonnet`` there and takes ``haiku`` too, but only once the updater has given up on it.
+    """
+    import kiss.scripts.update_models as mod
+
+    held, release = threading.Event(), threading.Event()
+    v2_efforts: list[tuple[str, str | None]] = []
+
+    def answer(request: sse.Request) -> sse.Reply:
+        reply = _answer_probe(request)
+        if not request.path.endswith("/responses"):
+            return reply
+        body = request.body
+        asked = (body["model"].split("-")[1], body.get("reasoning", {}).get("effort"))
+        v2_efforts.append(asked)
+        if asked == ("opus", "high"):
+            return sse.Reply(status=400, json_body=_UNSUPPORTED_EFFORT)
+        if asked == ("haiku", "high"):
+            held.set()
+            reply.headers_gate = release
+        return reply
+
+    families = ("opus", "sonnet", "haiku")
+    twins = {f"claude-{family}-9": _entry(thinking="high") for family in families}
+    twins["claude-sonnet-9-max"] = {**_entry(thinking="max"), "alias_of": "claude-sonnet-9"}
+    catalog = tmp_path / "MODEL_INFO.json"
+    catalog.write_text(json.dumps(twins))
+    monkeypatch.setattr(mod, "MODEL_INFO_PATH", catalog)
+    current = mod.get_current_model_info()
+    opus, sonnet, haiku = (f"openrouter/anthropic/claude-{family}-9" for family in families)
+    updates, new = mod.compute_changes(current, dict.fromkeys((opus, sonnet), _entry()), {}, {}, {})
+    # As its own probes leave a slug that calls no tools: one Responses request decides.
+    unanswered = {**_new_model(haiku, use_responses_api=True), "fc": False}
+    with sse.ScriptedOpenAIServer(answer) as server:
+        _use_local_openai(monkeypatch, server.base_url.removesuffix("/v1"), vendor="openrouter")
+        new = mod._probe_new_models(new)
+        assert [(nm["thinking"], nm["use_responses_api"]) for nm in new] == [(None, True)] * 2
+        mod._sync_openrouter_claude_thinking(current, updates, new)
+        # Each flag is now a verdict at its entry's level: syncing again asks nothing.
+        mod._sync_openrouter_claude_thinking(current, updates, new)
+        monkeypatch.setattr(mod, "_CAPABILITY_DEADLINE_SECONDS", 1.0)
+        mod._sync_openrouter_claude_thinking(current, updates, [unanswered])
+        held.wait(timeout=30)  # the abandoned probe's request is in before its answer goes out
+        release.set()
+    mod.apply_updates_to_file(updates, [*new, unanswered], [], current)
+    written = _read(catalog)
+    flags = {name: written[name].get("use_responses_api") for name in (opus, sonnet, haiku)}
+    assert flags == {opus: None, sonnet: True, haiku: None}
+    assert [written[name]["thinking"] for name in flags] == ["high"] * 3
+    assert written[f"{sonnet}-max"]["use_responses_api"] is True
+    assert "use_responses_api" not in written[f"{opus}-high"]
+    own_probes = [("opus", None)] * 3 + [("sonnet", None)] * 3
+    at_twins_level = [("opus", "high")] + [("sonnet", "high")] * 3 + [("haiku", "high")]
+    assert v2_efforts == own_probes + at_twins_level
+    out = capsys.readouterr().out
+    assert f"{opus}: use_responses_api=N at its default effort 'high'" in out
+    assert f"{sonnet}: use_responses_api=Y at its default effort 'high'" in out
+
+
+def test_main_test_existing_withdraws_a_flag_it_could_not_verify_at_the_new_effort(
+    tmp_path: Path,
+) -> None:
+    """Audit X3-1: a retest that moves an entry's default effort keeps no flag unverified there.
+
+    The real updater against an endpoint that answers tool requests at ``high`` with 503.
+    ``gpt-7``, stored at ``low``, takes ``high`` now, Responses gives no verdict on its tools
+    there, and the flag verified at ``low`` was published beside the new default.  ``gpt-8``
+    rises from ``high`` to ``xhigh`` with its tool probe unanswered: its default effort is
+    still ``high``, where its flag was verified, so the flag stays.
+    """
+
+    def answer(request: sse.Request) -> sse.Reply:
+        body = request.body
+        effort = body.get("reasoning", {}).get("effort")
+        if (body.get("model"), effort) == ("gpt-7", "xhigh"):
+            return sse.Reply(status=400, json_body=_UNSUPPORTED_EFFORT)
+        if effort == "high" and "tools" in body:
+            return sse.Reply(status=503, json_body={"error": {"message": "overloaded"}})
+        return _answer_probe(request)
+
+    target = tmp_path / "MODEL_INFO.json"
+    target.write_text(json.dumps({"gpt-7": _entry(True, "low"), "gpt-8": _entry(True, "high")}))
+    # The scripted endpoint answers POST only: the listings are read from the URL given before
+    # it.  The Responses probe retries the 503s without its waits.
+    child = _RETEST_CHILD.replace(
+        "mod.main()",
+        "mod.OPENROUTER_MODELS_URL = mod.OPENROUTER_DECISIONS_MODELS_URL = sys.argv.pop()\n"
+        "mod._CODEX_MODELS_JSON_URL = mod.OPENROUTER_MODELS_URL\n"
+        "from kiss.scripts import update_responses_api_support as scan\n"
+        "scan._RETRY_DELAYS_SECONDS = (0.0, 0.0)\n"
+        "mod.main()",
+    )
+    retest = [sys.executable, "-c", child, "--model-info", str(target), "--test-existing", "-v"]
+    with (
+        _http_status_server(404, {"/listing": (200, b"{}")}) as listing,
+        sse.ScriptedOpenAIServer(answer) as server,
+    ):
+        done = subprocess.run(
+            [*retest, f"{listing}/listing", server.base_url.removesuffix("/v1")],
+            env=_keyless_env(tmp_path / "home", target),
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+    assert done.returncode == 0, done.stderr
+    # Both ladders moved on answered probes; neither model got a Responses verdict.
+    assert "gpt-7... dec=N gen=Y emb=N fc=Y thinking=high use_responses_api=?" in done.stdout
+    assert "gpt-8... dec=N gen=Y emb=N fc=? thinking=xhigh use_responses_api=?" in done.stdout
+    assert "gpt-7: use_responses_api changed True -> False" in done.stdout
+    written = _read(target)
+    assert written["gpt-7"] == _entry(thinking="high")
+    assert written["gpt-8"] == _entry(True, "high")
+    flagged = sorted(name for name, row in written.items() if row.get("use_responses_api"))
+    assert flagged == ["gpt-8", *(f"gpt-8-{level}" for level in sorted(ALL_LEVELS))]
+
+
+def test_new_model_the_user_registry_defines_is_not_probed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Audit X3-3: a new vendor model that ``MY_MODELS.json`` defines too is left for a later run.
+
+    Its probes ran with the settings of the user's entry (the effort ``low`` here) and their
+    verdict was published as the vendor model's; the retest of a known model skips such a name.
+    """
+    import kiss.scripts.update_models as mod
+    from kiss.core.models import model_info
+
+    registry = tmp_path / "MY_MODELS.json"
+    registry.write_text(json.dumps({"gpt-8": _entry(thinking="low")}))
+    monkeypatch.setattr(model_info, "USER_MY_MODELS_PATH", registry)
+    candidates = [_new_model(name, use_responses_api=False) for name in ("gpt-8", "gpt-9")]
+    with sse.ScriptedOpenAIServer(_answer_probe) as server:
+        _use_local_openai(monkeypatch, server.base_url.removesuffix("/v1"))
+        kept = mod._probe_new_models(candidates)
+        probed = {request.body["model"] for request in server.requests}
+    assert [nm["name"] for nm in kept] == ["gpt-9"]
+    assert probed == {"gpt-9"}
+    assert "gpt-8: defined in MY_MODELS.json, not probed" in capsys.readouterr().out
+
+
 _STREAM_ERRORS = {  # the error each model's stream ends in
     "gpt-7": {"code": "server_error", "message": "An error occurred. You can retry your request."},
     "gpt-8": {"code": "rate_limit_exceeded", "message": "Rate limit reached for gpt-8."},
@@ -714,8 +939,6 @@ bare ``error`` event itself, or in a gateway's ``error`` object, which the SDK r
 
 def _stream_ending(shape: str, error: dict[str, str]) -> bytes:
     """Render the last event of a Responses stream that reports *error* as *shape* does."""
-    from kiss.tests.core.models import openai_sse_harness as sse
-
     if shape == "response.failed":
         failed = {"status": "failed", "error": error, "output": []}
         return sse.responses_event(shape, {"response": failed})
@@ -733,7 +956,6 @@ def test_scan_keeps_the_flag_of_a_model_whose_stream_failed_on_the_server(
     staying on Chat Completions.  Reported outside a failed response it still did.
     """
     import kiss.scripts.update_responses_api_support as scan
-    from kiss.tests.core.models import openai_sse_harness as sse
 
     def answer(request: sse.Request) -> sse.Reply:
         return sse.Reply(sse_chunks=[_stream_ending(shape, _STREAM_ERRORS[request.body["model"]])])

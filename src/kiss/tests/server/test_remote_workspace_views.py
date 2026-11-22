@@ -153,6 +153,14 @@ class TestRemoteWorkspaceViews(IsolatedAsyncioTestCase):
         self.assertEqual(created["token"], "t-fsAction")
         self.assertTrue((self.box_work / "box-dir" / "made-here.txt").is_file())
         self.assertFalse((self.home_work / "box-dir").exists())
+        # The order the Explorer asks for travels to the machine.
+        (self.box_work / "box-dir" / "also-here.txt").write_text("")
+        reverse = await self._ask(self._on_box({
+            "type": "listDir", "path": str(self.box_work / "box-dir"), "sort": "name-desc",
+        }), "dirListing")
+        self.assertEqual(
+            [e["name"] for e in reverse["entries"]], ["made-here.txt", "also-here.txt"],
+        )
 
     async def test_open_file_and_save_file_read_and_write_on_the_machine(self) -> None:
         opened = await self._ask(self._on_box({

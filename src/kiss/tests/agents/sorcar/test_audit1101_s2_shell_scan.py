@@ -18,6 +18,7 @@ import functools
 import json
 import os
 import shutil
+import signal
 import subprocess
 import time
 import timeit
@@ -26,6 +27,7 @@ from pathlib import Path
 import pytest
 
 from kiss.agents.sorcar.edit_guards import (
+    HEREDOC_UNKNOWN_VERDICT,
     HEREDOC_UNRESOLVED_VERDICT,
     HEREDOC_VERDICT,
     heredoc_guard,
@@ -35,6 +37,8 @@ from kiss.agents.sorcar.edit_guards import (
 from kiss.agents.sorcar.shell_scan import (
     MAX_NESTING,
     TOO_DEEP_VERDICT,
+    UNREAD_DELIMITER_VERDICT,
+    UNREAD_VALUES_VERDICT,
     TooDeepError,
     simple_commands,
 )
@@ -57,10 +61,38 @@ def _bash(command: str) -> str:
                           timeout=10, env=env).stdout
 
 
+@functools.cache
 def _bash_version() -> tuple[int, int]:
     """The major and minor version of that bash: 3.2 on macOS, 5.2 on Linux."""
     major, minor = _bash('echo "${BASH_VERSINFO[0]} ${BASH_VERSINFO[1]}"').split()
     return int(major), int(minor)
+
+
+#: The bash a construct came with, by a text of the commands below that only it has (each
+#: measured with bash 3.2 to 5.3, full run 2026-11-22): ``coproc``, ``mapfile`` and the
+#: handler of a missing program; a descriptor bash numbers and ``printf -v`` to an element;
+#: a name reference, ``-v`` of an element and an arithmetic list a failed assignment ends;
+#: the prompt operator; the evaluation of what ``RANDOM``, ``SRANDOM`` and ``SECONDS`` are
+#: assigned.
+_SINCE = (
+    ("coproc ", (4, 0)), ("mapfile ", (4, 0)), ("command_not_found_handle", (4, 0)),
+    ("exec {FD}", (4, 1)), ('printf -v "$X"', (4, 1)),
+    ("declare -n ", (4, 3)), ('test -v "$X"', (4, 3)), ("[[ -v $X ]]", (4, 3)),
+    ("readonly A; ((A = 0", (4, 3)), ("${X@P}", (4, 4)),
+    ("RANDOM=", (5, 1)), ("SECONDS=", (5, 1)), ("for RANDOM in", (5, 1)),
+)
+
+
+def _oracle_runs(command: str) -> bool:
+    """Whether the bash of this machine runs *command* as the bash the scan reads it for.
+
+    The macOS system bash (3.2) lacks the constructs of :data:`_SINCE`, and stock macOS
+    the ``setsid`` of util-linux: what bash rewrites there is no oracle for the scan,
+    whose verdict on the command is checked on every machine.
+    """
+    if "setsid " in command and shutil.which("setsid") is None:
+        return False
+    return all(_bash_version() >= since for mark, since in _SINCE if mark in command)
 
 
 def test_substitutions_inside_parameter_expansions_are_scanned() -> None:
@@ -231,6 +263,15 @@ _OWNED = "<<'EOF'\nowned\nEOF\n"
 _UNRESOLVED = HEREDOC_UNRESOLVED_VERDICT.format
 
 
+def _default_sigint() -> None:
+    """Give the bash that is started next the default SIGINT.
+
+    An ignored SIGINT survives exec (a suite launched as ``( pytest & )`` ignores it), and
+    bash cannot trap a signal ignored at entry: its ``trap 'cd sub' INT`` would never run.
+    """
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
+
+
 def _overwritten(tmp_path: Path, command: str, files: list[str]) -> set[str]:
     """The *files* (relative, holding ORIGINAL) that bash, run in *tmp_path*, rewrites.
 
@@ -241,7 +282,7 @@ def _overwritten(tmp_path: Path, command: str, files: list[str]) -> set[str]:
         (tmp_path / name).write_text("ORIGINAL\n")
     env = {"PATH": os.environ["PATH"], "HOME": str(tmp_path / "home")}
     subprocess.run(["bash", "-c", command], cwd=tmp_path, capture_output=True, check=False,
-                   timeout=10, env=env)
+                   timeout=10, env=env, preexec_fn=_default_sigint)
     return {name for name in files if (tmp_path / name).read_text() != "ORIGINAL\n"}
 
 
@@ -423,7 +464,7 @@ def test_a_shells_literal_command_string_is_scanned(tmp_path: Path) -> None:
     caller.  Text only the shell knows, and a shell that is an argument, are not scanned."""
     for command in ("bash -c 'cat <<EOF > existing\nowned\nEOF\n'",
                     "sh -ceu 'cat > existing <<EOF\nowned\nEOF\n'",
-                    "export T=existing; /bin/bash -lc 'cat > $T <<EOF\nowned\nEOF\n'",
+                    "export T=existing; /bin/bash -ec 'cat > $T <<EOF\nowned\nEOF\n'",
                     "cd sub && bash -c 'cat <<EOF > existing\nowned\nEOF\n'"):
         assert _overwritten(tmp_path, command, ["existing", "sub/existing"]) == {
             "sub/existing" if command.startswith("cd ") else "existing"}, command
@@ -433,6 +474,25 @@ def test_a_shells_literal_command_string_is_scanned(tmp_path: Path) -> None:
     assert simple_commands("bash -c 'cd sub'; cat > victim", "/w")[-1].cwd == "/w"
     assert _programs("bash -c \"$T\"; bash -c 'date'; docker exec c sh -c 'date'") == [
         "bash", "bash", "date", "docker"]
+
+
+def test_a_startup_file_exported_any_way_runs_before_a_child_shells_text(tmp_path: Path) -> None:
+    """Audit 2026-11-21 S13/F3: a child bash reads the file ``BASH_ENV`` names however the
+    variable was exported; the scanner knew ``export`` and an assignment before the command
+    only, so after ``set -a``, ``declare -x``, an assignment through a name reference or
+    behind ``env`` it read the child's text as written: ``victim``, a new file, while the
+    startup file's ``cd`` made it the existing ``sub/victim``."""
+    (tmp_path / "startup").write_text("cd sub\n")
+    for exported, shell in (("set -a; BASH_ENV=$PWD/startup", "bash"),
+                            ("declare -x BASH_ENV=$PWD/startup", "bash"),
+                            ("typeset -x BASH_ENV=$PWD/startup", "bash"),
+                            ("declare -n R=BASH_ENV; R=$PWD/startup; export BASH_ENV", "bash"),
+                            ("export BASH_ENV=$PWD/startup", "env bash")):
+        command = f"{exported}; {shell} -c 'cat > victim' {_OWNED}"
+        if _oracle_runs(command):
+            assert _overwritten(tmp_path, command, ["sub/victim"]) == {"sub/victim"}, command
+        assert heredoc_guard(command, str(tmp_path), os.path.lexists) == _UNRESOLVED(
+            path="victim"), command
 
 
 def test_an_exec_redirection_holds_for_the_commands_after_it(tmp_path: Path) -> None:
@@ -608,6 +668,56 @@ def test_the_assignments_of_a_command_are_read_in_one_pass() -> None:
     assert _scan_cpu_seconds(f"{known}; {assignments}") < 4 * parts
 
 
+def test_the_values_and_the_directory_a_scan_follows_are_bounded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Audit 2026-11-22 (left open by FX05e): the scan put a value into every word that
+    expands it and resolved every ``cd`` against the directory so far, at the cost of their
+    length each time.  Values built from one another doubled line after line (30 lines took
+    minutes, 60 all the memory), one long value read by thousands of words, arithmetic
+    commands or loops took seconds, and so did thousands of ``cd`` into an ever deeper
+    directory.  Past a megabyte of values read the scan ends as one nested too deep does,
+    and the Bash tool runs nothing: read on with the values unknown, it let a ``sed`` script
+    through that the rewrite guard refuses when it knows it (review of 2026-11-22).  Past a
+    directory of ``PATH_MAX`` characters only the shell knows where it is."""
+    monkeypatch.setattr(DEFAULT_CONFIG, "bash_detach_seconds", 0)
+    lines = [f'X{i}="$X{i - 1}$X{i - 1}"' for i in range(1, 61)]
+    known = simple_commands("; ".join(["X0=aaaaaaaa", *lines[:10], 'echo "$X10"']), "/w")
+    assert [(word.text, word.literal) for word in known[-1].words[1:]] == [("a" * 8192, True)]
+    doubled = "; ".join(["X0=aaaaaaaa", *lines, 'echo "$X60"'])
+    long = "A=" + "a" * 20000
+    script = "S='s/a/b\\nc/'; sed -i \"$S\" notes.md"
+    rewrite = long + "; :" + ' "$A"' * 53 + "; " + script
+    for command in (
+        doubled,
+        rewrite,
+        long + "; " + "Y=$A;" * 4000,
+        "X='" + "1+" * 5000 + "1'; " + "((X));" * 1666,
+        "X='" + "1" * 80000 + "';" + "(for i in 1; do X=1; done);" * 1000,
+    ):
+        started = time.thread_time()
+        with pytest.raises(TooDeepError) as raised:
+            simple_commands(command, "/w")
+        assert time.thread_time() - started < 0.5, command[:40]
+        assert str(raised.value) == UNREAD_VALUES_VERDICT
+    gate = simple_commands(doubled, "/w", optimistic=True)  # its reading: the commands so far
+    assert "echo" not in [simple.program() for simple in gate]
+    target = tmp_path / "notes.md"
+    target.write_text("a\n")
+    assert rewrite_guard(script, "/w", lambda path: True) is not None
+    with pytest.raises(TooDeepError):
+        rewrite_guard(rewrite, "/w", lambda path: True)
+    tools = UsefulTools(work_dir=str(tmp_path))
+    assert tools.Bash(rewrite, "too long", timeout_seconds=5) == UNREAD_VALUES_VERDICT
+    assert target.read_text() == "a\n"
+    deep = "cd " + "a/" * 2046 + "b"
+    assert simple_commands(f"{deep}; pwd", "/w")[-1].cwd == "/w/" + "a/" * 2046 + "b"
+    assert simple_commands(f"{deep}; cd c; pwd", "/w")[-1].cwd is None
+    assert _scan_cpu_seconds("; ".join(['cd "$PWD/$PWD"'] * 200)) < 0.5
+    # a ``cd`` costs a step, not the length of the directory the steps before it led to
+    assert _scan_cpu_seconds("cd a; " * 12000) < 8 * _scan_cpu_seconds("cd a; " * 3000)
+
+
 def test_the_text_env_splits_is_the_command_line_it_runs(tmp_path: Path) -> None:
     """Audit 2026-11-10 B/S10-F6: ``env -S 'text'`` (``-Stext``, ``--split-string=text``) splits
     the text into the command line it runs, with the words after it; the scanner skipped the
@@ -677,6 +787,30 @@ def test_a_quoted_or_escaped_assignment_is_a_command_word(tmp_path: Path) -> Non
     assert _verdict(named, {"a\u00e9"}) == HEREDOC_VERDICT.format(path="/w/a\u00e9")
 
 
+def test_an_unquoted_expansion_of_nothing_is_no_word(tmp_path: Path) -> None:
+    """Audit 2026-11-21 S13/F1: bash drops an unquoted expansion of nothing, so ``E=; $E tee
+    victim`` runs ``tee`` and ``$E read T`` the builtin; the scanner kept an empty command
+    word, which is no copier and no builtin.  The word after it is the command, an
+    assignment as written included, and a quoted one stays a word: a command bash cannot
+    find."""
+    rewritten = HEREDOC_VERDICT.format(path="/w/victim")
+    for command, verdict in (
+            (f"E=; $E tee victim {_OWNED}", rewritten),
+            (f"E=; A=1 ${{E}}$E tee victim {_OWNED}", rewritten),
+            (f"IFS=x; E=; $E tee victim {_OWNED}", rewritten),
+            (f"E=; coproc $E tee victim {_OWNED}", rewritten),
+            (f'T=/dev/null; E=; $E read T <<< victim; cat > "$T" {_OWNED}', _UNRESOLVED(path="$T")),
+            (f'B=/dev/null; E=; B=victim $E; cat > "$B" {_OWNED}', rewritten),
+            (f'B=victim; E=; A=1 $E B=/dev/null; cat > "$B" {_OWNED}', rewritten)):
+        if _oracle_runs(command):
+            assert _overwritten(tmp_path, command, ["victim"]) == {"victim"}, command
+        assert _verdict(command, {"victim"}) == verdict, command
+    for word in ('"$E"', '$E""', "$E''"):
+        command = f"E=; {word} tee victim {_OWNED}"
+        assert _overwritten(tmp_path, command, ["victim"]) == set(), command
+        assert _programs(command) == ["", ""] and _verdict(command, {"victim"}) is None, command
+
+
 def test_the_operands_of_let_are_arithmetic_expressions(tmp_path: Path) -> None:
     """Audit 2026-11-10 B/S10-F4: ``let ++T`` and ``let "0,T=2"`` assign ``T``; the scanner read
     each operand as a variable's name, found none and kept the old value."""
@@ -684,9 +818,274 @@ def test_the_operands_of_let_are_arithmetic_expressions(tmp_path: Path) -> None:
         command = f'T=1; let {operand}; cat > "$T" {_OWNED}'
         assert _overwritten(tmp_path, command, [written]) == {written}, command
         assert _verdict(command, {written}) == _UNRESOLVED(path="$T"), command
-    kept = f'T=1; let V=2 W++; cat > "$T" {_OWNED}'
+    kept = f'T=1; W=0; let V=2 W++; cat > "$T" {_OWNED}'
     assert _overwritten(tmp_path, kept, ["1"]) == {"1"}
     assert _verdict(kept, {"1"}) == HEREDOC_VERDICT.format(path="/w/1")
+    # Audit 2026-11-21 S13/F2: bash evaluates the value of a variable an expression reads as
+    # an expression too, so one holding ``T=1`` assigns ``T`` wherever its name is an operand;
+    # the scan kept ``T=0``, a new file, and let the command rewrite the existing ``1``
+    for indirect in ("let X", "Y=X; ((Y))", 'A[0]=0; : "${A[X]}"', ": $(($X))", ": $((X++))",
+                     "declare -i N; N=X", "[[ X -eq 1 ]]", "V=abc; : ${V:X}", "Y='A[X]'; ((Y))",
+                     'read -r "A[X]" <<< v', "for ((i=X; i<1; i++)); do :; done"):
+        command = f'T=0; X="T=1"; {indirect}; cat > "$T" {_OWNED}'
+        assert _overwritten(tmp_path, command, ["1"]) == {"1"}, command
+        assert _verdict(command, {"1"}) == _UNRESOLVED(path="$T"), command
+    # a number is none, nor is what a length names: no operands
+    plain = (f"T=0; X=5; N=X; P='a[$]'; let \"Y = X + N\"; "
+             f': $((X + ${{#P}})); cat > "$T" {_OWNED}')
+    assert _overwritten(tmp_path, plain, ["0"]) == {"0"}
+    assert _verdict(plain, {"0"}) == HEREDOC_VERDICT.format(path="/w/0")
+
+
+#: FX45 O1: what leaves ``T=1`` in an operand the scan cannot prove a number, then evaluates it.
+_UNPROVED_OPERANDS = (
+    "X=$(echo T=1); let X", "if true; then X=T=1; fi; ((X))", "for X in T=1; do let X; done",
+    "set -- T=1; X=$1; : $((X))", 'set -- T=1; let "$1"', "read X <<< T=1; [[ X -eq 1 ]]",
+    "[[ T=1 =~ .* ]]; ((BASH_REMATCH))", ": T=1; let _", "X=$(echo T=1); declare -i N=X",
+    "X=$(echo T=1); A[X]=x", "X=$(echo T=1); V=abc; : ${V:X}", ": $((0, $(echo T=1)))",
+    "X=$(echo T=1); while ((X)); do break; done", "X=$(echo T=1); Y=X; ((Y))",
+    "f() { X=T=1; }; f; let X", "X=0; for i in 1 2; do let X; X=T=1; done",
+    # (review 1) what a builtin or a loop gives an integer, and an array value's subscripts
+    "declare -i N; read N <<< T=1", "declare -i N; printf -v N %s T=1",
+    "declare -i N; for N in T=1; do :; done", "declare -ai A; mapfile A <<< T=1",
+    "X=$(echo T=1); A=([X]=v)", "X=$(echo T=1); declare -a A=([X]=v)",
+)
+#: FX45 O3: what evaluates a subscript that runs ``cat > victim``, under the here-document.
+_SUBSCRIPT_COMMANDS = (
+    "let X", "((X))", "[[ X -eq 0 ]]", "declare -i N=X", 'test -v "$X"', '[[ -v $X ]]',
+    'printf -v "$X" x', "{ : $((X)); }", "{ : ${A[X]}; }", "{ B=([X]=v); }", '{ : "${!X}"; }',
+)
+#: Evaluations of numbers: a counter, a list of integers, what bash computes at every use.
+_NUMBERS = (
+    "i=0; while [ $i -lt 3 ]; do i=$((i+1)); done", "for i in 1 2 3; do : $((i * 2)); done",
+    'n=0; ((n++)); let n+=1 "m = n * 2"', "i=0; for ((i = 0; i < 3; i++)); do :; done",
+    "n=3; m=$((n * 2 + 1)); k=$((m / 2)); echo $((k % 3 == 0)) ${#n} ${n:-0} ${n%3}",
+    ": $((RANDOM % 5 + $# + $? + SECONDS))", "n=5; a[n]=x; a[n+1]=y; : ${a[n]}",
+    "n=3; if ((n > 2)); then n=$((n - 1)); else ((n += 2)); fi; [[ n -lt 9 ]]",
+)
+
+
+def test_an_operand_the_scan_cannot_prove_a_number_may_assign_and_run(tmp_path: Path) -> None:
+    """Audit 2026-11-21 FX45 O1/O3: bash evaluates the value of an operand as an expression and
+    expands a subscript in it, so an operand of unknown value may assign any variable and run
+    a command.  The scan followed the values it knew and trusted the rest: ``X=$(echo T=1);
+    let X`` kept ``T=0``, a new file, while bash rewrote ``1``, and a ``cat`` in a subscript
+    copied the here-document unseen.  A number stays harmless: counters keep the target."""
+    for form in _UNPROVED_OPERANDS:
+        command = f'T=0; {form}; cat > "$T" {_OWNED}'
+        if _oracle_runs(command):
+            assert _overwritten(tmp_path, command, ["1"]) == {"1"}, command
+        assert _verdict(command, {"1"}) == _UNRESOLVED(path="$T"), command
+    for value in ("'a[$(cat > victim)]'", "$(echo 'a[$(cat > victim)]')"):
+        # (a word is expanded before its command's redirections: there it reads the pipe)
+        for command in (*(f"X={value}; {form} {_OWNED}" for form in _SUBSCRIPT_COMMANDS),
+                        f"X={value}; cat <<'EOF' | : $((X))\nowned\nEOF\n"):
+            if _oracle_runs(command):
+                assert _overwritten(tmp_path, command, ["victim"]) == {"victim"}, command
+                assert (tmp_path / "victim").read_text() == "owned\n", command
+            assert _verdict(command, {"victim"}) is not None, command
+    for form in _NUMBERS:
+        command = f'T=new; {form}; cat > "$T" {_OWNED}'
+        assert _overwritten(tmp_path, command, ["victim"]) == set(), command
+        assert _verdict(command, {"victim"}) is None, command
+        assert (tmp_path / "new").read_text() == "owned\n", command
+        (tmp_path / "new").unlink()
+
+
+#: Functions with a here-document, called where the scan does not see it (by a word only the
+#: shell knows, by a trap): one that may not have been defined, ones whose definition is given
+#: the here-document, one a trap set before the definition names.
+_UNSEEN_CALLS = (
+    "true && f() { cat > victim <<'EOF'\nowned\nEOF\n}\ncd sub; $(echo f)",
+    f"f() {{ cat > victim; }} {_OWNED}cd sub; $(echo f)",
+    f"f() {{ tee victim; }}; g() {{ f; }} {_OWNED}cd sub; $(echo g)",
+    f"trap f EXIT; f() {{ cat > victim; }} {_OWNED}cd sub",
+)
+#: FX45 O2: commands only the shell knows, each with the file bash rewrites: a word that is
+#: nothing, a copier, ``eval`` or a builtin that moves the shell; text bash computes or runs
+#: later; a script on the standard input; a pattern only ``extglob`` makes one.
+_ONLY_THE_SHELL_KNOWS = (
+    (f"$SUDO tee victim {_OWNED}", "victim"),
+    *((command, "sub/victim") for command in _UNSEEN_CALLS),
+    (f'X=$(echo tee); "$X" victim {_OWNED}', "victim"),
+    (f"$(echo tee) victim {_OWNED}", "victim"),
+    (f'set -- tee; "$@" victim {_OWNED}', "victim"),
+    (f'X=$(echo "tee victim x"); $X/bin/python {_OWNED}', "victim"),
+    (f"shopt -s nullglob; nosuch* tee victim {_OWNED}", "victim"),
+    (f"$SUDO cd sub; cat > victim {_OWNED}", "sub/victim"),
+    (f'T=new; $SUDO export T=victim; cat > "$T" {_OWNED}', "victim"),
+    (f'T=new; $SUDO read T <<< victim; cat > "$T" {_OWNED}', "victim"),
+    (f"$SUDO exec > victim; cat {_OWNED}", "victim"),
+    (f'X=$(echo "eval python3(){{ tee victim;}}"); $X; python3 {_OWNED}', "victim"),
+    (f'run() {{ "$@"; }}; run tee victim {_OWNED}', "victim"),
+    (f"f() {{ tee victim; }}; f {_OWNED}", "victim"),
+    (f'eval "$(echo cat) > victim" {_OWNED}', "victim"),
+    (f'bash -c "$(echo cat) > victim" {_OWNED}', "victim"),
+    ("X=$(echo eval); $X 'cat > victim <<E\nowned\nE'", "victim"),
+    ("T=new; trap 'cat > \"$T\" <<E\nowned\nE' EXIT; T=victim", "victim"),
+    ("bash <<'EOF'\ncat > victim <<'X'\nowned\nX\nEOF\n", "victim"),
+    ("bash -s <<'EOF'\ncat > victim\nowned\nEOF\n", "victim"),
+    ("bash <<EOF\n$(echo cat) > victim <<X\nowned\nX\nEOF\n", "victim"),
+    ("cat <<'EOF' | sh\ncat > victim <<'X'\nowned\nX\nEOF\n", "victim"),
+    (". /dev/stdin <<'EOF'\ncat > victim <<'X'\nowned\nX\nEOF\n", "victim"),
+    # review 1: a function named as a wrapper or called with an assignment, the handler of a
+    # missing program, a trap on a signal the text sends, a prompt bash expands, a name
+    # reference to an element, a function or a profile handed to a child shell
+    (f"timeout() {{ cat > victim; }}; timeout 5 python3 - {_OWNED}", "victim"),
+    (f'T=new; f() {{ cat > "$T"; }}; T=victim f {_OWNED}', "victim"),
+    (f"command_not_found_handle() {{ cat > victim; }}; nosuchprog9 - {_OWNED}", "victim"),
+    (f"trap 'cd sub' INT; kill -INT $$; cat > victim {_OWNED}", "sub/victim"),
+    (f"X='$(cat > victim)'; {{ : \"${{X@P}}\"; }} {_OWNED}", "victim"),
+    (f"PS4='$(cat > victim)'; set -x; {{ :; }} {_OWNED}", "victim"),
+    (f"PS4='$(cat > victim)' bash -xc : {_OWNED}", "victim"),
+    (f"declare -n R='A[$(cat > victim)]'; {{ : \"$R\"; }} {_OWNED}", "victim"),
+    (f"env 'BASH_FUNC_cat%%=() {{ tee victim; }}' bash -c 'cat > new' {_OWNED}", "victim"),
+    ("mkdir -p h; echo 'cd sub' > h/.bash_profile; HOME=$PWD/h bash -lc 'cat > victim' "
+     + _OWNED, "sub/victim"),
+    # a descriptor the text opened, under its number or a name; a copier another program runs
+    (f"exec 3>victim; cat >&3 {_OWNED}", "victim"),
+    (f"{{ cat >&3; }} 3>victim {_OWNED}", "victim"),
+    (f"exec 4>victim; exec 1>&4; cat {_OWNED}", "victim"),
+    (f"tee /dev/fd/3 3>victim >/dev/null {_OWNED}", "victim"),
+    (f"{{ cat > /dev/stdout; }} > victim {_OWNED}", "victim"),
+    (f"setsid -w tee victim >/dev/null {_OWNED}", "victim"),
+    (f"find . -maxdepth 0 -exec tee victim \\; >/dev/null {_OWNED}", "victim"),
+    # a path's name is a function's; a value that ends in a literal name: a copier's, one
+    # that may not have been assigned, one bash splits
+    (f'/usr/bin/python3() {{ tee victim; }}; D=$(echo /usr); "$D/bin/python3" {_OWNED}', "victim"),
+    (f'P="$(dirname "$(command -v tee)")/tee"; "$P" victim {_OWNED}', "victim"),
+    (f'P=tee; false && P="$(pwd)/nope/python3"; "$P" victim {_OWNED}', "victim"),
+    (f'P="$(echo tee victim) ./nope/python3"; $P {_OWNED}', "victim"),
+    # a name the command itself gave an existing file, or a directory, before it writes
+    (f"ln -s victim alias; cat > alias {_OWNED}", "victim"),
+    (f"ln -s sub link; cd link; cat > victim {_OWNED}", "sub/victim"),
+    (f'A=$(echo alias); cp -l victim "$A"; cat > alias {_OWNED}', "victim"),
+    (f"for i in 1 2; do cat > alias {_OWNED}ln -sf victim alias; done", "victim"),
+    (f"shopt -s extglob\ntee @(victim) {_OWNED}", "victim"),
+    (f'G="tee victim"; $G {_OWNED}', "victim"),
+)
+#: Commands whose here-document rewrites nothing, by a proof the scan has: a program named
+#: by a path's literal end or by a known value bash splits, a header that runs nothing, a
+#: sourced file (its commands are not the text's), a script or a function that only creates.
+_PROVED = (
+    f'"$HOME/bin/python" - {_OWNED}', f'PY="python3 -c pass"; $PY {_OWNED}',
+    f". ./activate; python3 -c pass {_OWNED}",
+    f'case "$1" in a) echo a;; *) echo b;; esac; cat > new {_OWNED}',
+    f'for f in "$HOME"/*.txt; do echo "$f"; done; cat > new {_OWNED}',
+    f'[ -n "$S2_UNSET" ] && echo set; cat > new {_OWNED}',
+    "bash <<'EOF'\ncat > new <<'X'\nowned\nX\nEOF\n", f"f() {{ cat > new; }}; f {_OWNED}",
+    f"trap 'rm -f scratch.tmp' EXIT; cat > new {_OWNED}",
+    f"(X=$(echo cd); $X sub); cat > new {_OWNED}",
+    f"set -euo pipefail; shopt -s nullglob; cd sub 2>/dev/null; cat > ../new {_OWNED}",
+    f"{{ echo a; echo b; }} > out.txt; for f in a b; do [ -f $f ] || continue; done\n"
+    f"g() {{ [ -n \"$1\" ] || return 1; }}; g x\nT=new; cat > \"$T\" {_OWNED}",
+    "f() { cat /dev/null | { read a; }; }; n=$(( $(date +%s) + 1 )); "
+    "f() { cat /dev/null | { read a; }; }; while f; do sleep 1; done; echo $n",
+    '[ -n "$S2_UNSET" ] && g() { echo a; }; $S2_UNSET true; echo done',
+    # review 1: the tool's own descriptors, a remote copier, a plain name reference
+    f"echo x > out.log 2>&1; cat >&2 {_OWNED}", f"ssh -G localhost tee victim {_OWNED}",
+    f"declare -A M=([a]=1); declare -n R=M; R[b]=2; cat > new {_OWNED}",
+    # a variable assigned one field that ends in a literal name, quoted: that program
+    f'P="$(pwd)/nope/python3"; "$P" - {_OWNED}',
+    f'ROOT=$(pwd); export P=$ROOT/nope/python3; Q="$P"; "${{Q}}" - {_OWNED}',
+    # a file moved into place after it is written, a link beside the new file
+    f"cat > x.tmp {_OWNED}mv x.tmp x.txt",
+    f'mkdir -p d; ln -sfn "$(pwd)/sub" d/link; cat > d/n.md {_OWNED}',
+)
+#: FX45: what bash skips or undoes while the text reads as run, each with the file bash
+#: rewrites.  A failed evaluation assigns nothing; a failed expansion or assignment skips the
+#: rest of its line; a builtin whose redirection fails does not run; ``return``, ``break``
+#: and ``continue`` skip the rest of a body; a definition may not run, or end with its
+#: subshell; an option changes what an assignment outlives and what a failure skips.
+_X = "X='a[$(cat > victim)]'"
+_SKIPPED = (
+    (f"{_X}; ((X = 1/0)); let X {_OWNED}", "victim"),
+    (f"{_X}; readonly A; ((A = 0, X = 1)); let X {_OWNED}", "victim"),
+    (f"{_X}; Y=08; ((X = Y)); let X {_OWNED}", "victim"),
+    (f"{_X}\nX=$((1/0))\nlet X {_OWNED}", "victim"),
+    (f"{_X}; for ((X = 1/0; X < 1; X++)); do :; done; let X {_OWNED}", "victim"),
+    (f'T=victim\n: $((1/0)); T=new\ncat > "$T" {_OWNED}', "victim"),
+    (f'T=victim\nU=$((1/0)) T=new\ncat > "$T" {_OWNED}', "victim"),
+    (f"cd sub\ncd .. $((1/0))\ncat > victim {_OWNED}", "sub/victim"),
+    (f"x=abc\n: ${{x:1/0}}; cd sub\ncat > victim {_OWNED}", "victim"),
+    (f"readonly R=1\nR=2; cd sub\ncat > victim {_OWNED}", "victim"),
+    (f"f() {{ : $((1/0)); }}\nf; cd sub\ncat > victim {_OWNED}", "victim"),
+    (f"if true; then\n: $((1/0))\nfi; cd sub\ncat > victim {_OWNED}", "victim"),
+    (f": $((1/0)); cat() {{ :; }}\ncat > victim {_OWNED}", "victim"),
+    (f"cd sub > /nonexistent/x; cat > victim {_OWNED}", "victim"),
+    (f'T=victim; export T=new > /nonexistent/x; cat > "$T" {_OWNED}', "victim"),
+    (f"{{ cd sub; }} > /nonexistent/x; cat > victim {_OWNED}", "victim"),
+    (f"eval 'cat() {{ :; }}' > /nonexistent/x; cat > victim {_OWNED}", "victim"),
+    (f'T=new; for i in 1; do T=victim; break; T=new; done; cat > "$T" {_OWNED}', "victim"),
+    (f'T=new; for a in 1; do T=victim; for b in 1; do continue 2; done; T=new; done; '
+     f'cat > "$T" {_OWNED}', "victim"),
+    (f"f() {{ return; cat() {{ :; }}; }}; f; cat > victim {_OWNED}", "victim"),
+    (f"false && cat() {{ :; }}; cat > victim {_OWNED}", "victim"),
+    (f"(cat() {{ :; }}); cat > victim {_OWNED}", "victim"),
+    (f"cat() {{ :; }} | true; cat > victim {_OWNED}", "victim"),
+    (f"if false; then cat() {{ :; }}; fi; cat > victim {_OWNED}", "victim"),
+    (f'set -o posix; T=new; T=victim :; cat > "$T" {_OWNED}', "victim"),
+    (f"bash --posix -c 'T=new; T=victim :; cat > \"$T\"' {_OWNED}", "victim"),
+    (f'shopt -s failglob\nT=victim\n: nosuch*; T=new\ncat > "$T" {_OWNED}', "victim"),
+)
+
+
+def test_what_bash_skips_is_not_taken_for_run(tmp_path: Path) -> None:
+    """Audit 2026-11-21 FX45: the scan read every command of a line as run and every
+    arithmetic target as assigned.  Bash assigns nothing when an evaluation fails, skips the
+    rest of a line when an expansion or an assignment fails, does not run a builtin whose
+    redirection fails, leaves a body at ``return``, ``break`` and ``continue``, and runs
+    another text under ``posix`` or ``failglob``: the state the scan kept (a directory, a
+    variable, a function named ``cat``) was not the shell's, and the existing file was
+    rewritten.  What may not have run is in doubt from there to the end of the line."""
+    for command, written in _SKIPPED:
+        if _oracle_runs(command):
+            assert _overwritten(tmp_path, command, ["victim", "sub/victim"]) == {written}, command
+            assert (tmp_path / written).read_text() == "owned\n", command
+        assert _verdict(command, {"victim", "sub/victim"}) is not None, command
+
+
+#: FX45 (review of FX12, S13/F3): no startup variable reaches these child shells with a value.
+_NO_STARTUP_FILE = (
+    "unset BASH_ENV; bash -c 'cat > new'", "BASH_ENV=; bash -c 'cat > new'",
+    "export BASH_ENV=; bash -c 'cat > new'", "BASH_ENV=sub/env; bash -c 'cat > new'",
+    "export BASH_ENV=sub/env; env -i bash -c 'cat > new'", "BASH_ENV=sub/env sh -c 'cat > new'",
+    "declare -n R=X; R=1; bash -c 'cat > new'", "export BASH_ENV=sub/env; dash -c 'cat > new'",
+)
+
+
+def test_what_only_the_shell_knows_is_no_proof(tmp_path: Path) -> None:
+    """Audit 2026-11-21 FX45 O2: a command word of unknown value may be nothing, ``tee``,
+    ``eval`` or ``cd``, and what it runs may redefine every later command; the scan took such
+    a command for a harmless program, and a script on a shell's standard input for no
+    commands at all.  A here-document that reaches what only the shell knows is refused, and
+    nothing is known after it; what the scan can prove still runs."""
+    (tmp_path / "activate").write_text("export VIRTUAL_ENV=venv\n")
+    for command, written in _ONLY_THE_SHELL_KNOWS:
+        if _oracle_runs(command):
+            assert _overwritten(tmp_path, command, ["victim", "sub/victim"]) == {written}, command
+            assert (tmp_path / written).read_text() == "owned\n", command
+        assert _verdict(command, {"victim", "sub/victim"}) is not None, command
+    assert _verdict(f"$SUDO tee new {_OWNED}", set()) == HEREDOC_UNKNOWN_VERDICT.format(
+        command="$SUDO")
+    # the here-document of a body may be run where only the shell knows; no body holds one
+    # in a command without ``<<`` (the two last of _PROVED)
+    for command in _UNSEEN_CALLS:
+        assert "only the shell knows what that runs" in (
+            _verdict(command, {"sub/victim"}) or ""), command
+    for command in _PROVED:
+        assert _overwritten(tmp_path, command, ["victim", "sub/victim"]) == set(), command
+        assert _verdict(command, {"victim", "sub/victim"}) is None, command
+    # a child shell is read as written unless a startup variable may reach it with a value
+    (tmp_path / "sub" / "env").write_text("cd sub\n")
+    for form in _NO_STARTUP_FILE:
+        command = f"{form} {_OWNED}"
+        assert _overwritten(tmp_path, command, ["victim", "sub/victim"]) == set(), command
+        assert _verdict(command, {"victim", "sub/victim"}) is None, command
+        if "dash" not in form or shutil.which("dash"):
+            assert (tmp_path / "new").read_text() == "owned\n", command
+            (tmp_path / "new").unlink()
+        assert not (tmp_path / "sub" / "new").exists(), command
 
 
 def _scanned_from(frames: int, command: str) -> int:
@@ -1046,14 +1445,14 @@ _CHILD_SETS_T = (
 )
 #: What leaves ``T`` as assigned: the scan keeps following it.
 _BASH_KEEPS_T = (
-    "trap 'T=other' EXIT", "trap -- 'T=other' INT TERM", "shopt -s nullglob",
+    "trap 'T=other' EXIT", "trap -- 'T=other' 0", "shopt -s nullglob",
     "set -euo pipefail", "printf -v U x", "wait", "a[0]=x", "a=(1 2); : ${a[0]} ${T:1:2}",
     "export U=other", "exec 3>/dev/null", "cat <<E >/dev/null\n${U:-x} $[1+1]\nE",
     # an option set in a pipeline's stage ends with its subshell
     "true | shopt -s lastpipe",
     # text that is no arithmetic: a string's value, the value of an element
     'declare U="$HOME --all=T"', 'readonly U="$HOME -=T"', 'a[0]="$HOME --all=T"',
-    'declare -A a; a[k]="$HOME++ T=other"', "U=T=other", "declare U=T=other",
+    'declare -A a; k=0; a[k]="$HOME++ T=other"', "U=T=other", "declare U=T=other",
 )
 
 
@@ -1075,10 +1474,455 @@ def test_the_scanner_names_the_file_bash_writes_or_none(tmp_path: Path) -> None:
         named = [HEREDOC_VERDICT.format(path=f"/w/{name}") for name in expected]
         assert _verdict(command, set(files)) in (_UNRESOLVED(path="$T"), *named), command
     # A child shell's text is no option of its command line, whatever it starts with.
-    child = f"bash -c '$HOME/missing 2>/dev/null; T=victim; cat > \"$T\"' {_OWNED}"
-    assert _overwritten(tmp_path, child, files) == {"victim"}
-    assert _verdict(child, set(files)) == HEREDOC_VERDICT.format(path="/w/victim")
+    # (Its first word is one only the shell knows unquoted, so the target is too; quoted,
+    # with a literal name at its end, it is a program and the scan goes on.)
+    for missing, verdict in (("$HOME/missing", _UNRESOLVED(path="$T")),
+                             ('"$HOME/missing"', HEREDOC_VERDICT.format(path="/w/victim"))):
+        child = f"bash -c '{missing} 2>/dev/null; T=victim; cat > \"$T\"' {_OWNED}"
+        assert _overwritten(tmp_path, child, files) == {"victim"}
+        assert _verdict(child, set(files)) == verdict, child
     for form in _BASH_KEEPS_T:
         command = f'T=victim; {form}\ncat > "$T" {_OWNED}'
         assert _overwritten(tmp_path, command, files) == {"victim"}, command
         assert _verdict(command, set(files)) == HEREDOC_VERDICT.format(path="/w/victim"), command
+
+
+#: FX45b F1/F2: a mover's name as data, a trap that sets no action: nothing is renamed or run.
+_NO_MOVER = (
+    "grep -c mv README.md", "echo ln", "which mv", "type ln", "command -v mv", "rg rename",
+    "git grep mv", "man -w link", "git log --grep rename", "timeout 5 grep -c mv README.md",
+    "uv run pytest -k rename", "find . -name mv", "git mv a b", "trap '' HUP", "trap - INT",
+    "trap -- '' HUP INT", "trap -p", "for t in ln mv cp; do command -v $t; done",
+)
+#: FX45b F1/B3: the movers bash runs, each before ``cat >`` the name in the second column.
+_MOVERS = (
+    ("ln -s victim alias", "alias"), ("env ln -s victim alias", "alias"),
+    ("command ln -s victim alias", "alias"), ("setsid -w ln -s victim alias", "alias"),
+    ("find . -maxdepth 0 -exec ln -s victim alias ';'", "alias"),
+    ('"$(dirname /bin/ln)/ln" -s victim alias', "alias"),
+    ("ln -s -- victim -alias", "./-alias"), ("cp -l -- victim -x", "./-x"),
+    # B4: in the script a shell reads, which the scan reads after the writer
+    ("bash <<'S'\nln -s victim alias\nS", "alias"), ("bash -c 'ln -s victim alias'", "alias"),
+)
+#: FX45b B4: a mover in a substitution, which bash runs before the writer's redirection.
+_SUBSTITUTED_MOVERS = (
+    f"cat $(ln -s victim alias) > alias {_OWNED}", f"X=$(ln -s victim alias) cat > alias {_OWNED}",
+    f"cat 2>$(ln -s victim alias; echo /dev/null) > alias {_OWNED}",
+    "cat <<EOF > alias\nowned $(ln -s victim alias)\nEOF\n",
+)
+#: FX45b B5: a writer the shell does not wait for, and the mover written after it.
+_RACING_WRITERS = (
+    "coproc { sleep 0.3; cat >alias; } <<'EOF'\nowned\nEOF\n\nln -s victim alias; wait",
+    "{ sleep 0.3; cat > alias; } <<'EOF' &\nowned\nEOF\nln -s victim alias; wait",
+    "sleep 0.3 && cat > alias <<'EOF' &\nowned\nEOF\nln -s victim alias; wait",
+    "{ sleep 0.3; cat; } <<'EOF' | { sleep 0.3; cat > alias; } & ln -s victim alias; wait\n"
+    "owned\nEOF\n",
+)
+
+
+def test_a_mover_is_a_command_bash_runs_before_the_writer_opens_its_file(tmp_path: Path) -> None:
+    """Audit 2026-11-21 FX45b (review of FX45, F1/F2/B3/B4/B5): any word ``mv``, ``ln``, ``cp``
+    made every later target unresolvable (``grep -c mv README.md``), as did ``trap '' HUP``;
+    while a mover's operand after ``--``, a mover in a shell's here-document script or in a
+    substitution of the writer itself, and one written after a background or coprocess writer
+    gave an existing file a new name unseen."""
+    for form in _NO_MOVER:
+        assert _verdict(f"{form}; cat > new.txt {_OWNED}", {"README.md", "victim"}) is None, form
+    for form, name in _MOVERS:
+        command = f"{form}\ncat > {name} {_OWNED}"
+        if _oracle_runs(command):
+            assert _overwritten(tmp_path, command, ["victim"]) == {"victim"}, command
+            (tmp_path / name).unlink()
+        assert _verdict(command, {"victim"}) == _UNRESOLVED(path=name), command
+    # ``git mv`` names its operands; behind another runner the mover's are the runner's to give
+    assert _verdict(f"git mv victim alias; cat > alias {_OWNED}", {"victim"}) == _UNRESOLVED(
+        path="alias")
+    assert _verdict(f"git mv a b; cat > alias {_OWNED}", {"victim"}) is None
+    assert _verdict(f"strace -o log ln a b; cat > new.txt {_OWNED}", set()) == _UNRESOLVED(
+        path="new.txt")
+    for command in (*_SUBSTITUTED_MOVERS, *_RACING_WRITERS):
+        if _oracle_runs(command):
+            assert _overwritten(tmp_path, command, ["victim"]) == {"victim"}, command
+            (tmp_path / "alias").unlink()
+        assert _verdict(command, {"victim"}) == _UNRESOLVED(path="alias"), command
+    # a writer bash waits for is done before a later mover; another name is no concern
+    for command in (f"cat > new.txt {_OWNED}mv new.txt final.txt",
+                    f"sleep 0.1 & cat > new.txt {_OWNED}mv new.txt final.txt",
+                    "cat > alias <<'EOF' &\nowned\nEOF\nwait; ln -s victim other"):
+        assert _verdict(command, {"victim"}) is None, command
+    # an action in a lone operand only the shell knows may run a function unseen
+    trap = ("f() { cat > victim; }; X=$(echo f USR1); trap $X; "
+            f"{{ kill -USR1 $$; sleep 0.2; }} {_OWNED}")
+    assert _overwritten(tmp_path, trap, ["victim"]) == {"victim"}
+    assert _verdict(trap, {"victim"}) == HEREDOC_UNKNOWN_VERDICT.format(command="kill")
+
+
+#: FX45b B1: a here-document on another descriptor than 0, and the command that copies it.
+_OTHER_DESCRIPTOR = (
+    "{ cat <&3 >victim; } 3<<'EOF'\nowned\nEOF\n", "cat /dev/fd/3 >victim 3<<'EOF'\nowned\nEOF\n",
+    "f() { cat <&3 >victim; }; f 3<<'EOF'\nowned\nEOF\n",
+    "bash -c 'cat <&3 >victim' 3<<'EOF'\nowned\nEOF\n", "cat 3<<'EOF' <&03 >victim\nowned\nEOF\n",
+    "tee victim 3<<'EOF' 0<&3 >/dev/null\nowned\nEOF\n",
+    "bash <<'S' 3<<'EOF'\ncat <&3 >victim\nS\nowned\nEOF\n",
+    "cat 2<<'EOF' /dev/stderr >victim\nowned\nEOF\n",  # a name of the descriptor
+)
+#: The same where only the shell knows who reads it: the shell's own descriptor after an
+#: ``exec``, one bash names, a script that is one of two here-documents or a descriptor's name.
+_UNKNOWN_READERS = (
+    ("exec 3<<'EOF'\nowned\nEOF\ncat <&3 >victim", "a command the shell runs on its own"),
+    ("exec <<'EOF'\nowned\nEOF\ncat > victim", "a command the shell runs on its own"),
+    ("exec {FD}<<'EOF'\nowned\nEOF\ncat <&$FD >victim", "a command the shell runs on its own"),
+    ("bash <<'S' 11<<'D'\ncat > victim <<'EOF'\nowned\nEOF\nS\nx\nD\n",
+     "a command the shell runs on its own"),
+    ("bash /dev/fd/3 3<<'S'\ncat > victim <<'EOF'\nowned\nEOF\nS\n", "bash"),
+)
+#: FX45b B2: a descriptor bash numbers as the scan did not: a move (``3-``), leading zeros,
+#: two digits, ``<>`` and ``<&`` on the standard output, a name of the standard output.
+_DESCRIPTOR_SPELLINGS = (
+    f"exec 3>>victim; cat >&3- {_OWNED}", f"exec 3>>victim; cat >&03 {_OWNED}",
+    f"exec 03>>victim; cat >&3 {_OWNED}", f"exec 3>>victim; exec 4>&3-; cat >&4 {_OWNED}",
+    f"cat 3>>victim 4>&3- >&4 {_OWNED}", f"exec 3>>victim; cat 1<&3- {_OWNED}",
+    f"exec 3>>victim; exec 1>&3-; cat {_OWNED}", f"exec 3>>victim; {{ cat; }} >&3- {_OWNED}",
+    f"exec 1<>victim; cat {_OWNED}", f"cat 01<>victim {_OWNED}", f"exec 01>>victim; cat {_OWNED}",
+    f"exec 13>>victim; cat >&13 {_OWNED}", f"exec 3>>victim; exec 1<&3; cat {_OWNED}",
+    # the output still goes down the pipe: descriptor 11 is not the standard output, a
+    # name of the standard output is the pipe, and so is a copy of it put back
+    *(f"cat {sink} <<'EOF' | tee victim >/dev/null\nowned\nEOF\n"
+      for sink in ("11>new", "> /dev/stdout", "3>&1 >new >&3")),
+)
+
+
+def test_a_descriptor_is_the_one_bash_numbers(tmp_path: Path) -> None:
+    """Audit 2026-11-21 FX45b (review of FX45, B1/B2): a here-document on descriptor 3 was no
+    one's input, so ``cat <&3 > victim`` under it passed, and ``>&3-``, ``>&03``, ``01<>`` or a
+    two-digit descriptor named no file the scan knew: bash rewrote ``victim`` each time."""
+    refused = HEREDOC_VERDICT.format(path="/w/victim")
+    for command in (*_OTHER_DESCRIPTOR, *_DESCRIPTOR_SPELLINGS):
+        assert _overwritten(tmp_path, command, ["victim"]) == {"victim"}, command
+        assert _verdict(command, {"victim"}) == refused, command
+    for command, reader in _UNKNOWN_READERS:
+        if _oracle_runs(command):
+            assert _overwritten(tmp_path, command, ["victim"]) == {"victim"}, command
+        assert _verdict(command, {"victim"}) == HEREDOC_UNKNOWN_VERDICT.format(
+            command=reader), command
+    # a descriptor that a piped group made a copy of its output is the pipe
+    piped = "{ cat >&3 <<'EOF'\nowned\nEOF\n} 3>&1 | tee victim >/dev/null\n"
+    assert _overwritten(tmp_path, piped, ["victim"]) == {"victim"}
+    assert _verdict(piped, {"victim"}) == _UNRESOLVED(path="&1")
+    # no copy of the text: a descriptor ``cat`` does not read, another program's script or
+    # data, the streams the tool gave the command
+    for command in ("cat 3<<EOF > victim\nowned\nEOF\n",
+                    "diff /dev/fd/3 /dev/fd/4 3<<'A' 4<<'B'\nx\nA\ny\nB\n",
+                    "python3 /dev/fd/3 3<<'EOF'\npass\nEOF\n", f"cat >&2 {_OWNED}",
+                    f"cat > /dev/stderr {_OWNED}", f"exec 3>&1; cat >&3 {_OWNED}",
+                    f"cat >& new.txt {_OWNED}", "cat 2>&1 <<'EOF' | tee new.log\nowned\nEOF\n"):
+        assert _verdict(command, {"victim"}) is None, command
+    assert _overwritten(tmp_path, "cat 3<<EOF > victim\nowned\nEOF\n", ["victim"]) == {"victim"}
+    assert (tmp_path / "victim").read_text() == ""  # emptied, as ``: > victim`` does: no copy
+
+
+#: FX45b: a copier fed a here-document inside ``<(...)``: the copier that holds the
+#: substitution, or one in the group it is the standard input of, reads the text.
+_STREAM_COPIES = (
+    f"tee victim >/dev/null < <(cat {_OWNED})\n", f"cat <(cat {_OWNED}) > victim\n",
+    "cat <(cat <<'EOF' | cat\nowned\nEOF\n) > victim\n", f"cat <({{ cat; }} {_OWNED}) > victim\n",
+    f"f() {{ cat; }}; cat <(f {_OWNED}) > victim\n", f"cat <(bash -c cat {_OWNED}) > victim\n",
+    f"cat < <(cat <(cat {_OWNED})) >> victim\n", f"env cat -- <(cat {_OWNED}) | tee victim\n",
+    f"{{ cat; }} < <(cat {_OWNED}) > victim\n",
+    f"if true; then tee victim >/dev/null; fi 0< <(cat {_OWNED})\n",
+)
+#: The same where only the shell knows who reads the stream: a descriptor the shell or a
+#: group keeps, a shell or a function that holds it, the output ``>(...)`` inherits.
+_STREAMS = (
+    f"exec 3< <(cat {_OWNED}); cat <&3 > victim\n",
+    f"{{ cat <&3 > victim; }} 3< <(cat {_OWNED})\n",
+    f"for f in <(cat {_OWNED}); do cat \"$f\" > victim; done\n",
+    f"f() {{ cat \"$1\" > victim; }}; f <(cat {_OWNED})\n",
+    f"bash -c 'cat \"$0\" > victim' <(cat {_OWNED})\n",
+    f"{{ : > >(cat {_OWNED}); wait $!; }} >> victim\n",
+    f"exec >> victim; : > >(cat {_OWNED}); wait $!\n",
+)
+
+
+def test_the_output_of_a_process_substitution_is_a_stream(tmp_path: Path) -> None:
+    """Audit 2026-11-21 FX45b: what a ``cat`` fed a here-document wrote inside ``<(...)`` or
+    ``>(...)`` was taken for a word, as a command substitution's output is: the command that
+    read the stream, or the output the shell had there, put the text in ``victim``."""
+    for command in _STREAM_COPIES:
+        assert _overwritten(tmp_path, command, ["victim"]) == {"victim"}, command
+        assert _verdict(command, {"victim"}) == HEREDOC_VERDICT.format(path="/w/victim"), command
+    for command in _STREAMS:
+        assert _overwritten(tmp_path, command, ["victim"]) == {"victim"}, command
+        assert _verdict(command, {"victim"}) == _UNRESOLVED(
+            path="a process substitution's output"), command
+    # no copy into an existing file: a new one, a program that is no copier reads the
+    # stream, no copier in the substitution is fed the here-document
+    for command in (f"cat <(cat {_OWNED}) > new.txt\n", f"grep -c o <(cat {_OWNED}) > new.txt\n",
+                    f"while read -r line; do echo \"$line\"; done < <(cat {_OWNED}) > new.txt\n",
+                    f"python3 <(echo 'print(1)') {_OWNED}", f"grep -c o <(python3 - {_OWNED})\n",
+                    f"diff <(sort a) <(sort b) > new.diff; cat > new.txt {_OWNED}",
+                    f"cat <(sort victim) > new.txt; tee new.log >/dev/null {_OWNED}"):
+        assert _verdict(command, {"victim"}) is None, command
+    # bash expands a redirection's operand with the redirections before it done: a command
+    # substituted in one written after the here-document has it as its input
+    unseen = HEREDOC_UNKNOWN_VERDICT.format(command="a command the shell runs on its own")
+    for head in (": <<'EOF' < <(cat >> victim)", ": <<'EOF' 3< <(tee victim >/dev/null)",
+                 ': <<\'EOF\' 2> "$(cat >> victim; echo /dev/null)"',
+                 "{ :; } <<'EOF' < <(cat >> victim)", ": 3<<'EOF' > >(cat <&3 >> victim)"):
+        command = f"{head}\nowned\nEOF\nwait $!\n"
+        assert _overwritten(tmp_path, command, ["victim"]) == {"victim"}, command
+        assert _verdict(command, {"victim"}) == unseen, command
+    # the substitution ran before the here-document was opened; the input of ``>(...)`` is the pipe
+    for command in (f": < <(cat >> victim) {_OWNED}wait $!\n",
+                    ": <<'EOF' > >(cat >> victim)\nowned\nEOF\nwait $!\n",
+                    "python3 - <<'EOF' 2> >(grep -v Warning >&2)\nprint(1)\nEOF\n"):
+        assert _overwritten(tmp_path, command, ["victim"]) == set(), command
+        assert _verdict(command, {"victim"}) is None, command
+
+
+#: FX45b B6: what assigns ``X`` to a variable bash starts with as an integer: it evaluates it.
+_INTEGER_ASSIGNMENTS = (
+    "RANDOM=X", "export OPTIND=X", "declare HISTCMD=X", "{ SRANDOM=X; }", "readonly RANDOM=X",
+    "declare SECONDS=X", "{ printf -v OPTIND %s X; }", "{ for RANDOM in X; do :; done; }",
+)
+
+
+def test_an_integer_bash_starts_with_evaluates_what_it_is_assigned(tmp_path: Path) -> None:
+    """Audit 2026-11-21 FX45b (review of FX45, B6): ``RANDOM``, ``SRANDOM``, ``OPTIND``,
+    ``HISTCMD``, ``SECONDS`` and ``BASHPID`` are integers without a ``declare -i``, so
+    ``RANDOM=X`` evaluates the value of ``X``: a subscript in it ran ``cat > victim`` under
+    the here-document, and an assignment in it moved the target (``Y=T=1; RANDOM=Y``)."""
+    for form in _INTEGER_ASSIGNMENTS:
+        command = f"X='A[$(cat >victim)]'; {form} {_OWNED}"
+        if _oracle_runs(command):
+            assert _overwritten(tmp_path, command, ["victim"]) == {"victim"}, command
+        assert _verdict(command, {"victim"}) is not None, command
+    for form in ("RANDOM=Y", "export OPTIND=Y"):
+        command = f'T=0; Y=T=1; {form}; cat > "$T" {_OWNED}'
+        if _oracle_runs(command):
+            assert _overwritten(tmp_path, command, ["0", "1"]) == {"1"}, command
+        assert _verdict(command, {"0", "1"}) == _UNRESOLVED(path="$T"), command
+    # a number as written evaluates to itself, as does a variable that holds one
+    for form in ("SECONDS=0", "OPTIND=1", "RANDOM=42", "X=1; RANDOM=X", "LINENO=X"):
+        assert _verdict(f"{form}; cat > new.txt {_OWNED}", {"victim"}) is None, form
+
+
+def _cdpath_sub() -> str:
+    """The ``CDPATH`` the shells of another environment inherit: ``sub``."""
+    return "sub"
+
+
+def test_a_cd_looks_in_the_cdpath_the_shell_inherits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Audit 2026-11-21 FX45b (review of FX45, B7): with ``CDPATH=sub`` in the environment the
+    tool hands its shell, ``cd d && cat > victim`` rewrote ``sub/d/victim`` while the guard
+    judged ``d/victim``: a ``CDPATH`` the text never assigned was taken to be empty."""
+    (tmp_path / "sub" / "d").mkdir(parents=True)
+    victim = tmp_path / "sub" / "d" / "victim"
+    work = str(tmp_path)
+    searched = f"cd d && cat > victim {_OWNED}"
+    victim.write_text("ORIGINAL\n")
+    subprocess.run(["bash", "-c", searched], cwd=tmp_path, check=True, capture_output=True,
+                   timeout=10, env={"PATH": os.environ["PATH"], "CDPATH": "sub"})
+    assert victim.read_text() == "owned\n"
+    monkeypatch.setenv("CDPATH", "sub")
+    assert heredoc_guard(searched, work, os.path.lexists, os.path.isdir) == _UNRESOLVED(
+        path="victim")
+    # what bash does not look up there, or the text decides, is judged as written
+    refused = HEREDOC_VERDICT.format(path=str(victim))
+    for command in (f"cd ./sub/d && cat > victim {_OWNED}",
+                    f"CDPATH=; cd sub/d && cat > victim {_OWNED}",
+                    f"cd {tmp_path}/sub/d && cat > victim {_OWNED}"):
+        assert heredoc_guard(command, work, os.path.lexists, os.path.isdir) == refused, command
+    assert heredoc_guard(f"cat > new.txt {_OWNED}", work, os.path.lexists, os.path.isdir) is None
+    # another environment's shell inherits its own: the caller tells which
+    monkeypatch.delenv("CDPATH")
+    assert heredoc_guard(f"cd d && cat > new.txt {_OWNED}", work, os.path.lexists) is None
+    assert heredoc_guard(searched, work, os.path.lexists, cdpath=_cdpath_sub) == _UNRESOLVED(
+        path="victim")
+
+
+#: A program that logs its first operand and how many it got.
+_MARK = '#!/bin/sh\necho "$1 $#" >> "$MARKS"\n'
+#: Commands whose calls of ``mark`` the scan reads as bash makes them.  ``mark NOT`` is text
+#: of a string or of a here-document body: bash never runs it.
+_ANSI_C_STRINGS = (
+    r"echo $'it\'s' ; mark SECOND",  # the two rows of the FX05c request, and its nested one
+    r"mark -rf $'don\'t # x' /tmp/w",
+    r"""echo "$(echo $'a\'b'; mark SECOND)" """,
+    r"echo $'a\\'; mark SECOND; echo $'a\\\'b'; mark THIRD 'x y'",  # ``\\`` escapes no quote
+    r"""echo "$'a\'; mark NOT; echo '" 'a\'; mark SECOND; echo 'b'""",  # no ``$'...'`` there
+    r"X=$'a\'b' mark SECOND && echo hi > $'a\'b'; mark THIRD < $'a\'b' | cat; mark FOURTH",
+    r"echo $'a\' | mark NOT `mark NOT` $(mark NOT) # ' ; mark SECOND",
+    "echo $'a\\'\nmark NOT\n' ; mark SECOND",
+    r"echo `echo $'a\'b)'; mark SECOND` $(echo $'a\')'; mark THIRD)",
+    r"for i in $'a\'b'; do mark SECOND; done; case x in $'a\'b') ;; *) mark THIRD;; esac",
+    r"""f() { a=($'a\'b)' c); mark SECOND "${a[0]}"; }; f; declare -a b=($'\'' y); mark THIRD""",
+    r"[[ x == $'a\'b' || x =~ $'a\'b' ]] || mark SECOND; (( 1 + $'1\'' )); mark THIRD $'a\'b'",
+    r"echo ${x:-$'a\'b}'} ${x#$'a\'b'} ${x/$'a\'b'/$'c\'d'} ${x:+$'a\'b'}; mark SECOND",
+    r"""x=1; echo "${x:+$'a\'b $(mark FIRST)\' c'}"; mark SECOND""",
+    r"""eval 'echo $'\''a\'\''b'\''; mark SECOND'; bash -c "echo \$'a\\'b'; mark THIRD" """,
+    "cat <<< $'a\\'b'; mark SECOND",
+    r"""echo "${x:-$'\n\t\a\$(mark NOT)\`mark NOT\`'}"; mark SECOND""",
+    # the parser ends the string at its quote whatever it holds: bash fails the first line
+    "echo \"${x:-$'a\\'b'}\"\nmark SECOND",
+    "echo \"${x:-$'${y'}\"\nmark SECOND; echo '}'",
+    "echo \"${x:-$'$('}\"\nmark SECOND; echo ')'",
+    "echo \"${x:-$'$(cat <<E)'}\"\nmark SECOND\nE",  # that here-document has no body
+    # a here-document delimiter is the string bash's parser decoded
+    "cat <<$'E\\'OF'\n$(mark NOT)\nE'OF\nmark SECOND",
+    "cat <<x$'E\\x4f\\106\\t\\\\\\\"\\?\\q\\x{141}'y\nmark NOT\nxEOF\t\\\"?\\qAy\nmark SECOND",
+    "cat <<$'\\a\\b\\e\\E\\f\\r\\v\\x\\$'\nmark NOT\n\a\b\x1b\x1b\f\r\v\\x\\$\nmark SECOND",
+    "cat <<\"$'E\"\n$(mark NOT)\n$'E\nmark SECOND",  # no string in double quotes
+    # bash looks for the delimiter of ``<<-`` in the line as written, then without its tabs
+    "cat <<-$'\\tE'\n\tmark NOT\n\tE\nmark SECOND",
+    "cat <<-'\tE'\n\tmark NOT\n\tE\nmark SECOND",
+    "cat <<-E\n\tmark NOT\n\tE\nmark SECOND",
+)
+#: Bash 5.2 quotes such a string in a pattern; the versions before it fail the line.
+_ANSI_C_STRINGS_52 = (
+    r"""x="a'bc"; echo "${x#$'a\'b'}" "${x/$'a\'b'/$'c\'d'}"; mark SECOND""",)
+#: Text bash decodes and then expands: it runs ``mark FIRST``, which the scan cannot read.
+_DECODED_COMMANDS = (
+    r"""echo "${x:-$'\x24(mark FIRST)'}"; mark SECOND""",
+    r"""echo "${x:-$'\\\$(mark FIRST)'}"; mark SECOND""",
+    r"""echo "${x:-$'\c\$(mark FIRST)'}"; mark SECOND""",
+    r"""echo "${x:-$'$(mark\tFIRST)'}"; mark SECOND""",
+    r"""x=abc; echo "${x:$'\044(mark FIRST; echo 1)'}"; mark SECOND""",
+)
+#: Delimiters only bash can decode: its versions, or two locales, make different strings.
+_UNREAD_DELIMITERS = ("$'E\\cAF'", "$'E\\u004fF'", "$'E\\U0000004fF'", "$'E\\xc3\\xa9'",
+                      "$'E\\0F'", "$'E\\x{}F'", "$'E\\001F'", "$'E\\177F'", '$"EOF"', 'x$"EOF"')
+
+
+def _marks(tmp_path: Path, command: str) -> list[str]:
+    """The first operand and the number of operands of each call of ``mark`` bash makes."""
+    program = tmp_path / "bin" / "mark"
+    program.parent.mkdir(exist_ok=True)
+    program.write_text(_MARK)
+    program.chmod(0o755)
+    log = tmp_path / "marks"
+    log.write_text("")
+    subprocess.run(["bash", "-c", command], cwd=tmp_path, capture_output=True, check=False,
+                   timeout=10, stdin=subprocess.DEVNULL,
+                   env={"PATH": f"{program.parent}:{os.environ['PATH']}", "MARKS": str(log)})
+    return log.read_text().splitlines()
+
+
+def _marked(command: str) -> list[str]:
+    """The same of each ``mark`` command the scan reads in *command*."""
+    return [f"{simple.argv()[1].text} {len(simple.argv()) - 1}"
+            for simple in simple_commands(command, "/w") if simple.program() == "mark"]
+
+
+def test_an_ansi_c_string_ends_at_its_first_unescaped_quote(tmp_path: Path) -> None:
+    """Audit 2026-11-21 LI (leftover I1, the FX05c request): the scan ended a ``$'...'`` at an
+    escaped quote, or past its quote in an expansion left open in it, so the commands after
+    it were glued into the word or read as a comment and no guard saw them; a here-document
+    delimited by such a string never ended; and text bash decodes and then expands
+    (``"${x:-$'\\x24(cmd)'}"``) ran unseen."""
+    recent = _ANSI_C_STRINGS_52 if _bash_version() >= (5, 2) else ()
+    for command in (*_ANSI_C_STRINGS, *recent):
+        calls = _marks(tmp_path, command)
+        assert calls and "NOT 1" not in calls, command
+        assert _marked(command) == calls, command
+    for command in _DECODED_COMMANDS:
+        assert _marks(tmp_path, command) == ["FIRST 1", "SECOND 1"], command
+        scanned = simple_commands(command, "/w", derived=True)
+        assert any(simple.unknown and not simple.words for simple in scanned), command
+        assert _marked(command) == ["SECOND 1"], command
+    # each of these hid a rewrite from the here-document guard; in the last one the quote the
+    # decoded text leaves open fails the line, so ``T=new.txt`` never runs
+    for command in (f"echo $'it\\'s'; cat > victim {_OWNED}",
+                    f"cat <<$'EOF'\nx\nEOF\ncat > victim {_OWNED}",
+                    ": <<EOF > \"${x:-$'\\x24(cat > victim)'}\"\nowned\nEOF\n",
+                    f"T=victim; echo \"${{x:-$'a\"b'}}\"; T=new.txt\ncat > \"$T\" {_OWNED}"):
+        assert _overwritten(tmp_path, command, ["victim"]) == {"victim"}, command
+        assert _verdict(command, {"victim"}) is not None, command
+    # plain text and letter escapes are what they show: the scan still knows what it knew
+    plain = f"T=new.txt; x=\"${{T%$'\\n'}}${{T:-$'\\t\\e\\?\\q'}}\"; cat > \"$T\" {_OWNED}"
+    assert _overwritten(tmp_path, plain, ["victim"]) == set()
+    assert _verdict(plain, {"victim"}) is None
+    # where only bash knows the end of a here-document, the text after it is unread: refused
+    for delimiter in _UNREAD_DELIMITERS:
+        command = f"mark FIRST; cat <<{delimiter}\nx\nEOF\ncat > victim {_OWNED}"
+        with pytest.raises(TooDeepError) as raised:
+            simple_commands(command, "/w")
+        assert str(raised.value) == UNREAD_DELIMITER_VERDICT, command
+        with pytest.raises(TooDeepError):
+            _verdict(command, {"victim"})
+        assert [simple.program() for simple in simple_commands(
+            command, "/w", optimistic=True)] == ["mark", "cat"], command
+
+
+#: How a command hands a text to a shell, to ``eval`` or to a trap: ``{}`` is the text, one
+#: quoted string.  Plain-quoted, the scan reads the text.
+_TEXT_FORMS = (
+    "eval {}", "bash -c {}", "sh -c {}", "bash -ec {} arg0", "eval eval {}", "command eval {}",
+    "$'eval' {}", "bash $'-c' {}", "e=eval; $e {}", "trap {} EXIT",
+    'X={}; eval "$X"', 'X={}; bash -c "$X"', 'X=""{}; eval "$X"', 'X={}; Y="$X"; eval "$Y"',
+    "export X={}; bash -c 'eval \"$X\"'", "X={} bash -c 'eval \"$X\"'",
+    # text only the shell knows, in which a here-document shows: the shell may copy it
+    "eval ${{Y:-{}}}", 'eval "$(echo {})"',
+)
+#: Words of ``$'...'`` strings every bash decodes alike: quoted text, whatever it holds.
+_DECODED_WORDS = (
+    r"$'a b\tc\nd' $'' x$''y a$'b c'd",
+    r"$'\a\b\e\E\f\r\v\\\'\"\?' $'\101\x42\x{43}\1011\x444\x7e\2'",
+    r"$'\q\x\8\ \$' $'*' $'~' $'{a,b}' $'$HOME`x`$(x)' " "$'a\\\nb'",
+)
+#: Escapes two versions of bash, or two locales, decode differently; ``\cJ`` is a newline.
+_UNDECODED = ("\\cJ", "\\u000a", "\\U0000000a", "\\0", "\\x{}", "\\1", "\\177", "\\x80")
+
+
+def test_an_ansi_c_string_is_the_text_bash_decodes(tmp_path: Path) -> None:
+    """Audit 2026-11-22 LH3 (the side finding of LH2): the scan kept a ``$'...'`` word as
+    written, a value only the shell knows, so the text of ``eval $'cat > victim <<EOF\\n...'``
+    or ``bash -c $'...'`` was never read; its ``\\n`` is no newline as written, so the net for
+    a here-document hidden in such a word missed it too, and bash rewrote ``victim``."""
+    text = "cat > victim <<EOF\nowned\nEOF"
+    string = "$'" + text.replace("\n", "\\n") + "'"
+    for form in _TEXT_FORMS:
+        command = form.format(string)
+        assert _overwritten(tmp_path, command, ["victim"]) == {"victim"}, command
+        verdict = _verdict(command, {"victim"})
+        assert verdict is not None, command
+        assert verdict == _verdict(form.format(f"'{text}'"), {"victim"}), command
+    # the text is read, not merely refused: a copy into a new file runs, a ``cd`` in it counts
+    moved = "bash -c $'cd sub\\ncat > victim <<EOF\\nowned\\nEOF'"
+    assert _overwritten(tmp_path, moved, ["victim", "sub/other"]) == set()
+    assert _verdict(moved, {"victim"}) is None
+    assert _verdict(moved, {"sub/victim"}) == HEREDOC_VERDICT.format(path="/w/sub/victim")
+    assert _verdict("X=$'cat > new.txt <<EOF\\nfresh\\nEOF'; eval \"$X\"", {"victim"}) is None
+    # bash settles what each string decodes to (its bytes: no ``\r`` is lost); the word itself
+    # stays as written, and not literal, for the guards that decode it themselves
+    for words in _DECODED_WORDS:
+        command = f"printf '<%s>' {words}"
+        scanned = simple_commands(command, "/w")[0].words[2:]
+        assert " ".join(word.text for word in scanned) == words, words
+        assert not any(word.literal or word.path for word in scanned), words
+        printed = subprocess.run(["bash", "-c", command], capture_output=True, check=True,
+                                 timeout=10).stdout.decode()
+        assert "".join(f"<{word.passed()}>" for word in scanned) == printed, words
+    # a string only bash can decode stays a value only the shell knows; handed to a command
+    # that may run it, it may hold a here-document
+    unknown = HEREDOC_UNKNOWN_VERDICT.format(command="a command the shell runs on its own")
+    newline = "eval $'cat > victim <<EOF\\cJowned\\cJEOF'"
+    assert _overwritten(tmp_path, newline, ["victim"]) == {"victim"}
+    for escape in _UNDECODED:
+        string = f"$'cat > victim <<EOF{escape}owned\\nEOF'"
+        word = simple_commands(f"echo {string}", "/w")[0].words[1]
+        assert (word.text, word.literal, word.passed()) == (string, False, None), escape
+        assert _verdict(f"echo {string}", {"victim"}) is None, escape
+        for form in ("eval {}", "bash -c {}", "$RUN {}", "trap {} EXIT"):
+            assert _verdict(form.format(string), {"victim"}) == unknown, (form, escape)
+    # an escape no bash makes an ASCII character of hides neither the operator nor a newline:
+    # the command runs, as its plain-quoted spelling does, unless the here-document shows
+    for command in ("$RUN $'caf\\u00e9'",
+                    "bash -c $'echo \\xe2\\x9c\\x93 \\342\\234\\223 \\U0001f600'"):
+        assert _verdict(command, {"victim"}) is None, command
+    shown = "eval $'cat > victim <<EOF\\nowned \\u00e9\\nEOF'"
+    assert _overwritten(tmp_path, shown, ["victim"]) == {"victim"}
+    assert _verdict(shown, {"victim"}) == unknown
+    assert _verdict("$RUN $'\\uff1c\\uff1cEOF\\n'", {"victim"}) == unknown  # a wide ``<``

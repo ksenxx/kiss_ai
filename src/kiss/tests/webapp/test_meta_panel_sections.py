@@ -55,6 +55,7 @@ import pytest
 from playwright.sync_api import Browser, Locator, Page, sync_playwright
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
+from kiss.agents.sorcar.task_metadata import ALL_TAGS
 from kiss.server.web_server import MEDIA_DIR, _build_html
 from kiss.tests.conftest import (
     goto_retrying_network_change,
@@ -124,23 +125,24 @@ _GEOMETRY_JS = """
   const shown = el => el.getClientRects().length > 0;
   const panel = document.getElementById('meta-panel');
   const pr = panel.getBoundingClientRect();
-  const pad = parseFloat(getComputedStyle(panel).paddingBottom);
   const list = document.getElementById('meta-list');
   const content = document.getElementById('meta-info-content');
   // The per-task sections only: the workspace (Explorer, Source
-  // Control) and global (Schedule, Apps, Spend, Recommendations)
-  // sections (hidden by _open_page unless asked for) are measured
-  // separately.
+  // Control) and global (Schedule, Machines, Skills, Connectors,
+  // Spend, Recommendations) sections (hidden by _open_page unless
+  // asked for) are measured separately.
   const isGlobal = el =>
     el && ['meta-explorer', 'meta-scm', 'meta-schedule', 'meta-machines',
-           'meta-apps', 'meta-spend', 'meta-recommendations'].includes(el.id);
+           'meta-skills', 'meta-apps', 'meta-spend',
+           'meta-recommendations'].includes(el.id);
   const resizers = Array.from(
     document.querySelectorAll('#meta-panel > .meta-section-resizer'))
     .filter(r => !isGlobal(r.previousElementSibling));
   const hdrs = Array.from(document.querySelectorAll('#meta-panel .meta-section-hdr'))
     .filter(h => !isGlobal(h.parentElement));
   return {
-    panelInnerBottom: pr.bottom - pad,
+    // The sections end where the strip along the panel's bottom begins.
+    sectionsBottom: rect('meta-footer').top,
     panelTop: pr.top,
     listShown: shown(list),
     listTop: rect('meta-list').top,
@@ -200,7 +202,7 @@ def remote_url(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
     root = tmp_path_factory.mktemp("remote-webapp")
     html = _build_html()
     (root / "index.html").write_text(html, encoding="utf-8")
-    marker = '<div id="meta-resizer"'
+    marker = '<div id="meta-footer"'
     assert marker in html
     (root / "three.html").write_text(
         html.replace(marker, _EXTRA_SECTION + marker), encoding="utf-8"
@@ -227,9 +229,10 @@ def browser() -> Iterator[Browser]:
 
 
 # Takes the workspace (Explorer, Source Control) and global (Schedule,
-# Machines, Apps, Spend, Recommendations) sections out of the stack (the `hidden`
-# attribute; the panel watches it and re-applies the layout), leaving
-# the per-task sections these geometry tests measure.
+# Machines, Skills, Connectors, Spend) sections out of the stack (the
+# `hidden` attribute; the panel watches it and re-applies the layout),
+# leaving the per-task sections these geometry tests measure: the page
+# itself keeps Recommendations hidden while it has no task.
 _HIDE_WORKSPACE_SECTIONS_JS = """
 () => {
   document.getElementById('meta-explorer').hidden = true;
@@ -240,8 +243,8 @@ _HIDE_WORKSPACE_SECTIONS_JS = """
 _HIDE_GLOBAL_SECTIONS_JS = """
 () => {
   for (const id of ['meta-explorer', 'meta-scm', 'meta-schedule',
-                    'meta-machines', 'meta-apps', 'meta-spend',
-                    'meta-recommendations'])
+                    'meta-machines', 'meta-skills', 'meta-apps',
+                    'meta-spend'])
     document.getElementById(id).hidden = true;
 }
 """
@@ -255,18 +258,24 @@ def _open_page(
     global_sections: bool = False,
     storage: dict[str, str] | None = None,
     fresh_profile: bool = False,
+    touch: bool = False,
 ) -> Page:
     """Open the remote page at the given viewport with post recording.
 
     The workspace sections (Explorer, Source Control) are always hidden:
     they browse a daemon this page has none of.  Unless
-    ``global_sections``, the Schedule, Apps and Spend sections are hidden
-    too, so only the per-task sections share the panel.  ``storage``
-    entries land in localStorage before the page's scripts run, the way
-    a previous visit would have left them.  The profile has already seen
-    the running version unless ``fresh_profile``: the first load of a
-    version shows only Recommendations."""
-    page = browser.new_page(viewport={"width": width, "height": height})
+    ``global_sections``, the Schedule, Machines, Skills, Connectors and
+    Spend sections are hidden too (Recommendations hides itself while
+    it has no task), so only the per-task sections share the panel.
+    ``storage`` entries land in localStorage before the page's scripts
+    run, the way a previous visit would have left them.  The profile
+    has already seen the running version unless ``fresh_profile``: the
+    first load of a version folds every section that folds, which
+    leaves Recommendations alone open.  ``touch`` makes the page a
+    phone's: a finger and no pointer to hover with."""
+    page = browser.new_page(
+        viewport={"width": width, "height": height}, has_touch=touch, is_mobile=touch,
+    )
     page.add_init_script(_RECORD_POSTS_JS)
     if not fresh_profile:
         mark_version_seen(page)
@@ -311,6 +320,32 @@ def _start_running_task(page: Page) -> dict[str, Any]:
     )
     assert poll is not None, "a running task must start the getTaskUpdate poll"
     return cast(dict[str, Any], poll)
+
+
+def _search_skills(page: Page) -> None:
+    """Search the registry from the Skills section and answer the search.
+
+    The page shows a ``skillSearch`` only when it echoes the
+    ``generation`` of the search it awaits, so the search is made the
+    way a user makes it and the reply carries the stamp of the posted
+    ``searchSkills``.  The connected report, the click and the reply
+    are dispatched in ONE evaluate, for the reason
+    ``_start_running_task`` gives: a search is neither sent nor awaited
+    while the daemon is down."""
+    asked = page.evaluate(
+        """reply => {
+          const deliver = data =>
+            window.dispatchEvent(new MessageEvent('message', {data}));
+          deliver({type: 'daemonStatus', connected: true});
+          document.getElementById('meta-skills-query').value = reply.query;
+          document.getElementById('meta-skills-search-btn').click();
+          const asked = window.__posted.filter(m => m.type === 'searchSkills').pop() || null;
+          if (asked) deliver({...reply, generation: asked.generation});
+          return asked;
+        }""",
+        _SKILL_SEARCH,
+    )
+    assert asked is not None and asked["query"] == _SKILL_SEARCH["query"], asked
 
 
 def _show_task_update(page: Page, html: str) -> None:
@@ -362,35 +397,274 @@ def _toggle(page: Page, section_id: str) -> None:
     page.locator(f"#{section_id} .meta-section-toggle").click()
 
 
-_EXPANDED_BY_ID_JS = """
-() => Object.fromEntries(Array.from(
-  document.querySelectorAll('#meta-panel > .meta-section'),
-  s => [s.id, s.querySelector('.meta-section-toggle').getAttribute('aria-expanded')]))
+# The ids of the sections that are open, what the pinned Recommendations
+# section shows, where its body lies between the separator over it
+# (the one after the section with the given id) and the bottom strip,
+# the free height over that separator, and how far that separator's
+# end is under its section's header (next to the same of the folded
+# Skills section, whose separator holds no free height).
+_OPEN_SECTIONS_JS = """
+above => {
+  const rect = sel => document.querySelector(sel).getBoundingClientRect();
+  const panel = document.getElementById('meta-panel');
+  const body = rect('#meta-recommendations-list');
+  const separator = rect('#' + above + ' + .meta-section-resizer');
+  const under = id => rect('#' + id + ' + .meta-section-resizer').bottom
+    - rect('#' + id + ' .meta-section-hdr').bottom;
+  return {
+    open: Array.from(document.querySelectorAll('#meta-panel > .meta-section:not(.collapsed)'),
+                     s => s.id),
+    toggles: document.querySelectorAll('#meta-recommendations .meta-section-toggle').length,
+    text: document.getElementById('meta-recommendations').innerText.trim(),
+    stored: localStorage.getItem('kiss-meta-section-collapsed:meta-recommendations'),
+    bodyHeight: body.height,
+    cardHeight: rect('.recommendation-row:not([inert])').height,
+    gapAbove: body.top - separator.bottom,
+    gapBelow: rect('#meta-footer').top - body.bottom,
+    freeAbove: separator.top - rect('#' + above + ' .meta-section-hdr').bottom,
+    separatorUnder: [under(above), under('meta-skills')],
+    infoHeight: rect('#meta-list').height,
+    share: parseFloat(panel.style.getPropertyValue('--meta-body-share')),
+    panelOverflows: panel.scrollHeight > panel.clientHeight,
+  };
+}
 """
 
+_TWO_TASKS: dict[str, object] = {
+    "type": "recommendations", "generatedAt": 1, "tasks": ["Fix the parser", "Run the tests"],
+}
 
-def test_a_fresh_profile_opens_only_recommendations(browser: Browser, remote_url: str) -> None:
-    """The first load after an install or an update: only Recommendations
-    is expanded, whatever the profile stored; the next load of the same
-    version keeps the user's folds."""
+
+def test_a_fresh_profile_shows_only_the_pinned_recommendations(
+    browser: Browser, remote_url: str
+) -> None:
+    """The first load after an install or an update folds every section
+    that folds, whatever the profile stored: Recommendations, pinned open
+    (its card alone: no header, no toggle) and hidden until it has a
+    task, is alone with the folded headers, as tall as its card and
+    pinned to the bottom strip, the free height over it and over the
+    separator of the section shown above it.  It stays there when
+    another section opens, and the next load of the same version keeps
+    the user's choice."""
     page = _open_page(
         browser, remote_url, 1200, global_sections=True, fresh_profile=True,
         storage={"kiss-meta-section-collapsed:meta-recommendations": "1"},
     )
     try:
         page.wait_for_selector("body.remote-desktop", state="attached")
-        expanded = page.evaluate(_EXPANDED_BY_ID_JS)
-        assert expanded["meta-recommendations"] == "true", expanded
-        assert {k for k, v in expanded.items() if v == "true"} == {"meta-recommendations"}
+        # Without a task the section is not on screen.
+        assert page.locator("#meta-recommendations").is_hidden()
+        _deliver(page, _TWO_TASKS)
+        fresh = page.evaluate(_OPEN_SECTIONS_JS, "meta-spend")
+        assert fresh["open"] == ["meta-recommendations"], fresh
+        # The task on show is all the section's text: no title, no
+        # position counter, no status line.
+        assert [fresh["toggles"], fresh["text"], fresh["stored"]] == [
+            0, "Fix the parser", None,
+        ], fresh
+        assert page.locator("#meta-recommendations button").count() == 0
         assert page.evaluate("localStorage.getItem('kiss-meta-sections-version')")
-        # The user opens Task Info (Recommendations folds) ...
+        # The body is its card, right under the separator (whose 2px
+        # margin and the card's own 4px part them) and 8px over the
+        # strip; the panel is empty from the folded headers down to
+        # the separator, and that counts as free height.
+        assert fresh["bodyHeight"] == pytest.approx(fresh["cardHeight"], abs=0.5), fresh
+        assert 20 < fresh["cardHeight"] < 60, fresh
+        assert fresh["gapAbove"] == pytest.approx(6, abs=0.5), fresh
+        assert fresh["gapBelow"] == pytest.approx(8, abs=0.5), fresh
+        assert fresh["freeAbove"] > 300, fresh
+        assert fresh["share"] == pytest.approx(fresh["bodyHeight"] + fresh["freeAbove"], abs=0.5)
+        # With Spend out of the panel the separator over the card is
+        # the one of Connectors, and the free height is over that one.
+        page.evaluate("document.getElementById('meta-spend').hidden = true")
+        _deliver(page, _TWO_TASKS)
+        moved = page.evaluate(_OPEN_SECTIONS_JS, "meta-apps")
+        assert [moved["gapAbove"], moved["gapBelow"]] == pytest.approx([6, 8], abs=0.5), moved
+        assert moved["freeAbove"] > 300, moved
+        page.evaluate("document.getElementById('meta-spend').hidden = false")
+        _deliver(page, _TWO_TASKS)
+        # The user opens Task Info: it fills the panel down to the
+        # card, which stays, 8px over the strip, its separator as far
+        # under the Spend header as any other is under its own ...
         _toggle(page, "meta-section-info")
+        opened = page.evaluate(_OPEN_SECTIONS_JS, "meta-spend")
+        assert opened["open"] == ["meta-section-info", "meta-recommendations"], opened
+        assert opened["bodyHeight"] == pytest.approx(fresh["bodyHeight"], abs=0.5), opened
+        assert [opened["gapAbove"], opened["gapBelow"]] == pytest.approx([6, 8], abs=0.5), opened
+        assert opened["freeAbove"] == pytest.approx(0, abs=0.5), opened
+        assert opened["separatorUnder"] == pytest.approx([11, 11], abs=0.5), opened
+        assert opened["infoHeight"] > 300 and not opened["panelOverflows"], opened
         reload_retrying_network_change(page)
         page.wait_for_selector("body.remote-chat", state="attached")
         # ... and a reload of the same version keeps that.
-        expanded = page.evaluate(_EXPANDED_BY_ID_JS)
-        assert expanded["meta-section-info"] == "true", expanded
-        assert expanded["meta-recommendations"] == "false", expanded
+        assert page.evaluate(
+            "() => Array.from(document.querySelectorAll("
+            "'#meta-panel > .meta-section:not(.collapsed)'), s => s.id)"
+        ) == ["meta-section-info", "meta-recommendations"]
+    finally:
+        page.close()
+
+
+# The Recommendations body: the tasks whose cards show (a card sliding
+# out is visible only while it slides, so it does not count), the
+# animation each card runs, the body's middle and height, the cards'
+# heights and how many different tops they have (one: they fill a grid
+# cell), and what the message box and the keyboard focus hold.
+_RECOMMENDATIONS_JS = """
+() => {
+  const panel = document.getElementById('meta-panel');
+  const list = document.getElementById('meta-recommendations-list');
+  const rows = Array.from(list.children);
+  const box = list.getBoundingClientRect();
+  return {
+    shown: rows.filter(r => getComputedStyle(r).visibility === 'visible'
+                            && !r.classList.contains('recommendation-out'))
+      .map(r => r.dataset.task),
+    slides: rows.map(r => getComputedStyle(r).animationName),
+    middle: [box.left + box.width / 2, box.top + box.height / 2],
+    bodyHeight: box.height,
+    cardHeights: rows.map(r => r.getBoundingClientRect().height),
+    tops: new Set(rows.map(r => Math.round(r.getBoundingClientRect().top))).size,
+    scrolls: list.scrollHeight > list.clientHeight + 1,
+    share: parseFloat(panel.style.getPropertyValue('--meta-body-share')),
+    infoHeight: document.getElementById('meta-list').getBoundingClientRect().height,
+    panelOverflows: panel.scrollHeight > panel.clientHeight,
+    focused: document.activeElement.dataset.task || document.activeElement.id,
+    composer: document.getElementById('task-input').value,
+  };
+}
+"""
+
+# The slide of the card with the given task, held a tenth of the way
+# in: whether the card is in sight and how far it is off its place
+# (px; to the right is positive).
+_HOLD_SLIDE_JS = """
+task => {
+  const row = Array.from(document.querySelectorAll('.recommendation-row'))
+    .find(r => r.dataset.task === task);
+  const [slide] = row.getAnimations();
+  slide.pause();
+  slide.currentTime = slide.effect.getComputedTiming().duration / 10;
+  const style = getComputedStyle(row);
+  return {visible: style.visibility === 'visible',
+          shift: new DOMMatrix(style.transform).m41};
+}
+"""
+
+# End the slides of the Recommendations cards: the tasks of the cards
+# in sight afterwards, and how many cards are off their place.
+_END_SLIDES_JS = """
+() => {
+  const list = document.getElementById('meta-recommendations-list');
+  for (const slide of list.getAnimations({subtree: true})) slide.finish();
+  const rows = Array.from(list.children);
+  return {
+    visible: rows.filter(r => getComputedStyle(r).visibility === 'visible')
+      .map(r => r.dataset.task),
+    moved: rows.filter(r => getComputedStyle(r).transform !== 'none').length,
+  };
+}
+"""
+
+
+def test_recommendations_show_one_card_at_a_time_and_the_next_every_30_seconds(
+    browser: Browser, remote_url: str
+) -> None:
+    """Every task's card fills the one cell of the Recommendations body,
+    as tall as the longest task needs, and one of them shows: the next
+    slides in every 30 seconds as the one before slides out, unless
+    the pointer is over the card or the keyboard focus in it.  The
+    body clips the sliding cards at its sides, and under
+    prefers-reduced-motion the slide takes no time.  A card off show
+    takes neither the focus nor a click.  A task taller than a third
+    of the window, or than an equal share of the panel when that is
+    less, is cut there and scrolls."""
+    short, long = "Fix the parser", ("Review the open pull requests and " * 6).strip()
+    words, more = ("word " * 900).strip(), ("more " * 900).strip()
+    page = _open_page(browser, remote_url, 1400, global_sections=True, fresh_profile=True)
+
+    def look() -> dict[str, Any]:
+        return cast(dict[str, Any], page.evaluate(_RECOMMENDATIONS_JS))
+
+    try:
+        page.wait_for_selector("body.remote-desktop", state="attached")
+        # From here on only run_for moves the page's time.
+        page.clock.install(time=0)
+        page.clock.pause_at(60)
+        _deliver(page, {"type": "recommendations", "generatedAt": 1, "tasks": [short, long]})
+        first = look()
+        assert [first["shown"], first["tops"]] == [[short], 1], first
+        assert first["slides"] == ["none", "none"], first
+        # Six lines of text and the card's padding.
+        assert first["cardHeights"] == [first["bodyHeight"]] * 2 and first["bodyHeight"] > 100
+        assert page.evaluate(
+            "getComputedStyle(document.getElementById('meta-recommendations-list')).overflowX"
+        ) == "hidden"
+        # A slide takes 0.45 s of real time, which the page's clock does
+        # not hold; a minute here, so the test can look at one under way.
+        duration = "getComputedStyle(document.documentElement).getPropertyValue('--dur-slide')"
+        assert page.evaluate(duration).strip() == "0.45s"
+        page.evaluate("document.documentElement.style.setProperty('--dur-slide', '60s')")
+        page.clock.run_for(29_999)
+        assert look()["shown"] == [short]
+        page.clock.run_for(1)
+        second = look()
+        assert second["shown"] == [long], second
+        assert second["slides"] == [
+            "recommendation-slide-out", "recommendation-slide-in",
+        ], second
+        assert second["bodyHeight"] == first["bodyHeight"], (first, second)
+        # Under way, both cards are in sight: the old one on its way out
+        # to the left, the new one coming from the right.  At the end
+        # the new one is alone, in its place.
+        leaving = page.evaluate(_HOLD_SLIDE_JS, short)
+        coming = page.evaluate(_HOLD_SLIDE_JS, long)
+        assert leaving["visible"] and leaving["shift"] < -10, leaving
+        assert coming["visible"] and coming["shift"] > 10, coming
+        assert page.evaluate(_END_SLIDES_JS) == {"visible": [long], "moved": 0}
+        # The pointer over the card keeps it; so does the keyboard focus,
+        # which Tab takes out of the list, not to the card off show.
+        page.mouse.move(*first["middle"])
+        page.clock.run_for(30_000)
+        assert look()["shown"] == [long]
+        page.mouse.move(10, 10)
+        page.locator(".recommendation-row:not([inert])").focus()
+        page.clock.run_for(30_000)
+        held = look()
+        assert [held["shown"], held["focused"]] == [[long], long], held
+        page.keyboard.press("Tab")
+        assert look()["focused"] not in (short, long)
+        page.clock.run_for(30_000)
+        assert look()["shown"] == [short]
+        # Once the slide is over the long card lies over the short one,
+        # hidden: a click there opens the one on show.
+        assert page.evaluate(_END_SLIDES_JS) == {"visible": [short], "moved": 0}
+        page.mouse.click(*first["middle"])
+        assert look()["composer"] == short
+        # A task taller than a third of the window (33vh of 900px) is
+        # cut there and scrolls, though the folded panel has more room.
+        # In a 600px window an equal share is less than its third once
+        # Task Info, open above the card, has the other share: the
+        # task is cut at the share.  The next card shows from its top.
+        _deliver(page, {"type": "recommendations", "generatedAt": 1, "tasks": [words, more]})
+        capped = look()
+        assert capped["scrolls"] and not capped["panelOverflows"], capped
+        assert capped["share"] > 297, capped
+        assert capped["bodyHeight"] == pytest.approx(297, abs=0.5), capped
+        page.set_viewport_size({"width": 1400, "height": 600})
+        _toggle(page, "meta-section-info")
+        cut = look()
+        assert cut["scrolls"] and not cut["panelOverflows"], cut
+        assert cut["share"] < 198, cut
+        assert cut["bodyHeight"] == pytest.approx(cut["share"], abs=0.5), cut
+        assert cut["infoHeight"] == pytest.approx(cut["share"], abs=0.5), cut
+        scroll_top = "document.getElementById('meta-recommendations-list').scrollTop"
+        assert page.evaluate(f"{scroll_top} = 300, {scroll_top}") == 300
+        page.clock.run_for(30_000)
+        assert page.evaluate(scroll_top) == 0 and look()["shown"] == [more]
+        page.evaluate("document.documentElement.style.removeProperty('--dur-slide')")
+        page.emulate_media(reduced_motion="reduce")
+        assert page.evaluate(duration).strip() == "0s"
     finally:
         page.close()
 
@@ -410,13 +684,13 @@ def test_both_sections_expanded_share_the_panel_equally(
 
         _show_task_update(page, _LONG_REPORT)
         geo = _geometry(page)
-        assert geo["headers"][1]["text"] == "Task update"
+        assert geo["headers"][1]["text"] == "Task Progress"
         assert geo["headers"][1]["expanded"] == "true"
         # The two bodies are equally tall, whatever their content.
         assert geo["listShown"] and geo["contentShown"], geo
         assert geo["listHeight"] == pytest.approx(geo["contentHeight"], abs=1), geo
-        # The report reaches the panel's padding and scrolls.
-        assert geo["contentBottom"] == pytest.approx(geo["panelInnerBottom"], abs=2), geo
+        # The report reaches the strip at the panel's bottom and scrolls.
+        assert geo["contentBottom"] == pytest.approx(geo["sectionsBottom"], abs=2), geo
         assert geo["contentScrolls"], geo
         # One separator between them, a real handle; none after the last.
         assert [r["shown"] for r in geo["resizers"]] == [True, False]
@@ -445,7 +719,7 @@ def test_drag_moves_the_boundary_persists_and_dblclick_restores(
             before,
             after,
         )
-        assert after["contentBottom"] == pytest.approx(after["panelInnerBottom"], abs=2)
+        assert after["contentBottom"] == pytest.approx(after["sectionsBottom"], abs=2)
         assert after["storedH"] == str(round(after["listHeight"]))
         assert _section_resizer(page).get_attribute("aria-valuenow") == after["storedH"]
 
@@ -454,7 +728,7 @@ def test_drag_moves_the_boundary_persists_and_dblclick_restores(
         shrunk = _geometry(page)
         assert shrunk["listHeight"] < before["listHeight"], (before, shrunk)
         assert shrunk["listScrolls"] is True, shrunk
-        assert shrunk["contentBottom"] == pytest.approx(shrunk["panelInnerBottom"], abs=2)
+        assert shrunk["contentBottom"] == pytest.approx(shrunk["sectionsBottom"], abs=2)
 
         # The height survives a reload.
         reload_retrying_network_change(page)
@@ -508,7 +782,7 @@ def test_collapsing_hides_the_body_and_the_other_section_fills(
         assert geo["resizers"][0]["cursor"] != "row-resize"
         # Task Info now fills the panel: the separator and the Task
         # update header sit at the bottom.
-        assert geo["headers"][1]["bottom"] == pytest.approx(geo["panelInnerBottom"], abs=12)
+        assert geo["headers"][1]["bottom"] == pytest.approx(geo["sectionsBottom"], abs=12)
 
         _toggle(page, "meta-section-info")
         geo = _geometry(page)
@@ -532,7 +806,7 @@ def test_collapsing_hides_the_body_and_the_other_section_fills(
         assert geo["storedCollapsed"] == {"info": "1", "update": None}
         assert geo["contentShown"] and not geo["listShown"]
         assert geo["resizers"][0]["handle"] is False
-        assert geo["contentBottom"] == pytest.approx(geo["panelInnerBottom"], abs=2)
+        assert geo["contentBottom"] == pytest.approx(geo["sectionsBottom"], abs=2)
     finally:
         page.close()
 
@@ -568,7 +842,7 @@ def test_short_window_keeps_both_headers_and_scrolls_the_bodies(
         geo = _geometry(page)
         assert geo["contentHeight"] > 50, geo
         assert geo["contentScrolls"] is True, geo
-        assert geo["contentBottom"] == pytest.approx(geo["panelInnerBottom"], abs=2), geo
+        assert geo["contentBottom"] == pytest.approx(geo["sectionsBottom"], abs=2), geo
     finally:
         page.close()
 
@@ -600,7 +874,7 @@ def test_mobile_drawer_has_the_same_sections_clear_of_the_close_button(
         geo = _geometry(page)
         assert geo["listShown"] is False
         assert geo["headers"][0]["expanded"] == "false"
-        assert geo["contentBottom"] == pytest.approx(geo["panelInnerBottom"], abs=2)
+        assert geo["contentBottom"] == pytest.approx(geo["sectionsBottom"], abs=2)
         # With Task Info collapsed the Task update header moves up to
         # right under the first header row.  The close button ends above
         # it, so the refresh button's whole face takes the tap.
@@ -660,14 +934,14 @@ def test_a_third_section_stacks_resizes_and_hides(
     try:
         page.wait_for_selector("body.remote-desktop", state="attached")
         geo = _geometry(page)
-        assert [h["text"] for h in geo["headers"]] == ["Task Info", "Task update", "Extra"]
+        assert [h["text"] for h in geo["headers"]] == ["Task Info", "Task Progress", "Extra"]
         assert [h["expanded"] for h in geo["headers"]] == ["true", "true", "true"]
         # No task: Task Info and Extra are shown, equally tall; Extra,
         # last, reaches the bottom.
         assert [r["shown"] for r in geo["resizers"]] == [True, False, False]
         assert geo["resizers"][0]["handle"] is True
         extra = page.evaluate(_EXTRA_GEOMETRY_JS)
-        assert extra["extraBottom"] == pytest.approx(geo["panelInnerBottom"], abs=2), extra
+        assert extra["extraBottom"] == pytest.approx(geo["sectionsBottom"], abs=2), extra
         assert extra["extraHeight"] == pytest.approx(extra["listHeight"], abs=1), extra
 
         # With a long Task update in the middle the three bodies share
@@ -718,7 +992,7 @@ def test_a_third_section_stacks_resizes_and_hides(
         extra = page.evaluate(_EXTRA_GEOMETRY_JS)
         assert extra["sectionShown"] is False, extra
         assert [r["shown"] for r in geo["resizers"]] == [True, False, False]
-        assert geo["contentBottom"] == pytest.approx(geo["panelInnerBottom"], abs=2), geo
+        assert geo["contentBottom"] == pytest.approx(geo["sectionsBottom"], abs=2), geo
     finally:
         page.close()
 
@@ -801,6 +1075,45 @@ _MACHINES = [
         "local": False, "status": "reachable", "error": "",
     },
 ]
+
+# The Skills section's three replies: the skills the agent can use
+# (`skills`), a search of the registry (`skillSearch`: one skill to add,
+# one already there) and a check that asks for a person's review
+# (`skillInstall`).
+_SKILLS: dict[str, object] = {
+    "type": "skills", "error": "",
+    "skills": [
+        {"name": "pdf", "description": "Read, fill and write PDF files.", "source": "bundled"},
+        {
+            "name": "web-design", "source": "user",
+            "description": "Guidelines for the layout, type and colour of a web page. " * 4,
+        },
+    ],
+}
+_SKILL_SEARCH: dict[str, object] = {
+    "type": "skillSearch", "query": "design", "error": "",
+    "results": [
+        {
+            "id": "acme/skills/frontend-design", "name": "frontend-design",
+            "source": "acme/skills", "installs": 233480, "installed": False,
+            "url": "https://skills.example/acme/skills/frontend-design",
+        },
+        {
+            "id": "acme/skills/pdf", "name": "pdf", "source": "acme/skills",
+            "installs": 1200, "installed": True,
+            "url": "https://skills.example/acme/skills/pdf",
+        },
+    ],
+}
+_SKILL_REVIEW: dict[str, object] = {
+    "type": "skillInstall", "id": "acme/skills/frontend-design", "status": "review",
+    "name": "frontend-design", "message": "The check found something to look at first.",
+    "findings": [{
+        "severity": "medium", "rule": "network", "file": "scripts/setup.sh", "line": 12,
+        "message": "Downloads and runs a script.",
+    }],
+}
+
 
 def _day_key(days_ago: int) -> str:
     """The local calendar day *days_ago* days back, as the reply keys it."""
@@ -1169,17 +1482,20 @@ def test_spend_pagers_are_keyboard_reachable_only_when_available(
 _GLOBAL_GEOMETRY_JS = """
 () => {
   const rect = id => document.getElementById(id).getBoundingClientRect();
-  const panel = document.getElementById('meta-panel');
-  const pad = parseFloat(getComputedStyle(panel).paddingBottom);
   const apps = document.getElementById('meta-apps-list');
   return {
-    panelInnerBottom: panel.getBoundingClientRect().bottom - pad,
-    scheduleTop: rect('meta-schedule-list').top,
-    scheduleHeight: rect('meta-schedule-list').height,
-    machinesTop: rect('meta-machines-list').top,
-    machinesHeight: rect('meta-machines-list').height,
+    sectionsBottom: rect('meta-footer').top,
+    scheduleTop: rect('meta-schedule-body').top,
+    scheduleHeight: rect('meta-schedule-body').height,
+    machinesTop: rect('meta-machines-body').top,
+    machinesHeight: rect('meta-machines-body').height,
     machines: Array.from(document.querySelectorAll(
       '#meta-machines-list .sidebar-panel-name')).map(e => e.textContent),
+    skillsTop: rect('meta-skills-body').top,
+    skillsHeight: rect('meta-skills-body').height,
+    skills: Array.from(document.querySelectorAll(
+      '#meta-skills-list .sidebar-panel-name')).map(e => e.textContent),
+    skillsStatus: document.getElementById('meta-skills-status').textContent,
     appsTop: rect('meta-apps-list').top,
     appsBottom: rect('meta-apps-list').bottom,
     appsHeight: rect('meta-apps-list').height,
@@ -1189,6 +1505,8 @@ _GLOBAL_GEOMETRY_JS = """
     recommendationsHeight: rect('meta-recommendations-list').height,
     recommendations: Array.from(document.querySelectorAll(
       '#meta-recommendations-list .sidebar-panel-name')).map(e => e.textContent),
+    share: parseFloat(document.getElementById('meta-panel').style.getPropertyValue(
+      '--meta-body-share')),
     listHeight: rect('meta-list').height,
     appsScrolls: apps.scrollHeight > apps.clientHeight + 1,
     headers: Array.from(document.querySelectorAll('#meta-panel .meta-section-hdr'))
@@ -1216,6 +1534,7 @@ def test_schedule_and_apps_sections_fill_scroll_and_launch_a_connect_task(
         posted = page.evaluate("() => window.__posted.map(m => m.type)")
         assert posted.count("getCronJobs") == 1 and posted.count("getAppsStatus") == 1
         assert posted.count("getSpendReport") == 1 and posted.count("getMachines") == 1
+        assert posted.count("getSkills") == 1
         _deliver(page, {
             "type": "cronJobs",
             "jobs": [{
@@ -1227,30 +1546,33 @@ def test_schedule_and_apps_sections_fill_scroll_and_launch_a_connect_task(
         })
         _deliver(page, {"type": "appsStatus", "apps": _APPS, "checkedAt": "2026-09-26T11:00:00"})
         _deliver(page, {"type": "machines", "machines": _MACHINES, "checkedAt": 1})
+        _deliver(page, _SKILLS)
         _deliver(page, _spend_report())
-        _deliver(page, {
-            "type": "recommendations", "generatedAt": 1,
-            "tasks": ["Fix the parser", "Run the tests"],
-        })
+        _deliver(page, _TWO_TASKS)
         geo = page.evaluate(_GLOBAL_GEOMETRY_JS)
-        # No running task: Task Info, Schedule, Machines, Apps, Spend
-        # and Recommendations are on screen.
+        # No running task: Task Info, Schedule, Machines, Skills,
+        # Connectors (the Apps section's header) and Spend are on
+        # screen under their headers; Recommendations, last, has none.
         assert geo["headers"] == [
-            "Task Info", "Schedule", "Machines", "Apps", "Spend", "Recommendations",
+            "Task Info", "Schedule", "Machines", "Skills", "Connectors", "Spend",
         ], geo
-        # The six bodies are equally tall; Recommendations reaches the
-        # bottom and Apps scrolls.
-        assert geo["scheduleTop"] < geo["machinesTop"] < geo["appsTop"], geo
+        # The six bodies that share are equally tall and Apps scrolls;
+        # the pinned Recommendations body, last, is its card (cut at an
+        # equal share on this crowded panel), 8px over the strip.
+        assert geo["scheduleTop"] < geo["machinesTop"] < geo["skillsTop"] < geo["appsTop"], geo
         assert geo["scheduleHeight"] == pytest.approx(geo["appsHeight"], abs=1), geo
         assert geo["machinesHeight"] == pytest.approx(geo["appsHeight"], abs=1), geo
+        assert geo["skillsHeight"] == pytest.approx(geo["appsHeight"], abs=1), geo
+        assert geo["skills"] == ["pdf", "web-design"], geo
+        assert geo["skillsStatus"] == "2 skills available"
         assert geo["listHeight"] == pytest.approx(geo["appsHeight"], abs=1), geo
         assert geo["spendHeight"] == pytest.approx(geo["appsHeight"], abs=1), geo
-        assert geo["recommendationsHeight"] == pytest.approx(geo["appsHeight"], abs=1), geo
+        assert 0 < geo["recommendationsHeight"] <= geo["share"] + 0.5 <= geo["appsHeight"] + 1, geo
         assert geo["recommendations"] == ["Fix the parser", "Run the tests"], geo
         assert geo["machines"] == ["laptop", "gpu-box"], geo
         assert geo["spendBottom"] < geo["recommendationsBottom"], geo
         assert geo["recommendationsBottom"] == pytest.approx(
-            geo["panelInnerBottom"], abs=2,
+            geo["sectionsBottom"] - 8, abs=1,
         ), geo
         assert geo["appsScrolls"], geo
         assert geo["appsStatus"] == "1 of 40 connected"
@@ -1259,7 +1581,7 @@ def test_schedule_and_apps_sections_fill_scroll_and_launch_a_connect_task(
 
         # The static server never completes the websocket handshake, so
         # the page believes the daemon is down (sends are held back).
-        # A reconnect after an outage re-requests the five subpanels; a
+        # A reconnect after an outage re-requests the six subpanels; a
         # repeated `connected` with no outage in between (the shim sends
         # one on `auth_required` and another on `auth_ok`) asks nothing.
         page.evaluate("() => { window.__posted.length = 0; }")
@@ -1271,7 +1593,7 @@ def test_schedule_and_apps_sections_fill_scroll_and_launch_a_connect_task(
         posted = page.evaluate("() => window.__posted.map(m => m.type)")
         assert posted.count("getCronJobs") == 1 and posted.count("getAppsStatus") == 1
         assert posted.count("getSpendReport") == 1 and posted.count("getMachines") == 1
-        assert posted.count("getRecommendations") == 1
+        assert posted.count("getRecommendations") == 1 and posted.count("getSkills") == 1
 
         # Clicking an app that is not connected submits a connect task
         # in a NEW chat, which takes the screen; the idle chat left
@@ -1311,7 +1633,8 @@ def test_a_long_task_update_leaves_the_apps_list_a_usable_share(
     browser: Browser, remote_url: str
 ) -> None:
     """A long Task update above the Apps list takes only its equal
-    share and scrolls instead of squeezing the Apps list."""
+    share and scrolls instead of squeezing the Apps list, whose first
+    app stays readable."""
     page = _open_page(browser, remote_url, 1200, height=700, global_sections=True)
     try:
         page.wait_for_selector("body.remote-desktop", state="attached")
@@ -1322,18 +1645,221 @@ def test_a_long_task_update_leaves_the_apps_list_a_usable_share(
             """() => {
               const r = id => document.getElementById(id).getBoundingClientRect();
               const c = document.getElementById('meta-info-content');
+              const name = document.querySelector('#meta-apps-list .sidebar-panel-name');
               return {apps: r('meta-apps-list').height,
                       update: r('meta-info-content').height,
                       panel: r('meta-panel').height,
+                      nameBottom: name.getBoundingClientRect().bottom - r('meta-apps-list').top,
                       updateScrolls: c.scrollHeight > c.clientHeight + 1};
             }"""
         )
         # Seven equal shares of a 700px panel after the headers, status
-        # lines and separators leave the Apps list at least 35px at the
-        # 13px root size.
-        assert geo["apps"] >= 35, geo
+        # lines, the Skills search row, the separators and the tools
+        # footer leave the Apps list about 37px at the 13px root size
+        # (Recommendations, with no task, is hidden): its first app's
+        # 30px row is in view whole.
+        assert geo["apps"] >= 24, geo
+        assert geo["nameBottom"] <= geo["apps"], geo
         assert geo["update"] == pytest.approx(geo["apps"], abs=1), geo
         assert geo["updateScrolls"], geo
+    finally:
+        page.close()
+
+
+_SKILLS_CHROME_JS = """
+() => {
+  const shown = id => document.getElementById(id).getClientRects().length > 0;
+  const rect = id => document.getElementById(id).getBoundingClientRect();
+  return {
+    header: shown('meta-skills-refresh'),
+    search: shown('meta-skills-search'),
+    body: shown('meta-skills-body'),
+    searchBottom: rect('meta-skills-search').bottom,
+    bodyTop: rect('meta-skills-body').top,
+    resultsTop: rect('meta-skills-results').top,
+    statusTop: rect('meta-skills-status').top,
+  };
+}
+"""
+
+
+def test_a_folded_skills_section_hides_its_search_row(browser: Browser, remote_url: str) -> None:
+    """The Skills search field sits between the header and the scrolling
+    body, with the found skills above the available ones.  Folding the
+    section takes the field away with the body, so a folded section is
+    its header alone; unfolding brings it back, ready for typing."""
+    page = _open_page(browser, remote_url, 1200, global_sections=True)
+    try:
+        page.wait_for_selector("body.remote-desktop", state="attached")
+        _deliver(page, _SKILLS)
+        _search_skills(page)
+        opened = page.evaluate(_SKILLS_CHROME_JS)
+        assert opened["header"] and opened["search"] and opened["body"], opened
+        assert opened["searchBottom"] <= opened["bodyTop"] + 0.5, opened
+        assert opened["bodyTop"] <= opened["resultsTop"] < opened["statusTop"], opened
+        _toggle(page, "meta-skills")
+        folded = page.evaluate(_SKILLS_CHROME_JS)
+        assert folded["header"] is True, folded
+        assert folded["search"] is False and folded["body"] is False, folded
+        _toggle(page, "meta-skills")
+        page.fill("#meta-skills-query", "pdf")
+        assert page.evaluate(_SKILLS_CHROME_JS)["search"] is True
+    finally:
+        page.close()
+
+
+# The verdict of the skill under review: its buttons as [text, left,
+# top, right, bottom], the verdict's own [left, right], whether a row's
+# + has the keyboard, and how many installs were asked for.
+_SKILL_VERDICT_JS = """
+() => {
+  const verdict = document.querySelector('#meta-skills-results .skill-verdict');
+  const box = el => el.getBoundingClientRect();
+  return {
+    buttons: verdict ? Array.from(verdict.querySelectorAll('button'), b =>
+      [b.textContent, box(b).left, box(b).top, box(b).right, box(b).bottom]) : null,
+    room: verdict ? [box(verdict).left, box(verdict).right] : null,
+    addFocused: document.activeElement.classList.contains('skill-add'),
+    installs: window.__posted.filter(m => m.type === 'installSkill').length,
+  };
+}
+"""
+
+
+def test_a_skill_to_review_offers_add_anyway_and_cancel_side_by_side(
+    browser: Browser, remote_url: str
+) -> None:
+    """Under a skill whose check asks for a review, "Add anyway" and
+    "Cancel" stand on one line inside the verdict's box.  Cancel takes
+    the verdict away and hands the keyboard to the row's +; nothing is
+    sent."""
+    page = _open_page(browser, remote_url, 1200, global_sections=True)
+    try:
+        page.wait_for_selector("body.remote-desktop", state="attached")
+        _deliver(page, _SKILLS)
+        _search_skills(page)
+        _deliver(page, _SKILL_REVIEW)
+        shown = page.evaluate(_SKILL_VERDICT_JS)
+        (add, a_left, a_top, a_right, a_bottom), (cancel, c_left, c_top, c_right, c_bottom) = (
+            shown["buttons"]
+        )
+        assert [add, cancel] == ["Add anyway", "Cancel"], shown
+        assert [a_top, a_bottom] == [c_top, c_bottom] and a_right < c_left, shown
+        assert shown["room"][0] < a_left and c_right < shown["room"][1], shown
+        page.click(".skill-cancel")
+        gone = page.evaluate(_SKILL_VERDICT_JS)
+        assert gone == {
+            "buttons": None, "room": None, "addFocused": True, "installs": 0,
+        }, gone
+    finally:
+        page.close()
+
+
+# The example line of the section with the given id: whether it shows,
+# its text, how many lines its command takes, whether it is cut, the
+# edges met going down the section (the header's bottom, the status
+# line's top, the body's top, the line's bottom, the list's top), how
+# far under the body's top the line and the first row start, the
+# command's outline with the room left over it under the body's top
+# edge, and what the message box and the keyboard hold.
+_EXAMPLE_JS = """
+id => {
+  const section = document.getElementById(id);
+  const body = section.querySelector('.meta-section-body');
+  const line = body.firstElementChild;
+  const row = body.querySelector('li');
+  const top = sel => section.querySelector(sel).getBoundingClientRect().top;
+  const box = line.getBoundingClientRect();
+  const cmd = line.querySelector('.meta-example-cmd');
+  const ring = getComputedStyle(cmd);
+  return {
+    shown: line.getClientRects().length > 0,
+    text: line.textContent,
+    lines: cmd.getClientRects().length,
+    cut: line.scrollWidth > line.clientWidth,
+    order: [section.querySelector('.meta-section-hdr').getBoundingClientRect().bottom,
+            top('.meta-info-status'), top('.meta-section-body'), box.bottom,
+            top('.sidebar-panel-list')],
+    offset: box.top - top('.meta-section-body'),
+    rowOffset: row && row.getBoundingClientRect().top - top('.meta-section-body'),
+    ring: [ring.outlineStyle, cmd.getBoundingClientRect().top - top('.meta-section-body')
+      - parseFloat(ring.outlineWidth) - parseFloat(ring.outlineOffset)],
+    composer: document.getElementById('task-input').value,
+    focused: document.activeElement.id,
+  };
+}
+"""
+
+
+def test_the_example_lines_wrap_fold_with_their_sections_and_insert_their_commands(
+    browser: Browser, remote_url: str
+) -> None:
+    """Schedule and Machines show an example of their slash command as
+    the first line of their body, under the status line and over the
+    list: it scrolls away with the rows, and a body with no more than
+    a row's room shows its rows instead.  A command too long for the
+    panel wraps instead of being cut.  A click on a command, or Enter
+    on it, puts it in the message box; folding the section takes the
+    line away."""
+    cron, machine = (
+        "/cron every weekday at 9am summarize my unread email", "/machine add user@host",
+    )
+    # The panel of a 1400px window has 247px for a line: room for the
+    # Machines line in every platform's font (198px to 199px on Windows
+    # and Linux, 209px in the wider San Francisco of macOS, which the
+    # 207px of a 1200px window would wrap) and not for the Schedule
+    # line (380px to 400px).
+    width = 1400
+    page = _open_page(browser, remote_url, width, global_sections=True)
+
+    def example(section_id: str) -> dict[str, Any]:
+        return cast(dict[str, Any], page.evaluate(_EXAMPLE_JS, section_id))
+
+    try:
+        page.wait_for_selector("body.remote-desktop", state="attached")
+        # Before the daemon answers, each status line reads that it is
+        # loading.
+        for section_id, command, lines in (
+            ("meta-machines", machine, 1), ("meta-schedule", cron, 2),
+        ):
+            shown = example(section_id)
+            assert [shown["shown"], shown["text"]] == [True, "Example: " + command], shown
+            assert [shown["lines"], shown["cut"]] == [lines, False], shown
+            assert shown["order"] == sorted(shown["order"]) and shown["order"][0] > 0, shown
+            assert shown["offset"] == pytest.approx(0, abs=0.5), shown
+        # More jobs than the Schedule body shows: the line scrolls out
+        # of it with the rows, and back.
+        _deliver(page, _cron_jobs(12))
+        height = example("meta-schedule")["order"][3] - example("meta-schedule")["order"][2]
+        scroll_top = "document.getElementById('meta-schedule-body').scrollTop"
+        scrolled = page.evaluate(f"{scroll_top} = 1e6, {scroll_top}")
+        assert scrolled > height > 0, (scrolled, height)
+        assert example("meta-schedule")["offset"] == pytest.approx(-scrolled, abs=0.5)
+        page.evaluate(f"{scroll_top} = 0")
+        # A window so short that a body has no more than a row's room:
+        # the line gives that room to the rows, and a tall window brings
+        # it back.
+        page.set_viewport_size({"width": width, "height": 500})
+        page.locator("#meta-schedule .meta-section-example").wait_for(state="hidden")
+        assert example("meta-schedule")["rowOffset"] == pytest.approx(0, abs=0.5)
+        assert example("meta-machines")["shown"] is False
+        page.set_viewport_size({"width": width, "height": 900})
+        page.locator("#meta-schedule .meta-section-example").wait_for(state="visible")
+        assert example("meta-schedule")["rowOffset"] > height
+        page.click("#meta-schedule .meta-example-cmd")
+        clicked = example("meta-schedule")
+        assert [clicked["composer"], clicked["focused"]] == [cron, "task-input"], clicked
+        page.fill("#task-input", "")
+        page.focus("#meta-machines .meta-example-cmd")
+        # The keyboard's ring is drawn outside the command's box: the
+        # line keeps room for it under the body's top edge, which clips.
+        ring = example("meta-machines")["ring"]
+        assert ring[0] == "solid" and ring[1] >= 0, ring
+        page.keyboard.press("Enter")
+        assert example("meta-machines")["composer"] == machine
+        _toggle(page, "meta-schedule")
+        assert example("meta-schedule")["shown"] is False
+        assert example("meta-machines")["shown"] is True
     finally:
         page.close()
 
@@ -1346,9 +1872,12 @@ _SURFACES = {
     "remote mobile drawer": (500, "document.getElementById('meta-drawer-btn').click();"),
 }
 
+# The heights of the seven bodies that share the panel, then that of
+# the pinned Recommendations body.
 _BODY_HEIGHTS_JS = """
-() => ['meta-list', 'meta-info-content', 'meta-schedule-list', 'meta-machines-list',
-       'meta-apps-list', 'meta-spend-body', 'meta-recommendations-list']
+() => ['meta-list', 'meta-info-content', 'meta-schedule-body', 'meta-machines-body',
+       'meta-skills-body', 'meta-apps-list', 'meta-spend-body',
+       'meta-recommendations-list']
   .map(id => document.getElementById(id).getBoundingClientRect().height)
 """
 
@@ -1357,11 +1886,12 @@ _BODY_HEIGHTS_JS = """
 def test_every_surface_gives_the_expanded_sections_equal_heights(
     browser: Browser, remote_url: str, surface: str
 ) -> None:
-    """All seven sections expanded: their bodies are equally tall by
-    default on every surface, whatever their content.  Dragging the
-    Schedule / Machines boundary moves only that boundary: the bodies
-    above it keep their heights, the four below absorb the loss between
-    them (Spend, last, keeps at least its minimum share)."""
+    """All eight sections expanded: the bodies of the seven that fold
+    are equally tall by default on every surface, whatever their
+    content, and the pinned Recommendations body is its card.  Dragging
+    the Schedule / Machines boundary moves only that boundary: the
+    bodies above it keep their heights, the four below that share
+    absorb the loss between them, and the card keeps its height."""
     width, setup = _SURFACES[surface]
     page = _open_page(browser, remote_url, width, height=900, global_sections=True)
     try:
@@ -1373,8 +1903,10 @@ def test_every_surface_gives_the_expanded_sections_equal_heights(
         )
         _deliver(page, {"type": "cronJobs", "jobs": []})
         _deliver(page, {"type": "machines", "machines": _MACHINES, "checkedAt": 1})
+        _deliver(page, _SKILLS)
         _deliver(page, {"type": "appsStatus", "apps": _APPS, "checkedAt": 1})
         _deliver(page, _spend_report())
+        _deliver(page, _TWO_TASKS)
         # Show the Task update section directly (as setMetaInfoHTML
         # does) and re-apply the layout the way a `hidden` change does.
         page.evaluate(
@@ -1387,9 +1919,10 @@ def test_every_surface_gives_the_expanded_sections_equal_heights(
             }""",
             _LONG_REPORT,
         )
-        heights = page.evaluate(_BODY_HEIGHTS_JS)
+        *heights, card = page.evaluate(_BODY_HEIGHTS_JS)
         assert min(heights) > 40, heights
         assert max(heights) - min(heights) <= 1, heights
+        assert 20 < card < min(heights), (card, heights)
 
         resizer = page.locator("#meta-schedule + .meta-section-resizer")
         box = resizer.bounding_box()
@@ -1400,7 +1933,8 @@ def test_every_surface_gives_the_expanded_sections_equal_heights(
         page.mouse.down()
         page.mouse.move(x, y + 30, steps=6)
         page.mouse.up()
-        dragged = page.evaluate(_BODY_HEIGHTS_JS)
+        *dragged, dragged_card = page.evaluate(_BODY_HEIGHTS_JS)
+        assert dragged_card == card, (card, dragged_card)
         assert dragged[0] == pytest.approx(heights[0], abs=1), (heights, dragged)
         assert dragged[1] == pytest.approx(heights[1], abs=1), (heights, dragged)
         assert dragged[2] == pytest.approx(heights[2] + 30, abs=2), (heights, dragged)
@@ -1414,10 +1948,9 @@ def test_every_surface_gives_the_expanded_sections_equal_heights(
         page.close()
 
 
-# Lists one chat in the Chats sidebar (the answer to the page's own
-# getHistory request) and reads the font of its summary and of each
-# kind of text in the Task Info and Task update sections.
-_FONTS_JS = """
+# Lists one chat in the Chats sidebar: the answer to the page's own
+# getHistory request.
+_LIST_ONE_CHAT_JS = """
 () => {
   const asked = window.__posted.filter(m => m.type === 'getHistory').pop();
   window.dispatchEvent(new MessageEvent('message', {data: {
@@ -1425,38 +1958,384 @@ _FONTS_JS = """
     sessions: [{id: 'c1', task_id: 1, title: 'Fix the flaky search test',
                 preview: 'Fix the flaky search test', has_events: true,
                 failed: false, is_running: false, timestamp: 1790440000}]}}));
+}
+"""
+
+# The two kinds of text of the Chats sidebar: a chat's summary and the
+# day label over a day's chats.
+_CHAT_SUMMARY = "#history-list .history-chat-title"
+_DAY_LABEL = "#history-list .history-day-sep"
+
+# Reads the font of the elements at two selectors (a chat's summary and
+# a day label), of each kind of row and of each kind of detail in the
+# task-info panel, and of the Chats search field and the fields of an
+# inline form.
+_FONTS_JS = """
+([summary, label]) => {
   const font = selector => {
     const cs = getComputedStyle(document.querySelector(selector));
     return [cs.fontFamily, cs.fontSize, cs.fontWeight, cs.fontStyle, cs.lineHeight];
   };
+  const fonts = selectors => Object.fromEntries(selectors.map(s => [s, font(s)]));
   return {
-    summary: font('#history-list .history-chat-title'),
-    panels: Object.fromEntries([
+    summary: font(summary),
+    label: font(label),
+    rows: fonts([
       '#meta-list .meta-item', '#meta-list .meta-label', '#meta-list .meta-value',
       '#meta-info-status', '#meta-info-content', '#meta-info-content p',
-      '#meta-info-content li',
-    ].map(selector => [selector, font(selector)])),
+      '#meta-info-content li', '#meta-info-content td',
+      '#meta-schedule .meta-section-example', '#meta-machines .meta-example-cmd',
+      '#meta-schedule-list .sidebar-panel-name', '#meta-machines-list .sidebar-panel-name',
+      '#meta-skills-status', '#meta-skills-list .sidebar-panel-name',
+      '#meta-skills-results a.sidebar-panel-name',
+      '#meta-apps-status', '#meta-apps-list .sidebar-panel-name',
+      '.spend-total', '.spend-model-name', '.spend-model-value',
+      '#meta-recommendations-list .sidebar-panel-name',
+    ]),
+    details: fonts([
+      '.sidebar-panel-sub', '.sidebar-panel-badge', '.app-state', '.spend-models-title',
+      '.sidebar-inline-form-label',
+      '#meta-skills-found-title', '.skills-clear', '.skill-state', '.skill-verdict-message',
+      '.skill-severity', '.skill-finding-text', '.skill-finding-where', '.skill-add-anyway',
+      '.skill-cancel',
+      '#meta-info-content h1', '#meta-info-content h2', '#meta-info-content h4',
+    ]),
+    fields: fonts([
+      '#history-search', '.sidebar-inline-form input', '.sidebar-inline-form select',
+      '.sidebar-inline-form textarea', '#meta-skills-query',
+    ]),
+  };
+}
+"""
+
+# Reads the font ("family | size | weight | style") of the elements at
+# two selectors and of every element the task-info panel shows text in,
+# each named by its class, id or tag; the code a report quotes is kept
+# apart.  The drawer's close button is a glyph, not text.
+_SHOWN_FONTS_JS = """
+([row, label]) => {
+  const font = el => {
+    const cs = getComputedStyle(el);
+    return [cs.fontFamily, cs.fontSize, cs.fontWeight, cs.fontStyle].join(' | ');
+  };
+  const shown = {};
+  const code = {};
+  const walker = document.createTreeWalker(
+    document.getElementById('meta-panel'), NodeFilter.SHOW_TEXT);
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    const el = node.parentElement;
+    if (!node.nodeValue.trim() || el.id === 'meta-close') continue;
+    if (el.getClientRects().length === 0) continue;
+    const fonts = el.closest('code') ? code : shown;
+    const key = font(el);
+    (fonts[key] = fonts[key] || []).push(el.getAttribute('class') || el.id || el.tagName);
+  }
+  return {
+    row: font(document.querySelector(row)),
+    label: font(document.querySelector(label)),
+    shown,
+    code,
   };
 }
 """
 
 
+def shown_panel_fonts(page: Page, row_selector: str, label_selector: str) -> str:
+    """Check the font of every text the task-info panel shows.
+
+    All of it is in the family and style of the element at
+    ``row_selector``, at that element's size or at the size of the
+    element at ``label_selector``, in the regular or the medium weight.
+    Code is the one other face: regular, at the label's size.
+
+    Returns:
+        The classes (or id, or tag) of the elements showing text, joined
+        by spaces, for the caller to check that the text it is about was
+        on screen.
+    """
+    fonts = page.evaluate(_SHOWN_FONTS_JS, [row_selector, label_selector])
+    family, row_size, _, style = fonts["row"].split(" | ")
+    label_size = fonts["label"].split(" | ")[1]
+    assert row_size.endswith("px") and label_size != row_size, fonts
+    names: list[str] = []
+    for key, elements in fonts["shown"].items():
+        shown_family, size, weight, shown_style = key.split(" | ")
+        assert [shown_family, shown_style] == [family, style], (key, elements)
+        assert size in (row_size, label_size), (key, elements)
+        assert weight in ("400", "500"), (key, elements)
+        names += elements
+    for key, elements in fonts["code"].items():
+        code_family, size, weight, code_style = key.split(" | ")
+        assert code_family != family, (key, elements)
+        assert [size, weight, code_style] == [label_size, "400", style], (key, elements)
+        names += elements
+    return " ".join(names)
+
+
+def _deliver_global_sections(page: Page) -> None:
+    """Fill Schedule, Machines, Skills (with a search and a skill whose
+    check asks for a review), Apps, Spend and Recommendations."""
+    _deliver(page, _cron_jobs(2))
+    _deliver(page, {"type": "machines", "machines": _MACHINES, "checkedAt": 1})
+    _deliver(page, _SKILLS)
+    _search_skills(page)
+    _deliver(page, _SKILL_REVIEW)
+    _deliver(page, {"type": "appsStatus", "apps": _APPS, "checkedAt": "2026-09-26T11:00:00"})
+    _deliver(page, _spend_report())
+    _deliver(page, {
+        "type": "recommendations", "generatedAt": 1,
+        "tasks": ["Fix the parser", "Run the tests"],
+    })
+
+
+# A task update with what a report is written in: headings, bold text,
+# a table, and code inline and in a block.
+_REPORT = (
+    "<h1>Progress</h1><p>Read the <strong>data</strong>, <b>ran</b> <code>make test</code>.</p>"
+    "<h2>Results</h2><table><thead><tr><th>Model</th></tr></thead>"
+    "<tbody><tr><td>baseline</td></tr></tbody></table>"
+    "<h4>Next</h4><ul><li>Train the model.</li></ul><pre><code>uv run pytest</code></pre>"
+)
+
+
 @pytest.mark.parametrize("surface", list(_SURFACES))
-def test_task_info_and_task_update_text_is_set_like_a_chat_summary(
+def test_the_panel_text_is_set_like_the_chats_sidebar(
     browser: Browser, remote_url: str, surface: str
 ) -> None:
-    """The rows of Task Info and the text of Task update (its status
-    line and its report) have the font of a chat's summary in the Chats
-    sidebar: the same family, size, weight, style and line height."""
+    """The task-info panel has the Chats sidebar's two fonts and no
+    other.  A row's text (a Task Info row, the Task update status line
+    and report, the name of a job, a machine, an app or a model, a
+    recommendation, a skill, a section's status line or its example
+    line) has the font of a chat's summary: the same family, size,
+    weight, style and line height.
+    What is secondary to a row (a job's schedule line, a badge, an
+    app's state, a group label, a form's label, what a skill's check
+    found) has the family and size of a day label, and a form's field
+    and the Skills search field are set as the Chats search field.
+    Every other piece of text in the panel is in that family at one of
+    those two sizes, at the regular or the medium weight.  The report
+    keeps to it whatever it is written in: a heading is a label over its
+    part, bold text and a table's header are the medium weight, and code
+    is the code face at the label's size."""
     width, setup = _SURFACES[surface]
-    page = _open_page(browser, remote_url, width)
+    page = _open_page(browser, remote_url, width, global_sections=True)
     try:
         page.evaluate(f"() => {{ {setup} }}")
-        _show_task_update(page, "<p>Read the data.</p><ul><li>Ran the baseline.</li></ul>")
-        fonts = page.evaluate(_FONTS_JS)
-        assert fonts["summary"][1].endswith("px"), fonts
-        for selector, font in fonts["panels"].items():
-            assert font == fonts["summary"], (selector, fonts)
+        page.evaluate(_LIST_ONE_CHAT_JS)
+        _deliver_global_sections(page)
+        page.click("#meta-schedule-add")
+        # Every section is expanded until a task starts; the task then
+        # folds all but Task Info and Task update, which it fills.
+        idle = shown_panel_fonts(page, _CHAT_SUMMARY, _DAY_LABEL)
+        for name in (
+            "sidebar-panel-name", "sidebar-panel-sub", "app-state", "spend-model-name",
+            "sidebar-inline-form-label", "skill-state review", "skill-state added",
+            "skill-severity medium", "skill-finding-where", "skill-add-anyway", "skill-cancel",
+            "meta-section-example", "meta-example-cmd",
+        ):
+            assert name in idle, (name, idle)
+        # The recommendation on show was among the texts checked.
+        assert page.locator(".recommendation-row:not([inert])").is_visible()
+        _show_task_update(page, _REPORT)
+        running = shown_panel_fonts(page, _CHAT_SUMMARY, _DAY_LABEL)
+        assert "meta-info-status" in running and "meta-value" in running, running
+        assert {"H1", "H2", "H4", "STRONG", "B", "TH", "TD", "CODE"} <= set(running.split())
+        fonts = page.evaluate(_FONTS_JS, [_CHAT_SUMMARY, _DAY_LABEL])
+        summary, label = fonts["summary"], fonts["label"]
+        for selector, font in fonts["rows"].items():
+            assert font == summary, (selector, fonts)
+        for selector, font in fonts["details"].items():
+            assert [font[0], font[1], font[3]] == [label[0], label[1], label[3]], (
+                selector, fonts,
+            )
+        for selector, font in fonts["fields"].items():
+            assert font[:4] == summary[:4], (selector, fonts)
+    finally:
+        page.close()
+
+
+# The Tags row of the Task Info list: its chips' names and how many
+# lines they take, each remove button's box, whether the list overflows
+# sideways, and the add select's options and state.
+_TAGS_ROW_JS = """
+() => {
+  const row = document.getElementById('meta-tags');
+  const list = document.getElementById('meta-list');
+  const chips = [...row.querySelectorAll('.meta-tag')];
+  const add = row.querySelector('.meta-tag-add');
+  return {
+    chips: chips.map(c => c.firstChild.data),
+    lines: new Set(chips.map(c => Math.round(c.getBoundingClientRect().top))).size,
+    removes: [...row.querySelectorAll('.meta-tag-remove')].map(b => {
+      const r = b.getBoundingClientRect();
+      return Math.min(r.width, r.height);
+    }),
+    overflows: list.scrollWidth > list.clientWidth,
+    options: add ? [...add.options].map(o => o.textContent) : null,
+    locked: add ? add.disabled : null,
+  };
+}
+"""
+
+_FOCUS_RING_JS = """
+() => {
+  const cs = getComputedStyle(document.activeElement);
+  return [document.activeElement.className, cs.outlineStyle, cs.outlineWidth];
+}
+"""
+
+
+@pytest.mark.parametrize("touch", [False, True], ids=["desktop dock", "phone drawer"])
+def test_the_tags_row_shows_and_edits_the_tags_of_the_task(
+    browser: Browser, remote_url: str, touch: bool
+) -> None:
+    """The Tags row in a real browser: three tags, an edit by pointer and
+    by keyboard, one tag, and every tag at once.  The chips and their
+    buttons are set in the panel's fonts; the chips wrap inside the
+    panel; a remove button takes a finger on a phone (24px at least)
+    and shows the keyboard focus; the lone tag of a task cannot be
+    removed."""
+    page = _open_page(browser, remote_url, *((390, 844) if touch else (1400, 900)), touch=touch)
+    task_id = "a" * 32
+
+    def tags(names: list[str]) -> dict[str, Any]:
+        _deliver(page, {
+            "type": "taskTags", "taskId": task_id, "tags": names,
+            "allTags": list(ALL_TAGS), "editable": True,
+        })
+        return cast(dict[str, Any], page.evaluate(_TAGS_ROW_JS))
+
+    def edits() -> list[list[str]]:
+        posted = page.evaluate("window.__posted.filter(m => m.type === 'setTaskTags')")
+        assert all(m["taskId"] == task_id for m in posted), posted
+        return [m["tags"] for m in posted]
+
+    try:
+        if touch:
+            page.locator("#meta-drawer-btn").tap()
+            page.wait_for_function(
+                "() => Math.abs(document.getElementById('meta-panel')"
+                ".getBoundingClientRect().right - innerWidth) < 1"
+            )
+        page.evaluate(_LIST_ONE_CHAT_JS)
+        _deliver(page, {"type": "daemonStatus", "connected": True})
+        _deliver(page, {"type": "task_settings", "settings": {"task_id": task_id}})
+        asked = page.evaluate("window.__posted.filter(m => m.type === 'getTaskTags')")
+        assert asked == [{"type": "getTaskTags", "taskId": task_id}]
+
+        row = tags(["work", "coding", "testing"])
+        assert row["chips"] == ["work", "coding", "testing"] and len(row["removes"]) == 3
+        rest = [name for name in ALL_TAGS if name not in row["chips"]]
+        assert row["options"] == ["+ Add tag", *rest] and row["overflows"] is False
+        shown = shown_panel_fonts(page, _CHAT_SUMMARY, _DAY_LABEL).split()
+        assert {"meta-tag", "meta-tag-remove"} <= set(shown), shown
+        if touch:
+            assert min(row["removes"]) >= 24, row
+            page.locator(".meta-tag-remove[data-tag='coding']").tap()
+        else:
+            # Tab from the Task id reaches the first chip's button, ringed.
+            page.locator("#meta-task-id").focus()
+            page.keyboard.press("Tab")
+            assert page.evaluate(_FOCUS_RING_JS) == ["meta-tag-remove", "solid", "1px"]
+            page.keyboard.press("Tab")
+            page.keyboard.press("Enter")
+        assert edits() == [["work", "testing"]]
+        assert page.evaluate(_TAGS_ROW_JS)["locked"] is True
+
+        assert tags(["work", "testing"])["locked"] is False
+        # The keyboard edit gets the focus back, on the select; a tap leaves none there.
+        assert page.evaluate("document.activeElement.tagName") == ("BODY" if touch else "SELECT")
+        page.select_option("#meta-tags .meta-tag-add", "review")
+        assert edits()[1] == ["work", "testing", "review"]
+        assert tags(edits()[1])["chips"] == ["work", "testing", "review"]
+
+        row = tags(["work"])
+        assert (row["chips"], row["removes"], len(row["options"])) == (["work"], [], len(ALL_TAGS))
+        row = tags(list(ALL_TAGS))
+        assert row["lines"] > 1 and row["overflows"] is False and row["options"] is None, row
+    finally:
+        page.close()
+
+
+# The room left and right of the first element at each selector inside
+# the padding box of the panel with the given id.
+_INSETS_JS = """
+([panelId, selectors]) => {
+  const panel = document.getElementById(panelId);
+  const left = panel.getBoundingClientRect().left + panel.clientLeft;
+  return Object.fromEntries(selectors.map(selector => {
+    const rect = document.querySelector(selector).getBoundingClientRect();
+    return [selector, [rect.left - left, left + panel.clientWidth - rect.right]];
+  }));
+}
+"""
+
+
+def panel_insets(page: Page, panel_id: str, selectors: list[str]) -> dict[str, list[float]]:
+    """Measure how far inside a side panel its elements start and end.
+
+    Returns:
+        For the first element at each of ``selectors``, the room left
+        and right of it inside the padding box of the panel ``panel_id``.
+    """
+    insets: dict[str, list[float]] = page.evaluate(_INSETS_JS, [panel_id, selectors])
+    return insets
+
+
+# The corner and the vertical padding of the first element at each
+# selector.
+_SHAPES_JS = """
+selectors => selectors.map(selector => {
+  const cs = getComputedStyle(document.querySelector(selector));
+  return [cs.borderTopLeftRadius, cs.paddingTop, cs.paddingBottom];
+})
+"""
+
+_CHAT_ROW = "#history-list .history-chat-header"
+_BOXED_ROWS = [
+    ".sched-row", ".machine-row", ".skill-row", ".skill-found-row", "button.app-row-main",
+]
+
+
+@pytest.mark.parametrize("surface", list(_SURFACES))
+def test_a_panel_row_is_boxed_like_a_chat_row(
+    browser: Browser, remote_url: str, surface: str
+) -> None:
+    """A Schedule, Machines, Skills or Apps row is a chat row's box: its
+    corner, its vertical padding, and a fill that ends as far inside the
+    panel as a chat row's fill does inside the Chats sidebar (a model row
+    of Spend, a denser list, has the fill's reach).  The fill reaches out of
+    the panel's column while the row's content stays in it: a job's name
+    starts where the section header does and an app's state ends where
+    the header does.  A body spans the panel, so a list that overflows
+    scrolls at the panel's edge, and its rows are as wide as the rows of
+    a list that does not overflow."""
+    width, setup = _SURFACES[surface]
+    page = _open_page(browser, remote_url, width, global_sections=True)
+    try:
+        page.evaluate(f"() => {{ {setup} }}")
+        page.evaluate(_LIST_ONE_CHAT_JS)
+        _deliver_global_sections(page)
+        chat = panel_insets(page, "sidebar", [_CHAT_ROW])[_CHAT_ROW]
+        assert min(chat) > 0, chat
+        name, state = ".sched-row .sidebar-panel-name", "button.app-row-main .app-state"
+        header, apps = "#meta-schedule .meta-section-hdr", "#meta-apps-list"
+        insets = panel_insets(
+            page, "meta-panel", [*_BOXED_ROWS, ".spend-model-row", header, name, state, apps],
+        )
+        for selector in (*_BOXED_ROWS, ".spend-model-row"):
+            assert insets[selector] == pytest.approx(chat, abs=0.5), (selector, insets)
+        shapes = page.evaluate(_SHAPES_JS, [_CHAT_ROW, *_BOXED_ROWS])
+        assert shapes.count(shapes[0]) == len(shapes), shapes
+        assert insets[header][0] > chat[0], insets
+        assert insets[name][0] == pytest.approx(insets[header][0], abs=0.5), insets
+        assert insets[state][1] == pytest.approx(insets[header][1], abs=0.5), insets
+        # The 40 apps overflow their body, which scrolls at the panel's edges.
+        assert page.evaluate(
+            "() => { const list = document.getElementById('meta-apps-list');"
+            " return list.scrollHeight > list.clientHeight; }"
+        )
+        assert insets[apps] == pytest.approx([0, 0], abs=0.5), insets
     finally:
         page.close()
 
@@ -1465,16 +2344,17 @@ _MINIMUM_GEOMETRY_JS = """
 () => {
   const panel = document.getElementById('meta-panel');
   const rect = id => document.getElementById(id).getBoundingClientRect();
-  const list = document.getElementById('meta-schedule-list');
+  const list = document.getElementById('meta-schedule-body');
   const row = list.querySelector('li');
   const share = parseFloat(getComputedStyle(panel).getPropertyValue('--meta-body-share'));
   const rem = parseFloat(getComputedStyle(document.documentElement).fontSize);
   return {
     share,
-    minimum: Math.min(4.5 * rem, share / 2),
+    minimum: Math.min(5 * rem, share / 2),
     listHeight: rect('meta-list').height,
-    scheduleHeight: rect('meta-schedule-list').height,
-    machinesHeight: rect('meta-machines-list').height,
+    scheduleHeight: rect('meta-schedule-body').height,
+    machinesHeight: rect('meta-machines-body').height,
+    skillsHeight: rect('meta-skills-body').height,
     appsHeight: rect('meta-apps-list').height,
     spendHeight: rect('meta-spend-body').height,
     recommendationsHeight: rect('meta-recommendations-list').height,
@@ -1483,6 +2363,10 @@ _MINIMUM_GEOMETRY_JS = """
       && row.getBoundingClientRect().top >= list.getBoundingClientRect().top - 0.5
       && row.getBoundingClientRect().bottom <= list.getBoundingClientRect().bottom + 0.5,
     panelOverflows: panel.scrollHeight > panel.clientHeight + 1,
+    // By how much the panel's content is taller than the panel, and
+    // how far above the panel's bottom edge the bottom strip ends.
+    overflow: panel.scrollHeight - panel.clientHeight,
+    stripGap: panel.getBoundingClientRect().bottom - rect('meta-footer').bottom,
     // The shown sections' headers (the hidden workspace sections have
     // none on screen).
     headerBottoms: Array.from(document.querySelectorAll(
@@ -1516,16 +2400,22 @@ def test_a_persisted_drag_cannot_hide_the_schedule_section(
     Task Info separator had once been dragged far down; that height
     persists, and a middle body used to have no minimum, so the dragged
     body took its whole share.  Every expanded body now keeps half of an
-    equal share (at most 4.5rem): the jobs stay on screen and scroll, the
+    equal share (at most 5rem): the jobs stay on screen and scroll, the
     dragged body yields instead, and because the minimum follows the
     panel's height a short window never makes the panel itself
     overflow.  A double-click on the separator still restores the equal
-    shares."""
+    shares.
+
+    The short window is also where the example lines of Schedule and
+    Machines once cost the panel its bottom strip: as rows of their own
+    (61px together) they left the bodies nothing, the panel overflowed
+    and the strip was clipped.  They lie in the bodies now, and a body
+    down to its minimum shows its rows instead."""
     page = _open_page(
         browser,
         remote_url,
         1200,
-        height=1200,
+        height=1300,
         global_sections=True,
         storage={"kiss-meta-section-h:meta-section-info": "2000"},
     )
@@ -1533,22 +2423,29 @@ def test_a_persisted_drag_cannot_hide_the_schedule_section(
         page.wait_for_selector("body.remote-desktop", state="attached")
         _deliver(page, _cron_jobs(12))
         _deliver(page, {"type": "machines", "machines": _MACHINES, "checkedAt": 1})
+        _deliver(page, _SKILLS)
         _deliver(page, {"type": "appsStatus", "apps": _APPS, "checkedAt": "2026-09-26T11:00:00"})
         _deliver(page, _spend_report())
         geo = page.evaluate(_MINIMUM_GEOMETRY_JS)
-        # Seven equal shares of a 1200px panel: well over 100px, so the
-        # minimum is the 4.5rem cap, taller than a Schedule row.
-        assert geo["share"] > 100, geo
-        assert geo["minimum"] > 40, geo
-        # Schedule, Machines, Apps, Spend and Recommendations each keep
-        # the minimum; Task Info has the rest, far less than the 2000px
-        # it asked for.
+        # Six equal shares of a 1300px panel (the six bodies that fold;
+        # Recommendations, with no task, is hidden, and there is no
+        # Task update yet): over 130px each, so the minimum, half a
+        # share, is the 5rem cap, taller than a Schedule row whose
+        # detail line wraps once (as it does on this 240px panel).
+        assert geo["share"] > 130, geo
+        assert geo["minimum"] == pytest.approx(65, abs=0.5), geo
+        # Schedule, Machines, Skills, Apps and Spend each keep the
+        # minimum and Recommendations, with nothing to show, takes no
+        # room; Task Info has the rest, far less than the 2000px it
+        # asked for.
         for key in (
-            "scheduleHeight", "machinesHeight", "appsHeight", "spendHeight",
-            "recommendationsHeight",
+            "scheduleHeight", "machinesHeight", "skillsHeight", "appsHeight", "spendHeight",
         ):
             assert geo[key] == pytest.approx(geo["minimum"], abs=1), (key, geo)
-        assert geo["listHeight"] < 6 * geo["share"] - 5 * geo["minimum"] + 2, geo
+        assert geo["recommendationsHeight"] == 0, geo
+        assert geo["listHeight"] == pytest.approx(
+            6 * geo["share"] - 5 * geo["minimum"], abs=2,
+        ), geo
         assert geo["firstRowInside"] is True and geo["scheduleScrolls"] is True, geo
         assert geo["panelOverflows"] is False, geo
 
@@ -1568,9 +2465,11 @@ def test_a_persisted_drag_cannot_hide_the_schedule_section(
         # A much shorter window: the share and the minimums shrink with
         # it (ResizeObserver), every header stays on screen, the bodies
         # still show something, and the panel still does not overflow.
-        # 420px: seven header rows and a long status line leave the
-        # bodies a few pixels each, never none.
-        page.set_viewport_size({"width": 1200, "height": 420})
+        # 500px: the parts that do not shrink (seven header rows, the
+        # status lines, the Skills search row, the separators and the
+        # tools footer, with the long error below about 400px in all)
+        # leave the bodies a few pixels each, never none.
+        page.set_viewport_size({"width": 1200, "height": 500})
         page.wait_for_function(
             "() => parseFloat(getComputedStyle(document.getElementById('meta-panel'))"
             ".getPropertyValue('--meta-body-share')) < 60"
@@ -1579,7 +2478,8 @@ def test_a_persisted_drag_cannot_hide_the_schedule_section(
         assert 0 < short["minimum"] < geo["minimum"], short
         assert short["scheduleHeight"] == pytest.approx(short["minimum"], abs=1), short
         assert short["panelOverflows"] is False, short
-        assert all(bottom <= 420 for bottom in short["headerBottoms"]), short
+        assert short["overflow"] == 0 and abs(short["stripGap"]) <= 0.5, short
+        assert all(bottom <= 500 for bottom in short["headerBottoms"]), short
 
         # A Task update whose status line then grows (a long error) adds
         # a seventh section and a taller header row on this short panel:
@@ -1609,21 +2509,33 @@ def test_a_persisted_drag_cannot_hide_the_schedule_section(
         assert len(crowded["headerBottoms"]) == 7, crowded
         assert 0 < crowded["minimum"] < short["minimum"], (short, crowded)
         assert crowded["panelOverflows"] is False, crowded
-        assert all(bottom <= 420 for bottom in crowded["headerBottoms"]), crowded
+        assert crowded["overflow"] == 0 and abs(crowded["stripGap"]) <= 0.5, crowded
+        assert all(bottom <= 500 for bottom in crowded["headerBottoms"]), crowded
+        # Two recommendations on top of that (their card comes on
+        # show, an eighth section), the fullest this panel gets: the
+        # bodies still have a share and the strip still ends, whole, at
+        # the panel's bottom edge.
+        _deliver(page, _TWO_TASKS)
+        full = page.evaluate(_MINIMUM_GEOMETRY_JS)
+        assert 0 < full["recommendationsHeight"] <= full["share"] + 0.5, full
+        assert 0 < full["minimum"] < crowded["minimum"], (crowded, full)
+        assert full["overflow"] == 0 and abs(full["stripGap"]) <= 0.5, full
+        _deliver(page, {"type": "recommendations", "generatedAt": 1, "tasks": []})
 
         # Double-clicking the separator forgets the dragged height:
-        # the bodies share the panel equally again.  (The share with
-        # seven sections and the long status line in 1000px is about
-        # 96px: the tall window is back once it is well above the short
-        # window's 60px.)
+        # the bodies have equal parts of the panel again, a share each
+        # (Recommendations, without a task again, is hidden).
+        # (The share with seven sections and the long status line in
+        # 1000px is about 85px: the tall window is back once it is
+        # above the short window's 60px.)
         page.set_viewport_size({"width": 1200, "height": 1000})
         page.wait_for_function(
             "() => parseFloat(getComputedStyle(document.getElementById('meta-panel'))"
-            ".getPropertyValue('--meta-body-share')) > 70"
+            ".getPropertyValue('--meta-body-share')) > 60"
         )
         _section_resizer(page).dblclick()
         reset = page.evaluate(_MINIMUM_GEOMETRY_JS)
-        assert reset["scheduleHeight"] == pytest.approx(reset["share"], abs=1), reset
+        assert reset["scheduleHeight"] == pytest.approx(reset["listHeight"], abs=1), reset
         assert reset["listHeight"] == pytest.approx(reset["share"], abs=1), reset
         assert page.evaluate(
             "() => localStorage.getItem('kiss-meta-section-h:meta-section-info')"

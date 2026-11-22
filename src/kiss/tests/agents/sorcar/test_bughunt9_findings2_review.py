@@ -251,6 +251,9 @@ def real_stdin(
     try:
         yield
     finally:
+        # The server the test started lives until the manager stops it,
+        # and writes to the errlog until then.
+        MCPManager.instance().shutdown()
         errlog.close()
         stdin_stream.close()
 

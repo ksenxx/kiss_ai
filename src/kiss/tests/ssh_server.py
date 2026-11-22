@@ -64,11 +64,34 @@ class SshServer:
         self.process.wait(timeout=20)
 
 
+def _quoted(value: object) -> str:
+    """Return *value* as one argument of an OpenSSH configuration line, in double quotes.
+
+    Bare, a value is split at its spaces, a quote in it opens a quoted
+    string and a ``#`` after a space starts a comment.
+    """
+    return '"' + str(value).replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _file(path: Path) -> str:
+    """Return *path* as the argument of a file option, where a ``%`` starts a token.
+
+    Two kinds of path stay out of reach: one with ``${``, which the client
+    expands as an environment variable, and a *workdir* with a backslash or
+    a ``[...]``, because a recent ``sshd`` (OpenSSH 10) reads
+    ``AuthorizedKeysFile`` as a glob pattern and an older one as a plain path.
+    """
+    return _quoted(str(path).replace("%", "%%"))
+
+
 def start_sshd(
     workdir: Path, remote_home: Path | None, home: Path | None = None, timeout: float = 30.0,
     host: str = "127.0.0.1",
 ) -> SshServer:
     """Start an ``sshd`` under *workdir* whose sessions see ``KISS_HOME=remote_home``.
+
+    The paths may hold spaces, quotes, ``#`` and ``%``: each is written into
+    the configuration as one quoted argument (:func:`_quoted`, :func:`_file`).
 
     Args:
         workdir: Where the keys and the client config live.  A second
@@ -83,7 +106,6 @@ def start_sshd(
 
     Raises:
         RuntimeError: When ``sshd`` exits or the port stays closed.
-        RuntimeError: When ``sshd`` exits or the port stays closed.
     """
     workdir.mkdir(parents=True, exist_ok=True)
     host_key, client_key = workdir / "host_key", workdir / "client_key"
@@ -97,17 +119,17 @@ def start_sshd(
     authorized.chmod(0o600)
     config = workdir / "ssh_config"
     config.write_text(
-        f"Host *\n  IdentityFile {client_key}\n  IdentitiesOnly yes\n"
-        f"  UserKnownHostsFile {workdir / 'known_hosts'}\n",
+        f"Host *\n  IdentityFile {_file(client_key)}\n  IdentitiesOnly yes\n"
+        f"  UserKnownHostsFile {_file(workdir / 'known_hosts')}\n",
         encoding="utf-8",
     )
     port = find_free_port()
     process = subprocess.Popen([
         SSHD, "-D", "-e", "-f", "/dev/null", "-p", str(port), "-h", str(host_key),
         "-o", f"ListenAddress={host}", "-o", "PidFile=none",
-        "-o", f"AuthorizedKeysFile={authorized}", "-o", "StrictModes=no",
+        "-o", f"AuthorizedKeysFile={_file(authorized)}", "-o", "StrictModes=no",
         "-o", "PasswordAuthentication=no", "-o", "UsePAM=no",
-        "-o", f"SetEnv=KISS_HOME={remote_home or ''} HOME={home or remote_home}",
+        "-o", f"SetEnv=KISS_HOME={_quoted(remote_home or '')} HOME={_quoted(home or remote_home)}",
         "-o", "LogLevel=ERROR",
     ], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     deadline = time.monotonic() + timeout

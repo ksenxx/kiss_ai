@@ -9,8 +9,10 @@
   // URLs for the in-page wake-word pipeline and the ack sound.
   const cfg = window.__VOICE__ || {};
   const btn = document.getElementById('voice-btn');
+  // The composer's mic (see "Dictation" below).
+  const dictateBtn = document.getElementById('dictate-btn');
   const inp = document.getElementById('task-input');
-  if (!btn || !inp) return;
+  if (!btn || !dictateBtn || !inp) return;
 
   // The wake phrase "Hey Sorcar" (mirrors WAKE_PHRASE in
   // kiss/server/speech.py).  "Sorcar" is not in the Vosk model's
@@ -84,6 +86,10 @@
   let enabled = false;
   let busy = false;
   let lastWakeAt = 0;
+  // The voice trigger was on when dictation took the microphone: it is
+  // off (`enabled`) until dictation ends and turns it on again (see
+  // "Dictation" below).
+  let wakePaused = false;
 
   // Generation stamp for the async voice lifecycle. Every mic toggle
   // bumps it; pipeline-start continuations compare the value they
@@ -230,13 +236,16 @@
   let processorNode = null;
   let voskLoadPromise = null;
 
-  // The one toast id every voice failure reuses, so a repeated failure
-  // updates the visible notification instead of stacking a second one,
-  // and a later successful start can close it.
+  // The one toast id every failure of the voice trigger reuses, and the
+  // one every failure of dictation does, so a repeated failure updates
+  // the visible notification instead of stacking a second one, and a
+  // later successful start can close it.
   const VOICE_NOTIFICATION_ID = 'voice-trigger-error';
+  const DICTATION_NOTIFICATION_ID = 'dictation-error';
 
   /**
-   * Show (or close) the voice trigger's visible notification.
+   * Show (or, without a `message`, close) the visible notification `id`
+   * of the voice trigger or of dictation.
    *
    * voice.js runs in its own closure and cannot call main.js's
    * showNotification directly, so it hands main.js the same
@@ -245,16 +254,16 @@
    * window-level toast container.  Errors are sticky: the user closes
    * them once they have read the remedy.
    */
-  function notifyUser(severity, message) {
+  function notifyUser(id, severity, message) {
     const data = message
       ? {
           type: 'notification',
-          id: VOICE_NOTIFICATION_ID,
+          id: id,
           severity: severity,
           sticky: true,
           message: message,
         }
-      : {type: 'notification', id: VOICE_NOTIFICATION_ID, close: true};
+      : {type: 'notification', id: id, close: true};
     window.dispatchEvent(new window.MessageEvent('message', {data: data}));
   }
 
@@ -262,11 +271,14 @@
    * Translate a capture failure into plain language with a remedy.
    *
    * `err` is the getUserMedia / AudioContext / model-load rejection (an
-   * Error with `name`, or a string from the server).
+   * Error with `name`, or a string from the server).  `feature` names
+   * what could not listen, as the remedy tells the user to turn it on
+   * again: 'the voice trigger' or 'dictation'.
    */
-  function describeVoiceError(err) {
+  function describeVoiceError(err, feature) {
     const name = (err && err.name) || '';
     const text = String((err && err.message) || err || '').trim();
+    const retry = ', then turn ' + feature + ' on again.';
     if (
       name === 'NotAllowedError' ||
       name === 'SecurityError' ||
@@ -274,26 +286,27 @@
     ) {
       return (
         'Microphone access was denied. Allow the microphone for this ' +
-        'site in the browser settings, then turn the voice trigger on again.'
+        'site in the browser settings' +
+        retry
       );
     }
     if (name === 'NotFoundError' || /not found|no device/i.test(text)) {
-      return (
-        'No microphone was found. Connect a microphone, then turn the ' +
-        'voice trigger on again.'
-      );
+      return 'No microphone was found. Connect a microphone' + retry;
     }
     if (name === 'NotReadableError' || /in use|could not start/i.test(text)) {
       return (
         'The microphone could not be started; another application may ' +
-        'be using it. Close that application, then turn the voice trigger ' +
-        'on again.'
+        'be using it. Close that application' +
+        retry
       );
     }
     return (
-      'The voice trigger could not start' +
+      feature.charAt(0).toUpperCase() +
+      feature.slice(1) +
+      ' could not start' +
       (text ? ' (' + text + ')' : '') +
-      '. Check the microphone, then turn the voice trigger on again.'
+      '. Check the microphone' +
+      retry
     );
   }
 
@@ -303,13 +316,13 @@
       tip =
         "Voice trigger on: say 'Hey Sorcar' and pause " +
         'briefly (click to turn off)';
-      notifyUser(null, null);
+      notifyUser(VOICE_NOTIFICATION_ID, null, null);
     } else if (state === 'loading') {
       tip = 'Voice trigger: starting ...';
     } else if (state === 'error') {
-      const plain = describeVoiceError(message);
+      const plain = describeVoiceError(message, 'the voice trigger');
       tip = 'Voice trigger error: ' + plain;
-      notifyUser('error', plain);
+      notifyUser(VOICE_NOTIFICATION_ID, 'error', plain);
     } else {
       tip = "Voice trigger: listen for the phrase 'Hey Sorcar'";
     }
@@ -515,7 +528,7 @@
       fromGrammar: fromGrammar,
       heardAt: now,
       owner: currentOwner() || UNSCOPED,
-      preamble: preambleChunks.map(entry => entry.chunk),
+      preamble: preamble.entries.map(entry => entry.chunk),
       chunks: [],
       sinceWakeMs: 0,
       elapsedMs: 0,
@@ -540,6 +553,31 @@
   // main.js flags the body and routes the composer text to the answer.
   function answeringQuestion() {
     return document.body.classList.contains('ask-answering');
+  }
+
+  /**
+   * Whether the composer may take the words of an utterance spoken into
+   * the conversation `owner`, which it is made to show first.
+   */
+  function composerTakes(owner) {
+    // tableak-coverage:start
+    // The user switched tasks while speaking: the words belong to the
+    // conversation that was on screen when the utterance began, and that
+    // tab's input is no longer the one in the DOM. Drop the transcript
+    // instead of typing it into a stranger's conversation.
+    if (!ownerIsOnScreen(owner)) return false;
+    // tableak-coverage:end
+    // The composer read and written by the caller must be this
+    // conversation's.  While a file is on screen the composer is hidden,
+    // so main.js brings the chat the file screen stands for
+    // (kissVoiceOwner) back first, with its own draft and its pending
+    // question. It cancels the event when no chat is left to take the
+    // words (the file on screen outlived its chats): they are dropped.
+    const compose = new CustomEvent('kiss-voice-compose', {
+      detail: {tabId: ownerTabId(owner)},
+      cancelable: true,
+    });
+    return window.dispatchEvent(compose);
   }
 
   // owner is this round's conversation, already retired by the caller. It is
@@ -567,24 +605,7 @@
           spoken
         : 'Speaker #' + speaker + ' says that: ' + spoken;
     }
-    // tableak-coverage:start
-    // The user switched tasks while speaking: the words belong to the
-    // conversation that was on screen when the utterance began, and that
-    // tab's input is no longer the one in the DOM. Drop the transcript
-    // instead of typing it into a stranger's conversation.
-    if (!ownerIsOnScreen(owner)) return;
-    // tableak-coverage:end
-    // The composer read and written below must be this conversation's.
-    // While a file is on screen the composer is hidden, so main.js brings
-    // the chat the file screen stands for (kissVoiceOwner) back first,
-    // with its own draft and its pending question. It cancels the event
-    // when no chat is left to take the words (the file on screen outlived
-    // its chats): they are dropped.
-    const compose = new CustomEvent('kiss-voice-compose', {
-      detail: {tabId: ownerTabId(owner)},
-      cancelable: true,
-    });
-    if (!window.dispatchEvent(compose)) return;
+    if (!composerTakes(owner)) return;
     // Non-auto mode drafts into the input for the user to edit, so insert
     // the exact spoken words: the speaker/language prefix is only useful to
     // the agent, and would just be noise the user has to delete by hand.
@@ -650,35 +671,43 @@
 
   let capture = null;
 
-  // Rolling ring of the most recent pre-wake audio (16kHz Int16Array
-  // chunks). When a recognizer hears the wake word, the ring ends with
-  // the audio of the word itself; the candidate takes it (heardWake) and
-  // it is prepended to the capture so the server can re-confirm the wake
-  // word from the transcript (dual wake check).
+  // A rolling ring of the audio heard last while nothing was being
+  // recorded, as `{entries, ms, keepMs}`: 16kHz Int16Array chunks with
+  // their durations, `ms` of audio in all, of which the last `keepMs`
+  // are kept.
+  //
+  // This one is the wake pipeline's.  When a recognizer hears the wake
+  // word, the ring ends with the audio of the word itself; the candidate
+  // takes it (heardWake) and it is prepended to the capture so the
+  // server can re-confirm the wake word from the transcript (dual wake
+  // check).
   const WAKE_PREAMBLE_MS = 2000;
-  let preambleChunks = [];
-  let preambleMs = 0;
+  const preamble = {entries: [], ms: 0, keepMs: WAKE_PREAMBLE_MS};
 
-  function rememberPreamble(samples, sourceRate, blockMs) {
-    preambleChunks.push({
+  /** Add one audio block to `ring` and drop what it no longer keeps. */
+  function rememberAudio(ring, samples, sourceRate, blockMs) {
+    ring.entries.push({
       chunk: downsampleTo16k(samples, sourceRate),
       ms: blockMs,
     });
-    preambleMs += blockMs;
+    ring.ms += blockMs;
     // Keep at least one chunk, and never evict below the cap: the wake
     // word must not be trimmed away by a block boundary.
     while (
-      preambleChunks.length > 1 &&
-      preambleMs - preambleChunks[0].ms >= WAKE_PREAMBLE_MS
+      ring.entries.length > 1 &&
+      ring.ms - ring.entries[0].ms >= ring.keepMs
     ) {
-      preambleMs -= preambleChunks[0].ms;
-      preambleChunks.shift();
+      ring.ms -= ring.entries[0].ms;
+      ring.entries.shift();
     }
   }
 
-  function clearPreamble() {
-    preambleChunks = [];
-    preambleMs = 0;
+  /** Empty `ring` and hand back the chunks it held, oldest first. */
+  function takeAudio(ring) {
+    const chunks = ring.entries.map(entry => entry.chunk);
+    ring.entries = [];
+    ring.ms = 0;
+    return chunks;
   }
 
   /**
@@ -690,7 +719,7 @@
     capture = candidate;
     candidate = null;
     capture.round = markSpeechStart(capture.owner);
-    clearPreamble();
+    takeAudio(preamble);
   }
 
   function downsampleTo16k(samples, sourceRate) {
@@ -922,6 +951,10 @@
     });
   }
 
+  // Why a listener whose microphone track ended can no longer listen.
+  const MIC_LOST =
+    'the microphone was disconnected or taken by another application';
+
   /**
    * The microphone went away under the live pipeline of generation
    * *gen* (headset unplugged, device taken by another app, the site's
@@ -937,10 +970,7 @@
    * transcripts still stand.
    */
   function onMicEnded(gen) {
-    failLivePipeline(
-      gen,
-      'the microphone was disconnected or taken by another application',
-    );
+    failLivePipeline(gen, MIC_LOST);
   }
 
   /**
@@ -1065,6 +1095,58 @@
     });
   }
 
+  /**
+   * Take down what a listener holds of its audio graph, each of which
+   * may be null: the processor and source nodes, the microphone
+   * `stream` and the audio `context`.
+   */
+  function releaseAudio(processor, source, stream, context) {
+    if (processor) {
+      try {
+        processor.disconnect();
+      } catch (_e) {}
+      processor.onaudioprocess = null;
+    }
+    if (source) {
+      try {
+        source.disconnect();
+      } catch (_e) {}
+    }
+    if (stream) stopTracks(stream);
+    if (context) {
+      try {
+        context.close();
+      } catch (_e) {}
+    }
+  }
+
+  /**
+   * Take the block of microphone audio a processor node hands over in
+   * `event`, as `{samples, rms, rate, blockMs}`: the samples, their
+   * loudness (root mean square), their sample rate and their duration.
+   */
+  function readBlock(event) {
+    // Never output pure silence: after 30 s of zeros Chrome swaps
+    // the audio sink for a fake one that ran this callback at
+    // under half speed (measured 2026-11-08 in Google Chrome with
+    // the real mic: 43 s of audio in 60 s), so the recognizers got
+    // chopped audio and missed the wake phrase.  1e-7 is about
+    // -140 dBFS, far below hearing.
+    event.outputBuffer.getChannelData(0).fill(SINK_KEEP_AWAKE_LEVEL);
+    const samples = event.inputBuffer.getChannelData(0);
+    let sumSquares = 0;
+    for (let i = 0; i < samples.length; i++) {
+      sumSquares += samples[i] * samples[i];
+    }
+    const rate = event.inputBuffer.sampleRate;
+    return {
+      samples: samples,
+      rms: Math.sqrt(sumSquares / samples.length),
+      rate: rate,
+      blockMs: (samples.length / rate) * 1000,
+    };
+  }
+
   function stopBrowserPipeline() {
     if (capture) {
       // An active capture dies with the pipeline before its audio was
@@ -1074,30 +1156,12 @@
       capture = null;
     }
     candidate = null;
-    clearPreamble();
-    if (processorNode) {
-      try {
-        processorNode.disconnect();
-      } catch (_e) {}
-      processorNode.onaudioprocess = null;
-      processorNode = null;
-    }
-    if (sourceNode) {
-      try {
-        sourceNode.disconnect();
-      } catch (_e) {}
-      sourceNode = null;
-    }
-    if (mediaStream) {
-      stopTracks(mediaStream);
-      mediaStream = null;
-    }
-    if (audioContext) {
-      try {
-        audioContext.close();
-      } catch (_e) {}
-      audioContext = null;
-    }
+    takeAudio(preamble);
+    releaseAudio(processorNode, sourceNode, mediaStream, audioContext);
+    processorNode = null;
+    sourceNode = null;
+    mediaStream = null;
+    audioContext = null;
     if (recognizer) {
       try {
         recognizer.remove();
@@ -1236,21 +1300,7 @@
         processorNode = audioContext.createScriptProcessor(4096, 1, 1);
         let lastRmsAt = 0;
         processorNode.onaudioprocess = event => {
-          // Never output pure silence: after 30 s of zeros Chrome swaps
-          // the audio sink for a fake one that ran this callback at
-          // under half speed (measured 2026-11-08 in Google Chrome with
-          // the real mic: 43 s of audio in 60 s), so the recognizers got
-          // chopped audio and missed the wake phrase.  1e-7 is about
-          // -140 dBFS, far below hearing.
-          event.outputBuffer.getChannelData(0).fill(SINK_KEEP_AWAKE_LEVEL);
-          const samples = event.inputBuffer.getChannelData(0);
-          let sumSquares = 0;
-          for (let i = 0; i < samples.length; i++) {
-            sumSquares += samples[i] * samples[i];
-          }
-          const rms = Math.sqrt(sumSquares / samples.length);
-          const rate = event.inputBuffer.sampleRate;
-          const blockMs = (samples.length / rate) * 1000;
+          const {samples, rms, rate, blockMs} = readBlock(event);
           if (debugEnabled()) {
             const now = Date.now();
             if (now - lastRmsAt > 2000) {
@@ -1264,7 +1314,7 @@
             }
             return;
           }
-          rememberPreamble(samples, rate, blockMs);
+          rememberAudio(preamble, samples, rate, blockMs);
           if (candidate) feedCandidate(samples, rms, blockMs, rate);
           try {
             recognizer.acceptWaveform(event.inputBuffer);
@@ -1308,9 +1358,13 @@
       });
   }
 
+  /**
+   * Store whether the user has the voice trigger on.  One that
+   * dictation has paused (`wakePaused`) still is.
+   */
   function persist() {
     try {
-      localStorage.setItem(STORAGE_KEY, enabled ? '1' : '0');
+      localStorage.setItem(STORAGE_KEY, enabled || wakePaused ? '1' : '0');
     } catch (_e) {}
   }
 
@@ -1405,8 +1459,264 @@
     }
   }
 
+  // dictation-coverage:start
+  // Dictation: the composer's mic (#dictate-btn).
+  //
+  // While the mic is on, what the user says is typed at the cursor of
+  // the text box, in English.  No wake word is involved: an utterance
+  // starts with the first loud block of audio and ends like the speech
+  // after a wake word does (CAPTURE_END_SILENCE_MS of silence, or
+  // CAPTURE_MAX_MS of speech).  Its audio goes to the daemon in the same
+  // `voiceTranscribe` command, marked `dictation` instead of carrying the
+  // wake word's fields, and the answer is its English transcript.
+  // Nothing is ever submitted.
+  //
+  // Dictation and the voice trigger never listen together, or the same
+  // words would be typed twice: the mic pauses a trigger that is on and
+  // turns it on again when dictation ends, and turning the trigger on
+  // ends dictation.
+
+  // An utterance takes the audio heard just before its first loud block
+  // along: the start of a word is often too soft to count as loud.
+  const DICTATION_LEAD_IN_MS = 500;
+  // An utterance with less loud audio than this is a click or a knock,
+  // not speech: it is not sent.
+  const DICTATION_MIN_SPEECH_MS = 200;
+  // Someone who speaks on without a long pause is cut at a short one
+  // (DICTATION_BREATH_MS) once the utterance is this long, rather than
+  // in the middle of a word at CAPTURE_MAX_MS.
+  const DICTATION_BREATH_AFTER_MS = 20000;
+  const DICTATION_BREATH_MS = 300;
+  // How long a transcript may take before its round is given up.
+  const DICTATION_REPLY_TIMEOUT_MS = 60000;
+
+  // What the dictation that is on holds, null while the mic is off: the
+  // microphone and its audio graph (`stream`, `context`, `source`,
+  // `processor`, each null until the start has it), the ring of the
+  // audio heard before an utterance (`leadIn`) and the utterance being
+  // recorded (`utterance`, or null).  A start in flight keeps the object
+  // it began with and stands down once this is another: the mic was
+  // toggled since.
+  let dictation = null;
+  // Why dictation failed, in plain language, until it is turned on again.
+  let dictationError = null;
+  // The utterances awaiting their transcript, oldest first, as `{id,
+  // owner, timer}`: the tag the daemon echoes, the conversation that was
+  // on screen when the utterance began (see `rounds`) and the timer that
+  // gives the round up.  They outlive the mic: what was said before it
+  // was turned off is still typed.
+  const dictationRounds = [];
+
+  /** Paint the mic button from what dictation is doing. */
+  function renderDictation() {
+    const on = dictation !== null;
+    const listening = on && dictation.processor !== null;
+    const hearing = listening && dictation.utterance !== null;
+    let tip =
+      'Dictate: speak and your words are typed at the cursor, in English';
+    if (dictationError) {
+      tip = 'Dictation error: ' + dictationError;
+    } else if (listening) {
+      tip =
+        'Dictation on: your words are typed at the cursor, in English ' +
+        '(click to turn off)';
+    } else if (on) {
+      tip = 'Dictation: starting ...';
+    }
+    dictateBtn.classList.toggle('dictate-loading', on && !listening);
+    dictateBtn.classList.toggle('active', listening);
+    dictateBtn.classList.toggle('dictate-hearing', hearing);
+    dictateBtn.classList.toggle(
+      'dictate-transcribing',
+      !hearing && dictationRounds.length > 0,
+    );
+    dictateBtn.classList.toggle('dictate-error', dictationError !== null);
+    dictateBtn.setAttribute('aria-pressed', on ? 'true' : 'false');
+    dictateBtn.setAttribute('data-tooltip', tip);
+  }
+
+  /** Give the dictation round `round` up: no transcript came in time. */
+  function expireDictationRound(round) {
+    dictationRounds.splice(dictationRounds.indexOf(round), 1);
+    renderDictation();
+  }
+
+  /**
+   * Close the dictation round that the transcript tagged `id` answers
+   * and hand it back; null when it answers none (a round of the voice
+   * trigger, or one given up).
+   */
+  function takeDictationRound(id) {
+    const at = dictationRounds.findIndex(round => round.id === id);
+    if (at === -1) return null;
+    const round = dictationRounds.splice(at, 1)[0];
+    clearTimeout(round.timer);
+    renderDictation();
+    return round;
+  }
+
+  /**
+   * End the utterance `held` is recording and send it for its
+   * transcript, unless it has too little loud audio to be speech.
+   */
+  function endUtterance(held) {
+    const said = held.utterance;
+    held.utterance = null;
+    if (said.loudMs >= DICTATION_MIN_SPEECH_MS) {
+      const round = {id: ++lastRoundId, owner: said.owner, timer: null};
+      round.timer = setTimeout(
+        expireDictationRound,
+        DICTATION_REPLY_TIMEOUT_MS,
+        round,
+      );
+      dictationRounds.push(round);
+      postToDaemon({
+        type: 'voiceTranscribe',
+        audio: pcmBase64(said.chunks),
+        // No wake word precedes these words: the daemon cuts none from
+        // their start and looks for no speaker.
+        dictation: true,
+        // The daemon echoes the tag on the transcript.
+        round: round.id,
+      });
+    }
+    renderDictation();
+  }
+
+  /** Take one block of microphone audio for the dictation `held`. */
+  function hearDictation(held, event) {
+    const {samples, rms, rate, blockMs} = readBlock(event);
+    const loud = rms >= SPEECH_RMS_THRESHOLD;
+    if (!held.utterance) {
+      if (!loud) {
+        rememberAudio(held.leadIn, samples, rate, blockMs);
+        return;
+      }
+      // What feedCapture keeps of a capture, with the conversation the
+      // words are spoken to and how much of the audio is loud.
+      held.utterance = {
+        owner: currentOwner() || UNSCOPED,
+        chunks: takeAudio(held.leadIn),
+        sinceWakeMs: 0,
+        elapsedMs: 0,
+        speechStarted: true,
+        trailingSilenceMs: 0,
+        loudMs: 0,
+      };
+      renderDictation();
+    }
+    const said = held.utterance;
+    if (loud) said.loudMs += blockMs;
+    if (
+      feedCapture(said, samples, rms, blockMs, rate) ||
+      (said.elapsedMs >= DICTATION_BREATH_AFTER_MS &&
+        said.trailingSilenceMs >= DICTATION_BREATH_MS)
+    ) {
+      endUtterance(held);
+    }
+  }
+
+  /**
+   * Turn the mic off.  What was being said is still sent for its
+   * transcript, and a voice trigger that dictation paused is turned on
+   * again.
+   */
+  function stopDictation() {
+    const held = dictation;
+    dictation = null;
+    if (held.utterance) endUtterance(held);
+    releaseAudio(held.processor, held.source, held.stream, held.context);
+    renderDictation();
+    if (wakePaused) {
+      wakePaused = false;
+      setEnabled(true);
+    }
+  }
+
+  /**
+   * The dictation `held` cannot listen (it got no microphone, or lost
+   * it): turn the mic off and say why.  A mic toggled since is another
+   * dictation's, or nobody's: there is nothing to do.
+   */
+  function failDictation(held, err) {
+    if (dictation !== held) return;
+    dictationError = describeVoiceError(err, 'dictation');
+    notifyUser(DICTATION_NOTIFICATION_ID, 'error', dictationError);
+    stopDictation();
+  }
+
+  /** Turn the mic on. */
+  function startDictation() {
+    if (enabled) {
+      // The voice trigger gives the microphone up the way it does when
+      // it is turned off (the capture under way and the transcripts
+      // awaited are dropped), but stays on for the user: stopDictation
+      // turns it on again.
+      wakePaused = true;
+      setEnabled(false);
+    }
+    const held = {
+      stream: null,
+      context: null,
+      source: null,
+      processor: null,
+      leadIn: {entries: [], ms: 0, keepMs: DICTATION_LEAD_IN_MS},
+      utterance: null,
+    };
+    dictation = held;
+    dictationError = null;
+    renderDictation();
+    // The microphone is asked for within the click.  A browser that has
+    // no microphone to ask for throws here, which fails this start the
+    // way a refusal does.
+    new Promise(resolve => resolve(requestMicrophone()))
+      .then(stream => {
+        if (dictation !== held) {
+          // Turned off while the browser asked: the microphone it has
+          // just granted is released.
+          stopTracks(stream);
+          return;
+        }
+        held.stream = stream;
+        const tracks = stream.getAudioTracks();
+        for (let i = 0; i < tracks.length; i++) {
+          tracks[i].addEventListener('ended', () =>
+            failDictation(held, MIC_LOST),
+          );
+        }
+        const Ctx = window.AudioContext || window.webkitAudioContext;
+        held.context = new Ctx();
+        return resumeAudio(held.context);
+      })
+      .then(() => {
+        // Turned off before the audio ran: stopDictation has released
+        // what this start held.
+        if (dictation !== held) return;
+        held.source = held.context.createMediaStreamSource(held.stream);
+        held.processor = held.context.createScriptProcessor(4096, 1, 1);
+        held.processor.onaudioprocess = event => hearDictation(held, event);
+        held.source.connect(held.processor);
+        held.processor.connect(held.context.destination);
+        notifyUser(DICTATION_NOTIFICATION_ID, null, null);
+        renderDictation();
+      })
+      .catch(err => failDictation(held, err));
+  }
+
+  dictateBtn.addEventListener('click', () => {
+    if (dictation) stopDictation();
+    else startDictation();
+  });
+
   btn.addEventListener('click', () => {
-    setEnabled(!enabled);
+    if (dictation) {
+      // The trigger takes the microphone over: dictation ends, which
+      // turns on the trigger it had paused, or this one.
+      wakePaused = true;
+      stopDictation();
+    } else {
+      setEnabled(!enabled);
+    }
   });
 
   window.addEventListener('message', event => {
@@ -1418,6 +1728,16 @@
     const msg = event.data;
     if (!msg || typeof msg !== 'object') return;
     if (msg.type === 'voiceSpeech' && typeof msg.text === 'string') {
+      const dictated = takeDictationRound(msg.round);
+      if (dictated) {
+        // The words of a dictated utterance go into the text box of the
+        // conversation they were spoken to, where the cursor is, and
+        // are left there for the user.
+        const spoken = msg.text.trim();
+        if (spoken && composerTakes(dictated.owner)) insertAtCursor(spoken);
+        return;
+      }
+      // dictation-coverage:end
       // tableak-coverage:start
       const owner = retireRound(msg.round);
       insertSpeech(

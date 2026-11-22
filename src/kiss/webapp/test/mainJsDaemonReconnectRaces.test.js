@@ -36,7 +36,6 @@ const {
   ofType: msgsOf,
   tabIds,
 } = require('./simplify2_harness');
-const {clickClose} = require('./subagent_tab_helpers');
 const {installAudio} = require('./speech_helpers');
 const {freezeClock} = require('./history_helpers');
 
@@ -262,11 +261,14 @@ function testPollersPauseWhileDisconnected() {
 
 // --- F4 ---------------------------------------------------------------------
 
-// The user's close: only the chat on screen has an entry (with a close
-// button) on the group strip, so the chat is brought on screen first.
+// The user's close of a chat: leaving it idle for another one.  "+" on
+// a chat that is still new only focuses the composer, so the daemon's
+// task-text echo makes the chat "used" first; "+" then moves to the
+// new chat t1 and closes the chat left behind.
 function closeTabViaUi(win, tabId) {
   win._testApi.switchToTab(tabId);
-  clickClose(win, tabId);
+  send(win, {type: 'setTaskText', text: 'a task', tabId});
+  win.document.getElementById('new-chat-btn').click();
 }
 
 function testStaleSnapshotDoesNotResurrectClosedTab() {
@@ -438,9 +440,9 @@ function testCloseShieldExpiresAfterTtl() {
 }
 
 function testServerCloseNeedsNoShield() {
-  // A close mirrored FROM the daemon (closeSubagentTab / another
-  // client's close arriving as a snapshot) posts no closeTab and arms
-  // no shield: the next snapshot is authoritative as before.
+  // A close mirrored FROM the daemon (another client's close arriving
+  // as a snapshot) posts no closeTab and arms no shield: the next
+  // snapshot is authoritative as before.
   const {win, posted} = makePage();
   win._testApi.endLaunch();
   send(win, {type: 'tabs_state', tabs: [entry('t1'), entry('t2')]});

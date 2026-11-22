@@ -17,6 +17,7 @@ const {
   makeRow,
   historyRows,
   openChatsPanel,
+  pressFilterOption,
 } = require('./history_helpers');
 
 const FROZEN_NOW_MS = 1_700_500_000_000;
@@ -33,6 +34,21 @@ function indicatorOf(row) {
     row.querySelector('.sidebar-item-completed') ||
     row.querySelector('.sidebar-item-failed')
   );
+}
+
+/** The states a row's status marks stand for (it must show exactly one). */
+function marksOf(row) {
+  return ['running', 'completed', 'failed'].filter(state =>
+    row.querySelector('.sidebar-item-' + state),
+  );
+}
+
+/** The titles of the rows `keep` accepts, sorted. */
+function titlesWhere(win, keep) {
+  return historyRows(win)
+    .filter(keep)
+    .map(r => r.querySelector('.sidebar-item-text').textContent)
+    .sort();
 }
 
 function testRunningTaskShowsAtTopAfterBurgerOpen() {
@@ -87,135 +103,80 @@ function testRunningTaskShowsAtTopAfterBurgerOpen() {
   );
 }
 
-function testFinishedTaskShowsSolidGreenCircle() {
+function testFinishedTaskShowsGreenTick() {
   const {win, posted} = makePage();
   openChatsPanel(win);
   sendEmptyWorkDir(win);
   const getHist = posted.find(m => m && m.type === 'getHistory');
   assert.ok(getHist, 'burger menu open must post getHistory');
 
-  const initialSessions = [
-    makeRow({task_id: 1, title: 'fresh completed task', is_running: false}),
-    makeRow({
-      task_id: 2,
-      title: 'running task',
-      is_running: true,
-      endTs: 0,
-    }),
-    makeRow({
-      task_id: 3,
-      title: 'failed task',
-      is_running: false,
-      failed: true,
-    }),
-  ];
-  send(win, {
-    type: 'history',
-    sessions: initialSessions,
-    offset: 0,
-    generation: getHist.generation,
-  });
+  const load = secondRuns =>
+    send(win, {
+      type: 'history',
+      sessions: [
+        makeRow({task_id: 1, title: 'settled task'}),
+        makeRow(
+          Object.assign(
+            {task_id: 2, title: 'second task'},
+            secondRuns ? {is_running: true, endTs: 0} : {},
+          ),
+        ),
+        makeRow({task_id: 3, title: 'failed task', failed: true}),
+      ],
+      offset: 0,
+      generation: getHist.generation,
+    });
 
+  // A task that finished successfully before the page loaded carries
+  // the green tick, as a failed one carries its cross: every row shows
+  // exactly one mark.
+  load(true);
   let byTitle = rowsByTitle(win);
-
-  const freshRow = byTitle['fresh completed task'];
-  assert.ok(freshRow, 'fresh completed row must render');
+  assert.deepStrictEqual(marksOf(byTitle['settled task']), ['completed']);
+  assert.deepStrictEqual(marksOf(byTitle['second task']), ['running']);
+  assert.deepStrictEqual(marksOf(byTitle['failed task']), ['failed']);
+  const tick = byTitle['settled task'].querySelector('.sidebar-item-completed');
   assert.strictEqual(
-    freshRow.querySelector('.sidebar-item-completed'),
-    null,
-    'fresh history load of a completed task MUST NOT render a ' +
-      'green tick — that is reserved for tasks the user ' +
-      'just watched transition from running to completed',
-  );
-  assert.strictEqual(
-    freshRow.querySelector('.sidebar-item-running'),
-    null,
-    'fresh completed row must not render a spinner either',
-  );
-
-  const runningRow = byTitle['running task'];
-  assert.ok(
-    runningRow.querySelector('.sidebar-item-running'),
-    'running row must carry .sidebar-item-running',
-  );
-
-  const failedRow = byTitle['failed task'];
-  assert.ok(
-    failedRow.querySelector('.sidebar-item-failed'),
-    'failed row must carry .sidebar-item-failed',
-  );
-
-  const finishedSessions = [
-    makeRow({task_id: 1, title: 'fresh completed task', is_running: false}),
-    makeRow({
-      task_id: 2,
-      title: 'running task',
-      is_running: false,
-      endTs: 1_700_000_010_000,
-    }),
-    makeRow({
-      task_id: 3,
-      title: 'failed task',
-      is_running: false,
-      failed: true,
-    }),
-  ];
-  send(win, {
-    type: 'history',
-    sessions: finishedSessions,
-    offset: 0,
-    generation: getHist.generation,
-  });
-  byTitle = rowsByTitle(win);
-
-  const transitionedRow = byTitle['running task'];
-  const completedDot = transitionedRow.querySelector('.sidebar-item-completed');
-  assert.ok(
-    completedDot,
-    'a row whose running→completed transition the session ' +
-      'witnessed MUST render a .sidebar-item-completed green tick',
-  );
-  assert.strictEqual(
-    transitionedRow.firstElementChild,
-    completedDot,
+    byTitle['settled task'].firstElementChild,
+    tick,
     'green tick must be the FIRST child (middle-left) of the row',
   );
   assert.ok(
-    completedDot.classList.contains('status-tick'),
+    tick.classList.contains('status-tick'),
     'the completed indicator must be the shared .status-tick icon',
   );
   assert.ok(
-    !completedDot.classList.contains('status-spinner'),
+    !tick.classList.contains('status-spinner'),
     'the completed indicator must not be a spinner',
   );
+  assert.strictEqual(tick.getAttribute('aria-label'), 'Task completed');
+  assert.strictEqual(tick.dataset.tooltip, 'Task completed');
   // Its colour and the absence of animation are pinned on a rendered
   // tick by historyBurgerMenuRunningTask.test.js.
 
-  const stillFreshRow = byTitle['fresh completed task'];
-  assert.strictEqual(
-    stillFreshRow.querySelector('.sidebar-item-completed'),
-    null,
-    'an unrelated fresh-completed row MUST not inherit the solid ' +
-      'green tick just because another row transitioned',
+  // The rows the tick marks are the rows the Succeeded filter counts:
+  // with the filter off, exactly they go.
+  const ticked = titlesWhere(win, r =>
+    r.querySelector('.sidebar-item-completed'),
   );
+  assert.deepStrictEqual(ticked, ['settled task']);
+  pressFilterOption(win, 'status', 'Succeeded');
+  assert.deepStrictEqual(
+    titlesWhere(win, r => r.style.display === 'none'),
+    ticked,
+  );
+  pressFilterOption(win, 'status', 'Succeeded');
 
-  send(win, {
-    type: 'history',
-    sessions: finishedSessions,
-    offset: 0,
-    generation: getHist.generation,
-  });
-  const persisted = rowsByTitle(win)['running task'];
-  assert.ok(
-    persisted.querySelector('.sidebar-item-completed'),
-    'green tick MUST persist across subsequent ' +
-      'history reloads once it has appeared',
-  );
+  // The second task finishes: its spinner gives way to the tick, and
+  // the other rows keep their marks.
+  load(false);
+  byTitle = rowsByTitle(win);
+  assert.deepStrictEqual(marksOf(byTitle['settled task']), ['completed']);
+  assert.deepStrictEqual(marksOf(byTitle['second task']), ['completed']);
+  assert.deepStrictEqual(marksOf(byTitle['failed task']), ['failed']);
 
   win.close();
-  console.log(
-    '  ok - green tick only after witnessed running→completed transition',
-  );
+  console.log('  ok - every successfully finished task shows the green tick');
 }
 
 function testIndicatorsAreVerticallyCenteredInTaskPanels() {
@@ -224,31 +185,6 @@ function testIndicatorsAreVerticallyCenteredInTaskPanels() {
   sendEmptyWorkDir(win);
   const getHist = posted.find(m => m && m.type === 'getHistory');
   assert.ok(getHist, 'burger menu open must post getHistory');
-
-  send(win, {
-    type: 'history',
-    sessions: [
-      makeRow({
-        task_id: 11,
-        title: 'completed centered task',
-        is_running: true,
-        endTs: 0,
-      }),
-      makeRow({
-        task_id: 12,
-        title: 'running centered task',
-        is_running: true,
-        endTs: 0,
-      }),
-      makeRow({
-        task_id: 13,
-        title: 'failed centered task',
-        failed: true,
-      }),
-    ],
-    offset: 0,
-    generation: getHist.generation,
-  });
 
   send(win, {
     type: 'history',
@@ -323,7 +259,7 @@ function testIndicatorsAreVerticallyCenteredInTaskPanels() {
 
 function main() {
   testRunningTaskShowsAtTopAfterBurgerOpen();
-  testFinishedTaskShowsSolidGreenCircle();
+  testFinishedTaskShowsGreenTick();
   testIndicatorsAreVerticallyCenteredInTaskPanels();
   console.log('historyTaskRowIndicators.test.js: all assertions passed.');
 }

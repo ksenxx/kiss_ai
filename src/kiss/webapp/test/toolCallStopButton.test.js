@@ -370,7 +370,7 @@ async function run() {
 /**
  * A sub-agent's tool runs on its own task; the daemon may re-announce
  * that sub-agent under a new tab id (retagSubagentTab renames the tab
- * and releases the old id).  The panel's Stop, clicked after the
+ * and tells the daemon nothing).  The panel's Stop, clicked after the
  * rename, must name the surviving tab: an interruptTool for the
  * retired id reaches no running task.
  */
@@ -392,8 +392,8 @@ function retagBody() {
   });
   announceRetaggedSubagent(win, parentId, 'sa-2');
   assert.ok(
-    wv.posted.some(m => m.type === 'closeTab' && m.tabId === 'sa-1'),
-    'setup: the retag releases the old id',
+    !wv.posted.some(m => m.type === 'closeTab'),
+    'setup: the rename of a sub-agent tab is not reported to the daemon',
   );
   assert.strictEqual(win._testApi.getActiveTabId(), 'sa-2');
   const tc = win.document.querySelector('#output .ev.tc');

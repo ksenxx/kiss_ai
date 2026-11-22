@@ -694,3 +694,25 @@ class TestHandoffConversationDelegated:
         types = {p.get("type") for p in user["content"] if isinstance(p, dict)}
         assert "input_image" in types
         assert "input_text" in types
+
+    def test_uploaded_file_part_keeps_its_file_id(self, capture_server: str) -> None:
+        """A Chat ``file`` part naming an uploaded file is sent as ``input_file`` (audit C8/F3).
+
+        Only inline ``file_data`` was converted: the part was dropped, and
+        the model answered without the document.  A part with neither is
+        still left out.
+        """
+        m = _make_model(capture_server)
+        m.initialize("summarize")
+        m.conversation[-1]["content"] = [
+            {"type": "text", "text": "summarize"},
+            {"type": "file", "file": {"file_id": "file-abc"}},
+            {"type": "file", "file": {}},
+        ]
+        _DelegationHandler.responses_queue = [_responses_text_json()]
+        m.generate_and_process_with_tools({"echo": echo})
+        user = next(it for it in _last_request()["body"]["input"] if it.get("role") == "user")
+        assert user["content"] == [
+            {"type": "input_text", "text": "summarize"},
+            {"type": "input_file", "file_id": "file-abc"},
+        ]

@@ -44,8 +44,7 @@ const {
 const {test, report} = makeRunner();
 
 // The page's clock stays at the noon the fixture rows are dated from, so
-// a run that crosses midnight still files them under Today / Yesterday,
-// and a running row's duration does not depend on how long a render takes.
+// a run that crosses midnight still files them under Today / Yesterday.
 const todayNoon = todayNoonSec();
 
 function makePage() {
@@ -301,12 +300,20 @@ async function main() {
       '1',
       'the running chat is still marked for the Running section',
     );
-    // The header is no toggle: the "Show details" chevron in its
-    // action strip (as on a task panel) folds and unfolds the tasks.
+    // The header is no toggle: the fold button on its line, left of
+    // the "…" button, folds and unfolds the tasks.
     const chevronA = gA.querySelector(
-      '.history-chat-header > .history-chat-actions > .history-chat-collapse',
+      '.history-chat-header > .history-chat-collapse',
     );
-    assert.ok(chevronA, 'the chat panel carries a Show details chevron');
+    assert.ok(chevronA, 'the chat panel carries a fold button on its line');
+    assert.ok(
+      chevronA.nextElementSibling.classList.contains('sidebar-item-more'),
+      'immediately left of the "…" button',
+    );
+    assert.strictEqual(
+      chevronA.getAttribute('aria-label'),
+      "Show the chat's tasks",
+    );
     assert.strictEqual(chevronA.getAttribute('aria-expanded'), 'false');
     assert.strictEqual(chevronA.dataset.tooltip, 'Show details');
     assert.strictEqual(
@@ -630,12 +637,11 @@ async function main() {
     win.close();
   });
 
-  await test('History: a kept row with a ticking duration gets its metrics refreshed in place', async () => {
+  await test('History: a running row is kept by an identical refresh a minute later', async () => {
     const {win, posted} = makePage();
-    // A running task's duration is `Date.now() - startTs`; the fast
-    // path must keep the node (so clicks/focus survive) but refresh the
-    // metrics text so the duration keeps ticking.  This is the shape of
-    // every running row and of completed rows lacking a recorded end.
+    // A running task has been at work a minute longer when the same
+    // page comes back: the fast path must still keep its node (so
+    // clicks/focus survive), as it keeps a finished row's.
     const startTs = win.Date.now() - 59000;
     const page1 = () => [
       session('A', 'a1', todayNoon, {is_running: true, startTs}),
@@ -643,9 +649,6 @@ async function main() {
     ];
     sendHistory(win, posted, 0, page1());
     const rowBefore = firstRow(win);
-    const metricsEl = rowBefore.querySelector('.running-item-metrics');
-    const textBefore = metricsEl.textContent;
-    assert.ok(/00:00:59/.test(textBefore), textBefore);
     const realNow = win.Date.now;
     win.Date.now = () => realNow() + 60000;
     try {
@@ -654,17 +657,8 @@ async function main() {
       assert.strictEqual(
         firstRow(win),
         rowBefore,
-        'the ticking row node is kept',
+        'the running row node is kept',
       );
-      const textAfter = rowBefore.querySelector(
-        '.running-item-metrics',
-      ).textContent;
-      assert.notStrictEqual(
-        textAfter,
-        textBefore,
-        'the duration must be recomputed in place',
-      );
-      assert.ok(/00:01:59/.test(textAfter), textAfter);
     } finally {
       win.Date.now = realNow;
     }
@@ -1263,29 +1257,35 @@ async function main() {
         1,
         "B's later deadline must not move the armed timer",
       );
-      // The timer fires (both overlays still pending) and refetches; the
-      // reply's PAGE ORDER puts the later deadline (B) first: the next
-      // timer must be re-armed for A's earlier deadline (~4.1s away at
-      // T+6s), not left at B's (~9.1s away).
+      // The timer fires (both overlays still pending) and refetches:
+      // the next timer is armed for A's earlier deadline (~4.1s away at
+      // T+6s), not for B's (~9.1s away), and the reply, whose PAGE
+      // ORDER puts the later deadline (B) first, arms no other.
       win.Date.now = () => T + 6000;
       timers[0].fn();
       sendHistory(win, posted, 0, [
         session('B', 'b1', todayNoon - 600, {steps: 3}),
         session('A', 'a1', todayNoon, {steps: 3}),
       ]);
-      assert.strictEqual(timers.length, 3, 'armed for B, re-armed for A');
+      assert.strictEqual(timers.length, 2, 're-armed once, for A');
       assert.ok(
-        timers[2].ms >= 4000 && timers[2].ms <= 4300,
-        `re-armed for the earliest pending deadline, got ${timers[2].ms}ms`,
+        timers[1].ms >= 4000 && timers[1].ms <= 4300,
+        `re-armed for the earliest pending deadline, got ${timers[1].ms}ms`,
       );
       // At A's deadline the timer refetches; A's overlay has expired
-      // (daemon value rules) while B's still holds.
+      // (daemon value rules) while B's still holds, its own bound
+      // planned (~4.9s away).
       win.Date.now = () => T + 10200;
       const asked = ofType(posted, 'getHistory').length;
-      timers[2].fn();
+      timers[1].fn();
       assert.ok(
         ofType(posted, 'getHistory').length > asked,
         'the earliest-deadline timer refetches the history',
+      );
+      assert.strictEqual(timers.length, 3, "B's own bound is planned");
+      assert.ok(
+        timers[2].ms >= 4800 && timers[2].ms <= 5000,
+        `planned for B's deadline, got ${timers[2].ms}ms`,
       );
       sendHistory(win, posted, 0, [
         session('A', 'a1', todayNoon, {steps: 3}),

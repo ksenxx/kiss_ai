@@ -28,6 +28,8 @@ from google.genai import types
 
 from kiss.core import config as config_module
 from kiss.core.models.anthropic_model import AnthropicModel
+from kiss.core.models.claude_code_model import ClaudeCodeModel
+from kiss.core.models.codex_model import CodexModel
 from kiss.core.models.gemini_model import GeminiModel
 from kiss.core.models.model_families import (
     fallback_of_another_family,
@@ -102,6 +104,14 @@ def test_fail_over_prefers_a_configured_other_family_to_the_twin(
     assert fallback_of_another_family(model_name) == "claude-opus-5-5", twin
 
 
+def _put_on_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *clis: str) -> None:
+    """Make ``PATH`` hold only the named CLIs, as executables that are looked up and never run."""
+    for cli in clis:
+        executable = f"{cli}.cmd" if sys.platform == "win32" else cli
+        (tmp_path / executable).touch(mode=0o755)
+    monkeypatch.setenv("PATH", str(tmp_path))
+
+
 _BEDROCK = "AWS_BEARER_TOKEN_BEDROCK"
 
 
@@ -121,13 +131,9 @@ def test_a_native_route_is_a_second_opinion_only_where_there_was_none(
 
     Without a CLI, OpenAI plus Bedrock was told no other family is
     configured (``""``: the strongest Bedrock model registered); with one,
-    the CLI model stays the answer.  ``PATH`` holds only the named CLIs,
-    as executables the selection looks up and never runs.
+    the CLI model stays the answer.
     """
-    for cli in clis.split():
-        executable = f"{cli}.cmd" if sys.platform == "win32" else cli
-        (tmp_path / executable).touch(mode=0o755)
-    monkeypatch.setenv("PATH", str(tmp_path))
+    _put_on_path(monkeypatch, tmp_path, *clis.split())
     _configure_only(monkeypatch, *keys.split())
     assert other_family_model(model) == (expected or registered_bedrock_model(cheapest=False))
 
@@ -294,3 +300,28 @@ def test_the_codex_cli_reads_no_effort_but_the_portable_one() -> None:
     native = {"reasoning": {"effort": "low"}, "output_config": {"effort": "low"}}
     assert same_model_and_effort("codex/default", "codex/default", native)
     assert not same_model_and_effort("codex/default", "codex/default", {"reasoning_effort": "low"})
+
+
+def _launch(name: str) -> list[str]:
+    """The command line the factory's adapter for *name* starts its CLI with."""
+    adapter = model(name)
+    assert isinstance(adapter, ClaudeCodeModel | CodexModel)
+    return adapter._build_cli_args("prompt-file")
+
+
+@pytest.mark.parametrize("base", ["cc/opus", "cc/sonnet", "codex/gpt-6-astra"])
+def test_an_unlisted_xhigh_alias_is_another_worker_only_when_its_cli_is_launched_apart(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, base: str
+) -> None:
+    """``cc/opus-xhigh`` is ``cc/opus``: Claude Code gets the same model and no effort for both.
+
+    The catalog lists none of these aliases.  The Codex CLI's adapter reads
+    the level off the suffix (``model_reasoning_effort="xhigh"``); Claude
+    Code's sends ``--effort`` for a level of the catalog only, yet the
+    alias used to pass for another worker than the model it is launched as.
+    """
+    _put_on_path(monkeypatch, tmp_path, "claude", "codex")
+    alias = f"{base}-xhigh"
+    apart = _launch(base) != _launch(alias)
+    assert apart == base.startswith("codex/")
+    assert same_model_and_effort(base, alias) == (not apart)

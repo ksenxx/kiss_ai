@@ -53,20 +53,25 @@ import os
 import re
 import shutil
 import signal
+import socket
 import statistics
 import subprocess
 import sys
 import threading
 import time
+from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import FrameType
 from urllib.parse import parse_qs, quote, urlparse
+from zoneinfo import ZoneInfo
 
 import pytest
 
 from kiss.agents.sorcar import web_stealth
 from kiss.agents.sorcar.web_use_tool import WebUseTool
+from kiss.core.config import kiss_home
+from kiss.core.processes import exited_unreaped
 from kiss.core.tool_interrupt import ToolCallInterrupted, inject_async_exception
 from kiss.tests.agents.sorcar.test_webuse_unresponsive_page_timeout import _stop_in
 from kiss.tests.server.pause import Pause
@@ -104,10 +109,12 @@ document.getElementById('box').addEventListener('keydown', e => ev.keys.push(per
 # HUMAN / PerimeterX's block page as walmart.com/blocked shows it: the
 # heading and sentence the detector keys on, and the ``#px-captcha``
 # element whose iframe holds the "Press & Hold" bar.  The bar counts a
-# hold of at least 5 s (the real bar fills over several seconds) and the
-# page loads the content once ``NEED`` holds were counted, carrying the
-# last hold's length and the pointer moves seen while held.  ``WIDTH`` x
-# ``HEIGHT`` is the element's size (the real bar is about 300 x 100).
+# hold of at least 5 s (the real bar fills over several seconds and then
+# says "completed, please wait" while still held, as this one does) and
+# the page loads the content once ``NEED`` holds were counted, carrying
+# the last hold's length and the pointer moves seen while held.
+# ``WIDTH`` x ``HEIGHT`` is the element's size (the real bar is about
+# 300 x 100).
 _PRESS_HOLD_PAGE = """<!doctype html><html><head><title>Robot or human?</title></head>
 <body style="margin:0;padding:40px;font:16px sans-serif">
 <h1>Robot or human?</h1>
@@ -116,12 +123,16 @@ _PRESS_HOLD_PAGE = """<!doctype html><html><head><title>Robot or human?</title><
  style="width:100%;height:100%;border:0" srcdoc="<body style='margin:0'>
 <div id=b style='width:100%;height:100px;background:#ddd;user-select:none'>Press &amp; Hold</div>
 <script>
-let down = 0, moves = 0, holds = 0;
+let down = 0, moves = 0, holds = 0, timer = 0;
 const b = document.getElementById('b');
-b.addEventListener('mousedown', () => { down = performance.now(); moves = 0; });
+b.addEventListener('mousedown', () => {
+  down = performance.now(); moves = 0;
+  timer = setTimeout(() => { b.textContent = 'Human Challenge completed, please wait'; }, 5000);
+});
 b.addEventListener('mousemove', () => { if (down) moves++; });
 b.addEventListener('mouseup', () => {
   const ms = performance.now() - down; down = 0;
+  clearTimeout(timer); b.textContent = 'Press &amp; Hold';
   if (ms >= 5000) { holds++; parent.postMessage({holds, ms, moves}, '*'); }
 });
 </script></body>"></iframe></div>
@@ -140,8 +151,11 @@ addEventListener('message', e => {
 # "Press & Hold" button is 200 px at its left edge, so no part of it lies
 # in the middle 35-65 % of the 900 px element.  Ahead of the button the
 # frame carries an off-frame decoy with the same role and name.  The page
-# loads the content after ``NEED`` holds of 5 s or more on the button;
-# ``SHOWN`` 0 keeps every copy hidden (the widget still rendering).
+# loads the content after ``NEED`` holds of 5 s or more on the button,
+# which says "completed, please wait" from then on while held;
+# ``SHOWN`` 0 keeps every copy hidden (the widget still rendering), and
+# ``HIDE`` is the style that hides a copy (``visibility:hidden`` copies
+# keep their layout boxes, above the visible one).
 _WIDE_PRESS_HOLD_PAGE = """<!doctype html><html><head><title>It needs a human touch</title></head>
 <body style="margin:0;padding:40px;font:16px sans-serif">
 <h1>It needs a human touch</h1>
@@ -157,17 +171,22 @@ let holds = 0;
 for (let i = 0; i < 4; i++) {
   const f = document.createElement('iframe');
   f.title = 'Human verification challenge';
-  f.style.cssText = 'width:100%;height:102px;border:0;display:'
-    + (i === 3 && SHOWN ? 'block' : 'none');
+  f.style.cssText = 'width:100%;height:102px;border:0;display:block;'
+    + (i === 3 && SHOWN ? '' : 'HIDE');
   f.addEventListener('load', () => {
     const b = f.contentDocument.getElementById('b');
-    let down = 0, moves = 0;
-    b.addEventListener('mousedown', () => { down = performance.now(); moves = 0; });
+    let down = 0, moves = 0, timer = 0;
+    b.addEventListener('mousedown', () => {
+      down = performance.now(); moves = 0;
+      timer = setTimeout(() => { b.textContent = 'Human Challenge completed, please wait'; }, 5000);
+    });
     b.addEventListener('mousemove', () => { if (down) moves++; });
     b.addEventListener('mouseup', () => {
       if (!down) return;
       const ms = performance.now() - down;
       down = 0;
+      clearTimeout(timer);
+      b.textContent = 'Press & Hold';
       if (ms >= 5000 && ++holds >= NEED)
         location.href = '/press-hold-done?ms=' + Math.round(ms) + '&moves=' + moves;
     });
@@ -175,6 +194,98 @@ for (let i = 0; i < 4; i++) {
   f.srcdoc = bar;
   root.appendChild(f);
 }
+</script></body></html>"""
+
+
+# walmart.com/blocked as served on 22 Nov 2026, HUMAN's "Enhanced
+# Accessibility Mode": the visible frame (288 x 102, after two hidden
+# copies in the closed shadow root) holds a round 40 px "Accessible
+# challenge" button first and the 238 px "Press & Hold" bar right of it.
+# The bar fills in ``FILL`` ms while held and only then says "HUMAN
+# CHALLENGE COMPLETED, PLEASE WAIT" (never with ``QUIET`` 1); let go
+# earlier, the hold does not count.  A press on the icon switches the
+# widget to its accessible flow ("PLEASE WAIT"), in which holds do not
+# count either.  The page loads the content after ``NEED`` full holds,
+# carrying the last hold's length; ``window.px`` records every release
+# as ``[ms, full]`` and the presses of the icon, and every press of the
+# bar is told to the server (``/px-pressed`` with the page's query).
+_ACCESSIBLE_PRESS_HOLD_PAGE = """<!doctype html><html><head><title>Robot or human?</title></head>
+<body style="margin:0;padding:40px;font:16px sans-serif">
+<h1>Robot or human?</h1>
+<p>Activate and hold the button to confirm that you\u2019re human. Thank You!</p>
+<div id="px-captcha" style="display:block;width:288px;height:102px"></div>
+<script>
+window.px = {released: [], icon: 0};
+const root = document.getElementById('px-captcha').attachShadow({mode: 'closed'});
+const widget = "<body style='margin:0'><div style='display:flex;align-items:center;height:102px'>"
+  + "<a id=icon role=button tabindex=0 aria-label='Accessible challenge' style='display:block;"
+  + "flex:none;width:40px;height:40px;border-radius:20px;background:#424257;margin:0 8px 0 1px'>"
+  + "</a><div id=b role=button tabindex=0 aria-label='Press &amp; Hold Human Challenge'"
+  + " style='flex:none;width:238px;height:100px;background:#ddd;user-select:none'>"
+  + "<p id=t>PRESS &amp; HOLD</p></div></div></body>";
+let holds = 0;
+for (let i = 0; i < 3; i++) {
+  const f = document.createElement('iframe');
+  f.title = 'Human verification challenge';
+  f.style.cssText = 'width:100%;height:102px;border:0;display:' + (i === 2 ? 'block' : 'none');
+  f.addEventListener('load', () => {
+    const doc = f.contentDocument, b = doc.getElementById('b'), t = doc.getElementById('t');
+    let down = 0, full = false, timer = 0;
+    doc.getElementById('icon').addEventListener('mousedown', () => {
+      window.px.icon++;
+      t.textContent = 'PLEASE WAIT';
+    });
+    b.addEventListener('mousedown', () => {
+      down = performance.now(); full = false;
+      fetch('/px-pressed' + location.search);
+      timer = setTimeout(() => {
+        full = true;
+        if (!QUIET && !window.px.icon) t.textContent = 'HUMAN CHALLENGE COMPLETED, PLEASE WAIT';
+      }, FILL);
+    });
+    b.addEventListener('mouseup', () => {
+      if (!down) return;
+      const ms = Math.round(performance.now() - down);
+      down = 0;
+      clearTimeout(timer);
+      window.px.released.push([ms, full]);
+      if (window.px.icon) return;
+      t.textContent = 'PRESS & HOLD';
+      if (full && ++holds >= NEED) location.href = '/press-hold-done?ms=' + ms;
+    });
+  });
+  f.srcdoc = widget;
+  root.appendChild(f);
+}
+</script></body></html>"""
+
+
+# The front page of a site behind HUMAN.  Its script rates the visitor two
+# seconds after the page loaded (the ``_px3`` cookie) -- badly when the
+# browser still carries what the check page left in its storage.
+_FRONT_PAGE = """<!doctype html><html><head><title>Shop</title></head>
+<body><h1>Everything store</h1>
+<script>
+setTimeout(() => {
+  const remembered = localStorage.getItem('PXtest_px_hvd') || sessionStorage.getItem('pxsid');
+  document.cookie = '_px3=' + (remembered ? 'bad' : 'ok') + '; path=/';
+}, 2000);
+</script></body></html>"""
+
+# What walmart.com's check page leaves in the browser (22 Nov 2026):
+# HUMAN's cookies and storage keys -- next to the site's own, a login and
+# a cart here.  Appended to the check page ``/shop/blocked`` serves.
+_SHOP_MARKS = """<script>
+localStorage.setItem('PXtest_px_hvd', '1');
+localStorage.setItem('PXtest_px_fp', 'f');
+sessionStorage.setItem('pxsid', 's');
+sessionStorage.setItem('_px_acp', 'a');
+document.cookie = '_px3=bad; path=/';
+document.cookie = '_pxvid=v1; path=/';
+document.cookie = 'pxcts=c1; path=/';
+localStorage.setItem('cart', '3 items');
+sessionStorage.setItem('tab', 'offers');
+document.cookie = 'login=user42; path=/';
 </script></body></html>"""
 
 
@@ -188,8 +299,21 @@ class _Handler(BaseHTTPRequestHandler):
     ``/blocked`` never clears; ``/press-hold?need=N&w=W&h=H`` is a
     press-and-hold page cleared by *N* holds of its *W* x *H* bar and
     ``/press-hold-bare`` the same page without the bar;
-    ``/press-hold-wide?need=N&shown=S`` is fiverr's layout of the widget
-    (a narrow button in a wide frame among hidden copies); ``/anubis``
+    ``/press-hold-wide?need=N&shown=S&hide=H`` is fiverr's layout of the
+    widget (a narrow button in a wide frame among copies hidden with the
+    style *H*, ``display:none`` unless given);
+    ``/press-hold-accessible?need=N&fill=MS&quiet=Q`` is walmart's (an
+    "Accessible challenge" icon ahead of a bar that is full after *MS* ms
+    and, unless *Q* is 1, says so); ``/`` is the site's front page (see
+    ``front``); ``/shop/item?lucky=N`` is a product page as walmart.com
+    serves it -- only to a visitor HUMAN rated on the front page
+    (``_px3=ok``) and does not remember as checked (the ``_pxhd`` cookie
+    it sets, HttpOnly), and with *N* only from the *N*-th such request on
+    -- redirecting everybody else to ``/shop/blocked``, a check page on
+    which no hold counts and which leaves HUMAN's marks in the browser;
+    ``/tz?zone=Z|json=Z&status=S`` is a service telling the timezone of
+    the caller's address (bare or as JSON, an error page without either);
+    ``/anubis``
     answers the first request per query with an Anubis page that reloads
     after 16 s (more than the ordinary 12 s wait); ``/sorry/index`` is
     Google's "unusual traffic" page; ``/aws-challenge`` answers the first
@@ -214,10 +338,17 @@ class _Handler(BaseHTTPRequestHandler):
     """
 
     challenge_hits: dict[str, int] = {}
+    # How often each path (with its query) was asked for.
+    hits: dict[str, int] = {}
+    # What ``/`` is: ``"checked"``, HUMAN's check too (a site that checks
+    # every page of a visitor it rates badly); ``"rates"``, a page whose
+    # script rates the visitor (:data:`_FRONT_PAGE`); ``"down"``, no answer.
+    front = "checked"
 
     def do_GET(self) -> None:  # noqa: N802 — BaseHTTPRequestHandler API
         """Answer the request according to its path."""
         path = urlparse(self.path).path
+        self.hits[self.path] = self.hits.get(self.path, 0) + 1
         headers = {}
         status = 200
         if path == "/events":
@@ -247,11 +378,56 @@ class _Handler(BaseHTTPRequestHandler):
             body = _PRESS_HOLD_PAGE.split('<div id="px-captcha"')[0] + "</body></html>"
         elif path == "/press-hold-wide":
             query = parse_qs(urlparse(self.path).query)
-            body = _WIDE_PRESS_HOLD_PAGE.replace("NEED", query.get("need", ["1"])[0]).replace(
-                "SHOWN", query.get("shown", ["1"])[0]
+            body = (
+                _WIDE_PRESS_HOLD_PAGE.replace("NEED", query.get("need", ["1"])[0])
+                .replace("SHOWN", query.get("shown", ["1"])[0])
+                .replace("HIDE", query.get("hide", ["display:none"])[0])
+            )
+        elif path == "/press-hold-accessible":
+            query = parse_qs(urlparse(self.path).query)
+            body = (
+                _ACCESSIBLE_PRESS_HOLD_PAGE.replace("NEED", query.get("need", ["1"])[0])
+                .replace("FILL", query.get("fill", ["5000"])[0])
+                .replace("QUIET", query.get("quiet", ["0"])[0])
             )
         elif path == "/press-hold-done":
             body = "<title>Real content</title><body><h1>Welcome</h1></body>"
+        elif path == "/":
+            if self.front == "down":
+                self.close_connection = True
+                return
+            bare = _PRESS_HOLD_PAGE.split('<div id="px-captcha"')[0] + "</body></html>"
+            body = _FRONT_PAGE if self.front == "rates" else bare
+        elif path == "/shop/item":
+            asked = urlparse(self.path).query
+            cookies = self.headers.get("Cookie", "")
+            rated = "_px3=ok" in cookies and "_pxhd=" not in cookies
+            if rated:
+                # HUMAN's rating has a random part: the first are unlucky.
+                key = f"rated {self.path}"
+                n = self.challenge_hits[key] = self.challenge_hits.get(key, 0) + 1
+                rated = n >= int(parse_qs(asked).get("lucky", ["1"])[0])
+            if rated:
+                body = "<title>Real content</title><body><h1>Welcome</h1></body>"
+            else:
+                status = 307
+                headers["Location"] = f"/shop/blocked?{asked}"
+                headers["Set-Cookie"] = "_pxhd=remembered; Path=/; HttpOnly"
+                body = ""
+        elif path == "/shop/blocked":
+            body = (
+                _ACCESSIBLE_PRESS_HOLD_PAGE.replace("NEED", "99")
+                .replace("FILL", "5000")
+                .replace("QUIET", "0")
+                .replace("</body></html>", _SHOP_MARKS)
+            )
+        elif path == "/tz":
+            query = parse_qs(urlparse(self.path).query)
+            status = int(query.get("status", ["200"])[0])
+            if "json" in query:
+                body = json.dumps({"ip": "203.0.113.7", "timezone": query["json"][0]})
+            else:
+                body = query.get("zone", ["<html>Too many requests</html>"])[0] + "\n"
         elif path == "/anubis":
             n = self.challenge_hits.get(self.path, 0) + 1
             self.challenge_hits[self.path] = n
@@ -604,7 +780,8 @@ def test_fingerprint_has_no_automation_tells(tool, server):
         "() => ({ua: navigator.userAgent, wd: navigator.webdriver,"
         " inner: [innerWidth, innerHeight], outer: [outerWidth, outerHeight],"
         " dpr: devicePixelRatio,"
-        " tz: Intl.DateTimeFormat().resolvedOptions().timeZone})"
+        " tz: Intl.DateTimeFormat().resolvedOptions().timeZone,"
+        " offsets: [0, 6].map(month => new Date(2026, month, 15, 12).getTimezoneOffset())})"
     )
     assert "HeadlessChrome" not in probe["ua"] and "Chrome/" in probe["ua"]
     assert probe["wd"] is False
@@ -615,10 +792,22 @@ def test_fingerprint_has_no_automation_tells(tool, server):
     assert tuple(probe["inner"]) == tool._viewport_size()
     assert probe["dpr"] == 1  # the machine's real scale, no Retina emulation
     # No timezone override: whatever the machine reports is what a
-    # person's browser here would report too.
+    # person's browser here would report too -- except a server's UTC,
+    # where it is the zone of the machine's address when somebody could
+    # tell it (test_browser_on_a_utc_machine_reports_the_zone_of_its_address).
     assert probe["tz"]
-    if time.tzname[0] == "UTC":
-        assert probe["tz"] in ("UTC", "Etc/UTC")
+    if web_stealth.machine_clock_is_utc():
+        zone = web_stealth.browser_timezone(kiss_home() / "browser_timezone.json")
+        if zone is None:
+            assert probe["tz"] in ("UTC", "Etc/UTC")
+        else:
+            # Chrome names some zones as it used to (Asia/Calcutta): the clock tells.
+            there, utc = ZoneInfo(zone), ZoneInfo("UTC")
+            noons = [datetime(2026, month, 15, 12) for month in (1, 7)]
+            assert probe["offsets"] == [
+                (noon.replace(tzinfo=there) - noon.replace(tzinfo=utc)) // timedelta(minutes=1)
+                for noon in noons
+            ]
 
 
 def test_unattended_browser_has_no_webauthn(tool, server):
@@ -761,6 +950,45 @@ def test_virtual_display_restarts_after_stop_and_falls_back_without_xvfb(tool, s
     assert fresh is not None
     tool.go_to_url(f"{server}/inert")
     assert tool._chromium_headless is False
+
+
+def _runs_xvfb(pid: int) -> bool:
+    """Whether *pid* is a running Xvfb: not gone, a zombie, or a stranger that took the number."""
+    try:
+        return Path(f"/proc/{pid}/cmdline").read_bytes().startswith(b"Xvfb\0")
+    except OSError:
+        return False
+
+
+def test_restart_ends_the_xvfb_of_a_wrapper_killed_from_outside(tool):
+    """The Xvfb of a wrapper that was killed alone is ended when the display restarts.
+
+    The wrapper kills its Xvfb only on its own way out; killed from
+    outside (the kernel's OOM killer, a stray ``pkill``), it leaves
+    Xvfb running in its process group.  The restart used to reap the
+    dead wrapper and forget it, after which nothing could end that
+    Xvfb: not the next display, not ``stop_virtual_display`` (audit
+    S17/F2).
+    """
+    tool.close()
+    web_stealth.stop_virtual_display()
+    assert web_stealth.virtual_display() is not None
+    wrapper = web_stealth._XVFB_PROC
+    assert wrapper is not None
+    xvfb_pid = int(subprocess.run(
+        ["pgrep", "-P", str(wrapper.pid), "-x", "Xvfb"], capture_output=True, text=True
+    ).stdout.split()[0])
+    try:
+        os.kill(wrapper.pid, signal.SIGKILL)
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not exited_unreaped(wrapper):
+            time.sleep(0.01)  # watched, not reaped: the restart finds it as it would
+        assert web_stealth.virtual_display() is not None
+        assert web_stealth._XVFB_PROC is not wrapper
+        assert not _runs_xvfb(xvfb_pid), "the killed wrapper's Xvfb outlived the restart"
+    finally:
+        if _runs_xvfb(xvfb_pid):  # on failure: no orphan
+            os.kill(xvfb_pid, signal.SIGTERM)
 
 
 def test_broken_xvfb_binary_means_no_virtual_display(tool, tmp_path):
@@ -970,6 +1198,66 @@ def test_caller_stopped_while_another_start_up_runs_starts_no_xvfb(tool):
             time.sleep(0.01)  # until the queued start-up had its turn
         assert not _threads_since(others)
         assert hook.wrapper is None, "an Xvfb was started for a caller that had left"
+    finally:
+        threading.setprofile(None)
+    assert web_stealth.virtual_display() is not None
+
+
+class _StopAsWaitTakesALock:
+    """Profile hook: raise the Stop in the caller where its wait has just taken a condition.
+
+    CPython raises an injected exception at a check point of the
+    bytecode, and one sits where ``Condition.__enter__`` returns with
+    the lock held, before the ``with`` block that would release it is
+    entered (gh-74174).  The hook raises there, once, in ``caller``,
+    after ``caller`` started its start-up thread; ``fired`` says
+    whether the wait took a condition at all.
+    """
+
+    def __init__(self) -> None:
+        self.outcome: list[object] = []
+        self.caller = threading.Thread(target=_start_display, args=(self.outcome,), daemon=True)
+        self.waiting = False
+        self.fired = False
+
+    def __call__(self, frame: FrameType, event: str, arg: object) -> None:
+        if event != "return" or self.fired or threading.get_ident() != self.caller.ident:
+            return
+        if frame.f_code is threading.Thread.start.__code__:
+            self.waiting = True
+        elif self.waiting and frame.f_code is threading.Condition.__enter__.__code__:
+            self.fired = True
+            raise KeyboardInterrupt
+
+
+def test_caller_stopped_as_its_wait_takes_a_lock_strands_no_start_up_thread(tool):
+    """A Stop landing where the caller's wait has just taken a lock leaves no thread behind.
+
+    The caller waited on a ``Future``.  Stopped right after
+    ``Future.result`` acquired the future's condition, it left that
+    lock held for good, and its start-up thread, which publishes the
+    display under the same lock, never ended (audit S17/F1).  A wait
+    that takes no lock gives the hook nothing to raise at: the caller
+    is then stopped as the runner stops it.
+    """
+    tool.close()
+    web_stealth.stop_virtual_display()
+    hook = _StopAsWaitTakesALock()
+    others = set(threading.enumerate())
+    threading.setprofile(hook)
+    try:
+        with web_stealth._XVFB_LOCK:  # the start-up thread queues here while the caller waits
+            hook.caller.start()
+            hook.caller.join(timeout=1)  # several slices of the wait
+            if not hook.fired:
+                hook.fired = True
+                assert inject_async_exception(hook.caller.ident or -1, KeyboardInterrupt) == 1
+            hook.caller.join(timeout=30)
+            assert hook.outcome == [KeyboardInterrupt]
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline and _threads_since(others):
+            time.sleep(0.01)
+        assert not _threads_since(others), "the start-up thread never ended"
     finally:
         threading.setprofile(None)
     assert web_stealth.virtual_display() is not None
@@ -1495,16 +1783,431 @@ def test_press_and_hold_target_is_the_visible_frames_button(tool, server):
     # Every point the old press drew from (35-65 % of the element) misses it.
     assert box["x"] + box["width"] < widget["x"] + 0.35 * widget["width"]
     # While every copy is hidden nothing is pressed, though the element
-    # itself is bar-sized.
-    tool._page.goto(f"{server}/press-hold-wide?shown=0", wait_until="load")
-    assert tool._read_page(tool._page, web_stealth.PRESS_AND_HOLD_BOX_JS)
-    copies: list = []
-    deadline = time.monotonic() + 10
-    while len(copies) < 4 and time.monotonic() < deadline:
-        time.sleep(0.1)
-        copies = [f for f in tool._page.frames if f.parent_frame is not None]
-    assert len(copies) == 4, copies
-    assert tool._challenge_widget(web_stealth.PERIMETERX_CHECK) is None
+    # itself is bar-sized: whether the copies have no box
+    # (``display:none``) or keep theirs (``visibility:hidden``, S17/F3).
+    for hide in ("display:none", "visibility:hidden"):
+        tool._page.goto(f"{server}/press-hold-wide?shown=0&hide={hide}", wait_until="load")
+        assert tool._read_page(tool._page, web_stealth.PRESS_AND_HOLD_BOX_JS)
+        copies: list = []
+        deadline = time.monotonic() + 10
+        while len(copies) < 4 and time.monotonic() < deadline:
+            time.sleep(0.1)
+            copies = [f for f in tool._page.frames if f.parent_frame is not None]
+        assert len(copies) == 4, copies
+        assert tool._challenge_widget(web_stealth.PERIMETERX_CHECK) is None, hide
+    # Among copies hidden with ``visibility:hidden`` the target is still the
+    # visible copy's button, below the three boxes those keep.
+    tool._page.goto(f"{server}/press-hold-wide?hide=visibility:hidden", wait_until="load")
+    widget = tool._read_page(tool._page, web_stealth.PRESS_AND_HOLD_BOX_JS)[0]
+    box = _widget_box(tool)
+    assert box is not None, widget
+    assert abs(box["x"] - widget["x"]) < 1, (box, widget)
+    assert abs(box["y"] - widget["y"] - 3 * 102) < 1, (box, widget)
+    assert (box["width"], box["height"]) == (200, 100), box
+
+
+def _widget_frame(tool: WebUseTool):
+    """The visible frame of the accessible press-and-hold page (the last copy)."""
+    return [f for f in tool._page.frames if f.parent_frame is not None][-1]
+
+
+def test_press_and_hold_bar_is_held_not_the_accessibility_icon(tool, server):
+    """walmart's layout of 22 Nov 2026: the bar is held, not the "Accessible challenge" icon.
+
+    The icon is the first button of the widget's frame and exactly as
+    wide as the smallest box taken for a bar, so the first usable button
+    was the icon: it was held for 8-10 s, the widget went into its
+    accessible flow and walmart.com stayed blocked.  The target is the
+    largest button of the frame.
+    """
+    tool.go_to_url(f"{server}/inert")  # launches the browser when this test runs alone
+    tool._page.goto(f"{server}/press-hold-accessible", wait_until="load")
+    widget = tool._read_page(tool._page, web_stealth.PRESS_AND_HOLD_BOX_JS)[0]
+    assert (widget["width"], widget["height"]) == (288, 102), widget
+    box = _widget_box(tool)
+    assert box is not None, widget
+    assert (box["width"], box["height"]) == (238, 100), box
+    assert abs(box["x"] - widget["x"] - 49) < 1, (box, widget)
+    assert abs(box["y"] - widget["y"] - 1) < 1, (box, widget)
+    # The icon comes first in the frame and passes for a bar by its size alone.
+    icon = _widget_frame(tool).get_by_role("button").first.bounding_box()
+    assert icon is not None and (icon["width"], icon["height"]) == (40, 40), icon
+    assert web_stealth._usable_box(icon, widget)
+    tree = tool.go_to_url(f"{server}/press-hold-accessible?need=1")
+    # The page clears only when the icon was never pressed.
+    assert tree.startswith("Page: Real content"), tree[:300]
+    assert "Note:" not in tree
+    # The bar was full after 5 s and said so: the hold was its drawn 8-10 s.
+    held_ms = int(parse_qs(urlparse(tool._page.url).query)["ms"][0])
+    assert 8000 <= held_ms < 11000, held_ms
+
+
+def test_press_and_hold_bar_is_held_until_it_is_full(tool, server):
+    """A bar that fills more slowly than the drawn hold is held until it says it is full.
+
+    walmart's bar took 8.5 s and 9.2 s to fill on 22 Nov 2026 and the
+    hold is drawn from 8-10 s: let go before it is full, the hold is a
+    failed attempt.  Here the bar needs 11.5 s; the hold lasts that long
+    and a moment more (a person sees the bar say so first), and that one
+    hold clears the page.
+    """
+    start = time.monotonic()
+    tree = tool.go_to_url(f"{server}/press-hold-accessible?need=1&fill=11500")
+    elapsed = time.monotonic() - start
+    assert tree.startswith("Page: Real content"), tree[:300]
+    assert "Note:" not in tree
+    held_ms = int(parse_qs(urlparse(tool._page.url).query)["ms"][0])
+    assert 11500 + 200 <= held_ms < 11500 + 3000, held_ms
+    # One hold: a second one starts 5 s after the first and takes 8 s more.
+    assert elapsed < 26, elapsed
+
+
+def test_press_and_hold_bar_that_never_says_full_is_let_go(tool, server):
+    """A bar that shows nothing new while held is let go 6 s after the drawn hold."""
+    extra_ms = web_stealth.BAR_FILL_EXTRA_SECS * 1000
+    assert extra_ms == 6000
+    tree = tool.go_to_url(f"{server}/press-hold-accessible?need=1&quiet=1")
+    assert tree.startswith("Page: Real content"), tree[:300]
+    held_ms = int(parse_qs(urlparse(tool._page.url).query)["ms"][0])
+    assert 8000 + extra_ms <= held_ms < 10000 + extra_ms + 1500, held_ms
+
+
+def test_bar_full_check_follows_the_text_of_the_bars_frame(tool, server):
+    """The check says "still filling" only while the frame shows what it showed at first."""
+    tool.go_to_url(f"{server}/inert")  # launches the browser when this test runs alone
+    # A Turnstile box is a click: nothing fills.
+    assert tool._bar_full(web_stealth.CLOUDFLARE_CHALLENGE) is None
+    # No widget, nothing to watch: the hold is its drawn length.
+    tool._page.goto(f"{server}/press-hold-bare", wait_until="load")
+    assert tool._bar_full(web_stealth.PERIMETERX_CHECK) is None
+    tool._page.goto(f"{server}/press-hold-accessible", wait_until="load")
+    assert _widget_box(tool) is not None
+    full = tool._bar_full(web_stealth.PERIMETERX_CHECK)
+    assert full is not None and full() is False
+    said = "() => { document.getElementById('t').textContent = 'COMPLETED, PLEASE WAIT'; }"
+    _widget_frame(tool).evaluate(said)
+    assert full() is True
+    # A frame that is gone is not known to be filling either.
+    full = tool._bar_full(web_stealth.PERIMETERX_CHECK)
+    assert full is not None and full() is False
+    tool._page.goto(f"{server}/inert", wait_until="load")
+    assert full() is True
+
+
+def _hits(path: str) -> int:
+    """How often the probe server was asked for *path* (with its query) so far."""
+    return _Handler.hits.get(path, 0)
+
+
+def _site_cookies(tool: WebUseTool, server: str) -> dict[str, str]:
+    """The cookies the browser holds for the probe site, by name."""
+    return {c["name"]: c["value"] for c in tool._context.cookies(server)}
+
+
+@pytest.fixture
+def shop(tool, server, monkeypatch):
+    """Yield the probe site as a shop behind HUMAN, to a browser that was never there.
+
+    Its front page rates the visitor (:data:`_FRONT_PAGE`); the browser
+    holds no cookie and nothing in the site's storage.
+    """
+    monkeypatch.setattr(_Handler, "front", "rates")
+    tool.go_to_url(f"{server}/inert")
+    tool._context.clear_cookies()
+    _main(tool, "(localStorage.clear(), sessionStorage.clear())")
+    _Handler.hits.clear()
+    return server
+
+
+def test_product_page_opened_cold_loads_from_the_front_page(tool, shop):
+    """walmart.com, 22 Nov 2026: a product page opened cold is opened again from the front page.
+
+    The site answers a visitor HUMAN has not rated with its check page,
+    accepts no hold there and remembers the browser as checked (an
+    HttpOnly cookie, storage keys).  The tool forgets what HUMAN keeps,
+    lets the front page rate the browser (2 s here) and opens the page
+    again: no hold, and what the site itself keeps (a login, a cart) is
+    still there.
+    """
+    item = "/shop/item?t=cold"
+    tree = tool.go_to_url(f"{shop}{item}")
+    assert tree.startswith("Page: Real content"), tree[:300]
+    assert "Note:" not in tree
+    assert tool._page.url == f"{shop}{item}"
+    # Asked for cold (sent to the check page) and once more after the front page.
+    assert (_hits(item), _hits("/shop/blocked?t=cold"), _hits("/")) == (2, 1, 1)
+    assert _hits("/px-pressed?t=cold") == 0
+    assert _site_cookies(tool, shop) == {"_px3": "ok", "login": "user42"}
+    assert _main(tool, "JSON.stringify([{...localStorage}, {...sessionStorage}])") == (
+        '[{"cart":"3 items"},{"tab":"offers"}]'
+    )
+    # Rated now, the next product page comes at once.
+    tree = tool.go_to_url(f"{shop}/shop/item?t=next")
+    assert tree.startswith("Page: Real content"), tree[:300]
+    assert (_hits("/shop/item?t=next"), _hits("/")) == (1, 1)
+
+
+def test_check_that_is_back_after_the_front_page_is_started_over_once_more(tool, shop):
+    """A check that comes back after the front page gets the front page once more.
+
+    On walmart.com 4 of 31 product pages opened after the front page
+    were still sent to the check page; here the first one is.
+    """
+    item = "/shop/item?t=again&lucky=2"
+    tree = tool.go_to_url(f"{shop}{item}")
+    assert tree.startswith("Page: Real content"), tree[:300]
+    assert "Note:" not in tree
+    assert (_hits(item), _hits("/")) == (3, 2)
+    assert _hits("/px-pressed?t=again&lucky=2") == 0
+
+
+def test_check_that_starting_over_does_not_clear_is_held(tool, shop):
+    """A check the front page does not lift is held after two tries from there, as before."""
+    page = "/press-hold-accessible?need=1&t=held"
+    tree = tool.go_to_url(f"{shop}{page}")
+    assert tree.startswith("Page: Real content"), tree[:300]
+    assert "Note:" not in tree
+    assert (_hits(page), _hits("/")) == (3, 2)
+    assert _hits("/px-pressed?need=1&t=held") == 1
+
+
+def test_site_that_checks_its_front_page_too_is_held_at_once(tool, server):
+    """A front page showing the check as well is not read, and not opened a second time."""
+    _Handler.hits.clear()
+    assert _Handler.front == "checked"
+    page = "/press-hold-accessible?need=1&t=front"
+    start = time.monotonic()
+    tree = tool.go_to_url(f"{server}{page}")
+    elapsed = time.monotonic() - start
+    assert tree.startswith("Page: Real content"), tree[:300]
+    assert (_hits(page), _hits("/")) == (2, 1)
+    assert _hits("/px-pressed?need=1&t=front") == 1
+    # The hold (8-10 s after 1.2 s of reading the bar) and two page loads.
+    assert elapsed < 8 + 10 + 3, elapsed
+
+
+def test_front_page_that_does_not_answer_leaves_the_check_to_be_held(tool, server, monkeypatch):
+    """A front page that fails to load costs nothing more: the page is opened again and held."""
+    monkeypatch.setattr(_Handler, "front", "down")
+    _Handler.hits.clear()
+    page = "/press-hold-accessible?need=1&t=down"
+    tree = tool.go_to_url(f"{server}{page}")
+    assert tree.startswith("Page: Real content"), tree[:300]
+    # Chromium's error page for the front page can cut the reopening short, tried once more then.
+    assert _hits(page) in (2, 3) and _hits("/") >= 1
+    assert _hits("/px-pressed?need=1&t=down") == 1
+
+
+def test_check_is_not_started_over_in_the_users_chrome_or_after_a_click(tool, shop, monkeypatch):
+    """Only ``go_to_url`` in the tool's own browser starts over.
+
+    An attached Chrome's cookies are the user's, and a click's target is
+    not known to be a page that can be asked for again: the check page
+    is waited on and reported where it is, and HUMAN's marks stay.
+    """
+    # The check is given 2 s and no hold: what is measured is where it is met.
+    monkeypatch.setattr(web_stealth, "_CHALLENGE_WAIT_SECS", 2.0)
+    monkeypatch.setattr(web_stealth, "widget_presses", lambda vendor: 0)
+    tree = tool.go_to_url(f"{shop}/links?to=/shop/item?t=click")
+    link = re.search(r"\[(\d+)\] link \"go\"", tree)
+    assert link, tree[:300]
+    tree = tool.click(int(link.group(1)))
+    assert tree.startswith("Note:") and "(PerimeterX press-and-hold check)" in tree, tree[:300]
+    assert (_hits("/shop/item?t=click"), _hits("/")) == (1, 0)
+    assert _site_cookies(tool, shop)["_pxhd"] == "remembered"
+    monkeypatch.setattr(tool, "_attached_url", "http://127.0.0.1:9")
+    tree = tool.go_to_url(f"{shop}/shop/item?t=theirs")
+    assert tree.startswith("Note:") and "(PerimeterX press-and-hold check)" in tree, tree[:300]
+    assert (_hits("/shop/item?t=theirs"), _hits("/")) == (1, 0)
+    assert _main(tool, "localStorage.getItem('PXtest_px_hvd')") == "1"
+    assert _site_cookies(tool, shop)["_pxhd"] == "remembered"
+
+
+def test_front_page_and_the_cookies_forgotten_are_the_check_pages_sites():
+    """The front page is the check page's site's; only HUMAN's cookies on that site go."""
+    front = web_stealth.front_page_url
+    blocked = "https://www.walmart.com/blocked?url=L2lwLzU2ODk5MTkxMjE=&uuid=41349a70"
+    assert front(blocked, "https://www.walmart.com/ip/5689919121") == "https://www.walmart.com/"
+    # A redirect to another host: that host's front page, where the check's marks are.
+    assert front(blocked, "https://walmart.com/ip/5689919121") == "https://www.walmart.com/"
+    assert front("http://127.0.0.1:8080/item?x=1", "http://127.0.0.1:8080/item?x=1") == (
+        "http://127.0.0.1:8080/"
+    )
+    # Nowhere to start over from: the front page itself was asked for, or no web page shows.
+    assert front("https://www.walmart.com/blocked?url=Lw==", "https://www.walmart.com/") is None
+    assert front("https://www.walmart.com/", "https://WWW.walmart.com") is None
+    assert front("https://www.walmart.com/?q=tv", "https://www.walmart.com/?q=tv") == (
+        "https://www.walmart.com/"
+    )
+    assert front("chrome-error://chromewebdata/", "https://www.walmart.com/ip/1") is None
+    assert front("about:blank", "https://www.walmart.com/ip/1") is None
+    chosen = web_stealth.perimeterx_cookies("www.walmart.com")
+    assert sorted(chosen) == ["domain", "name"]
+    for name in ("_px3", "_pxvid", "_pxhd", "_pxde", "pxcts", "_pxttld", "PXu6b0qd2S_px_hvd"):
+        assert chosen["name"].search(name), name
+    for name in ("login", "vtc", "ak_bmsc", "apex", "expx", "cart_px"):
+        assert not chosen["name"].search(name), name
+    for domain in (".walmart.com", "walmart.com", "www.walmart.com", ".www.walmart.com"):
+        assert chosen["domain"].search(domain), domain
+    for domain in (".com", "com", "evilwalmart.com", "walmart.com.evil.org", "www.fiverr.com"):
+        assert not chosen["domain"].search(domain), domain
+    assert web_stealth.perimeterx_cookies("localhost")["domain"].search("localhost")
+    local = web_stealth.perimeterx_cookies("127.0.0.1")["domain"]
+    assert local.search("127.0.0.1") and not local.search("10.0.0.1")
+
+
+@pytest.fixture
+def utc_machine(monkeypatch):
+    """Make this process a machine that keeps UTC and knows nothing of its address.
+
+    Yields the file the tool remembers the address's zone in, absent.
+    """
+    monkeypatch.setenv("TZ", "UTC")
+    time.tzset()
+    monkeypatch.setattr(web_stealth, "_TIMEZONE", None)
+    cache = kiss_home() / "browser_timezone.json"
+    saved = cache.read_bytes() if cache.exists() else None
+    cache.unlink(missing_ok=True)
+    try:
+        yield cache
+    finally:
+        monkeypatch.undo()
+        time.tzset()
+        cache.unlink(missing_ok=True)
+        if saved is not None:
+            cache.write_bytes(saved)
+
+
+def _browser_zone(tool: WebUseTool, server: str) -> tuple[object, object]:
+    """The timezone and UTC offset (minutes) the tool's browser reports when launched now.
+
+    The shared tool is relaunched for it (one sync Playwright driver may
+    live per thread) and closed again: its next launch is the next test's.
+    """
+    tool.close()
+    try:
+        tool.go_to_url(f"{server}/inert")
+        return (
+            _main(tool, "Intl.DateTimeFormat().resolvedOptions().timeZone"),
+            _main(tool, "new Date(2026, 0, 15).getTimezoneOffset()"),
+        )
+    finally:
+        tool.close()
+
+
+def test_browser_on_a_utc_machine_reports_the_zone_of_its_address(
+    tool, server, utc_machine, monkeypatch
+):
+    """A cloud VM keeps UTC; its Chromium reports the zone its address is in.
+
+    walmart.com (HUMAN) sent every product page of a browser reporting
+    UTC from an address in Iowa to its check page, and served them once
+    the browser reported America/Chicago (22 Nov 2026).  The zone comes
+    from a lookup service -- the second one here, the first being
+    rate-limited as ipapi.co was that day -- and is remembered for a day.
+    """
+    limited, told = "/tz?status=429&t=a", "/tz?json=Australia/Darwin&t=a"
+    monkeypatch.setattr(web_stealth, "TIMEZONE_SOURCES", (server + limited, server + told))
+    assert web_stealth.machine_clock_is_utc()
+    assert _browser_zone(tool, server) == ("Australia/Darwin", -570)
+    assert (_hits(limited), _hits(told)) == (1, 1)
+    assert json.loads(utc_machine.read_text())["zone"] == "Australia/Darwin"
+    # The next process asks nobody: the file knows, for a day.
+    other = "/tz?zone=Europe/Paris&t=b"
+    monkeypatch.setattr(web_stealth, "TIMEZONE_SOURCES", (server + other,))
+    monkeypatch.setattr(web_stealth, "_TIMEZONE", None)
+    assert web_stealth.browser_timezone(utc_machine) == "Australia/Darwin"
+    assert _hits(other) == 0
+    stale = json.loads(utc_machine.read_text())
+    utc_machine.write_text(json.dumps({**stale, "at": stale["at"] - 25 * 3600}))
+    assert web_stealth.browser_timezone(utc_machine) == "Australia/Darwin"  # this process knows
+    monkeypatch.setattr(web_stealth, "_TIMEZONE", None)
+    assert web_stealth.browser_timezone(utc_machine) == "Europe/Paris"
+    assert _hits(other) == 1
+    assert json.loads(utc_machine.read_text())["zone"] == "Europe/Paris"
+    # A file that is not the tool's is no answer either.
+    utc_machine.write_text('{"zone": "../../etc/passwd", "at": "now"}')
+    monkeypatch.setattr(web_stealth, "_TIMEZONE", None)
+    assert web_stealth.browser_timezone(utc_machine) == "Europe/Paris"
+    assert _hits(other) == 2
+
+
+def test_browser_keeps_the_zone_of_a_machine_that_has_one(tool, server, utc_machine, monkeypatch):
+    """A machine with a zone of its own is somebody's: nobody is asked, the browser reports it."""
+    source = "/tz?zone=Europe/Paris&t=own"
+    monkeypatch.setattr(web_stealth, "TIMEZONE_SOURCES", (server + source,))
+    monkeypatch.setenv("TZ", "Asia/Tokyo")
+    time.tzset()
+    assert not web_stealth.machine_clock_is_utc()
+    assert _browser_zone(tool, server) == ("Asia/Tokyo", -540)
+    assert _hits(source) == 0 and not utc_machine.exists()
+    # GMT is where people live (London in winter, Abidjan all year), not a server's default.
+    for zone, is_utc in (
+        ("Europe/London", False),
+        ("Africa/Abidjan", False),
+        ("America/Chicago", False),
+        ("Etc/UTC", True),
+        ("UTC", True),
+    ):
+        monkeypatch.setenv("TZ", zone)
+        time.tzset()
+        assert web_stealth.machine_clock_is_utc() is is_utc, zone
+
+
+def test_utc_machine_nobody_can_place_keeps_utc(tool, server, utc_machine, monkeypatch):
+    """Without a usable answer the machine's zone stays, and nobody is asked again for a while."""
+    with socket.socket() as closed:
+        closed.bind(("127.0.0.1", 0))
+        dead = f"http://127.0.0.1:{closed.getsockname()[1]}/timezone"
+    page, unknown, bare = "/tz?t=page", "/tz?zone=Mars/Olympus_Mons&t=x", "/tz?json=UTC&t=y"
+    sources = (dead, server + page, server + unknown, server + bare)
+    monkeypatch.setattr(web_stealth, "TIMEZONE_SOURCES", sources)
+    assert web_stealth.browser_timezone(utc_machine) is None
+    assert (_hits(page), _hits(unknown), _hits(bare)) == (1, 1, 1)
+    assert not utc_machine.exists()
+    assert web_stealth.browser_timezone(utc_machine) is None
+    assert (_hits(page), _hits(unknown), _hits(bare)) == (1, 1, 1)
+    assert _browser_zone(tool, server) == ("UTC", 0)
+    # Ten minutes later the services are asked again.
+    known = web_stealth._TIMEZONE
+    assert known is not None and known[0] is None and 0 < known[1] - time.monotonic() <= 600
+    told = "/tz?zone=America/Argentina/Buenos_Aires&t=z"
+    monkeypatch.setattr(web_stealth, "TIMEZONE_SOURCES", (server + told,))
+    monkeypatch.setattr(web_stealth, "_TIMEZONE", (None, time.monotonic() - 1))
+    assert web_stealth.browser_timezone(utc_machine) == "America/Argentina/Buenos_Aires"
+    assert web_stealth.browser_timezone() == "America/Argentina/Buenos_Aires"
+    assert _hits(told) == 1
+
+
+def test_zone_is_known_where_it_cannot_be_remembered_in_a_file(
+    server, utc_machine, monkeypatch, tmp_path
+):
+    """A home directory that cannot be written costs the cache, not the browser's launch.
+
+    Neither the cache nor the file staged for it can be created there,
+    and removing what was staged fails too: with a file where the
+    directory should be, and in a directory this user may not enter.
+    """
+    told = "/tz?zone=America/Chicago&t=ro"
+    monkeypatch.setattr(web_stealth, "TIMEZONE_SOURCES", (server + told,))
+    (tmp_path / "file").write_text("not a directory")
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    locked.chmod(0)
+    try:
+        for n, parent in enumerate((tmp_path / "file", locked), start=1):
+            monkeypatch.setattr(web_stealth, "_TIMEZONE", None)
+            cache = parent / "browser_timezone.json"
+            assert web_stealth.browser_timezone(cache) == "America/Chicago"
+            assert _hits(told) == n
+            # This process knows it all the same: nobody is asked again.
+            assert web_stealth.browser_timezone(cache) == "America/Chicago"
+            assert _hits(told) == n
+    finally:
+        locked.chmod(0o700)
+    assert (tmp_path / "file").read_text() == "not a directory"
+    if os.geteuid() != 0:  # root may write anywhere
+        assert not list(locked.iterdir())
 
 
 def test_anubis_proof_of_work_gets_its_longer_wait(tool, server):
@@ -2361,8 +3064,6 @@ def test_google_unusual_traffic_page_falls_back_to_bing(tool):
     Talks to google.com and bing.com; skipped when offline.
     """
     try:
-        import socket
-
         socket.create_connection(("www.google.com", 443), timeout=5).close()
     except OSError:
         pytest.skip("no Internet access")

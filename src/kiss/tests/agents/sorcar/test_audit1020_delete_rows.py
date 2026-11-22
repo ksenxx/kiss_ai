@@ -178,7 +178,7 @@ class TestDeleteRows:
         assert th._delete_task(first_id) == 1
         assert th._chat_summaries([chat_id])[chat_id] == {
             "summary": "My title", "last_launched": 0, "last_finished": 0,
-            "is_favorite": True}
+            "is_favorite": True, "is_pinned": False}
         assert _count(
             "SELECT COUNT(*) FROM chat_summaries WHERE chat_id = ? AND summary = ''", chat_id
         ) == 1
@@ -303,4 +303,6 @@ class TestDeleteRows:
 
     def test_connection_busy_timeout_is_the_pragma(self) -> None:
         row = th._get_db().execute("PRAGMA busy_timeout").fetchone()
-        assert int(row[0]) == 30000
+        # One slice of the 30 s a statement waits in all: a Stop waits a second at most.
+        assert int(row[0]) == th._BUSY_SLICE_MS <= 1000
+        assert th._BUSY_TIMEOUT_MS == 30000

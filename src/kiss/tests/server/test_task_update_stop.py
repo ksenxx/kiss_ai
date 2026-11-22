@@ -21,6 +21,7 @@ budget ran out), the real agent-state registry and the production
 
 from __future__ import annotations
 
+import sys
 import threading
 import time
 from pathlib import Path
@@ -30,8 +31,9 @@ from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.persistence import _add_task
 from kiss.server import agent_state
 from kiss.server.server import AgentServer
-from kiss.server.task_update import TaskUpdateRunner
+from kiss.server.task_update import TaskUpdateRunner, _ChildStopEvent
 from kiss.tests.agents.sorcar.local_model_server import MODEL, serve, tool_call_body
+from kiss.tests.lock_injection import stop_as_it_takes_its_lock
 
 #: Longest the child may outlive the Stop click: one in-flight model
 #: call to the local endpoint plus the cooperative check after it.
@@ -111,3 +113,41 @@ def test_stop_on_the_parent_tab_ends_its_running_update(tmp_path: Path) -> None:
             assert upd.text == ""
     finally:
         agent_state.unregister(task_id, state)
+
+
+def _wait_under_profile(
+    event: threading.Event, profile: Any, raised: list[BaseException],
+) -> None:
+    """Thread body: wait for *event* under the profile hook, noting what the wait raises."""
+    sys.setprofile(profile)
+    try:
+        event.wait(30)
+    except BaseException as exc:  # noqa: BLE001 — the injected Stop is expected
+        raised.append(exc)
+    finally:
+        sys.setprofile(None)
+
+
+def test_a_stop_as_the_childs_wait_takes_its_lock_leaves_the_event_settable() -> None:
+    """The forced Stop landing where a slice of the child's wait has taken its lock leaves it free.
+
+    The update's thread waits on its stop event in slices of
+    ``Event.wait``, which enters a ``threading.Condition``: the Stop
+    raised as its ``__enter__`` returns left the lock held (gh-74174),
+    and the Stop click on the child's tab, which sets that event from a
+    command handler, blocked on it for good.
+    """
+    event = _ChildStopEvent(threading.Event())
+    raised: list[BaseException] = []
+    profile = stop_as_it_takes_its_lock(threading.Event.wait, _ChildStopEvent.wait)
+    waiter = threading.Thread(
+        target=_wait_under_profile, args=(event, profile, raised), daemon=True,
+    )
+    waiter.start()
+    waiter.join(20)
+    assert not waiter.is_alive()
+    assert [type(exc) for exc in raised] == [KeyboardInterrupt]
+    setter = threading.Thread(target=event.set, daemon=True)
+    setter.start()
+    setter.join(5)
+    assert not setter.is_alive(), "the Stop left the child's stop event locked"

@@ -102,10 +102,14 @@ function openPromptlets(tricks) {
 // Audit 2026-11-11 (W1): an edit's new text lives nowhere else once
 // its editor is closed.  The disconnect dropped the pending edits like
 // the add's wait, and their texts with them: a change queued behind an
-// unanswered edit was never sent, and an edit the daemon had not
-// applied was gone from the page.
+// unanswered edit was gone from the page, and so was an edit the
+// daemon had not applied.
 function testOutageKeepsThePendingEdits() {
-  // The first edit reached the disk: the one queued behind it goes out.
+  // The first edit's answer went with the connection.  The list after
+  // the reconnect reads its text, as it would had another window put
+  // that text there and deleted the row: the edit queued behind it is
+  // not sent on that guess (audit 2026-11-21, W13/F1), and its text is
+  // back as a draft for the user to save.
   let {win, posted} = openPromptlets(['Original A']);
   editFirstRow(win, 'First B');
   editFirstRow(win, 'Latest C');
@@ -113,17 +117,22 @@ function testOutageKeepsThePendingEdits() {
   assert.strictEqual(edits().length, 1, 'setup: the second edit waits for the first answer');
   dropAndReconnect(win);
   send(win, {type: 'tricksData', tricks: ['First B'], userCount: 1});
-  assert.deepStrictEqual(
-    edits()
-      .slice(1)
-      .map(m => m.text + ' -> ' + m.newText),
-    ['First B -> Latest C'],
-    'BUG - the edit queued behind the outage was never sent',
+  assert.strictEqual(
+    edits().length,
+    1,
+    'BUG - an edit was sent for a row the list cannot tell is the one edited',
   );
   assert.strictEqual(
     win.document.querySelector('#tricks-list .sidebar-item-text').textContent,
-    'Latest C',
+    'First B',
+    'the list on disk is shown',
   );
+  assert.strictEqual(
+    byId(win, 'tricks-add-input').value,
+    'Latest C',
+    'BUG - the edit queued behind the outage was lost',
+  );
+  assert.ok(addErrorText(win.document).includes('connection dropped'), 'with the reason');
   win.close();
 
   // The edit never reached the disk: its text comes back as a draft,

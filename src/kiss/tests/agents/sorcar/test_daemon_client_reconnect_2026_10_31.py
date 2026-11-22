@@ -23,24 +23,34 @@ from __future__ import annotations
 
 import json
 import socket
+import sys
+import textwrap
 import threading
 import time
 from pathlib import Path
+from types import CodeType
 from typing import Any
 
 import pytest
 
-from kiss.agents.sorcar import daemon_client, local_endpoint, persistence
-from kiss.server import agent_state
+from kiss.agents.sorcar import daemon_client, local_endpoint, persistence, sea_commands
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
+from kiss.core.config import kiss_home
+from kiss.core.locked import _race_delay
+from kiss.server import agent_state, task_runner, task_update
+from kiss.server.web_server import RemoteAccessServer
+from kiss.tests.agents.sorcar.conftest import reset_sea_registry
 from kiss.tests.server.parallel_agent_harness import (
     STANDIN_MODEL,
     LocalDaemonTestCase,
     StandInModelServer,
     finish_response,
+    history_rows,
     request_text,
     tool_call_response,
     wait_for,
 )
+from kiss.tests.server.pause import Pause, Pauses
 from kiss.tests.server.test_autocommit_wire_toggle import _FakeCredentials
 
 pytestmark = pytest.mark.timeout(300)
@@ -50,6 +60,26 @@ TOKENS_PER_CALL = 15
 PROBE_PROMPT = "reconnect probe"
 PARENT_PROMPT = "parent seed task"
 SUMMARY = "reconnect probe finished"
+#: A SEA whose ``description()`` (its ``/slowhelp help`` answer) waits for a ``release`` file.
+SLOW_HELP_SEA = textwrap.dedent(
+    """
+    import pathlib
+    import time
+
+    from kiss.agents.seas.base.base_sea import BaseSea
+
+    _DIR = pathlib.Path(__file__).resolve().parent
+
+
+    class Sea(BaseSea):
+        def description(self):
+            (_DIR / "entered").write_text("1", encoding="utf-8")
+            deadline = time.time() + 60
+            while time.time() < deadline and not (_DIR / "release").exists():
+                time.sleep(0.02)
+            return "slow help text"
+    """
+)
 
 # Not reachable over a real daemon, so not covered here: a daemon that
 # closes the fresh connection before the ``resumeSession`` is written
@@ -73,7 +103,9 @@ class _TcpRelay:
     """
 
     def __init__(self, daemon_port: int) -> None:
-        self._daemon_port = daemon_port
+        # The port connections are relayed to; a test that restarts the
+        # daemon sets it to the new daemon's.
+        self.daemon_port = daemon_port
         self._lock = threading.Lock()
         self._live: list[socket.socket] = []
         self.accepted = 0
@@ -110,7 +142,7 @@ class _TcpRelay:
             except OSError:
                 return  # the listener was closed (pause / close)
             try:
-                upstream = socket.create_connection(("127.0.0.1", self._daemon_port))
+                upstream = socket.create_connection(("127.0.0.1", self.daemon_port))
             except OSError:
                 client.close()
                 continue
@@ -259,6 +291,9 @@ class ReconnectHarness(LocalDaemonTestCase):
         self.addCleanup(self.credentials.restore)
         self.release = threading.Event()
         self.blocked = threading.Event()
+        # Set by the client at each ``status running=true`` of the run
+        # it takes in (:meth:`_start_run`).
+        self.seen_running = threading.Event()
         self._calls = 0
         self._calls_lock = threading.Lock()
         self.standin = StandInModelServer(self._respond)
@@ -271,9 +306,13 @@ class ReconnectHarness(LocalDaemonTestCase):
         self.addCleanup(self.release.set)
         self.relay = _TcpRelay(self.server.port)
         self.addCleanup(self.relay.close)
+        self.relay_endpoint = Path(self.tmpdir) / "relay-endpoint.json"
+        self._write_relay_endpoint()
+
+    def _write_relay_endpoint(self) -> None:
+        """Write the endpoint file the client dials: the relay's port, the daemon's credentials."""
         daemon_endpoint = local_endpoint.read_endpoint(Path(self.endpoint_file))
         assert daemon_endpoint is not None
-        self.relay_endpoint = Path(self.tmpdir) / "relay-endpoint.json"
         local_endpoint.write_endpoint(
             self.relay_endpoint,
             local_endpoint.LocalEndpoint(
@@ -296,14 +335,21 @@ class ReconnectHarness(LocalDaemonTestCase):
         self.release.wait(timeout=120)
         return finish_response(SUMMARY)
 
-    def _start_run(self, **kwargs: Any) -> tuple[threading.Thread, dict[str, Any]]:
-        """Run the probe task through the relay on a thread; its outcome lands in the dict."""
+    def _start_run(
+        self, prompt: str = PROBE_PROMPT, **kwargs: Any,
+    ) -> tuple[threading.Thread, dict[str, Any]]:
+        """Run *prompt* through the relay on a thread; its outcome lands in the dict.
+
+        The run's *running* event (the caller's, else one made here) is
+        kept as :attr:`seen_running`.
+        """
         out: dict[str, Any] = {}
+        self.seen_running = kwargs.setdefault("running", threading.Event())
 
         def target() -> None:
             try:
                 out["result"] = daemon_client.run(
-                    PROBE_PROMPT,
+                    prompt,
                     work_dir=self.repo,
                     endpoint_file=self.relay_endpoint,
                     model=STANDIN_MODEL,
@@ -324,8 +370,30 @@ class ReconnectHarness(LocalDaemonTestCase):
         return worker, out
 
     def _await_blocked_task(self) -> None:
-        """Wait until the task sits in its blocked second model call (one call's spend reported)."""
+        """Wait until the task sits in its blocked second model call and the client knows it."""
         self.assertTrue(self.blocked.wait(timeout=120), "the task never reached its slow step")
+        self._await_client()
+
+    def _await_client(self) -> None:
+        """Wait until the client has every event the daemon sent its run so far.
+
+        The daemon sent the run's events (its chat and row, the first
+        model call's spend) before the run got where the test waited
+        for it, but they may still be on their way to the client: on a
+        loaded machine a cut then left the client with no spend to
+        report, or with no run to resume.  The status repeated here
+        marks the stream: once the client has it, it has every event
+        before it.  The run's own status (its start) is awaited first,
+        so that it is not taken for the mark.
+        """
+        self.assertTrue(self.seen_running.wait(timeout=60), "the client never saw the run start")
+        self.seen_running.clear()
+        self.server._printer.broadcast(
+            {"type": "status", "running": True, "tabId": self._probe_state().tab_id},
+        )
+        self.assertTrue(
+            self.seen_running.wait(timeout=60), "the client never got the run's first events",
+        )
 
     def _collect(self, worker: threading.Thread, out: dict[str, Any]) -> Any:
         worker.join(timeout=180)
@@ -416,6 +484,37 @@ class ReconnectTest(ReconnectHarness):
         self.assertEqual(row["tokens"], result.tokens)
         self.assertEqual(row["steps"], result.steps)
         self.assertAlmostEqual(row["cost"], result.cost, places=9)
+
+    def test_a_help_answered_while_away_is_delivered_by_the_replay(self) -> None:
+        """``/slowhelp help`` is answered while the daemon is unreachable.
+
+        No agent runs for it: the runner makes the run's row itself,
+        under an id that did not name the run, so the client's recovery
+        found no row of its run and reported the answered help lost.
+        """
+        sea = Path(self.tmpdir) / "seas" / "slowhelp" / "slowhelp_sea.py"
+        sea.parent.mkdir(parents=True)
+        sea.write_text(SLOW_HELP_SEA, encoding="utf-8")
+        seas_md = kiss_home() / "SEAS.md"
+        seas_md.write_text(f"{sea.parent.parent}\n", encoding="utf-8")
+        self.addCleanup(reset_sea_registry)
+        self.addCleanup(seas_md.unlink, missing_ok=True)
+        sea_commands.refresh_registry()
+        worker, out = self._start_run("/slowhelp help", reconnect_seconds=120.0)
+        self.assertTrue(
+            wait_for((sea.parent / "entered").exists, timeout=60), "description() never ran",
+        )
+        self._await_client()
+        self.relay.pause()
+        self.relay.cut()
+        (sea.parent / "release").write_text("1", encoding="utf-8")
+        self.assertTrue(wait_for(self._task_over, timeout=60), "the help task did not end")
+        self.relay.resume()
+        result = self._collect(worker, out)
+        self.assertIsInstance(result, daemon_client.TaskResult, result)
+        self.assertTrue(result.success, result)
+        self.assertEqual(result.text, "slow help text")
+        self.assertEqual([row["id"] for row in history_rows()], [result.task_id])
 
     def test_reconnect_seconds_zero_keeps_raising_at_the_first_cut(self) -> None:
         """``reconnect_seconds=0``: the cut raises ``ConnectionLostError`` at once, as before."""
@@ -782,3 +881,600 @@ class ReconnectTest(ReconnectHarness):
         self.assertGreaterEqual(elapsed, 0.3)
         self.assertLess(elapsed, 5.0)
         self.assertEqual(error.task_result.tokens, TOKENS_PER_CALL)
+
+
+class SequentialBlocksReconnectTest(ReconnectHarness):
+    """A run of two ``<task>`` blocks: the first finishes at once, the second (the probe) blocks."""
+
+    def _respond(self, request: dict[str, Any]) -> dict[str, Any]:
+        if PROBE_PROMPT not in request_text(request):
+            return finish_response("first block done")
+        self.blocked.set()
+        self.release.wait(timeout=120)
+        return finish_response(SUMMARY)
+
+    def test_every_block_is_charged_once_across_a_late_charge_and_a_reconnect(self) -> None:
+        """The run's spend is every block's own, whatever a late charge and a replay repeat.
+
+        The blocks run one after the other, each with its own counters
+        and row.  While the second runs, a side call of the first is
+        paid: banked on the dispatching parent, which still runs, and
+        announced to the waiting client with the first row's new totals.
+        The connection then drops, and the replay holds the second
+        block's transcript alone.  The client used to keep one task's
+        totals and one sum of such charges: the announcement made the
+        finished first block the run's task again (the one the reconnect
+        resumed, so the wait ended with the first block's result while
+        the second ran on), and its charge was subtracted from whichever
+        block reported next.
+        """
+        parent_id, _chat = persistence._add_task("running parent")
+        parent = ChatSorcarAgent("reconnect-running-parent")
+        with parent._task_id_lock:
+            parent._last_task_id = parent_id
+        state = agent_state.AgentState(
+            parent_id, agent=parent, tab_id="webtab-parent", server_owned=True,
+        )
+        agent_state.register(state)
+        self.addCleanup(agent_state.unregister, parent_id, state)
+        running = threading.Event()
+        worker, out = self._start_run(
+            f"<task>warm up</task><task>{PROBE_PROMPT}</task>",
+            reconnect_seconds=60.0, parent_task_id=parent_id, parent_tab_id="webtab-parent",
+            running=running,
+        )
+        self._await_blocked_task()
+        probe = self._probe_state()
+        first = next(row["id"] for row in history_rows() if row["task"].startswith("warm up"))
+        # The status repeated after the charge marks the stream: once the
+        # client has it, it has the charge's announcement.
+        running.clear()
+        task_update.charge_side_channel_usage(
+            self.server._printer, None, first, 0.5, 500, 1, tab_id=probe.tab_id, key="side:a",
+        )
+        self.server._printer.broadcast({"type": "status", "running": True, "tabId": probe.tab_id})
+        self.assertTrue(running.wait(timeout=60), "the client never got past the late charge")
+        self.relay.cut()
+        self.assertTrue(
+            wait_for(lambda: self.relay.accepted >= 2, timeout=60),
+            "the client never reconnected through the relay",
+        )
+        self.release.set()
+        result = self._collect(worker, out)
+        self.assertIsInstance(result, daemon_client.TaskResult, result)
+        self.assertIn(SUMMARY, result.text)
+        self.assertEqual(result.reconnects, 1)
+        self.assertEqual(result.task_id, probe.task_id)
+        first_row, second_row = self._history_row(first), self._history_row(result.task_id)
+        # The first row holds the late charge, which the parent was
+        # charged directly: the client reports the blocks' own spend.
+        self.assertEqual(first_row["tokens"], TOKENS_PER_CALL + 500)
+        self.assertEqual(parent.usage_snapshot(), (0.5, 500, 1))
+        self.assertEqual((result.tokens, result.steps), (2 * TOKENS_PER_CALL, 2))
+        self.assertAlmostEqual(
+            result.cost, first_row["cost"] - 0.5 + second_row["cost"], places=9,
+        )
+
+
+class _HeldRecovery:
+    """Holds the daemon's next recovery replay between its attach and its transcripts.
+
+    ``_replay_session`` calls its ``_race_delay()`` test hook in that
+    window; a ``sys.monitoring`` callback on the hook's code blocks the
+    first such call until :attr:`go` is set.  Nothing of the daemon is
+    replaced.
+    """
+
+    _TOOL = 4  # a ``sys.monitoring`` id no debugger, coverage or profiler takes
+
+    def __init__(self) -> None:
+        self.reached = threading.Event()
+        self.go = threading.Event()
+        sys.monitoring.use_tool_id(self._TOOL, "held-recovery")
+        sys.monitoring.register_callback(self._TOOL, sys.monitoring.events.PY_START, self._hold)
+        sys.monitoring.set_local_events(
+            self._TOOL, _race_delay.__code__, sys.monitoring.events.PY_START,
+        )
+
+    def _hold(self, _code: CodeType, _offset: int) -> None:
+        caller = sys._getframe(1).f_back
+        if (
+            caller is not None
+            and caller.f_code.co_name == "_replay_session"
+            and caller.f_locals["recovery"]
+            and not self.reached.is_set()
+        ):
+            self.reached.set()
+            self.go.wait(timeout=120)
+
+    def close(self) -> None:
+        """Let a held replay go and stop watching the hook."""
+        self.go.set()
+        sys.monitoring.set_local_events(self._TOOL, _race_delay.__code__, 0)
+        sys.monitoring.register_callback(self._TOOL, sys.monitoring.events.PY_START, None)
+        sys.monitoring.free_tool_id(self._TOOL)
+
+
+class BlocksOverWhileAwayTest(ReconnectHarness):
+    """A run of ``<task>`` blocks ``block-1`` to ``block-3``, each one model call the test holds.
+
+    Audit 2026-11-21 (S4/F3): each block has a history row of its own,
+    and a reconnecting client names the last row it saw.  The daemon
+    answered with that row's transcript alone: a block that began and
+    ended while the client was away was missing from the run's spend,
+    and a run that ended meanwhile returned the result of the block the
+    client had seen last.
+    """
+
+    def setUp(self) -> None:
+        self.entered = {block: threading.Event() for block in (1, 2, 3)}
+        self.gates = {block: threading.Event() for block in (1, 2, 3)}
+        super().setUp()
+        for gate in self.gates.values():
+            self.addCleanup(gate.set)
+
+    def _respond(self, request: dict[str, Any]) -> dict[str, Any]:
+        text = request_text(request)
+        # A later block's request can quote the earlier ones (its chat's context).
+        block = next((n for n in (3, 2, 1) if f"block-{n}" in text), None)
+        if block is None:
+            return finish_response("parent done")
+        self.entered[block].set()
+        self.gates[block].wait(timeout=120)
+        return finish_response(f"result of block {block}")
+
+    def _seed(self) -> daemon_client.TaskResult:
+        """Run the seed task (:data:`PARENT_PROMPT`) to its end; return its result."""
+        seed = daemon_client.run(
+            PARENT_PROMPT, work_dir=self.repo, endpoint_file=self.relay_endpoint,
+            model=STANDIN_MODEL, model_config=self.standin.model_config, max_budget=5.0,
+            use_web_tools=False, auto_classify=False, use_memory=False, is_parallel=False,
+            timeout=120.0,
+        )
+        self.assertTrue(seed.success, seed)
+        return seed
+
+    def _parent(self) -> dict[str, Any]:
+        """Run the seed parent task; return the arguments that dispatch a sub-agent of it."""
+        return {"parent_task_id": self._seed().task_id, "parent_tab_id": "webtab-parent"}
+
+    def _cut_in_block_one(
+        self, blocks: int, **kwargs: Any,
+    ) -> tuple[threading.Thread, dict[str, Any]]:
+        """Start a run of *blocks* blocks; cut its connection once the client has block 1's row."""
+        worker, out = self._start_run(
+            "".join(f"<task>block-{n}</task>" for n in range(1, blocks + 1)),
+            reconnect_seconds=60.0, **kwargs,
+        )
+        self.assertTrue(self.entered[1].wait(timeout=120), out)
+        # Once the client has the mark, it has the events that named
+        # block 1's row.  (The run's own status, come late, was taken
+        # for the mark here: the cut then left the client with no row.)
+        self._await_client()
+        self.relay.pause()
+        self.relay.cut()
+        return worker, out
+
+    def _reconnect(self) -> None:
+        """Let the client back in and wait until it is."""
+        accepted = self.relay.accepted
+        self.relay.resume()
+        self.assertTrue(
+            wait_for(lambda: self.relay.accepted > accepted, timeout=60),
+            "the client never reconnected through the relay",
+        )
+
+    def _check_outcome(
+        self, worker: threading.Thread, out: dict[str, Any], blocks: list[int],
+    ) -> None:
+        """The run returned the last of *blocks*' result and row, with their summed spend."""
+        result = self._collect(worker, out)
+        self.assertIsInstance(result, daemon_client.TaskResult, result)
+        rows = {row["task"]: row["id"] for row in history_rows()}
+        spent = [self._history_row(rows[f"block-{n}"]) for n in blocks]
+        self.assertTrue(result.success, result)
+        self.assertIn(f"result of block {blocks[-1]}", result.text)
+        self.assertEqual(result.task_id, rows[f"block-{blocks[-1]}"])
+        self.assertEqual(result.reconnects, 1)
+        self.assertEqual(
+            (result.tokens, result.steps), (len(blocks) * TOKENS_PER_CALL, len(blocks)),
+        )
+        self.assertAlmostEqual(result.cost, sum(row["cost"] for row in spent), places=9)
+
+    def _block_two_while_away(self, **kwargs: Any) -> None:
+        worker, out = self._cut_in_block_one(3, **kwargs)
+        self.gates[1].set()
+        self.gates[2].set()
+        self.assertTrue(self.entered[3].wait(timeout=120), "block 3 never began")
+        self._reconnect()
+        self.gates[3].set()
+        self._check_outcome(worker, out, [1, 2, 3])
+
+    def _over_while_away(self, deleted: bool = False, **kwargs: Any) -> None:
+        worker, out = self._cut_in_block_one(2, **kwargs)
+        self.gates[1].set()
+        self.gates[2].set()
+        self.assertTrue(wait_for(self._task_over, timeout=120), "the run did not end")
+        if deleted:
+            first = next(row["id"] for row in history_rows() if row["task"] == "block-1")
+            persistence._delete_task(first)
+        self._reconnect()
+        self._check_outcome(worker, out, [2] if deleted else [1, 2])
+
+    def _close_tab_and_finish(self) -> None:
+        """Close the running run's tab as a user does, then let the run end and be forgotten.
+
+        The ``closeTab`` comes from another connection and stops
+        nothing.  Once the run is over the daemon disposes of the closed
+        tab's state: only the history rows are left of the run.
+        """
+        state = self._probe_state()
+        viewer = local_endpoint.connect(Path(self.endpoint_file), max_size=1 << 26)
+        self.addCleanup(viewer.close)
+        local_endpoint.send(viewer, json.dumps({"type": "closeTab", "tabId": state.tab_id}))
+        self.assertTrue(wait_for(lambda: state.frontend_closed, timeout=30), "the tab never closed")
+        self.assertTrue(state.running(), "closing the tab stopped its run")
+        for gate in self.gates.values():
+            gate.set()
+        self.assertTrue(
+            wait_for(lambda: agent_state.find_by_tab(state.tab_id) is None, timeout=120),
+            "the closed tab's state outlived its run",
+        )
+
+    def _closed_and_over_while_away(self, **kwargs: Any) -> None:
+        worker, out = self._cut_in_block_one(3, **kwargs)
+        self._close_tab_and_finish()
+        self._reconnect()
+        self._check_outcome(worker, out, [1, 2, 3])
+
+    def _cut_before_the_first_row(
+        self, blocks: int, first_row: Pause, **kwargs: Any,
+    ) -> tuple[threading.Thread, dict[str, Any]]:
+        """Start a run of *blocks* blocks; cut its connection while its first row is held back.
+
+        The client has the run's chat and no row of it: its reconnect
+        names the run by its token.
+        """
+        running = threading.Event()
+        worker, out = self._start_run(
+            "".join(f"<task>block-{n}</task>" for n in range(1, blocks + 1)),
+            reconnect_seconds=60.0, running=running, **kwargs,
+        )
+        self.assertTrue(first_row.paused.wait(timeout=60), "the run never allocated a row")
+        self.assertTrue(running.wait(timeout=60), "the client never saw the run start")
+        self.relay.pause()
+        self.relay.cut()
+        return worker, out
+
+    def test_a_block_that_ran_while_away_is_charged(self) -> None:
+        """Block 2 begins and ends while the client is away: the run's spend holds it."""
+        self._block_two_while_away()
+
+    def test_a_sub_agents_block_that_ran_while_away_is_charged(self) -> None:
+        """As above for a sub-agent, whose blocks share their parent and no chat lineage."""
+        self._block_two_while_away(**self._parent())
+
+    def test_a_run_over_while_away_returns_its_last_block(self) -> None:
+        """Both blocks end while the client is away: the result is block 2's, not the one seen."""
+        self._over_while_away()
+
+    def test_a_sub_agent_run_over_while_away_returns_its_last_block(self) -> None:
+        """As above for a sub-agent, whose replay carries no status at all."""
+        self._over_while_away(**self._parent())
+
+    def test_a_block_whose_row_was_deleted_meanwhile_is_left_out(self) -> None:
+        """A row of the run deleted from the history while away has nothing left to charge."""
+        self._over_while_away(deleted=True)
+
+    def test_a_block_that_begins_during_the_recovery_is_the_runs_last(self) -> None:
+        """Block 3 runs between the recovery's attach and its transcripts.
+
+        The daemon read the run's rows (blocks 1 and 2) before block 3
+        had one, and block 3's events reach the client ahead of the older
+        blocks' transcripts: those must not put block 2's result and row
+        in place of block 3's.
+        """
+        worker, out = self._cut_in_block_one(3)
+        self.gates[1].set()
+        self.assertTrue(self.entered[2].wait(timeout=120), "block 2 never began")
+        held = _HeldRecovery()
+        self.addCleanup(held.close)
+        self.relay.resume()
+        self.assertTrue(held.reached.wait(timeout=60), "the daemon never replayed the run")
+        self.gates[2].set()
+        self.gates[3].set()
+        self.assertTrue(wait_for(self._task_over, timeout=120), "the run did not end")
+        held.go.set()
+        self._check_outcome(worker, out, [1, 2, 3])
+
+    def test_a_closed_tabs_run_over_while_away_returns_its_last_block(self) -> None:
+        """The tab is closed, and blocks 2 and 3 run and end, while the client is away.
+
+        The daemon knew a run's rows from a list it kept for the tab,
+        which went with the closed tab's state when the run ended: the
+        recovery got block 1's row alone, and the run returned block
+        1's result and spend.  The rows are found in the history now.
+        """
+        self._closed_and_over_while_away()
+
+    def test_a_closed_sub_agent_tabs_run_over_while_away_returns_its_last_block(self) -> None:
+        """As above for a sub-agent's run."""
+        self._closed_and_over_while_away(**self._parent())
+
+    def test_a_closed_tabs_run_named_by_its_token_returns_its_last_block(self) -> None:
+        """As above for a client cut before its run's first row: it names the run by its token."""
+        with Pause(persistence._add_task.__code__, lambda _locals: True) as first_row:
+            worker, out = self._cut_before_the_first_row(3, first_row)
+        self._close_tab_and_finish()
+        self._reconnect()
+        self._check_outcome(worker, out, [1, 2, 3])
+
+    def test_a_run_whose_rows_all_come_during_the_recovery_returns_its_last_block(self) -> None:
+        """The recovery attaches before the run's first row; every block runs before its transcript.
+
+        The daemon read no row of the run, and what it replays for a
+        run without rows is no block's transcript: the run's rows are
+        read again afterwards, and the run is replayed from them.
+        """
+        with Pause(persistence._add_task.__code__, lambda _locals: True) as first_row:
+            worker, out = self._cut_before_the_first_row(3, first_row)
+            held = _HeldRecovery()
+            self.addCleanup(held.close)
+            self.relay.resume()
+            self.assertTrue(held.reached.wait(timeout=60), "the daemon never replayed the run")
+        for gate in self.gates.values():
+            gate.set()
+        self.assertTrue(wait_for(self._task_over, timeout=120), "the run did not end")
+        held.go.set()
+        self._check_outcome(worker, out, [1, 2, 3])
+
+    def test_a_run_over_before_the_daemon_restarted_returns_its_last_block(self) -> None:
+        """The run ends and the daemon restarts while the client is away.
+
+        The new daemon has the history and no memory of the run: the
+        rows of the run are all it can answer from.
+        """
+        worker, out = self._cut_in_block_one(3)
+        for gate in self.gates.values():
+            gate.set()
+        self.assertTrue(wait_for(self._task_over, timeout=120), "the run did not end")
+        self.join_tasks()
+        self._shutdown_server()
+        self.server = RemoteAccessServer(
+            local_endpoint_file=self.endpoint_file, work_dir=self.repo,
+        )
+        self.run_on_loop(self.server.start_private_async(), timeout=30)
+        self.relay.daemon_port = self.server.port
+        self._write_relay_endpoint()
+        self._reconnect()
+        self._check_outcome(worker, out, [1, 2, 3])
+
+    def _assert_lost(self, error: Any, tokens: int) -> None:
+        """The run ended as a lost connection that reports *tokens* spent."""
+        self.assertIsInstance(error, daemon_client.ConnectionLostError, error)
+        self.assertIn("neither running nor finished with a result", str(error))
+        self.assertEqual(error.task_result.tokens, tokens)
+
+    def _forget_run(self) -> None:
+        """Drop the daemon's state of the running run: all a restarted daemon knows of it.
+
+        A restart ends the run's thread with its process and leaves the
+        rows the run had written.  A thread cannot be ended here: the
+        held run stays as it is (its rows too) while the test looks,
+        and is let go and joined before the daemon's home is removed.
+        """
+        state = self._probe_state()
+        thread = state.task_thread
+        assert thread is not None
+        agent_state.unregister(state.task_id, state)
+        self.addCleanup(self._join_forgotten, thread)
+
+    def _join_forgotten(self, thread: threading.Thread) -> None:
+        for gate in self.gates.values():
+            gate.set()
+        thread.join(timeout=120)
+        self.assertFalse(thread.is_alive(), "the task thread did not end")
+
+    def test_a_run_the_daemon_lost_in_a_later_block_is_a_lost_connection(self) -> None:
+        """Block 1 is over and block 2 has no result when the daemon loses the run.
+
+        The client used to keep the last result it was sent: block 1's,
+        replayed with that block's spend, passed for the result of a
+        run that never finished.
+        """
+        worker, out = self._cut_in_block_one(2)
+        self.gates[1].set()
+        self.assertTrue(self.entered[2].wait(timeout=120), "block 2 never began")
+        self._forget_run()
+        self._reconnect()
+        self._assert_lost(self._collect(worker, out), TOKENS_PER_CALL)
+
+    def _queue_block_two(self) -> None:
+        """Queue ``<task>block-2</task>`` behind the running block, as a user's follow-up does."""
+        state = self._probe_state()
+        sender = local_endpoint.connect(Path(self.endpoint_file), max_size=1 << 26)
+        self.addCleanup(sender.close)
+        local_endpoint.send(sender, json.dumps(
+            {"type": "appendUserMessage", "tabId": state.tab_id, "prompt": "<task>block-2</task>"},
+        ))
+        self.assertTrue(
+            wait_for(lambda: bool(state.queued_followup_tasks), timeout=30),
+            "the follow-up was never queued",
+        )
+
+    def _lost_after_block_one(self, code: CodeType, queued: bool = False, **kwargs: Any) -> None:
+        """Block 1 has returned when the daemon loses the run, held at its next entry of *code*.
+
+        Block 2 is part of the prompt, or (*queued*) a follow-up queued
+        while block 1 ran.
+        """
+        with Pause(code, lambda entered: entered.get("task") != "block-1") as held:
+            worker, out = self._cut_in_block_one(1 if queued else 2, **kwargs)
+            if queued:
+                self._queue_block_two()
+            self.gates[1].set()
+            self.assertTrue(held.paused.wait(timeout=60), "block 1 never returned")
+            persistence._flush_chat_events()
+            self._forget_run()
+            self._reconnect()
+            self._assert_lost(self._collect(worker, out), TOKENS_PER_CALL)
+
+    def test_a_run_lost_between_two_blocks_is_a_lost_connection(self) -> None:
+        """Block 1 is over and block 2 has no row yet when the daemon loses the run.
+
+        Block 1's row is the newest the history has of the run, and it
+        holds a result: the client returned it as the run's, a success
+        of a run whose second block never ran.  The row says the run
+        went on from it.
+        """
+        self._lost_after_block_one(persistence._add_task.__code__)
+
+    def test_a_sub_agent_run_lost_between_two_blocks_is_a_lost_connection(self) -> None:
+        """As above for a sub-agent's run."""
+        self._lost_after_block_one(persistence._add_task.__code__, **self._parent())
+
+    def test_a_run_lost_before_a_blocks_end_is_recorded_is_a_lost_connection(self) -> None:
+        """Block 1 has returned and its end is not in its row yet when the daemon loses the run.
+
+        A block whose row has no end is none the run is known to have
+        ended with.
+        """
+        self._lost_after_block_one(task_runner._TaskRunnerMixin._persist_subtask_row.__code__)
+
+    def test_a_run_lost_before_the_end_of_a_block_a_follow_up_was_queued_behind(self) -> None:
+        """As above for a one-block run that a ``<task>`` follow-up was queued behind meanwhile.
+
+        The row's id said whether a block was queued behind it when it
+        was allocated: none was then, so block 1's result passed for
+        the result of a run whose second block never ran.
+        """
+        self._lost_after_block_one(
+            task_runner._TaskRunnerMixin._persist_subtask_row.__code__, queued=True,
+        )
+
+    def test_a_run_rejoined_before_its_last_blocks_end_is_recorded_returns_its_result(self) -> None:
+        """The client is back while block 1, the run's only block, has returned and not ended.
+
+        No row says yet that the run ended with block 1, and the run is
+        on: its result is the one block 1 recorded, which the frame of
+        block 1's unfinished row must not take back.
+        """
+        ending = Pause(task_runner._TaskRunnerMixin._persist_subtask_row.__code__, lambda _l: True)
+        replayed = Pause(daemon_client._Inbox.replay_done.__code__, lambda _locals: True)
+        with Pauses(ending, replayed):
+            worker, out = self._cut_in_block_one(1)
+            self.gates[1].set()
+            self.assertTrue(ending.paused.wait(timeout=60), "block 1 never returned")
+            persistence._flush_chat_events()
+            self._reconnect()
+            self.assertTrue(replayed.paused.wait(timeout=60), "the replay never ended")
+        self._check_outcome(worker, out, [1])
+
+    def test_a_run_whose_last_row_is_deleted_during_the_recovery_keeps_the_others_spend(
+        self,
+    ) -> None:
+        """Block 3's row is deleted between the recovery's reading of the run's rows and its use.
+
+        The daemon replayed the newest row it had read of, found none,
+        and sent nothing of blocks 1 and 2 either: the client reported
+        a lost run that had spent nothing.  The run's result went with
+        the row; what the other blocks spent is still reported.
+        """
+        worker, out = self._cut_in_block_one(3)
+        self._close_tab_and_finish()
+        last = next(row["id"] for row in history_rows() if row["task"] == "block-3")
+        held = _HeldRecovery()
+        self.addCleanup(held.close)
+        self.relay.resume()
+        self.assertTrue(held.reached.wait(timeout=60), "the daemon never replayed the run")
+        persistence._delete_task(last)
+        held.go.set()
+        self._assert_lost(self._collect(worker, out), 2 * TOKENS_PER_CALL)
+
+    def test_a_charge_waits_for_the_frame_of_the_row_it_charges(self) -> None:
+        """A side channel charges block 1 while the frame of what block 1 spent is on its way.
+
+        The frame was read before the charge and sent after it: the
+        client was told an amount the row no longer had, and a charge
+        whose own event it got first was undone by the frame.  Reading
+        and sending are one step now, which the charge waits for.
+        """
+        worker, out = self._cut_in_block_one(3)
+        for gate in self.gates.values():
+            gate.set()
+        self.assertTrue(wait_for(self._task_over, timeout=120), "the run did not end")
+        first = next(row["id"] for row in history_rows() if row["task"] == "block-1")
+        printer = self.server._printer
+        charge = threading.Thread(
+            target=task_update.charge_side_channel_usage,
+            args=(printer, None, first, 0.5, 500, 1),
+            kwargs={"key": "late"},
+            daemon=True,
+        )
+        frame = Pause(
+            type(printer).broadcast.__code__,
+            lambda entered: entered["event"].get("type") == "task_events"
+            and entered["event"].get("task_id") == first,
+        )
+        with frame:
+            self.relay.resume()
+            self.assertTrue(frame.paused.wait(timeout=60), "the daemon never replayed block 1")
+            charge.start()
+            charge.join(timeout=1)
+            self.assertEqual(
+                self._history_row(first)["tokens"], TOKENS_PER_CALL,
+                "the row was charged while its frame was on its way",
+            )
+        charge.join(timeout=60)
+        self.assertEqual(self._history_row(first)["tokens"], TOKENS_PER_CALL + 500)
+        result = self._collect(worker, out)
+        self.assertIsInstance(result, daemon_client.TaskResult, result)
+        self.assertIn("result of block 3", result.text)
+
+    def test_a_charge_of_a_block_over_since_the_attach_is_not_undone_by_its_recording(self) -> None:
+        """Block 1 ends and is charged between the recovery's attach and its transcripts.
+
+        The recovery replayed what block 1 had recorded when it was
+        attached to, after the frame of block 1's row: totals the row
+        no longer had, which the charge was lost to for good (block 2
+        has no row yet, so nothing is replayed again).  The row of a
+        block that is over is sent after what the block recorded.
+        """
+        next_row = Pause(
+            persistence._add_task.__code__, lambda entered: entered.get("task") == "block-2",
+        )
+        replayed = Pause(daemon_client._Inbox.replay_done.__code__, lambda _locals: True)
+        with Pauses(next_row, replayed):
+            worker, out = self._cut_in_block_one(2)
+            first = self._probe_state().task_id
+            held = _HeldRecovery()
+            self.addCleanup(held.close)
+            self.relay.resume()
+            self.assertTrue(held.reached.wait(timeout=60), "the daemon never replayed the run")
+            self.gates[1].set()
+            self.assertTrue(next_row.paused.wait(timeout=60), "block 1 never ended")
+            task_update.charge_side_channel_usage(
+                self.server._printer, None, first, 0.5, 500, 1, key="late",
+            )
+            self.assertEqual(self._history_row(first)["tokens"], TOKENS_PER_CALL + 500)
+            held.go.set()
+            self.assertTrue(replayed.paused.wait(timeout=60), "the replay never ended")
+        self.gates[2].set()
+        result = self._collect(worker, out)
+        self.assertIsInstance(result, daemon_client.TaskResult, result)
+        self.assertIn("result of block 2", result.text)
+        self.assertEqual((result.tokens, result.steps), (2 * TOKENS_PER_CALL + 500, 3))
+
+    def test_a_run_lost_before_its_first_row_gets_no_other_tasks_result(self) -> None:
+        """The daemon loses a run that has no row yet, in a chat whose last task has a result.
+
+        The client names the run by its token.  The daemon answered a
+        name it knew nothing of with the chat's latest row: the earlier
+        task's transcript, whose result the client returned as its own.
+        """
+        chat_id = self._seed().chat_id
+        with Pause(persistence._add_task.__code__, lambda _locals: True) as first_row:
+            worker, out = self._cut_before_the_first_row(1, first_row, chat_id=chat_id)
+            self._forget_run()
+            self._reconnect()
+            self._assert_lost(self._collect(worker, out), 0)

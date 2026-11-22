@@ -94,7 +94,7 @@ If you have an **OPENAI_API_KEY**, with the __Hey Sorcar__ wake word, {{PRODUCT_
 Speak 'Hey Sorcar', your task ...
 ```
 
-Click the **mic** button below the chat input box if it is grey and wait for it to start pulsing blue. Speak 'Hey Sorcar' followed by your task, and {{PRODUCT_NAME}} will automatically run the task and tell you the results using its own voice. The voice interface distinguishes among different speakers.
+Turn on **Voice trigger** in the **…** menu below the chat input box. Once listening, speak 'Hey Sorcar' followed by your task, and {{PRODUCT_NAME}} will automatically run the task and tell you the results using its own voice. The voice interface distinguishes among different speakers. To dictate directly at the cursor without a wake word, click the **mic** button below the chat input box instead.
 
 You can also steer the agent's execution and ask for status when an agent is running using voice.
 
@@ -179,7 +179,7 @@ All you need to do is use a variant of the following prompt with {{PRODUCT_NAME}
 
 ## Useful Promptlets
 
-Click on the "Inject Promptlet" button below the chat input textbox to insert a useful promptlet into your prompt.
+Choose **"Inject promptlet"** from the **…** menu below the chat input textbox to insert a useful promptlet into your prompt.
 
 # Tip
 

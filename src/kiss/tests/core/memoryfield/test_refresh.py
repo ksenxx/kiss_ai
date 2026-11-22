@@ -93,6 +93,18 @@ def test_refresh_reports_stale_pages_and_skips_unparseable_dates(tmp_path: Path)
     assert "  old  (verified 2020-01-05T00:00:00Z)" in stale_section
     assert "fresh" not in stale_section
     assert "dateless" not in stale_section
+    # Oldest first by the instant, not by the text of the time: 22:30 UTC on the
+    # first of January is before 01:30 UTC on the second, whatever the offsets say.
+    tools.memory_write("later", "verified at 01:30 UTC on the second")
+    tools.memory_write("earlier", "verified at 22:30 UTC on the first")
+    set_stamp(tools, "later", "verified", "2000-01-01T23:30:00-02:00")
+    set_stamp(tools, "earlier", "verified", "2000-01-02T00:30:00+02:00")
+    stale_section = tools.memory_refresh(stale_days=365).split("Pages not verified or updated")[1]
+    assert stale_section.splitlines()[1:] == [
+        "  earlier  (verified 2000-01-02T00:30:00+02:00)",
+        "  later  (verified 2000-01-01T23:30:00-02:00)",
+        "  old  (verified 2020-01-05T00:00:00Z)",
+    ]
 
 
 def test_a_job_rewrite_does_not_make_a_page_look_verified(tmp_path: Path) -> None:

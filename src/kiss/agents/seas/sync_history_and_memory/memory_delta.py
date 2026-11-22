@@ -34,7 +34,6 @@ is ever packed or unpacked, so a stream cannot write outside the memory.
 
 from __future__ import annotations
 
-import errno
 import hashlib
 import io
 import json
@@ -46,27 +45,14 @@ import tarfile
 import tempfile
 import time
 import types
-from collections.abc import Iterator
-from contextlib import contextmanager, suppress
+from contextlib import suppress
 from pathlib import Path
 from typing import Any, BinaryIO
 
-# The same two primitives ``kiss.core.file_lock`` uses: ``flock`` on POSIX,
-# ``msvcrt.locking`` of the first byte on Windows.
-try:
-    import fcntl
-except ImportError:  # pragma: no cover - Windows
-    fcntl = None  # type: ignore[assignment]
-try:
-    import msvcrt
-except ImportError:  # POSIX
-    msvcrt = None  # type: ignore[assignment]
-
 LOCK_TIMEOUT = 60.0
-"""Longest wait for an agent holding a memory's lock (``MemoryDir.MUTATION_LOCK_TIMEOUT``)."""
+"""Longest wait for an agent holding a memory's lock (``MemoryDir.MUTATION_LOCK_TIMEOUT``).
 
-LOCK_POLL = 0.05
-"""Seconds between attempts at a held lock."""
+Given to ``merge_memory_pages``, whose :func:`locked_merge` takes the locks."""
 
 ENTRY_RE = re.compile(
     r"^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?/)?"
@@ -237,7 +223,7 @@ def unpack_and_merge(stream: BinaryIO, memory_dir: Path, tolerance: float) -> di
     ``merge_memory_pages.merge`` (which puts every page in place by an
     atomic rename inside the memory); the scratch directory is removed.
     The merge holds the mutation lock of the memory and of every domain
-    memory it touches (:func:`memory_locks`): an agent writing a page in
+    memory it touches (``merge_memory_pages.locked_merge``): an agent writing a page in
     the instant between the merge's comparison and its rename would
     otherwise lose that write.
 
@@ -256,86 +242,14 @@ def unpack_and_merge(stream: BinaryIO, memory_dir: Path, tolerance: float) -> di
     """
     memory_dir.mkdir(parents=True, exist_ok=True)
     rules = merge_module()
+    rules.LOCK_TIMEOUT = LOCK_TIMEOUT
     staging = Path(tempfile.mkdtemp(prefix="memory-delta-"))
     try:
         received = unpack(stream, staging)
-        domains = [entry.name for entry in staging.iterdir() if rules.is_domain_memory(entry)]
-        with memory_locks(memory_dir, domains):
-            counts, conflicts = rules.merge(staging, memory_dir, tolerance)
+        counts, conflicts = rules.locked_merge(staging, memory_dir, tolerance)
     finally:
         shutil.rmtree(staging, ignore_errors=True)
     return {"received": received, "counts": counts, "conflicts": conflicts}
-
-
-@contextmanager
-def memory_locks(memory_dir: Path, domains: list[str]) -> Iterator[None]:
-    """Hold the mutation locks of a memory and of the named domain memories for the block.
-
-    The locks are the ones ``kiss.core.memoryfield.pages.MemoryDir`` takes
-    around every write and delete (``kiss.core.file_lock``): an exclusive
-    lock on ``<memory>.lock`` beside the memory directory and on
-    ``<memory>/<domain>.lock`` for a domain memory, ``flock`` on POSIX and
-    ``msvcrt.locking`` of the file's first byte on Windows.  An agent never
-    holds two of them at once, so taking several here, in a fixed order,
-    cannot deadlock with one.
-
-    Args:
-        memory_dir: The memory.
-        domains: Names of its domain memories to lock as well.
-
-    Raises:
-        TimeoutError: When a lock is still held after :data:`LOCK_TIMEOUT`.
-    """
-    paths = [Path(f"{memory_dir}.lock")] + [memory_dir / f"{name}.lock" for name in sorted(domains)]
-    descriptors: list[int] = []
-    try:
-        for path in paths:
-            descriptor = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
-            descriptors.append(descriptor)
-            _lock(descriptor, path)
-        yield
-    finally:
-        for descriptor in reversed(descriptors):
-            _unlock(descriptor)
-            os.close(descriptor)
-
-
-def _lock(descriptor: int, path: Path) -> None:
-    """Take the exclusive lock on *descriptor*, polling for up to :data:`LOCK_TIMEOUT` seconds."""
-    deadline = time.monotonic() + LOCK_TIMEOUT
-    while not _try_lock(descriptor):
-        if time.monotonic() >= deadline:
-            raise TimeoutError(f"{path} still locked by another process after {LOCK_TIMEOUT:g}s")
-        time.sleep(LOCK_POLL)
-
-
-def _try_lock(descriptor: int) -> bool:
-    """Probe the lock once without waiting; True when it is now held."""
-    if fcntl is not None:
-        try:
-            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            return False
-        return True
-    if msvcrt is not None:  # pragma: no cover - Windows
-        os.lseek(descriptor, 0, os.SEEK_SET)
-        try:
-            msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)  # pyright: ignore[reportAttributeAccessIssue]
-        except OSError as exc:
-            if exc.errno in (errno.EACCES, errno.EDEADLK):
-                return False
-            raise
-        return True
-    return True  # pragma: no cover - a platform with neither primitive has no lock to take
-
-
-def _unlock(descriptor: int) -> None:
-    """Release the lock :func:`_try_lock` took on *descriptor*."""
-    if fcntl is not None:
-        fcntl.flock(descriptor, fcntl.LOCK_UN)
-    elif msvcrt is not None:  # pragma: no cover - Windows
-        os.lseek(descriptor, 0, os.SEEK_SET)
-        msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)  # pyright: ignore[reportAttributeAccessIssue]
 
 
 def main(argv: list[str]) -> int:

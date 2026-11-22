@@ -2,25 +2,23 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""A replay's late completion signal never closes a tab reopened since.
+"""A sub-agent that finishes while its tab is replayed is closed by that replay.
 
 A parent replay (``_open_persisted_subagent_tabs``) announces a running
 child, sends its transcript offer, and then checks again whether the
-child finished meanwhile, telling the clients ``subagentDone`` if so.
-If the child finishes in that window and a user reopens its tab
-(``resumeSession`` with ``reopen: true``, which announces the finished
-tab ``reopened`` on every surface), that late ``subagentDone`` used to
-follow the reopening: every page closes the tab on ``subagentDone`` and
-sends ``closeTab``, which the daemon mirrors to every surface, so the
-user's reopening was undone.  The replay is held at its pending-ask
-step (``Pause``, a trace hook on the real code path) while the child
-finishes and the reopening runs.  A real ``AgentServer``, real agent
-states and a real history database; nothing is mocked.
+child finished meanwhile, telling the clients ``subagentDone`` if so:
+the child's own ``subagentDone`` may have preceded the announcement on
+a page still opening the tab.  A replay of the child's tab by name
+(``resumeSession``) does the same, and announces nothing for a child
+that is over when the replay gets to its announcement.  The replay is
+held at a step of the real code path (``Pause``, a trace hook) while
+the child finishes.  A real ``AgentServer``, real agent states and a
+real history database; nothing is mocked.
 
-The same harness covers the other replay-vs-lifecycle races of a
-sub-agent tab: a child finishing while its tab is replayed by name,
-and a chat resumed into a child's tab while the parent replay loads
-the children's rows.
+The same harness covers a chat resumed into a child's tab while the
+parent replay loads the children's rows, and another sub-agent replayed
+into a child's tab while that child's own end is on its way, before the
+end reaches the tab or right after it.
 """
 
 from __future__ import annotations
@@ -30,7 +28,9 @@ from typing import Any
 
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
+from kiss.agents.sorcar.sorcar_agent import _notify_subagent_done
 from kiss.server import agent_state
+from kiss.server.json_printer import JsonPrinter
 from kiss.server.server import AgentServer
 from kiss.tests.server.pause import Pause
 from kiss.tests.server.test_subagent_stop_review_fixes import (
@@ -54,21 +54,21 @@ def _register_running(task_id: str, chat_id: str, tab_id: str, parent_id: str = 
     )
 
 
-def _tab_frames(events: list[dict[str, Any]], tab_id: str) -> list[tuple[str, Any, Any]]:
-    """The (type, isDone, reopened) of every sub-agent tab frame about *tab_id*."""
+def _tab_frames(events: list[dict[str, Any]], tab_id: str) -> list[tuple[str, str]]:
+    """The (type, task id) of every sub-agent tab frame about *tab_id*."""
     return [
-        (ev["type"], ev.get("isDone"), ev.get("reopened"))
+        (ev["type"], ev["task_id"])
         for ev in events
         if ev.get("tab_id") == tab_id and ev.get("type") in ("openSubagentTab", "subagentDone")
     ]
 
 
-class TestReplayCompletionAfterReopen(_DbRedirectBase):
-    """The replay's completion check yields to a reopening recorded before it."""
+class TestSubagentFinishingMidReplay(_DbRedirectBase):
+    """A replay closes the tab of a child that finishes while it runs."""
 
-    def _finish_mid_replay(self, reopen: bool) -> list[tuple[str, Any, Any]]:
-        """Replay a running child, finish it (and reopen its tab) mid-replay; return its frames."""
-        chat_id = "chat-replay-reopen"
+    def test_a_child_finishing_mid_replay_is_closed(self) -> None:
+        """The parent replay closes the tab it announced running."""
+        chat_id = "chat-replay-finish"
         parent_id, _ = th._add_task("parent task", chat_id=chat_id)
         sub_id, _ = th._add_task(
             "sub task", chat_id=chat_id, extra={"subagent": {"parent_task_id": parent_id}},
@@ -93,27 +93,12 @@ class TestReplayCompletionAfterReopen(_DbRedirectBase):
             replay.start()
             assert held.paused.wait(30), "the replay never reached the child's pending ask"
             agent_state.unregister(sub_id)
-            if reopen:
-                server._replay_session(chat_id, sub_tab, task_id=sub_id, reopen=True)
             held.release()
             replay.join(30)
         assert not replay.is_alive(), "the replay never ended"
-        return _tab_frames(printer.events, sub_tab)
+        frames = _tab_frames(printer.events, sub_tab)
 
-    def test_a_child_finishing_and_reopened_mid_replay_stays_open(self) -> None:
-        """No ``subagentDone`` from the replay follows the reopened announcement."""
-        frames = self._finish_mid_replay(reopen=True)
-
-        assert frames == [
-            ("openSubagentTab", False, None),
-            ("openSubagentTab", True, True),
-        ], frames
-
-    def test_a_child_finishing_mid_replay_is_closed(self) -> None:
-        """Without a reopening, the replay closes the tab it announced running."""
-        frames = self._finish_mid_replay(reopen=False)
-
-        assert frames == [("openSubagentTab", False, None), ("subagentDone", None, None)], frames
+        assert frames == [("openSubagentTab", sub_id), ("subagentDone", sub_id)], frames
 
     def test_a_child_finishing_mid_named_replay_is_closed(self) -> None:
         """A child's tab replayed by name (``resumeSession``) closes when it finishes mid-replay.
@@ -148,22 +133,25 @@ class TestReplayCompletionAfterReopen(_DbRedirectBase):
         assert not replay.is_alive(), "the replay never ended"
         frames = _tab_frames(printer.events, sub_tab)
 
-        assert frames == [("openSubagentTab", False, None), ("subagentDone", None, None)], frames
+        assert frames == [("openSubagentTab", sub_id), ("subagentDone", sub_id)], frames
 
-    def _finish_before_named_announcement(self, side_channel: bool) -> list[tuple[str, Any, Any]]:
-        """Replay a running child by name and finish it while its announcement is built.
+    def test_a_child_over_before_its_named_announcement_is_told_done_only(self) -> None:
+        """A child over when the named replay gets to its announcement is not announced.
 
-        Returns the frames the replay sent.
-
-        The replay is held while building the announcement: after the
-        unlocked ``is_done`` sample, before the locked broadcast.
+        ``_replay_session`` attaches the tab while the child runs; the
+        child's release (``_release_run_state``) and its ``subagentDone``
+        can land before ``_announce_or_end_subagent_tab`` decides.  It samples
+        and broadcasts under the lock the release runs under, so the
+        end is the only frame about the tab: no announcement, status or
+        transcript follows a done signal.  The daemon forgets the tab
+        with that answer (no page reports that it closed a sub-agent's
+        tab), so the answer goes to every connection: the tab was a
+        viewer of the child, and the child's own end no longer finds it.
         """
         chat_id = "chat-named-late"
         parent_id, _ = th._add_task("parent task", chat_id=chat_id)
         sub_id, _ = th._add_task(
-            "sub task",
-            chat_id=chat_id,
-            extra={"subagent": {"parent_task_id": parent_id, "side_channel": side_channel}},
+            "sub task", chat_id=chat_id, extra={"subagent": {"parent_task_id": parent_id}},
         )
         _register_running(parent_id, chat_id, "tab-parent")
         _register_running(sub_id, chat_id, f"task-{parent_id}__sub_0", parent_id)
@@ -171,42 +159,30 @@ class TestReplayCompletionAfterReopen(_DbRedirectBase):
         server = AgentServer(printer=printer)
         sub_tab = f"tab-parent__sub_{sub_id}"
         replay = threading.Thread(
-            target=server._replay_session, args=(chat_id, sub_tab), kwargs={"task_id": sub_id},
+            target=server._replay_session,
+            args=(chat_id, sub_tab),
+            kwargs={"task_id": sub_id, "conn_id": "conn-asking"},
         )
         held = Pause(
-            AgentServer._subagent_announcement.__code__,
-            lambda local: local["sub_tab_id"] == sub_tab,
+            AgentServer._announce_or_end_subagent_tab.__code__,
+            lambda local: local["tab_id"] == sub_tab,
         )
         with held:
             replay.start()
-            assert held.paused.wait(30), "the replay never built the child's announcement"
+            assert held.paused.wait(30), "the replay never got to the child's announcement"
             agent_state.unregister(sub_id)
             held.release()
             replay.join(30)
         assert not replay.is_alive(), "the replay never ended"
-        return _tab_frames(printer.events, sub_tab)
+        about_tab = [
+            (ev["type"], ev.get("task_id"), ev.get("connId"))
+            for ev in printer.events
+            if sub_tab in (ev.get("tab_id"), ev.get("tabId"))
+        ]
 
-    def test_a_child_finishing_before_the_named_announcement_is_announced_done(self) -> None:
-        """The named replay's announcement carries the child's state at the moment it is broadcast.
-
-        ``_replay_session`` samples ``is_done`` outside the lock; the
-        child's release (``_release_run_state``, under that lock) and
-        its ``subagentDone`` can land before ``_reopen_subagent_tab``
-        broadcasts, which then said ``isDone: false`` AFTER the done
-        signal — every client had to tolerate a running announcement
-        for a finished child.  Re-sampled under the lock that
-        broadcasts, the announcement says finished, and the replay's
-        late completion check has nothing left to correct.
-        """
-        frames = self._finish_before_named_announcement(side_channel=False)
-
-        assert frames == [("openSubagentTab", True, None)], frames
-
-    def test_a_side_channel_finishing_before_its_named_announcement_is_closed(self) -> None:
-        """A side channel (the /ask answerer) finishing in that window is closed, not announced."""
-        frames = self._finish_before_named_announcement(side_channel=True)
-
-        assert frames == [("subagentDone", None, None)], frames
+        assert about_tab == [("subagentDone", sub_id, None)], about_tab
+        assert printer.tasks_for_tab(sub_tab) == [], "the ended tab is still a viewer"
+        assert sub_tab not in server._tab_opened_task_ids, "the ended tab is still pinned"
 
     def test_a_child_tab_rebound_to_another_chat_mid_replay_keeps_that_chat(self) -> None:
         """A descendant replay yields to a chat resumed into the child's tab meanwhile.
@@ -257,3 +233,100 @@ class TestReplayCompletionAfterReopen(_DbRedirectBase):
         assert frames == [("task_events", chat_b)], frames
         assert sub_tab not in printer.viewer_tab_ids(sub_id)
         assert server._tab_chat_views.get(sub_tab) == chat_b
+
+    def test_a_childs_end_leaves_the_sub_agent_replayed_into_its_tab_meanwhile(self) -> None:
+        """A child's end closes no other sub-agent replayed into its tab since the end began.
+
+        The ending child's thread samples the tabs watching it, then
+        asks the daemon to end each.  Another running sub-agent replayed
+        into one of them in between owns the tab: it is told nothing of
+        the first child's end, which would close it on every page, and
+        keeps its pin and its subscription.
+        """
+        chat_id = "chat-end-vs-takeover"
+        parent_id, _ = th._add_task("parent task", chat_id=chat_id)
+        subs = [
+            th._add_task(
+                name, chat_id=chat_id, extra={"subagent": {"parent_task_id": parent_id}},
+            )[0]
+            for name in ("first sub", "second sub")
+        ]
+        _register_running(parent_id, chat_id, "tab-parent")
+        for idx, sub_id in enumerate(subs):
+            _register_running(sub_id, chat_id, f"task-{parent_id}__sub_{idx}", parent_id)
+        first, second = subs
+        printer = _RecordingPrinter()
+        server = AgentServer(printer=printer)
+        sub_tab = f"tab-parent__sub_{first}"
+        server._replay_session(chat_id, sub_tab, task_id=first)
+        agent_state.unregister(first)
+        ending = threading.Thread(
+            target=_notify_subagent_done, args=(printer, first, "", "", "tab-parent"),
+        )
+        held = Pause(
+            AgentServer._end_subagent_view.__code__, lambda local: local["tab_id"] == sub_tab,
+        )
+        with held:
+            ending.start()
+            assert held.paused.wait(30), "the child's end never reached its tab"
+            server._replay_session(chat_id, sub_tab, task_id=second)
+            held.release()
+            ending.join(30)
+        assert not ending.is_alive(), "the child's end never returned"
+        frames = _tab_frames(printer.events, sub_tab)
+
+        assert frames == [("openSubagentTab", first), ("openSubagentTab", second)], frames
+        assert printer.tasks_for_tab(sub_tab) == [second]
+        assert server._tab_opened_task_ids.get(sub_tab) == second
+
+    def test_a_childs_end_restores_no_picker_of_a_chat_resumed_into_its_tab_since(self) -> None:
+        """A child's end hands its tab's model picker back before the tab can be taken over.
+
+        The end tells the tab and restores its picker in one step.  A
+        running chat resumed into the tab from then on shows the model
+        its agent picked; a restore sent after the takeover would put
+        the ended child's model over it, with no later event to fix it.
+        """
+        chat_id = "chat-end-vs-model"
+        parent_id, _ = th._add_task("parent task", chat_id=chat_id)
+        sub_id, _ = th._add_task(
+            "sub task", chat_id=chat_id, extra={"subagent": {"parent_task_id": parent_id}},
+        )
+        other_id, other_chat = th._add_task("another chat's task")
+        _register_running(parent_id, chat_id, "tab-parent")
+        _register_running(sub_id, chat_id, f"task-{parent_id}__sub_0", parent_id)
+        _register_running(other_id, other_chat, "tab-other")
+        printer = _RecordingPrinter()
+        server = AgentServer(printer=printer)
+        sub_tab = f"tab-parent__sub_{sub_id}"
+        server._replay_session(chat_id, sub_tab, task_id=sub_id)
+        printer.broadcast_agent_model_pick("child-model", "", sub_id)
+        printer.broadcast_agent_model_pick("other-model", "tab-other", other_id)
+        agent_state.unregister(sub_id)
+        ending = threading.Thread(
+            target=_notify_subagent_done,
+            args=(printer, sub_id, "", "launch-model", "tab-parent"),
+        )
+        takeover = threading.Thread(target=server._replay_session, args=(other_chat, sub_tab))
+        held = Pause(
+            JsonPrinter.restore_model_pick.__code__, lambda local: local["tab_id"] == sub_tab,
+        )
+        with held:
+            ending.start()
+            assert held.paused.wait(30), "the child's end never got to the tab's picker"
+            takeover.start()
+            takeover.join(0.5)  # over before the release only when the restore is a later step
+            held.release()
+            ending.join(30)
+            takeover.join(30)
+        assert not ending.is_alive(), "the child's end never returned"
+        assert not takeover.is_alive(), "the takeover never returned"
+        picks = [
+            (ev["model"], ev["source"])
+            for ev in printer.events
+            if ev["type"] == "modelPick" and ev.get("tabId") == sub_tab
+        ]
+
+        assert picks[0] == ("child-model", "agent"), picks
+        assert picks[-1] == ("other-model", "agent"), picks
+        assert sub_tab in printer._model_override_tabs, "the tab's picker is no longer the agent's"

@@ -225,6 +225,11 @@ def chat_scenes(page: Page, out: Path, prefix: str) -> str:
     page.click("#more-btn")
     page.wait_for_timeout(200)
     shoot(page, out / f"{prefix}-5-more-menu.png")
+    page.keyboard.press("Escape")
+    # Settings is a button of the strip under the Chats list.
+    page.evaluate(
+        "() => document.getElementById('sidebar').classList.add('open')"
+    )
     page.click("#settings-btn")
     page.wait_for_timeout(300)
     shoot(page, out / f"{prefix}-6-settings.png")

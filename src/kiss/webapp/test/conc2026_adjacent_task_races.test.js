@@ -4,7 +4,7 @@
 // add your name here
 
 // End-to-end (JSDOM) tests for adjacent-task / background-status races
-// in media/main.js (audit candidates CAND-1..CAND-4). Each test asserts
+// in media/main.js (audit candidates CAND-1, CAND-3..CAND-5). Each test asserts
 // the CORRECT (post-fix) behavior:
 //
 //   CAND-1  After a neighbouring task W was spliced into tab A's
@@ -15,15 +15,6 @@
 //           the anchors on every tab switch while the spliced DOM
 //           survives in the tab's fragment, and renderAdjacentTask
 //           never dedups by task id.)
-//
-//   CAND-2  When a background tab's event swaps the visible tab
-//           mid-event (a bg `summary` tool_call adopts a finished
-//           run_parallel panel, collapses it, and closeTab() closes the
-//           ACTIVE sub-agent tab, a finished one the user reopened),
-//           processOutputEventForBgTab must NOT overwrite the newly
-//           restored tab's status row texts / stepCount with the
-//           pre-event values of the tab that was closed: the row keeps
-//           the swapped-in tab's own values.
 //
 //   CAND-3  An #adjacent-loader that was detached into a tab's
 //           fragment during a tab switch (its reply arrived addressed
@@ -43,13 +34,13 @@
 //           page's own request in flight.
 //
 // The harness mirrors adjacentTaskScroll.test.js (overscroll + adjacent
-// replies) and bgRenderTabSwap_sweep1026.test.js (a hidden parent's
-// `summary` swapping a reopened sub-agent tab off screen).
+// replies).
 
 'use strict';
 
 const assert = require('assert');
 const harness = require('./simplify2_harness');
+const {historyRows, makeRow} = require('./history_helpers');
 
 const {
   send,
@@ -57,17 +48,8 @@ const {
   wheel,
   getAdjacent,
   makeLaunchedPage: makePage,
-  statusMetrics,
   showHistoryTask,
 } = harness;
-const {
-  bootParallelRun,
-  finishFanOut,
-  togglePanel,
-  subagentTabEls,
-} = require('./subagent_tab_helpers');
-
-const TS = 1767225600000;
 
 // The daemon's reply to a 'prev' getAdjacentTask: task W = '41'.
 function answerPrevTask41(win, tabId) {
@@ -193,101 +175,6 @@ function testAnchorsOfAnotherTaskAreNotRestored() {
   }
 }
 
-// CAND-2: a background tab's event can swap the visible tab mid-event.
-// The user reads a finished sub-agent's tab S, reopened by expanding
-// the fan-out panel, while the hidden parent P gets a `summary`
-// tool_call: the summary folds the fan-out, the fold closes the
-// finished tab S, and closeTab puts P on screen (restoreTab repaints
-// the status row from P's saved numbers). processOutputEventForBgTab
-// must then leave the row as restoreTab painted it, not overwrite it
-// with the closed tab's pre-event values.
-function testBgEventTabSwapKeepsRestoredStatusRow() {
-  const {win, parentId: tabP, panel, subTabIds} = bootParallelRun(
-    1,
-    makePage(),
-  );
-  try {
-    // Parent tab P runs live with numbers of its own.
-    send(win, {
-      type: 'usage_info',
-      text: '',
-      total_tokens: 999,
-      cost: '$9.99',
-      total_steps: 9,
-      tabId: tabP,
-      ts: TS,
-    });
-    const parentRow = statusMetrics(win);
-    assert.deepStrictEqual(parentRow, {
-      tokens: 'Tokens: 999',
-      budget: 'Cost: $9.99',
-      steps: 'Steps: 9',
-    });
-
-    // The sub-agent finishes (its tab closes) and the user expands the
-    // folded fan-out again: the finished sub-agent's tab reopens.
-    finishFanOut(win, subTabIds);
-    togglePanel(win, panel);
-    const [tabS] = subagentTabEls(win).map(el => el.dataset.tabId);
-    assert.ok(tabS, 'expanding the fan-out reopens the finished tab');
-
-    // The reopened tab S is on screen with numbers of ITS own.
-    clickTab(win, tabS);
-    assert.strictEqual(win._testApi.getActiveTabId(), tabS);
-    send(win, {
-      type: 'task_events',
-      tabId: tabS,
-      task: 'sub 1',
-      task_id: 'sub-task-1',
-      events: [
-        {
-          type: 'usage_info',
-          text: '',
-          total_tokens: 555,
-          cost: '$5.55',
-          total_steps: 5,
-          ts: TS,
-        },
-      ],
-    });
-    const subRow = statusMetrics(win);
-    assert.deepStrictEqual(subRow, {
-      tokens: 'Tokens: 555',
-      budget: 'Cost: $5.55',
-      steps: 'Steps: 5',
-    });
-
-    // The hidden parent's summary folds the fan-out mid-event.
-    send(win, {
-      type: 'tool_call',
-      name: 'summary',
-      tabId: tabP,
-      extras: {description: 'folded the fan-out'},
-      ts: TS,
-    });
-    assert.strictEqual(
-      win._testApi.getActiveTabId(),
-      tabP,
-      'the fold must have closed sub-agent tab S and put parent tab P ' +
-        'on screen (scenario precondition)',
-    );
-    const after = statusMetrics(win);
-    assert.deepStrictEqual(
-      after,
-      parentRow,
-      'after a background event swapped the visible tab, the status row ' +
-        'must keep the swapped-in tab\u2019s restored values (' +
-        JSON.stringify(parentRow) +
-        '), not the closed tab\u2019s pre-event values (' +
-        JSON.stringify(subRow) +
-        ')',
-    );
-    console.log('PASS bg event tab swap keeps the restored status row');
-  } finally {
-    win.close();
-  }
-}
-
 // CAND-3: a loader detached into the switched-away tab's fragment
 // (its reply was dropped by the isForActiveTab guard) must be removed
 // when the tab is restored.
@@ -367,6 +254,122 @@ function testDaemonDisconnectClearsAdjacentLoading() {
         '(adjacentLoading must not stay latched for ever)',
     );
     console.log('PASS daemon disconnect clears adjacent loading state');
+  } finally {
+    win.close();
+  }
+}
+
+/**
+ * What the daemon sends when it loses `machine`'s stream of tab `tabId`
+ * (RemoteTabs.dropped): the terminal status naming the machine as
+ * `lost`, the refusal's error, then the tab's unbinding.
+ */
+function loseMachine(win, tabId, machine) {
+  send(win, {type: 'status', tabId, running: false, lost: machine});
+  send(win, {
+    type: 'error',
+    tabId,
+    code: 'prompt_refused',
+    text: 'lost the connection to ' + machine,
+  });
+  send(win, {type: 'tabMachine', tabId, machine: ''});
+}
+
+// Audit 2026-11-21 (W10 F2): a tab bound to a registered machine sends
+// its getAdjacentTask to that machine, whose stream can be lost while
+// this daemon stays connected.  The answer is not coming then, as
+// after a daemon outage: the loader row goes and a later overscroll
+// asks again.  The loss of ANOTHER tab's machine leaves the request of
+// the tab on screen in flight.
+function testLostMachineCancelsItsTabsNeighbourRead() {
+  const {win, posted} = makePage();
+  try {
+    const {tabId, O} = showHistoryTask(win, posted);
+    send(win, {type: 'tabMachine', tabId, machine: 'box'});
+    win._testApi.createNewTab();
+    const otherTab = win._testApi.getActiveTabId();
+    send(win, {type: 'tabMachine', tabId: otherTab, machine: 'other-box'});
+    clickTab(win, tabId);
+
+    O.scrollTop = 0;
+    wheel(win, O, -50, 10);
+    assert.strictEqual(getAdjacent(posted).length, 1, 'prev of 42 is asked');
+    assert.ok(O.querySelector('.adjacent-loader'), 'the loader row is up');
+
+    loseMachine(win, otherTab, 'other-box');
+    // A tab this page does not have (closed here) can lose its machine too.
+    loseMachine(win, 'tab-closed-here', 'other-box');
+    assert.ok(
+      O.querySelector('.adjacent-loader'),
+      "the loss of a background tab's machine must leave the request " +
+        'of the tab on screen in flight',
+    );
+    wheel(win, O, -50, 10);
+    assert.strictEqual(getAdjacent(posted).length, 1, 'and its latch held');
+
+    loseMachine(win, tabId, 'box');
+    assert.strictEqual(
+      O.querySelector('.adjacent-loader'),
+      null,
+      'BUG - "Loading previous task…" stays up for a neighbour asked ' +
+        'of a machine whose stream was lost',
+    );
+    O.scrollTop = 0;
+    wheel(win, O, -50, 10);
+    assert.strictEqual(
+      getAdjacent(posted).length,
+      2,
+      'BUG - the lost request keeps every later overscroll latched',
+    );
+    console.log('PASS a lost machine cancels its tab\u2019s neighbour read');
+  } finally {
+    win.close();
+  }
+}
+
+// The same loss ends the reading back to a task that a history click
+// asked for (seekSoughtTask): left waiting, it would start again with
+// the next neighbour the reader scrolls to, long after the click.
+function testLostMachineEndsTheReadBack() {
+  const {win, posted} = makePage();
+  try {
+    const {tabId, O} = showHistoryTask(win, posted);
+    send(win, {type: 'tabMachine', tabId, machine: 'box'});
+    send(win, {type: 'status', tabId, running: true, startTs: Date.now()});
+    send(win, {
+      type: 'history',
+      offset: 0,
+      generation: 0,
+      sessions: [
+        makeRow({
+          id: 'chat-abc',
+          task_id: 39,
+          title: 'Task 39',
+          machine: 'box',
+        }),
+      ],
+    });
+    historyRows(win)[0].click();
+    const asked = () =>
+      getAdjacent(posted).map(m => String(m.taskId) + ' ' + m.direction);
+    assert.deepStrictEqual(asked(), ['42 prev'], 'the thread is read back');
+
+    loseMachine(win, tabId, 'box');
+    O.scrollTop = 0;
+    wheel(win, O, -50, 10);
+    assert.deepStrictEqual(
+      asked(),
+      ['42 prev', '42 prev'],
+      'the reader asks again',
+    );
+    answerPrevTask41(win, tabId);
+    assert.deepStrictEqual(
+      asked(),
+      ['42 prev', '42 prev'],
+      'BUG - the read-back that awaited the lost machine went on with ' +
+        'the neighbour the reader scrolled to',
+    );
+    console.log('PASS a lost machine ends the read-back');
   } finally {
     win.close();
   }
@@ -472,9 +475,10 @@ function main() {
   const tests = [
     testNoDuplicateAdjacentRegionAfterTabSwitch,
     testAnchorsOfAnotherTaskAreNotRestored,
-    testBgEventTabSwapKeepsRestoredStatusRow,
     testDetachedLoaderRemovedOnRestore,
     testDaemonDisconnectClearsAdjacentLoading,
+    testLostMachineCancelsItsTabsNeighbourRead,
+    testLostMachineEndsTheReadBack,
     testNeighbourOfAnotherEdgeIsNotSpliced,
     testReplayOfARunWithoutARowForgetsTheTaskBeforeIt,
   ];

@@ -60,6 +60,39 @@ logger = logging.getLogger(__name__)
 
 _FRONTMATTER_RE = re.compile(r"\A---[^\S\n]*\n((?:.*\n)*?)---[^\S\n]*\n?")
 
+#: The pairs the ``<<`` keys of one frontmatter block may merge, all told.
+#: Metadata merges a handful; each level of ``m1: {<<: [*m0, *m0]}`` holds
+#: twice the pairs of the one before it, written out in full.
+_MAX_MERGED_PAIRS = 10_000
+
+
+class _FrontmatterLoader(yaml.SafeLoader):
+    """A safe loader that refuses a block merging more than :data:`_MAX_MERGED_PAIRS` pairs."""
+
+    flattening = 0  #: the :meth:`flatten_mapping` calls in progress
+    merged = 0  #: the pairs the block's ``<<`` keys have merged so far
+
+    def flatten_mapping(self, node: yaml.MappingNode) -> None:
+        """Merge the ``<<`` keys of *node* as ``SafeLoader`` does, within the budget.
+
+        ``SafeLoader`` flattens each mapping a key merges through this
+        method, then copies its pairs: a call inside another is such a
+        mapping, counted before the copy, so no merge past the budget
+        is built.
+
+        Raises:
+            yaml.MarkedYAMLError: The block's merges exceed the budget.
+        """
+        self.flattening += 1
+        super().flatten_mapping(node)
+        self.flattening -= 1
+        if self.flattening:
+            self.merged += len(node.value)
+            if self.merged > _MAX_MERGED_PAIRS:
+                raise yaml.MarkedYAMLError(
+                    problem="the merge keys expand past any metadata's size",
+                    problem_mark=node.start_mark)
+
 
 @_unstopped
 def _read_regular_file(path: Path) -> str:
@@ -109,11 +142,12 @@ def parse_frontmatter(path: Path) -> tuple[dict[str, Any], str] | None:
     if match:
         body = text[match.end():]
         try:
-            loaded = yaml.safe_load(match.group(1))
+            loaded = yaml.load(match.group(1), Loader=_FrontmatterLoader)
             if isinstance(loaded, dict):
                 meta = loaded
-        # Not only YAMLError: an impossible date or an over-long integer
-        # raises ValueError, a deeply nested block RecursionError.
+        # Not only YAMLError (a merge-key bomb is one: :class:`_FrontmatterLoader`):
+        # an impossible date or an over-long integer raises ValueError, a
+        # deeply nested block RecursionError.
         except (yaml.YAMLError, ValueError, RecursionError):
             logger.debug("bad frontmatter in %s", path, exc_info=True)
     return meta, body

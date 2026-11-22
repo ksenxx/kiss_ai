@@ -36,7 +36,6 @@ import pytest
 from playwright.sync_api import Locator, Page, expect, sync_playwright
 
 from kiss.agents.sorcar import persistence
-from kiss.tests.conftest import click_row_menu_item
 from kiss.tests.server.test_content_tab_file_links import _ServerHarness
 from kiss.tests.webapp.test_content_tab_file_links import _open_page
 
@@ -146,7 +145,7 @@ def _open_task(page: Page, prompt: str = _PROMPT, result: str = _RESULT) -> None
     """Click the CHATS row of the chat's task *prompt* and wait for its transcript."""
     group = page.locator(f'#history-list .history-chat-group[data-chat-id="{_CHAT}"]')
     # The chat's rows sit folded under its header: unfold, then click the task.
-    click_row_menu_item(group.locator(".history-chat-header"), ".history-chat-collapse")
+    group.locator(".history-chat-header > .history-chat-collapse").click()
     group.locator(".sidebar-item").filter(has_text=prompt).click()
     expect(page.locator("#output > .rc")).to_contain_text(result, timeout=_TIMEOUT)
 

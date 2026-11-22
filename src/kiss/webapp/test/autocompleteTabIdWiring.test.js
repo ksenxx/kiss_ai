@@ -128,7 +128,107 @@ async function main() {
   win.close();
 }
 
+// A list of files answers the mention it was asked for.  Once the text
+// typed, or the folder or the machine the tab browses, is another, the
+// list still on screen (the answer to the new mention is on its way)
+// completes nothing: Tab, Enter or a click would put a file of the old
+// list in place of the new mention.  Nor once the caret moved inside
+// the word typed: the mention is the word up to the caret.
+function testAListForAnotherMentionIsNotAccepted() {
+  const {win, posted} = makePage();
+  const tabId = win._testApi.getActiveTabId();
+  const inp = win.document.getElementById('task-input');
+  const config = extra =>
+    send(win, {
+      type: 'configData',
+      config: Object.assign({work_dir: '/work/a'}, extra),
+      apiKeys: {},
+    });
+  const files = (prefix, text, extra) =>
+    send(
+      win,
+      Object.assign(
+        {type: 'files', tabId, prefix, workDir: '/work/a', files: [{type: 'file', text}]},
+        extra,
+      ),
+    );
+  const accept = how => {
+    if (how === 'click') {
+      win.document.querySelector('#autocomplete .ac-item').click();
+      return;
+    }
+    inp.dispatchEvent(
+      new win.KeyboardEvent('keydown', {key: how, bubbles: true, cancelable: true}),
+    );
+  };
+  // Type *text*, the caret where its "|" is.
+  const typeAt = text => {
+    const caret = text.indexOf('|');
+    inp.value = text.replace('|', '');
+    inp.setSelectionRange(caret, caret);
+    inp.dispatchEvent(new win.Event('input', {bubbles: true}));
+  };
+  const drafts = {'the caret': 'Review @alpha|zebra'};
+  const changes = {
+    'the text': () => typeInto(win, 'Review @zebra'),
+    'the folder': () => config({work_dir: '/work/b'}),
+    'the machine': () => config({last_machine: 'gpu-box'}),
+    'the caret': () => {
+      inp.setSelectionRange(inp.value.length, inp.value.length);
+      win.document.dispatchEvent(new win.Event('selectionchange'));
+    },
+  };
+  // What answers the mention after each change.
+  const answers = {
+    'the text': () => files('zebra', './zebra.txt'),
+    'the folder': () => files('alpha', './alpha-b.txt', {workDir: '/work/b'}),
+    'the machine': () =>
+      files('alpha', './alpha-gpu.txt', {machine: 'gpu-box', workDir: ''}),
+    // No keystroke asked for the word the caret ends now: the next does.
+    'the caret': () => {
+      typeInto(win, inp.value);
+      files('alphazebra', './alphazebra.txt');
+    },
+  };
+
+  for (const what of Object.keys(changes)) {
+    for (const how of ['Tab', 'Enter', 'click']) {
+      config({});
+      typeAt(drafts[what] || 'Review @alpha|');
+      files('alpha', './alpha-private.txt');
+      assert.ok(pickerVisible(win), 'the list is on screen');
+      changes[what]();
+      const typed = inp.value;
+      posted.length = 0;
+      accept(how);
+      const label = what + ', ' + how;
+      assert.strictEqual(
+        inp.value,
+        typed,
+        label + ': BUG: a file of the old list replaced the mention',
+      );
+      assert.deepStrictEqual(
+        posted.filter(c => c.type === 'recordFileUsage' || c.type === 'submit'),
+        [],
+        label,
+      );
+      // The answer arrives: its list completes the mention.
+      answers[what]();
+      assert.ok(pickerVisible(win), label + ': the new list is on screen');
+      accept(how);
+      assert.strictEqual(
+        inp.value,
+        'Review ' + win.document.querySelector('#autocomplete .ac-item').dataset.text + ' ',
+        label,
+      );
+    }
+  }
+  console.log('  ok - a list for another mention is not accepted');
+  win.close();
+}
+
 main()
+  .then(testAListForAnotherMentionIsNotAccepted)
   .then(() => console.log('autocompleteTabIdWiring.test.js: all tests passed'))
   .catch(err => {
     console.error('FAIL:', err && err.stack ? err.stack : err);

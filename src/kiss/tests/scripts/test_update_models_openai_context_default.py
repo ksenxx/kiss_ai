@@ -17,6 +17,12 @@ These tests drive the production ``compute_changes`` end-to-end with
 synthetic vendor payloads, exactly like the live script does.
 """
 
+import json
+from pathlib import Path
+
+import pytest
+
+from kiss.scripts import update_models
 from kiss.scripts.update_models import (
     _DEFAULT_CONTEXT_LENGTH_BY_SOURCE,
     _OPENAI_DEFAULT_CONTEXT_LENGTH,
@@ -201,3 +207,35 @@ def test_zero_priced_entry_with_context_but_no_openrouter_twin_is_left_alone() -
     openai = {"gpt-6-luna": {"source": "openai"}}
     updates, _ = compute_changes(current, {}, {}, {}, openai)
     assert [u for u in updates if u["name"] == "gpt-6-luna"] == []
+
+
+def test_zero_context_generated_alias_takes_the_repaired_context_of_its_base(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Audit X3-2: the repair looked a generated alias up by its own name, which OpenRouter
+    does not list, and its vendor default replaced the twin's window the alias copies from its
+    base.  A real model whose name merely ends in ``-high`` is still repaired by that name."""
+    row = {"context_length": 0, "input_price_per_1M": 5.0, "output_price_per_1M": 25.0}
+    catalog = tmp_path / "MODEL_INFO.json"
+    catalog.write_text(
+        json.dumps(
+            {
+                "gpt-6-luna": {**row, "thinking": "high"},
+                "gpt-6-luna-high": {**row, "thinking": "high", "alias_of": "gpt-6-luna"},
+                "gpt-6-terra-high": row,
+            }
+        )
+    )
+    monkeypatch.setattr(update_models, "MODEL_INFO_PATH", catalog)
+    twin = {**row, "context_length": 262144, "source": "openrouter"}
+    current = update_models.get_current_model_info()
+    updates, _ = compute_changes(current, {"openrouter/openai/gpt-6-luna": twin}, {}, {}, {})
+    update_models.apply_updates_to_file(updates, [], [], current)
+    written = json.loads(catalog.read_text())
+    assert {name: entry["context_length"] for name, entry in written.items()} == {
+        "gpt-6-luna": 262144,
+        "gpt-6-luna-low": 262144,
+        "gpt-6-luna-medium": 262144,
+        "gpt-6-luna-high": 262144,
+        "gpt-6-terra-high": _OPENAI_DEFAULT_CONTEXT_LENGTH,
+    }

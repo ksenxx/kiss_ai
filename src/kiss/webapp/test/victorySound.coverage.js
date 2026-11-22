@@ -5,8 +5,9 @@
 
 // Coverage gate: requires 100% line coverage of the victory-sound code
 // in media/main.js (the regions fenced by `// victory-coverage:start` /
-// `// victory-coverage:end`: the Settings checkbox, playVictorySound,
-// isUsersTaskTab and the task_done hook) when running the functional
+// `// victory-coverage:end`: a project's own setting, the Settings
+// checkbox, playVictorySound, isUsersTaskTab and the task_done hook) when
+// running the functional
 // jsdom suite in test/victorySound.test.js.  That suite covers a visible,
 // a background, a sub-agent, an unknown and an unnamed tab, the copy of
 // an end sent to a tab viewing the task, the muted
@@ -23,5 +24,5 @@ gateRegions({
   testFile: 'victorySound.test.js',
   mark: 'victory',
   label: 'victory sound',
-  targets: [{file: 'main.js', sourceUrl: 'victory-main.js', regions: 2}],
+  targets: [{file: 'main.js', sourceUrl: 'victory-main.js', regions: 3}],
 });

@@ -124,10 +124,53 @@ def _chat_summaries(path: Path) -> list[tuple[str, str, int]]:
         con.close()
 
 
-def _backups(kiss_dir: Path) -> list[Path]:
-    """Return the databases a wholesale replacement moved aside, oldest first."""
+_PROJECT_KEY = "sk-ant-stays-at-home-0123456789abcdef"
+
+
+def _add_project(path: Path, chat_id: str) -> None:
+    """Give a database a project with an API key of its own and put *chat_id* in it."""
+    con = sqlite3.connect(path)
+    con.execute(
+        "INSERT INTO projects(id, name, settings) VALUES ('P1', 'Paper', ?)",
+        (json.dumps({"api_keys": {"ANTHROPIC_API_KEY": _PROJECT_KEY}}),),
+    )
+    con.execute(
+        "INSERT INTO chat_summaries(chat_id, summary, project_id) VALUES (?, 'about', 'P1')",
+        (chat_id,),
+    )
+    con.commit()
+    con.close()
+
+
+def _projects(path: Path) -> tuple[list[str], list[str]]:
+    """Return the ids of a database's projects and the chats it has in one."""
+    con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        return (
+            [str(row[0]) for row in con.execute("SELECT id FROM projects")],
+            [str(row[0]) for row in con.execute(
+                "SELECT chat_id FROM chat_summaries WHERE project_id != ''")],
+        )
+    finally:
+        con.close()
+
+
+def _files_holding(directory: Path, text: str) -> list[str]:
+    """Return the names of the files under *directory* that have *text* in their bytes."""
     return sorted(
-        p for p in kiss_dir.glob("history.db.replaced-*") if not p.name.endswith("-wal")
+        p.name for p in directory.rglob("*") if p.is_file() and text.encode() in p.read_bytes()
+    )
+
+
+def _backups(kiss_dir: Path) -> list[Path]:
+    """Return the databases a wholesale replacement moved aside, oldest first.
+
+    Not the -wal kept beside one, nor the -shm that reading the database
+    through that -wal leaves with it.
+    """
+    return sorted(
+        p for p in kiss_dir.glob("history.db.replaced-*")
+        if not p.name.endswith(("-wal", "-shm"))
     )
 
 
@@ -593,6 +636,53 @@ class SyncTaskDbBothWaysTest(unittest.TestCase):
 
         self.assertEqual(_tasks(self.remote_db), {"L1": _SERVER, "L2": _SERVER})
         self.assertEqual(_backups(self.remote_kiss), [])
+
+    def test_a_machines_projects_stay_on_it_when_its_whole_database_travels(self) -> None:
+        """Projects are a machine's own, and their settings can hold API keys.
+
+        A first sync moves a whole database, to the server or from it.
+        The copy that leaves has no project in it, no chat marked as in
+        one, and the key nowhere in its bytes; the machine it left keeps
+        all three.
+        """
+        _make_db(self.local_db, ["L1"], work_dir=_LAPTOP, chat_id="C")
+        _add_project(self.local_db, "C")
+        result = self._sync(_LAPTOP, _SERVER)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(_tasks(self.remote_db), {"L1": _SERVER})
+        self.assertEqual(_projects(self.remote_db), ([], []))
+        self.assertEqual(_files_holding(self.remote_kiss, _PROJECT_KEY), [])
+        self.assertEqual(_projects(self.local_db), (["P1"], ["C"]))
+
+        # The other way: the server has the project, this machine no database.
+        shutil.rmtree(self.local_kiss)
+        self.local_kiss.mkdir()
+        _add_project(self.remote_db, "D")
+        result = self._sync(_LAPTOP, _SERVER)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(_tasks(self.local_db), {"L1": _LAPTOP})
+        self.assertEqual(_projects(self.local_db), ([], []))
+        self.assertEqual(_files_holding(self.local_kiss, _PROJECT_KEY), [])
+        self.assertEqual(_projects(self.remote_db), (["P1"], ["D"]))
+
+    def test_a_database_whose_projects_cannot_be_taken_out_does_not_travel(self) -> None:
+        """A copy that may still hold a project's API keys is not sent, either way."""
+        _make_db(self.remote_db, ["R1"])
+        con = sqlite3.connect(self.remote_db)
+        con.execute("DROP TABLE projects")
+        con.execute("CREATE VIEW projects AS SELECT 'P1' AS id")  # rows cannot be deleted from it
+        con.commit()
+        con.close()
+        result = self._sync(_LAPTOP, _SERVER)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("projects out of its snapshot", result.stdout)
+        self.assertFalse(self.local_db.exists())
+
+        shutil.move(self.remote_db, self.local_db)
+        result = self._sync(_LAPTOP, _SERVER)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Could not snapshot", result.stderr)
+        self.assertFalse(self.remote_db.exists())
 
     def test_neither_machine_having_a_database_is_not_an_error(self) -> None:
         """Nothing to sync is a fine outcome, not a failed deploy."""

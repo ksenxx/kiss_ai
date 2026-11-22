@@ -9,7 +9,7 @@
 
 The task-info panel on the right of the remote webapp carries two
 collapsible sections for the workspace, beside Task Info, Schedule,
-Apps and Spend:
+Skills, Connectors and Spend:
 
 * **Explorer** — the workspace folder tree (``listDir`` →
   ``dirListing``); a folder click lists it in place, a file click opens
@@ -34,6 +34,8 @@ import pytest
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
+from kiss.agents.sorcar import persistence
+from kiss.core.user_config import record_recent_work_dir
 from kiss.tests.conftest import (
     goto_retrying_network_change,
     mark_version_seen,
@@ -43,6 +45,8 @@ from kiss.tests.server.test_explorer_scm_commands import (
     harness,  # noqa: F401  (module fixture used by param name)
 )
 from kiss.tests.webapp.test_content_tab_editing import _dismiss_toasts
+from kiss.tests.webapp.test_meta_panel_sections import panel_insets, shown_panel_fonts
+from kiss.tests.webapp.test_remote_stylesheet_cascade_sweep1030 import _UNREACHABLE_JS
 
 
 @pytest.fixture(scope="module")
@@ -169,8 +173,10 @@ def _fold_section(page, section_id: str) -> None:
 
 def test_workspace_sections_sit_in_the_task_info_panel(browser, harness):
     """The task-info panel stacks Task Info, (Task update,) Explorer,
-    Source Control, Schedule, Machines, Apps and Spend; the history panel on the
-    left holds the Chats view alone, with no activity bar."""
+    Source Control, Schedule, Machines, Skills, Connectors (the section
+    with the id ``meta-apps``), Spend and Recommendations (hidden while
+    it has no task, as on this daemon); the history panel on the left
+    holds the Chats view alone, with no activity bar."""
     context, page, _ = _open_page(browser, harness)
     try:
         assert page.locator("#activity-bar").count() == 0
@@ -180,9 +186,12 @@ def test_workspace_sections_sit_in_the_task_info_panel(browser, harness):
         )
         assert ids == [
             "meta-section-info", "meta-info", "meta-explorer", "meta-scm",
-            "meta-schedule", "meta-machines", "meta-apps", "meta-spend",
-            "meta-recommendations",
+            "meta-schedule", "meta-machines", "meta-skills", "meta-apps", "meta-spend",
         ]
+        # Recommendations ends the stack, hidden: nothing is suggested yet.
+        assert page.eval_on_selector(
+            "#meta-panel > .meta-section:last-of-type", "el => [el.id, el.hidden]",
+        ) == ["meta-recommendations", True]
         # The label span only: the Source Control toggle also carries
         # the uncommitted-file count (#scm-hdr-count) once the git
         # status arrives, which this harness's repo has.
@@ -401,6 +410,28 @@ def test_source_control_shows_changes_and_commit_graph(browser, harness):
         assert st[-1]["token"] == lg[-1]["token"]
         assert st[-1]["workDir"] == str(harness.work_dir)
         assert lg[-1]["limit"] == 50
+        # Explorer and Source Control are set like the rest of the panel:
+        # a row's text as a Task Info row (which has a chat summary's
+        # font), what is secondary to it at the size of a section's
+        # header.  A row's fill reaches out of the panel's column,
+        # halfway into the panel's padding, as every row of the panel;
+        # the commit graph stays in the column.
+        page.wait_for_selector(".explorer-row.is-file", timeout=15000)
+        shown = shown_panel_fonts(page, "#meta-list .meta-item", "#meta-panel .sidebar-hdr")
+        for name in (
+            "explorer-name", "scm-branch", "scm-group-hdr", "scm-path", "scm-dir",
+            "scm-status", "scm-commit-subject", "scm-ref", "scm-commit-meta",
+        ):
+            assert name in shown, (name, shown)
+        header, cell = "#meta-scm .meta-section-hdr", "#scm-graph .scm-graph-cell"
+        rows = [".explorer-row", "#scm-changes .scm-row", "#scm-graph .scm-commit"]
+        insets = panel_insets(page, "meta-panel", [header, cell, *rows])
+        column = insets[header]
+        for selector in rows:
+            assert insets[selector] == pytest.approx(
+                [column[0] / 2, column[1] / 2], abs=0.5,
+            ), (selector, insets)
+        assert insets[cell][0] == pytest.approx(column[0], abs=0.5), insets
     finally:
         context.close()
 
@@ -683,9 +714,29 @@ def test_keyboard_model_roving_tabindex_and_arrows(browser, harness):
 
 def test_orphaned_content_tab_keeps_browsing_its_folder(browser, harness):
     """A file opened from a chat keeps the Explorer on that chat's
-    folder even after the chat tab is closed."""
+    folder even after the chat was left for a new one and retired."""
+    # A chat tab has no close control: a chat goes when it is left idle
+    # for another one.  "+" leaves only a chat that has a task (a new
+    # chat is kept as the new chat), so the file is opened from a
+    # finished chat picked in the Chats panel.
+    task_id, _ = persistence._add_task(
+        "Left task", "left-chat", {"work_dir": str(harness.work_dir)},
+    )
+    persistence._queue_chat_event(
+        {"type": "result", "text": "success: true", "summary": "<p>left result</p>",
+         "success": True},
+        task_id=task_id,
+    )
+    persistence._flush_chat_events()
+    persistence._save_task_result("left result", task_id=task_id)
     context, page, frames = _open_page(browser, harness)
     try:
+        new_chat_id = page.evaluate("window._testApi.getActiveTabId()")
+        page.locator(
+            "#history-list .history-chat-group[data-chat-id='left-chat'] .history-chat-header"
+        ).click(timeout=30000)
+        # Its transcript is on screen: the page knows the chat is idle.
+        page.wait_for_selector("#output > .rc", timeout=30000)
         _show_section(page, "meta-explorer")
         page.wait_for_selector(".explorer-row.is-file", timeout=15000)
         _explorer_row(page, "README.md").click()
@@ -693,24 +744,18 @@ def test_orphaned_content_tab_keeps_browsing_its_folder(browser, harness):
             f"{_OPEN_TAB_COUNT_JS} === 2", timeout=15000,
         )
         chat_id = page.evaluate("window._testApi.getActiveTabId()")
-        # Close the chat tab (its group-strip entry; the strip itself is
-        # hidden for a lone chat, so the click is dispatched by script)
-        # while the content tab shows in the content pane.  With no chat
-        # left, the split layout opens a fresh one beside the orphaned
-        # file tab.
-        page.evaluate(
-            """() => {
-              const chat = document.querySelector('#tab-list .chat-tab:not(.content-tab)');
-              chat.querySelector('.chat-tab-close').click();
-            }"""
-        )
+        # "+" leaves the chat for a new one while the content tab shows
+        # in the content pane: the chat, idle, is retired, and the new
+        # chat sits beside the orphaned file tab.
+        page.click("#new-chat-btn")
         page.wait_for_function(
             "prev => window._testApi.openTabs().filter(t => !t.isContentTab)"
             ".every(t => t.id !== prev)",
             arg=chat_id,
             timeout=15000,
         )
-        assert [f["tabId"] for f in _sent(frames, "closeTab")] == [chat_id]
+        # The chat the page opened with was retired by the pick.
+        assert [f["tabId"] for f in _sent(frames, "closeTab")] == [new_chat_id, chat_id]
         assert (
             page.locator("#content-tab-list .chat-tab.active .chat-tab-label").inner_text()
             == "README.md"
@@ -720,6 +765,8 @@ def test_orphaned_content_tab_keeps_browsing_its_folder(browser, harness):
         assert _explorer_row(page, "README.md").is_visible()
     finally:
         context.close()
+        # The other tests share the server: the seeded task goes with the test.
+        persistence._delete_task(task_id)
 
 
 def test_collapsed_sections_catch_up_when_expanded(browser, harness):
@@ -907,7 +954,11 @@ def _set_work_dir(page, work_dir: str) -> None:
     """Change the workspace through the chat header's working directory
     drop-down ("Choose ..." opens the folder picker, whose path box takes
     the directory) and wait for the docked task-info panel to show it."""
-    page.select_option("#chat-workdir", label="Choose ...")
+    # The label a browser matches is the one the drop-down shows: every
+    # entry between two left-to-right marks (main.js renderChatWorkDir),
+    # which keep "/" and "..." in place where a phone lays the shown
+    # path out right to left.
+    page.select_option("#chat-workdir", label="\u200eChoose ...\u200e")
     page.wait_for_selector("#folder-picker:not([hidden])", timeout=15000)
     page.fill("#folder-picker .folder-picker-input", work_dir)
     # The top-right notification container may cover the picker's
@@ -920,3 +971,33 @@ def _set_work_dir(page, work_dir: str) -> None:
         arg=work_dir,
         timeout=15000,
     )
+
+
+def test_folder_picker_taller_than_the_screen_scrolls_to_its_buttons(browser, harness):
+    """With a recent folder listed and its "New Folder" row open, the
+    folder picker's rows are taller than a phone held sideways
+    (568x320).  The dialog scrolls: the path box at its top and the
+    buttons at its bottom can all be brought under the pointer, and
+    Cancel closes it."""
+    # A folder of its own: one the Explorer shows is not listed as recent.
+    recent = os.path.join(harness.tmpdir, "recent")
+    os.makedirs(recent, exist_ok=True)
+    record_recent_work_dir(recent)
+    context, page, _ = _open_page(browser, harness)
+    try:
+        _show_section(page, "meta-explorer")
+        page.click("#explorer-add-folder")
+        page.wait_for_selector(
+            "#folder-picker .folder-picker-recent:not([hidden]) .workdir-item", timeout=15000,
+        )
+        _dismiss_toasts(page)
+        page.click("#folder-picker .folder-picker-new-btn")
+        page.set_viewport_size({"width": 568, "height": 320})
+        assert page.evaluate(_UNREACHABLE_JS, [
+            "#folder-picker .folder-picker-" + name
+            for name in ("input", "new-create", "new-btn", "cancel", "select")
+        ]) == []
+        page.click("#folder-picker .folder-picker-cancel")
+        page.wait_for_selector("#folder-picker", state="hidden", timeout=15000)
+    finally:
+        context.close()

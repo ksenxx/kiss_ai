@@ -10,10 +10,11 @@
 // A `checkPaths` forwarded to a registered machine that is unreachable
 // comes back as `{type:'pathsExist', tabId, machine, error}` with no
 // `results` (sidebar_panels.py `_machine_reply`).  main.js must then drop
-// the in-flight dedup keys of that tab+machine, or every later panel of
-// the tab that mentions the same path is never checked again and its
-// links stay inert for the rest of the session.  The candidate spans
-// stay registered so the next reply that covers their path resolves
+// the in-flight dedup keys of that check (the oldest of the tab+machine
+// not answered yet), or every later panel of the tab that mentions the
+// same path is never checked again and its links stay inert for the
+// rest of the session.  The candidate spans stay registered so the
+// next reply that covers their path resolves
 // them -- which matters most for a hidden tab, whose transcript is
 // parked in a detached fragment that a document query does not see:
 // only the registry (_pendingFileLinkSpans) can find its spans.
@@ -168,9 +169,10 @@ function testRefusedCheckKeepsOtherHiddenCandidatesResolvable() {
   assertCounts(
     win,
     2,
-    0,
-    "the refused machine's dedup keys are released; the live candidates " +
-      'stay registered: no reply has resolved them yet',
+    1,
+    "the refused check's dedup key is released, the other check's is " +
+      'not (audit 2026-11-21, W9 F2); the live candidates stay ' +
+      'registered: no reply has resolved them yet',
   );
 
   // The other check's reply arrives and must still promote its link.
@@ -292,7 +294,84 @@ function testRefusalAfterAClearReleasesTheDroppedCheck() {
   console.log('  ok - a refusal after a clear releases the dropped check');
 }
 
+// Audit 2026-11-21 (W9 F2): a refusal answers one check, the oldest of
+// its tab and machine not answered yet (a machine answers in the order
+// asked), and releases that one alone.  The checks behind it keep what
+// they are owed: an answer still to ignore, asked before a clear, is
+// still ignored, or it would settle the rebuilt transcript's span
+// ahead of the fresh answer.
+function testRefusalReleasesItsOwnCheckOnly() {
+  const {win, posted} = makeBoundPage(false);
+  const out = sel => win.document.querySelector('#output ' + sel);
+  const refuse = () =>
+    send(win, {
+      type: 'pathsExist',
+      tabId: BOX,
+      machine: 'box',
+      error: 'timed out',
+    });
+  const answer = results =>
+    send(win, {
+      type: 'pathsExist',
+      tabId: BOX,
+      machine: 'box',
+      workDir: '/box/work',
+      results,
+    });
+  mention(win, 'see src/a.py please');
+  mention(win, 'see src/b.py please');
+  send(win, {type: 'clear', tabId: BOX});
+  mention(win, 'see src/b.py please');
+  assert.strictEqual(checks(posted).length, 3);
+  // In the order asked: a.py is refused, the b.py of the cleared
+  // transcript did not exist yet, the b.py on screen does.
+  refuse();
+  answer({'src/b.py': false});
+  assert.ok(
+    out('[data-path-candidate="src/b.py"]'),
+    'BUG - the refusal of another check let the answer to a cleared one in',
+  );
+  answer({'src/b.py': true});
+  assert.ok(out('[data-path="src/b.py"]'), 'the fresh answer settles the link');
+  assertCounts(win, 0, 0, 'nothing is left in flight');
+
+  // Asked three times over two clears: the refusal of the first leaves
+  // one more answer to ignore.
+  for (let asked = 0; asked < 3; asked++) {
+    send(win, {type: 'clear', tabId: BOX});
+    mention(win, 'see src/c.py please');
+  }
+  refuse();
+  answer({'src/c.py': false});
+  assert.ok(out('[data-path-candidate="src/c.py"]'), 'the second is ignored');
+  answer({'src/c.py': true});
+  assert.ok(out('[data-path="src/c.py"]'), 'the third settles the link');
+
+  // An answered check is not the oldest any more, nor is one that a
+  // lost connection swallowed: the refusal is of the check in flight.
+  mention(win, 'see src/e.py please');
+  send(win, {type: 'daemonStatus', connected: false});
+  send(win, {type: 'daemonStatus', connected: true});
+  answer({'src/e.py': true});
+  mention(win, 'see src/f.py please');
+  const before = checks(posted).length;
+  refuse();
+  mention(win, 'again src/f.py');
+  assert.strictEqual(
+    checks(posted).length,
+    before + 1,
+    'the refused path is asked about again',
+  );
+  // A refusal with nothing of its tab and machine in flight is no one's.
+  answer({'src/f.py': true});
+  refuse();
+  assertCounts(win, 0, 0, 'nothing is left in flight');
+  win.close();
+  console.log('  ok - a refusal releases its own check only');
+}
+
 testErrorReplyReleasesTheCheck();
 testErrorOfAnotherMachineKeepsTheCheck();
 testRefusedCheckKeepsOtherHiddenCandidatesResolvable();
 testRefusalAfterAClearReleasesTheDroppedCheck();
+testRefusalReleasesItsOwnCheckOnly();

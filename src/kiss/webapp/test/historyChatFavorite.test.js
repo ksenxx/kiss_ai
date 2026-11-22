@@ -32,7 +32,22 @@ const {
   chatTabs,
   rowByTitle,
   visibleTitles,
+  pressFilterOption,
+  freezeClock,
 } = require('./history_helpers');
+
+const FROZEN_NOW_MS = 1_700_500_000_000;
+
+// The page's clock stands still: a click's star is shielded from stale
+// refetches for 10 s of it, so a stalled run must not let the host's
+// clock end the shield between a click and the reply that follows it
+// (the bound scenarios move the clock themselves).
+function openPage() {
+  return openChatsPage(win => {
+    stubRaf(win);
+    freezeClock(win, FROZEN_NOW_MS);
+  });
+}
 
 /** A finished row of chat `chat` titled `title`; `extra` on top. */
 function row(chat, title, extra) {
@@ -78,7 +93,7 @@ function refresh(win, posted, sessions) {
 }
 
 function testTheHeaderStarShowsTheChatsStar() {
-  const {win, posted} = openChatsPage(stubRaf);
+  const {win, posted} = openPage();
   // B's row comes from a daemon that does not send the field yet; the
   // last row belongs to no chat.
   sendHistory(win, posted, [
@@ -118,7 +133,7 @@ function testTheHeaderStarShowsTheChatsStar() {
 }
 
 function testAClickStarsTheChatAtOnce() {
-  const {win, posted} = openChatsPage(stubRaf);
+  const {win, posted} = openPage();
   sendHistory(win, posted, page(false));
   const header = chatHeader(win, 'A');
   const tabsBefore = chatTabs(win).length;
@@ -163,7 +178,7 @@ function testAClickStarsTheChatAtOnce() {
 }
 
 function testAStarTheDaemonNeverStoredGoesAtTheBound() {
-  const {win, posted} = openChatsPage(stubRaf);
+  const {win, posted} = openPage();
   sendHistory(win, posted, page(false));
   const timers = captureTimers(win);
   click(win, star(win, 'A'));
@@ -191,7 +206,7 @@ function testAStarTheDaemonNeverStoredGoesAtTheBound() {
 }
 
 async function testAParkedPagePastTheBoundAgreesOnEveryRow() {
-  const {win, posted} = openChatsPage(stubRaf);
+  const {win, posted} = openPage();
   sendHistory(win, posted, page(false));
   click(win, star(win, 'A'));
   // A page from before the write arrives while a row is pressed: it is
@@ -222,7 +237,7 @@ async function testAParkedPagePastTheBoundAgreesOnEveryRow() {
 }
 
 function testAChatIsStarredOnTheMachineThatHoldsIt() {
-  const {win, posted} = openChatsPage(stubRaf);
+  const {win, posted} = openPage();
   // R lives on boxb only; M has a task here and a newer one on boxb.
   const newer = {timestamp: 1_700_000_500, startTs: 1_700_000_500_000};
   const there = extra =>
@@ -257,7 +272,7 @@ function testAChatIsStarredOnTheMachineThatHoldsIt() {
 }
 
 function testTheFavoritesChipKeepsAStarredChatsTasks() {
-  const {win, posted} = openChatsPage(stubRaf);
+  const {win, posted} = openPage();
   sendHistory(win, posted, [
     row('A', 'a2', {chat_is_favorite: true}),
     row('A', 'a1', {chat_is_favorite: true}),
@@ -290,7 +305,7 @@ function testTheFavoritesChipKeepsAStarredChatsTasks() {
   setChip(true);
   assert.deepStrictEqual(visibleTitles(win), ['b2', 'c1']);
   // The flat list keeps the same tasks.
-  byId(win, 'history-view-toggle').click();
+  pressFilterOption(win, 'group', 'None');
   assert.strictEqual(win.document.querySelector('.history-chat-group'), null);
   assert.deepStrictEqual(visibleTitles(win), ['b2', 'c1']);
   win.close();
@@ -298,7 +313,7 @@ function testTheFavoritesChipKeepsAStarredChatsTasks() {
 }
 
 function testFocusStaysOnTheHeaderControlAcrossARebuild() {
-  const {win, posted} = openChatsPage(stubRaf);
+  const {win, posted} = openPage();
   sendHistory(win, posted, page(false));
   ['history-chat-favorite', 'history-chat-collapse'].forEach((cls, i) => {
     const control = chatHeader(win, 'A').querySelector('.' + cls);

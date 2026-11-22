@@ -10,7 +10,8 @@ module under ``src/kiss/tests`` that imports, directly or through other
 plus untracked files, or the paths given on the command line).  A
 changed test file is impacted by itself, and a changed ``conftest.py``
 impacts every test below its directory, which pytest loads it for
-without an import.  ``--splits N`` prints instead
+without an import; one that imports a changed file impacts the tests
+below it that run the import (:func:`impacted_tests`).  ``--splits N`` prints instead
 the JSON list of ``N`` ``uv run pytest`` commands for
 ``run_commands_parallel``, each with a per-test timeout
 (:data:`DEFAULT_TEST_TIMEOUT_SECONDS`) and balanced by the durations
@@ -36,11 +37,13 @@ import argparse
 import ast
 import json
 import os
+import re
 import shlex
 import statistics
 import subprocess
 import sys
 from collections import defaultdict, deque
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 
 from kiss.scripts.durations import durations_path, load_durations
@@ -79,15 +82,31 @@ def imported_modules(path: Path, src: Path = SRC) -> set[str]:
         path: A Python source file.
         src: The source root *path* lies under (default: the repository's ``src/``).
     """
+    tree, package = _parse(path, src)
+    return _imports(ast.walk(tree), package)
+
+
+def _text(path: Path) -> str:
+    """Return *path*'s text, empty when it cannot be read."""
     try:
-        tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
-    except (OSError, SyntaxError, ValueError):
-        return set()
-    package = _module_name(path, src).split(".")
-    if path.name != "__init__.py":
-        package = package[:-1]
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def _parse(path: Path, src: Path) -> tuple[ast.Module, tuple[str, ...]]:
+    """Return *path*'s syntax tree (empty if it does not parse) and package (none outside *src*)."""
+    try:
+        tree = ast.parse(_text(path))
+    except (SyntaxError, ValueError):
+        tree = ast.parse("")
+    return tree, path.parent.relative_to(src).parts if path.is_relative_to(src) else ()
+
+
+def _imports(nodes: Iterable[ast.AST], package: tuple[str, ...]) -> set[str]:
+    """Return the ``kiss`` names the import statements among *nodes* name in a file of *package*."""
     names: set[str] = set()
-    for node in ast.walk(tree):
+    for node in nodes:
         if isinstance(node, ast.Import):
             names.update(alias.name for alias in node.names if alias.name.startswith("kiss"))
         elif isinstance(node, ast.ImportFrom):
@@ -102,6 +121,126 @@ def imported_modules(path: Path, src: Path = SRC) -> set[str]:
     return names
 
 
+def _and_packages(names: set[str]) -> set[str]:
+    """Return *names* and every package above: importing ``a.b.c`` runs ``a`` and ``a.b`` first."""
+    return {name.rsplit(".", n)[0] for name in names for n in range(name.count(".") + 1)}
+
+
+def _reach(roots: Iterable[str], importers: dict[str, set[str]], depth: int) -> dict[str, int]:
+    """Return the modules within *depth* import hops of *roots* (``0``: no bound), by their hops."""
+    hops = dict.fromkeys(roots, 0)
+    queue = deque(hops)
+    while queue:
+        module = queue.popleft()
+        if depth and hops[module] >= depth:
+            continue
+        for importer in importers.get(module, ()):
+            if importer not in hops:
+                hops[importer] = hops[module] + 1
+                queue.append(importer)
+    return hops
+
+
+def _waits(function: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
+    """Return the names top-level conftest *function* waits to be asked by; none: it runs unasked.
+
+    It waits unless something may run it on its own: pytest a ``pytest_*`` hook or a fixture
+    that may be ``autouse`` (one with any setting but ``scope``, ``params``, ``ids``, a literal
+    ``name`` and ``autouse=False``), Python a module ``__dunder__``, any decorator but
+    ``pytest.fixture`` whatever it is handed.  A fixture is asked for by its function's name
+    or its ``name=``.
+    """
+    if function.name.startswith(("pytest_", "__")):
+        return set()
+    names = {function.name}
+    for decorator in function.decorator_list:
+        call = decorator if isinstance(decorator, ast.Call) else ast.Call(decorator, [], [])
+        if ast.unparse(call.func) != "pytest.fixture":
+            return set()
+        for keyword in call.keywords:
+            setting = ast.unparse(keyword)
+            if keyword.arg == "name" and isinstance(keyword.value, ast.Constant):
+                names.add(str(keyword.value.value))
+            elif keyword.arg not in ("scope", "params", "ids") and setting != "autouse=False":
+                return set()
+    return names
+
+
+def _units(conftest: Path, src: Path) -> Iterator[tuple[Path, set[str], set[str], set[str]]]:
+    """Yield the units *conftest* runs in, each (its directory, askers, names, imports).
+
+    The first runs unasked, for every test below: its asker is ``""``.  It is everything but
+    the body of ``if TYPE_CHECKING:``, which never runs, and the functions that wait
+    (:func:`_waits`), a unit each.  Of those the body alone waits: decorators, argument
+    defaults and annotations may be evaluated as the conftest loads, so what they name the
+    first unit names as well, but for a string that is itself a setting of the fixture
+    (``name="x"``), which pytest keeps.  A unit's names are its identifiers and its string
+    literals, each as a whole (``"a b".split()`` computes its names).
+    """
+    tree, package = _parse(conftest, src)
+    never = ("TYPE_CHECKING", "typing.TYPE_CHECKING")
+    function = (ast.FunctionDef, ast.AsyncFunctionDef)
+    unasked: list[ast.AST] = []
+    units: list[tuple[set[str], list[ast.AST]]] = [({""}, unasked)]
+    for statement in tree.body:
+        if isinstance(statement, function) and (askers := _waits(statement)):
+            units.append((askers, list(ast.walk(statement))))
+            header = (p for p in ast.iter_child_nodes(statement) if not isinstance(p, ast.stmt))
+            kept = [k.value for d in statement.decorator_list for k in getattr(d, "keywords", ())]
+            unasked += (
+                n for part in header for n in ast.walk(part)
+                if isinstance(n, (ast.Name, ast.Attribute))
+                or isinstance(n, ast.Constant) and n not in kept
+            )
+        elif isinstance(statement, ast.If) and ast.unparse(statement.test) in never:
+            unasked += (node for part in statement.orelse for node in ast.walk(part))
+        else:
+            unasked += ast.walk(statement)
+    for askers, nodes in units:
+        named = {v for node in nodes for _, v in ast.iter_fields(node) if isinstance(v, str)}
+        yield conftest.parent, askers, named, _and_packages(_imports(nodes, package))
+
+
+def _naming(asker: str, directory: Path, by_module: dict[str, Path]) -> Iterator[str]:
+    """Yield the modules whose text has the word *asker*; ``""`` is in every text.
+
+    The conftests pytest loads for all of *directory* are left out: those are read by unit.
+    """
+    word = re.compile(rf"(?<!\w){re.escape(asker)}(?!\w)")
+    for module, path in by_module.items():
+        loaded = path.name == "conftest.py" and directory.is_relative_to(path.parent)
+        if not asker or not loaded and asker in (text := _text(path)) and word.search(text):
+            yield module
+
+
+def _stood_for(
+    pending: list[tuple[str, Path]], units: list[tuple[Path, set[str], set[str], set[str]]],
+    by_module: dict[str, Path], importers: dict[str, set[str]],
+) -> set[str]:
+    """Return the modules that run a conftest unit asked for in *pending*, (asker, directory) pairs.
+
+    They are the modules below the directory that name the asker: in their text or, at any
+    distance, in that of a module they import.  A unit of a conftest above or below the
+    directory that names the asker, or imports a module that does, asks on by its own
+    askers, for the modules below both.
+    """
+    pending = sorted(pending, reverse=True)  # "" pops first: a whole directory spares its names
+    asked: set[tuple[str, Path]] = set()
+    modules: set[str] = set()
+    while pending:
+        pair = asker, directory = pending.pop()
+        if pair in asked or any(directory.is_relative_to(d) for a, d in asked if not a):
+            continue
+        asked.add(pair)
+        naming = _reach(_naming(asker, directory, by_module), importers, 0).keys()
+        modules.update(m for m in naming if by_module[m].is_relative_to(directory))
+        for other, askers, names, imports in units:
+            deeper = other if other.is_relative_to(directory) else directory
+            if deeper.is_relative_to(other) and (asker in names or imports & naming):
+                pending += [(a, deeper) for a in askers]
+    return modules
+
+
 DEFAULT_DEPTH = 2
 """How many import hops from a changed module a test may sit: 1 is the
 tests importing the module itself, 2 adds the tests of its direct
@@ -113,7 +252,14 @@ def impacted_tests(changed: list[Path], src: Path = SRC, depth: int = DEFAULT_DE
     """Return the test files within *depth* import hops of *changed* in the reverse import graph.
 
     A changed ``conftest.py`` adds every test below its directory, whatever
-    the depth: pytest loads it for them without an import.
+    the depth: pytest loads it for them without an import.  A ``conftest.py``
+    that imports a module reached with two hops to spare (the conftest is one
+    hop from it, its tests are two) adds the tests below it that run the
+    import: all of them, unless the import is in the body of a function that
+    waits to be asked (:func:`_waits`), which runs for the tests that name it
+    (:func:`_stood_for`).  A name counts where it is written out, as an import
+    does: a fixture requested by a computed name, by the ``usefixtures`` ini
+    option or by a fixture of a ``pytest_plugins`` module is not seen.
 
     Args:
         changed: Changed files (absolute, or relative to the repo root);
@@ -130,37 +276,30 @@ def impacted_tests(changed: list[Path], src: Path = SRC, depth: int = DEFAULT_DE
     importers: dict[str, set[str]] = defaultdict(set)
     for path in files:
         importer = _module_name(path, src)
-        for name in imported_modules(path, src):
-            # Importing a.b.c runs a/__init__.py and a/b/__init__.py first:
-            # the importer depends on every package above the name too.
-            while name:
-                importers[name].add(importer)
-                name = name.rpartition(".")[0]
+        for name in _and_packages(imported_modules(path, src)):
+            importers[name].add(importer)
     roots = []
-    conftest_dirs = []
+    pending: list[tuple[str, Path]] = []
     for path in changed:
         resolved = path.resolve() if path.is_absolute() else (src.parent / path).resolve()
         if resolved.name == "conftest.py":
-            conftest_dirs.append(resolved.parent)
+            pending.append(("", resolved.parent))
         if resolved.suffix == ".py" and resolved.is_relative_to(src):
             roots.append(_module_name(resolved, src))
-    seen = set(roots)
-    queue = deque((root, 0) for root in roots)
-    while queue:
-        module, hops = queue.popleft()
-        if depth and hops >= depth:
-            continue
-        for importer in importers.get(module, ()):
-            if importer not in seen:
-                seen.add(importer)
-                queue.append((importer, hops + 1))
+    hops = _reach(roots, importers, depth)
+    near = {module for module, far in hops.items() if not depth or far + 2 <= depth}
+    # The conftests pytest loads for the tests: those under src and the repository's own.
+    conftests = [f for f in (*files, src.parent / "conftest.py") if f.name == "conftest.py"]
+    units = [unit for conftest in conftests for unit in _units(conftest, src)]
+    pending += [(a, d) for d, askers, _, imports in units if imports & near for a in askers]
+    stood_for = _stood_for(pending, units, by_module, importers)
     tests_dir = src / "kiss" / "tests"
     return sorted(
         test
         for module, test in by_module.items()
         if test.is_relative_to(tests_dir)
         and test.name.startswith("test_")
-        and (module in seen or any(test.is_relative_to(d) for d in conftest_dirs))
+        and (module in hops or module in stood_for)
     )
 
 

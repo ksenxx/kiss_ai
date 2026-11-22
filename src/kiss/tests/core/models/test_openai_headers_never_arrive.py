@@ -51,6 +51,7 @@ from openai import BadRequestError, OpenAI
 from kiss.core import stop_signal
 from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
 from kiss.core.models.openai_compatible_model2 import OpenAICompatibleModel2
+from kiss.core.models.stream_abort import shutdown_pool_sockets
 from kiss.core.tool_interrupt import inject_async_exception
 from kiss.tests.core.models.openai_sse_harness import (
     Reply,
@@ -61,6 +62,7 @@ from kiss.tests.core.models.openai_sse_harness import (
     responses_event,
     retry_later,
 )
+from kiss.tests.server.pause import Pause
 
 _STALL_TIMEOUT = 1.0
 # Generous bound: the SDK retries a pre-headers timeout once (``_MAX_RETRIES
@@ -596,8 +598,58 @@ def test_a_forced_stop_while_the_stream_opens_leaves_no_request_behind(
 
 
 def _opening_threads() -> list[threading.Thread]:
-    """The live worker threads of stream-opening calls."""
-    return [thread for thread in threading.enumerate() if thread.name == "model-stream-open"]
+    """The live worker threads of stream-opening calls, and of non-streamed requests."""
+    names = ("model-stream-open", "model-blocking-request")
+    return [thread for thread in threading.enumerate() if thread.name in names]
+
+
+@pytest.mark.parametrize("streamed", [True, False], ids=["stream", "blocking"])
+@pytest.mark.parametrize(
+    "held",
+    [OpenAICompatibleModel._abort_pending_request, shutdown_pool_sockets],
+    ids=["before-the-teardown", "inside-it"],
+)
+def test_a_forced_stop_as_the_stop_tears_the_request_down_still_cuts_it(
+    silent_server: tuple[ScriptedOpenAIServer, _SilentGateway], streamed: bool, held: Any
+) -> None:
+    """A forced Stop landing as the Stop tears the request down leaves no open client or call.
+
+    The client was dropped before its sockets were shut down: the runner's
+    ``KeyboardInterrupt`` landing between the two left a request nobody
+    could reach any more, on a client nobody closed, and one landing just
+    before the teardown left a non-streamed request untouched (audit
+    C8/F1).  The turn is held at the entry of *held*.
+    """
+    server, _gateway = silent_server
+    model = OpenAICompatibleModel(
+        _MODEL,
+        base_url=server.base_url,
+        api_key="test-key",
+        model_config={"stream_stall_timeout": 10 * _DEADLINE},
+        token_callback=(lambda _t: None) if streamed else None,
+    )
+    model.initialize("Say something.")
+    model._ensure_client()
+    client = model.client
+    stop = threading.Event()
+    errors: list[BaseException] = []
+    turn = threading.Thread(target=_generate_under, args=(model, stop, errors), daemon=True)
+    with Pause(held.__code__, lambda _locals: True) as tearing_down:
+        turn.start()
+        deadline = time.monotonic() + _DEADLINE
+        while not server.requests and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert server.requests, "the request never reached the server"
+        stop.set()
+        assert tearing_down.paused.wait(_DEADLINE), "the Stop did not reach the teardown"
+        assert inject_async_exception(turn.ident or -1, KeyboardInterrupt) == 1
+    turn.join(_DEADLINE)
+    assert not turn.is_alive() and isinstance(errors[0], KeyboardInterrupt), errors
+    assert client.is_closed(), "the client of the cut request was left open"
+    assert model.client is None, "the closed client was kept for the next turn"
+    while _opening_threads() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert not _opening_threads(), "the cut request runs on as an orphan thread"
 
 
 def test_a_stream_that_opens_after_the_turn_gave_it_up_is_closed() -> None:

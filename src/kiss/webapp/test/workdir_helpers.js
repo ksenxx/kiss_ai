@@ -57,6 +57,12 @@ function assertJsonEqual(actual, expected) {
 // pick()'s argument for the "Choose ..." entry (the id of its option).
 const CHOOSE = 'chat-workdir-choose';
 
+// The left-to-right mark at each end of an entry as the drop-down
+// shows it (an option's `label`; its text and value stay bare): a
+// phone lays the shown path out right to left to cut its beginning,
+// and the marks keep the leading "/" in front (renderChatWorkDir).
+const LRM = '\u200e';
+
 /** The labels of the drop-down's options, in order. */
 function optionLabels(win) {
   return Array.from(byId(win, 'chat-workdir').options, o => o.textContent);
@@ -65,14 +71,21 @@ function optionLabels(win) {
 /**
  * The directory the drop-down shows as current ('' = none).  What it
  * shows is the label its transparent select lies over: the selected
- * entry as a native list words it (an option's `text`), whatever
- * repainted the select.
+ * entry as a native list words it (the option's `label`: its text,
+ * whole, between two left-to-right marks), whatever repainted the
+ * select.
  */
 function currentDir(win) {
   const select = byId(win, 'chat-workdir');
+  const option = select.options[select.selectedIndex];
+  assert.strictEqual(
+    option.label,
+    LRM + option.textContent + LRM,
+    'the selected entry is shown between left-to-right marks',
+  );
   assert.strictEqual(
     select.previousElementSibling.textContent,
-    select.options[select.selectedIndex].text,
+    option.label,
     'the label shows the selected entry',
   );
   return select.value;
@@ -196,6 +209,7 @@ module.exports = {
   msgs,
   assertJsonEqual,
   CHOOSE,
+  LRM,
   optionLabels,
   currentDir,
   pick,

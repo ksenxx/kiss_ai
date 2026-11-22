@@ -46,9 +46,13 @@ class TestDockerToolsGuards(unittest.TestCase):
         self.env.stream_callback = None
 
     def _slow_tools(self) -> DockerTools:
-        """DockerTools whose commands really outlive a 1 s container timeout."""
+        """DockerTools whose commands really outlive a 1 s container timeout.
+
+        Each stays what the tool handed over (its own ``ToolScript``, not a model's command).
+        """
         def slow_bash(command: str, description: str) -> str:
-            return self.env.Bash(f"sleep 3; {command}", description, timeout_seconds=1)
+            return self.env.Bash(
+                type(command)(f"sleep 3; {command}"), description, timeout_seconds=1)
 
         return DockerTools(slow_bash)
 
@@ -66,7 +70,7 @@ class TestDockerToolsGuards(unittest.TestCase):
         self.assertFalse(self._exists(path))
 
     def test_streaming_write_that_timed_out_is_not_success(self) -> None:
-        """Same on the streaming path production actually uses."""
+        """Same when the function the tools are given streams what a script prints."""
         chunks: list[str] = []
         self.env.stream_callback = chunks.append
         path = "/tmp/g_write_timeout_stream.txt"
@@ -110,6 +114,25 @@ class TestDockerToolsGuards(unittest.TestCase):
         self.assertIn("old_string must not be empty", result)
         self.assertIn("aaa", self.tools.Read(path))
         self.assertNotIn("XaXaXaX", self.tools.Read(path))
+
+    def test_the_tools_stream_nothing_of_their_own_scripts(self) -> None:
+        """The panel of a Write, an Edit or a Read stays empty, whatever its scripts print.
+
+        The scripts ran through the function that streams a command's output:
+        a store's marker, the editor's line and the text read went into the
+        panel, and a call that streamed is recorded by its status lines alone,
+        so the result of each of these calls was recorded blank.
+        """
+        panel: list[str] = []
+        self.env.stream_callback = panel.append
+        path = "/tmp/g_stream.txt"
+        self.assertIn("Successfully wrote", self.tools.Write(path, "one\ntwo\n"))
+        self.assertIn("Successfully replaced", self.tools.Edit(path, "two", "2"))
+        self.assertEqual(self.tools.Read(path), "one\n2\n")
+        # A store in two pieces, and one that fails and is discarded.
+        self.assertIn("Successfully wrote", self.tools.Write(path, "x" * 80_000))
+        self.assertIn("exit code:", self.tools.Write("/dev/null/impossible/test.txt", "fail"))
+        self.assertEqual(panel, [])
 
 
 if __name__ == "__main__":

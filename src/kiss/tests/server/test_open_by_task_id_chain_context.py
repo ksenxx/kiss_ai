@@ -298,35 +298,8 @@ class TestChatTree(_ChainContextBase):
         prompt = self.capture.prompts[0]
         assert _context_tasks(prompt) == ["one task", "three task"], prompt
 
-    def test_task_run_in_a_subagent_tab_keeps_the_dispatch_chain(self) -> None:
-        rows = _seed_dispatch_chain([
-            ("t1 magic word apple", "r1 apple stored", "chatA"),
-            ("t2 magic word pear", "r2 pear stored", "chatA"),
-            ("t3 magic word plum", "r3 plum stored", "chatB"),
-        ])
-
-        tab = "tab-tree-subagent"
-        _open_by_task_id(self.server, tab, "chatB", rows[2][0])
-        self._run_twice(tab, "", "first follow-up quokka", "second follow-up wombat")
-
-        chain = ["t1 magic word apple", "t2 magic word pear", "t3 magic word plum"]
-        first = self.capture.prompts[0]
-        assert _context_tasks(first) == chain, first
-        assert "### Result 3\nr3 plum stored" in first, first
-        # The run started a chat of its own, whose next task still
-        # carries the path the first one continued.
-        own_chat = _chat_of("first follow-up quokka")
-        assert own_chat not in ("chatA", "chatB")
-        assert _chat_of("second follow-up wombat") == own_chat
-        second = self.capture.prompts[1]
-        assert _context_tasks(second) == [*chain, "first follow-up quokka"], second
-
     def test_cycle_in_parent_links_terminates(self) -> None:
-        rows = _seed_dispatch_chain([
-            ("cyc-a task", "cyc-a result", "chatC"),
-            ("cyc-b task", "cyc-b result", "chatC"),
-        ])
-        a_id, b_id = rows[0][0], rows[1][0]
+        a_id, b_id = _seed_chat("chatC", ["cyc-a", "cyc-b"])
         db = th._get_db()
         with th._rw_lock.write_lock():
             db.execute(

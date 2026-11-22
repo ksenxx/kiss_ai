@@ -403,7 +403,31 @@ def test_select_all_then_copy_puts_the_native_selection_text_on_the_clipboard() 
 def test_copy_keeps_the_selected_whitespace() -> None:
     """Copy puts the selection on the clipboard as rendered, its leading
     and trailing whitespace included: the indentation of a selected code
-    line is part of it (it used to be trimmed off)."""
+    line is part of it (it used to be trimmed off).
+
+    Select All takes in the whitespace the page shows at the edges of the
+    scope when it is in text nodes of its own, as the native Select All
+    does: the indentation around highlighted code, a preformatted block
+    of nothing else, the line breaks ``pre-line`` keeps, no-break spaces.
+    It used to start and end at the nearest text that ``trim()`` leaves
+    something of.  A preview runs the menu from its bootstrap markup."""
+    split = '<pre class="case">    <span>indented()</span>  </pre>'
+    no_wrap = '<div class="case" style="text-wrap-mode:nowrap;white-space-collapse:'
+    cases = {
+        "split pre": split,
+        "blank pre": '<pre class="case">   </pre>',
+        "pre-wrap": '<div class="case" style="white-space:pre-wrap">  <b>x</b>  </div>',
+        "pre-line": '<div class="case" style="white-space:pre-line">  <b>x</b>\n\n</div>',
+        "break-spaces, no wrap": no_wrap + 'break-spaces">  <b>x</b>  </div>',
+        "kept breaks, no wrap": no_wrap + 'preserve-breaks">\n<b>x</b>\n\n</div>',
+        "no-break spaces": '<p class="case"><span>&nbsp;&nbsp;</span><span>x</span></p>',
+    }
+    native_text = (
+        "() => { getSelection().selectAllChildren(document.querySelector('.case'));"
+        " const text = getSelection().toString(); getSelection().removeAllRanges();"
+        " return text; }"
+    )
+    select_all = '#sorcar-content-context-menu .sorcar-ctx-item[data-action="select-all"]'
     with _page() as page:
         page.evaluate("() => getSelection().selectAllChildren(document.getElementById('pre'))")
         shown = str(page.evaluate("() => getSelection().toString()"))
@@ -412,3 +436,25 @@ def test_copy_keeps_the_selected_whitespace() -> None:
         _menu(page, "#pre", "select-all")
         assert page.evaluate("() => getSelection().toString()") == shown
         assert _copy(page, "#pre") == shown
+
+        for name, html in cases.items():
+            page.evaluate("h => { document.getElementById('cases').innerHTML = h; }", html)
+            native = str(page.evaluate(native_text))
+            assert native != native.strip(), (name, native)
+            _menu(page, ".case", "select-all")
+            assert page.evaluate("() => getSelection().toString()") == native, name
+            assert _copy(page, ".case") == native, name
+
+        page.evaluate(
+            "html => new Promise(resolve => {"
+            " const frame = document.createElement('iframe');"
+            " frame.id = 'preview'; frame.setAttribute('sandbox', 'allow-scripts');"
+            " frame.onload = () => resolve();"
+            " frame.srcdoc = html + ContentContextMenu.contentContextMenuBootstrapHtml();"
+            " document.body.append(frame); })",
+            split,
+        )
+        preview = page.frame_locator("#preview")
+        preview.locator(".case").click(button="right")
+        preview.locator(select_all).click()
+        assert preview.locator(".case").evaluate("() => getSelection().toString()") == shown

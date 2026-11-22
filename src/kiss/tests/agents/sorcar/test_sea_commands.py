@@ -38,6 +38,7 @@ from kiss.core.config import kiss_home
 from kiss.core.tool_interrupt import inject_async_exception
 from kiss.tests.agents.sorcar.conftest import isolated_sea_registry, reset_sea_registry
 from kiss.tests.conftest import is_root, posix_only
+from kiss.tests.lock_injection import stop_as_it_takes_its_lock
 from kiss.tests.server.pause import Pause
 
 
@@ -876,6 +877,272 @@ def _logged(log: Path) -> Callable[[], bool]:
     return lambda: log.exists() and log.read_text().endswith("\n")
 
 
+def _log_reads(log: Path, text: str) -> Callable[[], bool]:
+    """Return a condition true once *log* holds exactly *text*."""
+    return lambda: log.exists() and log.read_text() == text
+
+
+_EXCLUSIVE_IMPORT_SEA = '''\
+"""SEA whose import holds a marker file while it waits for its release file (at most 20 s)."""
+
+import time
+from pathlib import Path
+
+from kiss.agents.seas.base.base_sea import BaseSea
+
+folder = Path(__file__).parent
+open(folder / "importing_TAG", "x").close()  # fails while another import of this text runs
+with open(folder / "entered_TAG", "a") as log:
+    log.write("x")
+deadline = time.monotonic() + 20
+while not (folder / "release_TAG").exists() and time.monotonic() < deadline:
+    time.sleep(0.01)
+(folder / "importing_TAG").unlink()
+
+
+class Sea(BaseSea):
+    def register_as_model(self):
+        return True
+'''
+
+
+def _load_into(path: Path, outcomes: list[object]) -> None:
+    """Thread body: load the SEA at *path* and record it, or the error the load raised."""
+    try:
+        outcomes.append(sea_commands.load_sea(path))
+    except sea_settings.SeaError as exc:
+        outcomes.append(exc)
+
+
+def _list_into(path: Path, outcomes: list[bool]) -> None:
+    """Thread body: record the real picker listing's answer for *path*."""
+    outcomes.append(sea_commands._listed_as_model(path))
+
+
+def test_a_replaced_queued_check_and_its_listing_follow_the_repaired_revision(
+    tmp_path: Path,
+) -> None:
+    """Abandonment while queued cannot grant concurrent imports of the repaired bytes.
+
+    An ordinary load holds the old import, checker A queues behind it, and an edit starts
+    checker B. B must import the repair without the old import returning. A's listing must
+    follow B, not wait for A or return its default False. An ordinary load of the repair
+    takes its turn; when A eventually gets its turn it cannot overlap that same revision.
+    The script's exclusive marker makes any overlapping initialization an actual failure.
+    """
+    path = _write_router(tmp_path, "queued", _EXCLUSIVE_IMPORT_SEA.replace("TAG", "old"))
+    folder = path.parent
+    loads: list[object] = []
+    old_listing: list[bool] = []
+    new_listing: list[bool] = []
+    original = threading.Thread(target=_load_into, args=(path, loads), daemon=True)
+    first = threading.Thread(target=_list_into, args=(path, old_listing), daemon=True)
+    replacement = threading.Thread(target=_list_into, args=(path, new_listing), daemon=True)
+    direct = threading.Thread(target=_load_into, args=(path, loads), daemon=True)
+    checks: list[threading.Thread] = []
+    try:
+        original.start()
+        _wait_for(_log_reads(folder / "entered_old", "x"))
+        first.start()
+        _wait_for(lambda: path in sea_commands._model_checks)
+        checks.append(sea_commands._model_checks[path])
+        _wait_for(lambda: sea_settings._waited_module(checks[0].ident) is not None)
+        path.write_text(_EXCLUSIVE_IMPORT_SEA.replace("TAG", "repaired"), encoding="utf-8")
+        replacement.start()
+        _wait_for(lambda: sea_commands._model_checks.get(path) is not checks[0])
+        checks.append(sea_commands._model_checks[path])
+        _wait_for(_log_reads(folder / "entered_repaired", "x"))
+        assert original.is_alive() and checks[0].is_alive()
+        direct.start()
+        _wait_for(lambda: sea_settings._waited_module(direct.ident) is not None or bool(loads))
+        assert not loads and (folder / "entered_repaired").read_text() == "x"
+        (folder / "release_repaired").touch()
+        for thread in (first, replacement, direct):
+            thread.join(5)
+            assert not thread.is_alive(), "a listing kept waiting for the replaced queued check"
+        assert old_listing == new_listing == [True]
+        assert [type(result).__name__ for result in loads] == ["Sea"], loads
+        assert original.is_alive() and checks[0].is_alive()
+    finally:
+        for gate in ("release_old", "release_repaired"):
+            (folder / gate).touch()
+        for thread in (original, first, replacement, direct, *checks):
+            if thread.ident is not None:
+                thread.join(10)
+                assert not thread.is_alive()
+    assert [type(result).__name__ for result in loads] == ["Sea", "Sea"], loads
+    assert (folder / "entered_repaired").read_text() == "xxx"
+    assert sea_commands._listed_as_model(path)
+
+
+def _listing_tests_a_check(frame_locals: dict[str, object]) -> bool:
+    """Pause the original listing, not a checker or the main test thread."""
+    return (
+        threading.current_thread().name == "old-model-listing"
+        and getattr(frame_locals.get("self"), "name", None) == "sea-model-check"
+    )
+
+
+def _joining_check(listing: threading.Thread, check: threading.Thread | None) -> bool:
+    """Whether the real listing thread is waiting in ``Thread.join`` for *check*."""
+    frame = sys._current_frames().get(listing.ident or 0)
+    while frame is not None:
+        if frame.f_code is threading.Thread.join.__code__ and frame.f_locals.get("self") is check:
+            return True
+        frame = frame.f_back
+    return False
+
+
+@pytest.mark.parametrize("replacement_done", [False, True])
+def test_a_listing_rechecks_its_replacement_before_returning_a_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, replacement_done: bool,
+) -> None:
+    """A repair completing between the link read and timeout decision is not omitted.
+
+    The thread-start failure rollback is deliberately not induced: exhausting OS threads
+    on this shared host would violate its resource limit, and Thread.start is not mocked.
+    """
+    path = _write_router(tmp_path, "boundary", _EXCLUSIVE_IMPORT_SEA.replace("TAG", "old"))
+    monkeypatch.setattr(sea_commands, "MODEL_CHECK_TIMEOUT_SECONDS", 0.2)
+    outcomes: list[bool] = []
+    listing = threading.Thread(
+        target=_list_into, args=(path, outcomes), name="old-model-listing", daemon=True,
+    )
+    replacement_answers: list[bool] = []
+    replacement_listing = threading.Thread(
+        target=_list_into, args=(path, replacement_answers), daemon=True,
+    )
+    old: threading.Thread | None = None
+    with Pause(threading.Thread.is_alive.__code__, _listing_tests_a_check) as held:
+        try:
+            listing.start()
+            assert held.paused.wait(10)
+            _wait_for(_log_reads(path.with_name("entered_old"), "x"))
+            check = sea_commands._model_checks[path]
+            old = check
+            _wait_for(lambda: time.monotonic() >= check.deadline)
+            if replacement_done:
+                path.write_text(_ROUTER_TRUE, encoding="utf-8")
+                assert sea_commands._listed_as_model(path)
+            else:
+                # The old check is already expired. Give the new check its normal budget
+                # so its pending state is controlled by a file gate, not a short clock race.
+                monkeypatch.setattr(sea_commands, "MODEL_CHECK_TIMEOUT_SECONDS", 15.0)
+                path.write_text(_EXCLUSIVE_IMPORT_SEA.replace("TAG", "repaired"))
+                replacement_listing.start()
+                _wait_for(_log_reads(path.with_name("entered_repaired"), "x"))
+            held.release()
+            if not replacement_done:
+                _wait_for(lambda: _joining_check(listing, check.replacement))
+                path.with_name("release_repaired").touch()
+                replacement_listing.join(5)
+                assert not replacement_listing.is_alive() and replacement_answers == [True]
+            listing.join(5)
+            assert not listing.is_alive() and outcomes == [True]
+            assert old.is_alive(), "the original import is still intentionally blocked"
+        finally:
+            held.release()
+            path.with_name("release_old").touch()
+            path.with_name("release_repaired").touch()
+            listing.join(10)
+            if replacement_listing.ident is not None:
+                replacement_listing.join(10)
+                assert not replacement_listing.is_alive()
+            if old is not None:
+                old.join(10)
+                assert not old.is_alive()
+
+
+def test_loads_of_a_repaired_script_take_turns_whichever_import_ends_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The loads of a script run one at a time, beside a thread given up on and after it.
+
+    A load ran beside the model check given up on (stuck in the import of the script's old
+    text) under the first name no such check held.  Once that import ended while the repaired
+    text was still being imported under the second name, the first name was free again: the
+    next load, and one that had waited for the old import all along, ran at once, beside the
+    import under way (audit 2026-11-21, S11/F1). Loads now queue under the source revision,
+    independently of publication slots, and a load that waited for old bytes requeues.
+    """
+    path = _write_router(tmp_path, "gated", _EXCLUSIVE_IMPORT_SEA.replace("TAG", "old"))
+    folder, module_name = path.parent, sea_settings._module_name(path)
+    monkeypatch.setattr(sea_commands, "MODEL_CHECK_TIMEOUT_SECONDS", 0.2)
+    outcomes: list[object] = []
+    waiting, later = (
+        threading.Thread(target=_load_into, args=(path, outcomes), daemon=True) for _ in range(2)
+    )
+    checks: list[threading.Thread] = []
+    try:
+        assert not sea_commands._listed_as_model(path)  # its check is stuck in the import
+        checks.append(sea_commands._model_checks[path])
+        _wait_for(_log_reads(folder / "entered_old", "x"))
+        waiting.start()
+        old_key = f"{module_name}__{sea_settings.file_revision(path)}"
+        _wait_for(lambda: sea_settings._waited_module(waiting.ident) == old_key)
+        path.write_bytes(_EXCLUSIVE_IMPORT_SEA.replace("TAG", "repaired").encode("utf-8"))
+        assert not sea_commands._listed_as_model(path)  # the old check is given up on
+        checks.append(sea_commands._model_checks[path])
+        _wait_for(_log_reads(folder / "entered_repaired", "x"))
+        (folder / "release_old").touch()
+        checks[0].join(10)
+        assert not checks[0].is_alive() and checks[1].is_alive()
+        later.start()
+        loaders = (waiting, later, checks[1])
+        repaired_key = f"{module_name}__{sea_settings.file_revision(path)}"
+        _wait_for(lambda: bool(outcomes) or sum(
+            sea_settings._waited_module(thread.ident) == repaired_key for thread in loaders
+        ) == 2)
+        assert not outcomes and (folder / "entered_repaired").read_text() == "x"
+    finally:
+        for gate in ("release_old", "release_repaired"):
+            (folder / gate).touch()
+        for thread in (waiting, later, *checks):
+            if thread.ident is not None:
+                thread.join(10)
+    assert [type(outcome).__name__ for outcome in outcomes] == ["Sea", "Sea"], outcomes
+    assert (folder / "entered_repaired").read_text() == "xxx"
+    assert sea_commands._listed_as_model(path)
+    # No thread given up on is left in the file: it is loaded under its own name again.
+    assert type(sea_commands.load_sea(path)).__module__ == module_name
+
+
+def test_reverting_to_an_import_still_running_reuses_its_revision_gate(tmp_path: Path) -> None:
+    """A free publication slot cannot admit a second import of a still-running revision."""
+    source = _EXCLUSIVE_IMPORT_SEA.replace("TAG", "old")
+    path = _write_router(tmp_path, "reverted", source)
+    folder = path.parent
+    outcomes: list[object] = []
+    original, edited, reverted = (
+        threading.Thread(target=_load_into, args=(path, outcomes), daemon=True) for _ in range(3)
+    )
+    try:
+        original.start()
+        _wait_for(_log_reads(folder / "entered_old", "x"))
+        path.write_text(_EXCLUSIVE_IMPORT_SEA.replace("TAG", "repaired"), encoding="utf-8")
+        edited.start()
+        _wait_for(_log_reads(folder / "entered_repaired", "x"))
+        (folder / "release_repaired").touch()
+        edited.join(5)
+        assert not edited.is_alive() and original.is_alive()
+        # The bytes _write_router wrote: text mode would revert to CRLF lines on Windows,
+        # which is another revision of the file.
+        path.write_bytes(source.encode("utf-8"))
+        reverted.start()
+        _wait_for(lambda: sea_settings._waited_module(reverted.ident) is not None)
+        assert (folder / "entered_old").read_text() == "x"
+        assert len(outcomes) == 1
+    finally:
+        for gate in ("release_old", "release_repaired"):
+            (folder / gate).touch()
+        for thread in (original, edited, reverted):
+            if thread.ident is not None:
+                thread.join(10)
+                assert not thread.is_alive()
+    assert [type(outcome).__name__ for outcome in outcomes] == ["Sea"] * 3, outcomes
+    assert (folder / "entered_old").read_text() == "xx"
+
+
 _CROSS_LOADING_SEA = '''\
 """SEA that derives from another SEA file, which in turn derives from this one."""
 
@@ -1299,6 +1566,8 @@ def test_unreadable_sea_does_not_break_the_model_picker_registry(
     locked = _write_router(folder, "locked", _ROUTER_TRUE)
     locked.chmod(0)
     try:
+        with pytest.raises(sea_settings.SeaError, match="failed to import"):
+            sea_settings.execute_python_file(locked)
         _write_seas_md([str(folder)])
         sea_commands.refresh_registry()
         seas = sea_commands.model_seas()
@@ -1531,19 +1800,33 @@ def _stop_once_the_thread_is_launched(frame: object, event: str, arg: object) ->
 
     Injects the daemon's Stop into its own thread the moment the hook's thread exists, before
     ``start()`` has seen it run.  Nothing of the product is replaced: the injection is the real
-    one, and ``start()`` checks for it at this point with or without a profile function.
+    one, which the pick holds back until the start is over.
     """
     if event == "c_return" and getattr(arg, "__name__", "") == "start_joinable_thread":
         inject_async_exception(threading.get_ident(), KeyboardInterrupt)
 
 
-def test_a_stop_landing_in_the_start_of_the_hook_thread_leaves_one_run(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "stop",
+    [
+        _stop_once_the_thread_is_launched,
+        stop_as_it_takes_its_lock(
+            threading.Event.wait, threading.Thread.start, sea_commands._picked_hook_thread),
+    ],
+    ids=["launched", "at-its-started-lock"],
+)
+def test_a_stop_landing_in_the_start_of_the_hook_thread_leaves_one_run(
+    tmp_path: Path, stop: Callable[..., None],
+) -> None:
     """A Stop that lands while a pick starts the hook's thread does not let another run start.
 
     The thread was entered in the table of running hooks only once ``Thread.start()`` had
     returned, so a Stop landing inside it left a running hook no later pick could find, and
     every pick started another.  The interrupted pick's thread either runs the hook as the
     one the later picks share, or finds that a later pick took its place and runs nothing.
+    A Stop raised where ``start()`` had taken the lock of the thread's ``_started`` event left
+    that lock held (gh-74174): the thread blocked on it for good before it ran anything, one
+    more for each pick stopped there.  The start is one step, which a Stop waits for.
     """
     router = _write_router(tmp_path / "seas", "gated", _GATED_PICKER.replace("LABEL", "first"))
     loaded = sea_commands.load_sea(router)
@@ -1551,7 +1834,7 @@ def test_a_stop_landing_in_the_start_of_the_hook_thread_leaves_one_run(tmp_path:
     work.mkdir()
     before = set(threading.enumerate())
     profile = sys.getprofile()
-    sys.setprofile(_stop_once_the_thread_is_launched)
+    sys.setprofile(stop)
     try:
         with pytest.raises(KeyboardInterrupt):
             sea_commands.run_picked_hook("gated", str(work), wait=False, sea=loaded)
@@ -1593,6 +1876,44 @@ def test_a_loaded_sea_is_picked_under_the_revision_it_was_loaded_from(tmp_path: 
     assert log.read_text() == "first\nsecond\n"
 
 
+def test_a_script_with_the_text_of_another_runs_its_own_hook(tmp_path: Path) -> None:
+    """A hook run is shared by the picks of one script, not by two scripts of one text.
+
+    Picks were keyed by the model, the directory and the revision of the text alone.  A
+    command registered anew from another folder with the same bytes, or one text loaded from
+    two paths, shared the stuck hook of the first file: the hook of the second, which may
+    read its own ``self.path`` and the files beside it, never ran (audit 2026-11-21, S11/F4).
+    The picks of one file still share its run, by name or loaded, however its path is spelt.
+    """
+    source = _GATED_PICKER.replace("LABEL", "same")
+    old, new = (_write_router(tmp_path / folder, "gated", source) for folder in ("old", "new"))
+    by_name, loaded = tmp_path / "by_name", tmp_path / "loaded"
+    by_name.mkdir()
+    loaded.mkdir()
+    before = set(threading.enumerate())
+    for router, logged in ((old, "same\n"), (new, "same\nsame\n")):
+        _write_seas_md([str(router.parent.parent)])
+        sea_commands.refresh_registry()
+        sea_commands.run_picked_hook("gated", str(by_name), wait=False)
+        sea_commands.run_picked_hook(
+            "gated", str(loaded), wait=False, sea=sea_commands.load_sea(router)
+        )
+        _wait_for(_log_reads(by_name / "picked.log", logged))
+        _wait_for(_log_reads(loaded / "picked.log", logged))
+    assert len(_picked_hook_threads(before)) == 4
+    link = tmp_path / "link"
+    link.symlink_to(old.parent, target_is_directory=True)
+    sea_commands.run_picked_hook("gated", str(loaded), wait=False)
+    sea_commands.run_picked_hook(
+        "gated", str(by_name), wait=False, sea=sea_commands.load_sea(link / old.name)
+    )
+    assert len(_picked_hook_threads(before)) == 4
+    for work in (by_name, loaded):
+        assert (work / "picked.log").read_text() == "same\nsame\n"
+        (work / "release").touch()
+    _wait_for(lambda: not _picked_hook_threads(before))
+
+
 _GATED_PICKER_WITH_A_GATED_IMPORT = _GATED_PICKER + """
 Path(__file__).with_name('loading').touch()
 deadline = time.monotonic() + 30
@@ -1601,7 +1922,10 @@ while not Path(__file__).with_name('loaded').exists() and time.monotonic() < dea
 """
 
 
-def test_a_load_that_waited_for_another_is_picked_under_the_text_it_ran(tmp_path: Path) -> None:
+@pytest.mark.parametrize("retarget", [False, True])
+def test_a_load_that_waited_for_another_is_picked_under_the_text_it_ran(
+    tmp_path: Path, retarget: bool,
+) -> None:
     """A SEA is picked under the revision of the text that ran, however long its load waited.
 
     The revision was the file's stamp, read before the load waited for another load of the
@@ -1612,6 +1936,10 @@ def test_a_load_that_waited_for_another_is_picked_under_the_text_it_ran(tmp_path
     """
     source = _GATED_PICKER_WITH_A_GATED_IMPORT
     router = _write_router(tmp_path / "seas", "gated", source.replace("LABEL", "first"))
+    if retarget:
+        link = router.with_name("linked_sea.py")
+        link.symlink_to(router.name)
+        router = link
     loading, loaded = router.with_name("loading"), router.with_name("loaded")
     work = tmp_path / "work"
     work.mkdir()
@@ -1630,7 +1958,11 @@ def test_a_load_that_waited_for_another_is_picked_under_the_text_it_ran(tmp_path
             _wait_for(lambda: any(
                 sea_settings._waited_module(thread.ident) for thread in threading.enumerate()
             ))
-            router.write_bytes(source.replace("LABEL", "second").encode("utf-8"))
+            revised = router.with_name("revised_sea.py") if retarget else router
+            revised.write_bytes(source.replace("LABEL", "second").encode("utf-8"))
+            if retarget:
+                router.unlink()
+                router.symlink_to(revised.name)
         finally:
             loaded.touch()
         for sea in (overtaken.result(10), waiting.result(10)):
@@ -1640,6 +1972,43 @@ def test_a_load_that_waited_for_another_is_picked_under_the_text_it_ran(tmp_path
     (work / "release").touch()
     _wait_for(lambda: not _picked_hook_threads(before))
     assert log.read_text() == "first\nsecond\n"
+
+
+def test_a_script_loaded_through_a_link_is_the_file_its_text_was_read_from(tmp_path: Path) -> None:
+    """A loaded SEA is picked as the file its text was read from, whatever its link names since.
+
+    The file was resolved once the SEA had been constructed.  A link switched to another
+    script of the same text while the first was still being imported made the loaded SEA that
+    other script: its stuck hook held back the hook of the script the link named by then,
+    which never ran (audit 2026-11-21, S11/F4).  A pick of the first file still shares its run.
+    """
+    source = _GATED_PICKER_WITH_A_GATED_IMPORT.replace("LABEL", "same")
+    old, new = (_write_router(tmp_path / folder, "gated", source) for folder in ("old", "new"))
+    link = tmp_path / "link"
+    link.symlink_to(old.parent, target_is_directory=True)
+    work = tmp_path / "work"
+    work.mkdir()
+    log = work / "picked.log"
+    before = set(threading.enumerate())
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        try:
+            through_link = pool.submit(sea_commands.load_sea, link / old.name)
+            _wait_for(old.with_name("loading").exists)
+            link.unlink()
+            link.symlink_to(new.parent, target_is_directory=True)
+        finally:
+            for router in (old, new):
+                router.with_name("loaded").touch()
+        loaded_old = through_link.result(10)
+    sea_commands.run_picked_hook("gated", str(work), wait=False, sea=loaded_old)
+    _wait_for(_log_reads(log, "same\n"))
+    sea_commands.run_picked_hook("gated", str(work), wait=False, sea=sea_commands.load_sea(new))
+    _wait_for(_log_reads(log, "same\nsame\n"))
+    sea_commands.run_picked_hook("gated", str(work), wait=False, sea=sea_commands.load_sea(old))
+    assert len(_picked_hook_threads(before)) == 2
+    (work / "release").touch()
+    _wait_for(lambda: not _picked_hook_threads(before))
+    assert log.read_text() == "same\nsame\n"
 
 
 def test_an_edit_that_keeps_the_stamp_of_the_file_runs_its_own_hook(tmp_path: Path) -> None:

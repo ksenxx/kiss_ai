@@ -17,15 +17,17 @@ import os
 import shlex
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 import uuid
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Generator, Iterable
+from contextlib import closing
 from pathlib import Path
 from typing import Any, NamedTuple, cast
 
+from kiss.agents.sorcar import projects
 from kiss.agents.sorcar.agent_dispatch import (
+    MODEL_SWITCH_LOCK,
     kill_jobs_of,
     live_agent_jobs,
     make_agent_job_tool,
@@ -93,20 +95,21 @@ from kiss.core.kiss_agent import KISSAgent
 from kiss.core.kiss_error import BudgetExceededError, KISSError
 from kiss.core.kiss_tmp import CONTAINER_TMP_DIR, SUBAGENT_DIR_PREFIX, kiss_tmp_dir
 from kiss.core.llm_reply import LLMReply
-from kiss.core.locked import locked_call
+from kiss.core.locked import locked, locked_call
 from kiss.core.memoryfield.tools import MemoryTools
-from kiss.core.models.model import Attachment, plain_io
+from kiss.core.models.model import Attachment, framework_flags_over, plain_io
 from kiss.core.models.model_info import (
     OPENAI_COMPATIBLE_PROVIDERS,
     _match_openai_compatible_provider,
+    _native_provider,
     _strip_provider_prefix,
     custom_model_config,
     get_default_model,
 )
 from kiss.core.models.model_info import model as _model_factory
-from kiss.core.models.openai_compatible_model import _model_thinking_level
 from kiss.core.printer import Printer
 from kiss.core.processes import kill_env_marked
+from kiss.core.tool_interrupt import call_without_injection
 from kiss.core.tool_verdict import Verdict
 from kiss.core.utils import finish, rmtree_force, substitute_prompt_args
 
@@ -241,6 +244,68 @@ def canonical_tool_profile(name: str) -> str:
             f"(several joined with '+'), got {name!r}.{hint}"
         )
     return canonical
+
+
+def endpoint_is_own(
+    own_config: dict[str, Any] | None, model_config: dict[str, Any] | None,
+) -> bool:
+    """Return whether a run given *model_config* has its model's own endpoint.
+
+    A settings-panel custom model runs against the endpoint of its
+    ``MY_MODELS.json`` entry.  A run of that model sent elsewhere (its
+    configuration names a gateway) has the run's endpoint instead, which
+    ``set_model`` carries over to the next model, while a model's own
+    goes to no other.  Whoever reads the registry for a run's
+    configuration says which it is from that one read: the task runner,
+    else :func:`launch_model_config`.
+
+    Args:
+        own_config: The model's registry configuration
+            (:func:`~kiss.core.models.model_info.custom_model_config`);
+            ``None`` when it has no endpoint of its own.
+        model_config: The configuration the run is given.
+
+    Returns:
+        ``True`` when the model has an endpoint of its own and the run
+        names no other.
+    """
+    return own_config is not None and (model_config or {}).get("base_url") in (
+        None, own_config["base_url"],
+    )
+
+
+def launch_model_config(
+    model_name: str, model_config: dict[str, Any] | None, stated: bool | None = None,
+) -> tuple[dict[str, Any] | None, bool]:
+    """Return the configuration a run of *model_name* given *model_config* has, and whose endpoint.
+
+    One read of the registry gives the run its model's own endpoint
+    unless it names another (the task runner's rule) and says whose it
+    has.  A run the task runner did not configure is configured here,
+    once, ahead of its classifier, which is then asked where the run is
+    and during whose round trip the settings panel may delete the
+    model's entry or add one: by a driver that classifies itself
+    (``ChatSorcarAgent.run``, ``headless.run_sea``), else by
+    :meth:`SorcarAgent.run` at its entry.
+
+    Args:
+        model_name: The run's resolved model name.
+        model_config: The configuration the run is given, or ``None``.
+        stated: What the agent whose configuration *model_config* is
+            recorded about its endpoint (an in-process child's parent),
+            from the earlier read that configured it; ``None``: nobody
+            said.  It stands where the run gets *model_config* as it
+            is, as the task runner takes a dispatching caller's word.
+
+    Returns:
+        ``(model configuration, whether its endpoint is the model's own)``;
+        the second is the run's ``_launch_owns_endpoint``.
+    """
+    own_config = custom_model_config(model_name)
+    config = own_config if model_config is None else framework_flags_over(model_config, own_config)
+    if stated is not None and model_config is not None and config is model_config:
+        return config, stated
+    return config, endpoint_is_own(own_config, config)
 
 
 def classification_chooses_prompt(
@@ -714,7 +779,7 @@ def _agent_usage(agent: Any) -> tuple[float, int, int]:
     )
 
 
-def _subagent_done_event(tab_id: str) -> dict[str, Any]:
+def _subagent_done_event(tab_id: str, task_id: str) -> dict[str, Any]:
     """Build the ``subagentDone`` event closing sub-agent tab *tab_id*.
 
     The event names no ``connId``, so it reaches every connection; a
@@ -722,18 +787,21 @@ def _subagent_done_event(tab_id: str) -> dict[str, Any]:
 
     Args:
         tab_id: The sub-agent tab to close.
+        task_id: The finished sub-agent's task id (``""`` when it has
+            none): a page closes the sub-agent tab showing that task
+            when it holds none under *tab_id*.
 
     Returns:
         The event dict to broadcast.
     """
-    return {"type": "subagentDone", "tab_id": tab_id, "tabId": ""}
+    return {"type": "subagentDone", "tab_id": tab_id, "task_id": task_id, "tabId": ""}
 
 
 def _broadcast_subagent_done(
-    printer: Any, tab_ids: list[str], model: str = "",
+    printer: Any, tab_ids: list[str], task_id: str, model: str = "",
 ) -> None:
-    """Broadcast ``subagentDone`` for each tab id so the frontend can
-    stop the running indicator on the sub-agent tab.
+    """Broadcast ``subagentDone`` for each tab id so the frontend
+    closes the finished sub-agent's tab.
 
     A sub-agent that switched models with ``set_model`` also has to hand
     its tab's model picker back to *model* — the model the task was
@@ -743,6 +811,7 @@ def _broadcast_subagent_done(
     Args:
         printer: The printer to broadcast through.
         tab_ids: The sub-agent's tab plus any tabs viewing it.
+        task_id: The sub-agent's task id (``""`` when it has none).
         model: The model the sub-agent was launched with, restored into
             those tabs' pickers.
     """
@@ -752,7 +821,7 @@ def _broadcast_subagent_done(
     restore = getattr(printer, "restore_model_pick", None)
     for vid in tab_ids:
         try:
-            broadcast(_subagent_done_event(vid))
+            broadcast(_subagent_done_event(vid, task_id))
             if callable(restore) and model:
                 restore(model, vid)
         except Exception:
@@ -786,22 +855,33 @@ def _notify_subagent_done(
     model: str = "",
     parent_tab_id: str = "",
 ) -> None:
-    """Broadcast ``subagentDone`` to every tab watching a finished sub-agent.
+    """Tell every tab watching a finished sub-agent that it is over.
 
-    The targets are the tabs subscribed to *sub_task_id* through the
-    printer's fan-out registry, the tab every surface opened for the
-    sub-agent on its ``new_tab`` — the derived
+    The targets are the tabs a page can hold for the sub-agent — the
+    tabs subscribed to *sub_task_id* through the printer's fan-out
+    registry and the tab every surface opened for the sub-agent on its
+    ``new_tab``, the derived
     ``{parent_tab_id or 'task'}__sub_{sub_task_id}`` — and the
     sub-agent's own synthetic *sub_tab_id*.  The derived id matters
     for a surface whose ``resumeSession`` has not reached the daemon
     when the child ends (a slow page, a remote machine's stream): it
-    is not a registered viewer yet, and without this signal it would
-    only learn ``isDone`` from the later ``openSubagentTab`` reply,
-    which marks the tab finished but never closes it — out of sync
-    with the surfaces that did receive ``subagentDone``.  It is left
-    out once the daemon says the tab shows something else (the
-    printer's ``subagent_view_kept``: a chat was resumed into it), or
-    the sub-agent's end would close that chat's tab on every surface.
+    is not a registered viewer yet, and without this signal its tab
+    would stay open until the reply to that resume closes it — later
+    than on the surfaces that did receive ``subagentDone``.
+
+    A daemon ends each of the pages' tabs itself (the printer's
+    ``end_subagent_view``): it tells the tab and forgets it in one
+    step, since no page tells a daemon that it closed a sub-agent's
+    tab, and it leaves alone a tab that shows something else by then
+    (a chat was resumed into it), which the sub-agent's end would
+    otherwise close on every surface.  A tab that is more than a view
+    of the sub-agent (the own tab of a multi-task dispatch, a chat's
+    tab opened on the sub-agent's task) is told by the daemon too and
+    keeps its state, as the synthetic tab does: whoever opened it
+    closes it.  The daemon decides each tab under its own lock, as
+    the tabs sampled here can show something else by then.  A printer
+    with no daemon behind it tells them all.
+
     An empty *sub_task_id* (no ``task_history`` row was allocated, so
     no ``new_tab`` was ever broadcast) fans out to the synthetic tab
     only.  Shared by ``run_parallel`` children, ``run_agent``
@@ -817,17 +897,22 @@ def _notify_subagent_done(
             named (its ``_subagent_info["parent_tab_id"]``); empty for
             a parentless sub-agent, whose tab is ``task__sub_…``.
     """
-    viewer_ids = _viewer_tab_ids(printer, sub_task_id)
-    extra = [sub_tab_id]
+    page_tabs = [tab for tab in _viewer_tab_ids(printer, sub_task_id) if tab != sub_tab_id]
     if sub_task_id:
         derived = f"{parent_tab_id or 'task'}__sub_{sub_task_id}"
-        kept = getattr(printer, "subagent_view_kept", None)
-        if kept is None or kept(derived, sub_task_id):
-            extra.insert(0, derived)
-    for tab in extra:
-        if tab and tab not in viewer_ids:
-            viewer_ids.append(tab)
-    _broadcast_subagent_done(printer, viewer_ids, model)
+        if derived not in page_tabs and derived != sub_tab_id:
+            page_tabs.append(derived)
+    own_tab = [sub_tab_id] if sub_tab_id else []
+    end_view = getattr(printer, "end_subagent_view", None)
+    if end_view is None:
+        _broadcast_subagent_done(printer, page_tabs + own_tab, sub_task_id or "", model)
+        return
+    for tab in page_tabs:
+        try:
+            end_view(tab, sub_task_id, model)
+        except Exception:
+            pass
+    _broadcast_subagent_done(printer, own_tab, sub_task_id or "", model)
 
 
 class _ClassifierSpend(NamedTuple):
@@ -1010,12 +1095,37 @@ def _bank_remote_charge(
     under the charge's own key, which the ledger counts once.  The
     caller holds the offsets' publish lock, taken with ``locked_call``:
     it may be a task thread, which a Stop must reach while another
-    publisher owns the lock.
+    publisher owns the lock.  The mark and the bank are one step for a
+    Stop injected into that thread (``call_without_injection``): raised
+    between the two, it left a mark with no bank in a process that
+    lives on, whose later usage events reach the marked totals plus
+    the charge by other spend, so the orphan recovery of a row killed
+    before its final save read the charge as banked.  The step starts
+    once the mark has the history's write lock and its transaction
+    (:func:`~kiss.agents.sorcar.persistence._write_admission`), so the
+    hold adds nothing to the waits for them: a Stop lands in the wait
+    for the lock, behind a reader of the history, and in the wait for
+    another process's write, between two of the slices SQLite makes it
+    in (as in every write of persistence), the charge unmarked either way.
     """
+    from kiss.agents.sorcar.persistence import _write_admission
+
+    if marked:
+        _attribute_sub_usage(agent, budget, tokens, steps, key=f"remote:{charge}")
+        return
+    with closing(_write_admission()) as admission:
+        next(admission)
+        call_without_injection(_mark_and_bank, agent, charge, budget, tokens, steps, admission)
+
+
+def _mark_and_bank(
+    agent: RelentlessAgent, charge: int, budget: float, tokens: int, steps: int,
+    admission: Generator[None, tuple[str, tuple[Any, ...]]],
+) -> None:
+    """:func:`_bank_remote_charge`'s mark and bank, an injected Stop held back by its caller."""
     from kiss.agents.sorcar.persistence import _mark_remote_charge_banked
 
-    if not marked:
-        _mark_remote_charge_banked(charge, *agent.usage_snapshot())
+    _mark_remote_charge_banked(charge, *agent.usage_snapshot(), admission)
     _attribute_sub_usage(agent, budget, tokens, steps, key=f"remote:{charge}")
 
 
@@ -1134,7 +1244,7 @@ _FACTORY_DEFAULT_BASE_URLS: frozenset[str] = frozenset(
 
 
 _PROVIDER_SPECIFIC_CONFIG_KEYS: dict[str, frozenset[str]] = {
-    "openai": frozenset({"reasoning_effort", "use_responses_api"}),
+    "openai": frozenset({"reasoning_effort"}),
     "anthropic": frozenset({"thinking"}),
     "gemini": frozenset({"thinking_config"}),
 }
@@ -1172,11 +1282,13 @@ def _sanitize_model_config_for_switch(
     ``set_model`` copies the old adapter's complete ``model_config``
     onto the new one.  Provider-specific request options (Anthropic's
     ``thinking``, Gemini's ``thinking_config``, OpenAI's
-    ``reasoning_effort`` / ``use_responses_api``) survive that copy and
+    ``reasoning_effort``) survive that copy and
     are then sent as unsupported SDK kwargs by the target adapter, so
     the switch reports success but the next model request fails.  When
     the provider family changes, remove every known provider-specific
-    key that does not belong to the target family.
+    key that does not belong to the target family.  What belongs to the
+    endpoint rather than to the model (``use_responses_api``, the
+    headers) follows the endpoint instead: see :func:`_endpoint_of`.
 
     Args:
         config: The config dict to sanitize (mutated in place).
@@ -1195,6 +1307,37 @@ def _sanitize_model_config_for_switch(
         for key in keys:
             config.pop(key, None)
     return config
+
+
+def _endpoint_of(model_name: str, base_url: str | None) -> str | None:
+    """Return what identifies the endpoint a model named *model_name* talks to.
+
+    A model with a *base_url* (every OpenAI-compatible adapter has one,
+    a ``model_config["base_url"]`` override included) talks to that URL.
+    Without one the :func:`~kiss.core.models.model_info.model` factory
+    routes it by name: to a registered vendor's default URL, else to a
+    native provider.  ``set_model`` compares the two models' endpoints:
+    an explicit ``use_responses_api`` and the ``extra_headers`` were
+    given for one endpoint and do not travel to another.
+
+    Args:
+        model_name: A model name, possibly carrying a harbor-style
+            ``provider/`` prefix.
+        base_url: The model's API root; ``None`` or empty when its name
+            alone routes it.
+
+    Returns:
+        The URL without its trailing slashes, else the native provider's
+        label (``"Anthropic"``, ``"Bedrock"``, ``"Gemini"``, a CLI's), or
+        ``None`` for a name the factory does not route.
+    """
+    if base_url:
+        return base_url.rstrip("/")
+    name = _strip_provider_prefix(model_name)
+    provider = _match_openai_compatible_provider(name)
+    if provider is not None:
+        return provider.base_url.rstrip("/")
+    return _native_provider(name)
 
 
 _ATTACHMENT_KINDS: tuple[tuple[str, str], ...] = (
@@ -1274,6 +1417,17 @@ class SorcarAgent(RelentlessAgent):
         # Per-run settings taken from :meth:`run`'s arguments; the
         # defaults are what a run that never reached ``run`` reports.
         self._launch_model_name: str = ""
+        # Whether the endpoint the run's model is configured with is that
+        # model's own (its ``MY_MODELS.json`` entry's) rather than the
+        # run's: recorded when the configuration is put in place, at the
+        # launch and by the ``set_model`` tool.
+        self._model_owns_endpoint: bool = False
+        # That fact for the next run, said by a launcher that read the
+        # registry for the run's configuration (the daemon's task runner,
+        # a driver through ``launch_model_config``) from that read;
+        # ``None``: no launcher said, ``run`` says at its entry
+        # (``_reset`` asks for a session started without ``run``).
+        self._launch_owns_endpoint: bool | None = None
         self._ask_user_question_callback: Callable[[str], str] | None = None
         self._inherited_tools: list[Callable[..., Any]] = []
         self._tools_hook: (
@@ -1341,6 +1495,9 @@ class SorcarAgent(RelentlessAgent):
         # When its commands run in a container, which has a folder of its
         # own for those, this one holds what its tools write on the host.
         self._private_dir: str | None = None
+        # Not empty once this run made that folder (:meth:`_make_private_dir`):
+        # a path alone may be the folder of another task that drew the name.
+        self._private_dir_made: list[None] = []
         # The tool profile ``run()`` was given (canonical;
         # ``ChatSorcarAgent.run`` gives the one it decided on the task),
         # or "" to let _tool_profile() decide from the reviewer marker.
@@ -1748,8 +1905,11 @@ class SorcarAgent(RelentlessAgent):
                     )
                 # The host's rule: a long foreground sleep waits on the
                 # running job instead, or is refused past the deadline.
+                # The container, or the bridged environment, says which
+                # sleep its shell would run.
                 refused, note, rest = wait_instead_of_sleep(
                     command, timeout_seconds, jobs.last_running, jobs.wait,
+                    self.docker_manager.sleep_probe,
                 )
                 if refused is not None:
                     return refused
@@ -1868,48 +2028,35 @@ class SorcarAgent(RelentlessAgent):
                 return f"Model is already {model_name}; no change."
 
             new_config: dict[str, Any] = dict(old_model.model_config or {})
-            # The same oracle the adapter's constructor sets the default
-            # from, so a hot-added ``MY_MODELS.json`` model counts too: a
-            # default effort is dropped (the new model gets its own), an
-            # explicit one is kept.
-            if new_config.get("reasoning_effort") == _model_thinking_level(
-                old_model.model_name
-            ):
-                new_config.pop("reasoning_effort", None)
+            # The effort the old adapter's constructor defaulted, as that
+            # adapter recorded it (the registry the default came from may
+            # have dropped the model since): a default effort is dropped
+            # (the new model gets its own), an explicit one is kept, an
+            # explicit ``None`` included.
+            default_effort = getattr(old_model, "default_reasoning_effort", None)
+            if default_effort is not None and new_config.get("reasoning_effort") == default_effort:
+                del new_config["reasoning_effort"]
             _sanitize_model_config_for_switch(
                 new_config, old_model.model_name, model_name,
             )
             old_base_url = getattr(old_model, "base_url", None)
             old_api_key = getattr(old_model, "api_key", None)
             custom = custom_model_config(model_name)
-            if custom or custom_model_config(old_model.model_name):
+            if custom or self._model_owns_endpoint:
                 # A settings-panel custom model (a ``MY_MODELS.json`` entry
                 # with its own endpoint) runs against THAT endpoint, as the
                 # task runner starts it.  The endpoint, key and headers are
                 # the model's own, not the run's, so a different model never
                 # inherits them (as a sub-agent does not: see
                 # ``agent_dispatch._parent_model_config``) and the native
-                # same-family key carry-over below does not apply.
+                # same-family key carry-over below does not apply.  Whether
+                # the old model runs on its own endpoint is what the run
+                # recorded, not what the registry says now: its entry may
+                # have been deleted, or one added under its name, since.
                 for key in ("base_url", "api_key", "extra_headers"):
                     new_config.pop(key, None)
                 new_config.update(custom or {})
                 old_base_url = old_api_key = None
-            if "use_responses_api" in new_config:
-                # `use_responses_api` forces /responses delegation, which
-                # only some OpenAI-compatible vendors support.  Keep it
-                # only when the switch stays on the SAME vendor endpoint.
-                from kiss.core.models.model_info import (
-                    openai_compatible_provider_for_base_url,
-                )
-
-                old_vendor = openai_compatible_provider_for_base_url(
-                    old_base_url or ""
-                )
-                new_vendor = _match_openai_compatible_provider(
-                    _strip_provider_prefix(model_name)
-                )
-                if old_vendor is None or old_vendor is not new_vendor:
-                    new_config.pop("use_responses_api", None)
             if old_base_url and "base_url" not in new_config:
                 normalized = old_base_url.rstrip("/")
                 if normalized in _FACTORY_DEFAULT_BASE_URLS:
@@ -1932,6 +2079,18 @@ class SorcarAgent(RelentlessAgent):
                     new_config["base_url"] = old_base_url
                     if old_api_key is not None:
                         new_config["api_key"] = old_api_key
+            if _endpoint_of(old_model.model_name, getattr(old_model, "base_url", None)) != (
+                _endpoint_of(model_name, new_config.get("base_url"))
+            ):
+                # Another endpoint.  An explicit ``use_responses_api`` (it
+                # forces or forbids /responses, which not every endpoint
+                # serves) and the ``extra_headers`` (credentials among
+                # them) were given for the old one: they stay only on it,
+                # whatever the two models are named.  A custom model's
+                # headers are its own (set above).
+                new_config.pop("use_responses_api", None)
+                if not custom:
+                    new_config.pop("extra_headers", None)
             new_model = _model_factory(
                 model_name,
                 model_config=new_config or None,
@@ -1963,8 +2122,7 @@ class SorcarAgent(RelentlessAgent):
                 setattr(new_model, "api_key", old_api_key)  # noqa: B010
             new_model.initialize("")
             previous_name = old_model.model_name
-            target.switch_model(new_model, model_name)
-            self.model_name = model_name
+            target.switch_model(new_model, model_name, new_config or None)
             # The next session's executor (a continuation, the summarizer)
             # is built from ``self.model_config`` (``_executor_model_config``),
             # so it keeps the routing computed above — the endpoint, key
@@ -1974,10 +2132,10 @@ class SorcarAgent(RelentlessAgent):
             # (``work_dir``, the first session's ``system_instruction``)
             # are not frozen in unless the launch config set them.
             launch_config = self.model_config or {}
-            self.model_config = {
+            self._store_model_switch(model_name, bool(custom), {
                 key: value for key, value in new_config.items()
                 if key in launch_config or key not in ("work_dir", "system_instruction")
-            }
+            })
             self._show_model_in_picker(model_name)
             return f"Model changed from {previous_name} to {model_name}."
 
@@ -2051,6 +2209,21 @@ class SorcarAgent(RelentlessAgent):
             except Exception:
                 logger.warning("MCP tool setup failed", exc_info=True)
         return tools
+
+    @locked(MODEL_SWITCH_LOCK)
+    def _store_model_switch(
+        self, model_name: str, owns_endpoint: bool, model_config: dict[str, Any],
+    ) -> None:
+        """Store the model ``set_model`` switched to, its endpoint record and its configuration.
+
+        In one hold of ``MODEL_SWITCH_LOCK``: a sub-task started on another
+        thread (a background ``run_agent`` job, a task update, a merge)
+        reads the three under the same lock, so it never takes one
+        model's name with the other's endpoint.
+        """
+        self.model_name = model_name
+        self._model_owns_endpoint = owns_endpoint
+        self.model_config = model_config
 
     def _show_model_in_picker(self, model_name: str) -> None:
         """Display *model_name* in the picker of every tab watching this task.
@@ -2170,6 +2343,13 @@ class SorcarAgent(RelentlessAgent):
         # :meth:`run` resolved the model once for the whole run; a
         # direct ``RelentlessAgent.run`` call (tests) resolves here.
         self._launch_model_name = self._resolve_model_name(model_name)
+        # Decided once, by the read that configured the run (the launcher's
+        # when it said, else this one): the settings panel may delete the
+        # model's registry entry, or add one, at any time after it.
+        stated, self._launch_owns_endpoint = self._launch_owns_endpoint, None
+        self._model_owns_endpoint = (
+            bool(custom_model_config(self._launch_model_name)) if stated is None else stated
+        )
         super()._reset(
             model_name=self._launch_model_name,
             max_sub_sessions=max_sub_sessions,
@@ -2621,6 +2801,12 @@ class SorcarAgent(RelentlessAgent):
             tools: List of tools to be added in addition to bash and web tools.
             max_steps: Maximum steps per sub-session. Defaults to 10000.
             max_budget: Maximum budget in USD. Defaults to config value.
+            model_config: The model's provider settings (``base_url``,
+                ``api_key``, ...) and framework flags.  A run no
+                launcher configured (the daemon's task runner does) on
+                a ``MY_MODELS.json`` model with an endpoint gets that
+                entry's endpoint, key and headers when this is ``None``
+                or holds framework flags alone.
             work_dir: Working directory for the agent. Defaults to the current directory.
             printer: Printer instance for output display.
             max_sub_sessions: Maximum continuation sub-sessions. Defaults to config value.
@@ -2764,6 +2950,9 @@ class SorcarAgent(RelentlessAgent):
             ValueError: If *tool_profile* is neither ``""`` nor a
                 ``+``-joined list of :data:`TOOL_PROFILES` keys.
         """
+        # The API keys of the projects are stored in history.db, which a
+        # tool of this run can read: they are secrets of its output too.
+        projects.register_secrets()
         self._tool_profile_name = canonical_tool_profile(tool_profile)
         self._ask_user_question_callback = ask_user_question_callback
         self._use_web_tools = web_tools
@@ -2810,13 +2999,13 @@ class SorcarAgent(RelentlessAgent):
         task_text = substitute_prompt_args(prompt_template, arguments)
         try:
             try:
+                if self._launch_owns_endpoint is None:
+                    # No launcher configured the run.
+                    model_config, self._launch_owns_endpoint = launch_model_config(
+                        model_name, model_config,
+                    )
                 if self._subagent_info is not None:
-                    # In the agents' temp directory (a resolved path, so
-                    # that the tools compare one).  With a container it is
-                    # the folder of the tools that run on the host; the
-                    # commands get one of their own in there.
-                    self._private_dir = tempfile.mkdtemp(
-                        prefix=SUBAGENT_DIR_PREFIX, dir=kiss_tmp_dir())
+                    self._make_private_dir()
                 # Decided once per run: the restricted-profile note and
                 # the toolset both follow this verdict.
                 profile = self._run_profile = self._tool_profile(task_text)
@@ -2977,6 +3166,9 @@ class SorcarAgent(RelentlessAgent):
                 completed = True
                 return result
             finally:
+                # Said for this run alone, also when it ended before
+                # ``_reset`` took it.
+                self._launch_owns_endpoint = None
                 self._finish_run(unwinding=not completed)
         except (KISSError, SeaError):
             # A broken SEA method (its ``system_prompt`` or ``tools``
@@ -3443,6 +3635,7 @@ class SorcarAgent(RelentlessAgent):
         messages = []
         for wt in self.worktrees:
             branch = wt.branch
+            message = ""
             try:
                 message = self._merge_one(wt, conflict_resolver=resolve_merge_conflict)
             finally:
@@ -3454,7 +3647,15 @@ class SorcarAgent(RelentlessAgent):
                 # retry, instead of editing the user's checkout while the
                 # worktree counts as active.
                 stranded = self._wt_for_repo(wt.repo_root) is not None and not wt.wt_dir.exists()
-                reattached = self._reattach_after_failed_merge(wt) if stranded else ""
+                try:
+                    reattached = self._reattach_after_failed_merge(wt) if stranded else ""
+                except BaseException:
+                    # The stop cut the re-attach and nothing is returned:
+                    # the merge's message is queued, which alone names
+                    # the stash a failed merge kept ("git stash pop").
+                    if message:
+                        self.add_warning(message)
+                    raise
             message += reattached
             merged = self._wt_for_repo(wt.repo_root) is None
             self._broadcast_to_watchers({
@@ -4033,6 +4234,7 @@ class SorcarAgent(RelentlessAgent):
             succeeded but the task branch could not be deleted.  A dirty
             main tree whose ``git stash push`` failed returns
             :attr:`MergeResult.STASH_FAILED` without touching the repo.
+            After :attr:`MergeResult.SUCCESS` *wt* is no longer pending.
         """
         return locked_call(
             repo_lock(wt.repo_root), self._do_merge_locked, wt, conflict_resolver,
@@ -4055,8 +4257,12 @@ class SorcarAgent(RelentlessAgent):
                 GitWorktreeOps.ensure_scratch_merge_driver(wt.repo_root)
             except Exception:  # pragma: no cover — filesystem permission error
                 logger.warning("Failed to install scratch merge driver", exc_info=True)
+            # Resolved here: a stop finds no call between the stash pop
+            # and the branch's deletion, each of which is run again.
+            key = _repo_key(wt)
             stash_before = GitWorktreeOps.stash_ref(wt.repo_root)
             did_stash: bool | None = False
+            merged = ""  # the task branch, once its squash is in
             try:
                 did_stash = GitWorktreeOps.stash_if_dirty(wt.repo_root)
                 if did_stash is None:
@@ -4064,6 +4270,35 @@ class SorcarAgent(RelentlessAgent):
                 result, resolved_by_agent = self._merge_stashed(
                     wt, original_branch, conflict_resolver,
                 )
+                if result == MergeResult.SUCCESS:
+                    merged = wt.branch
+                if did_stash:
+                    if result == MergeResult.CHECKOUT_FAILED:
+                        if not GitWorktreeOps.stash_pop(wt.repo_root):
+                            stash_warning = (
+                                "Your uncommitted changes were stashed "
+                                "before the failed checkout and could not "
+                                "be auto-restored. Run 'git stash pop' to "
+                                "recover them."
+                            )
+                    elif result == MergeResult.SUCCESS:
+                        if not GitWorktreeOps.stash_pop(
+                            wt.repo_root, wt.branch, wt.baseline_commit,
+                        ):
+                            stash_warning = (
+                                "Your uncommitted changes could not be "
+                                "auto-restored after merging the worktree "
+                                f"('{wt.branch}'). Run 'git stash pop' to "
+                                "recover them."
+                            )
+                            logger.warning("git stash pop failed after merge of '%s'", wt.branch)
+                    else:
+                        stash_warning = (
+                            "Your uncommitted changes were saved before "
+                            "the merge attempt and are safe in "
+                            "'git stash'. After resolving the merge, "
+                            "run 'git stash pop' to restore them."
+                        )
             except BaseException:
                 # The runner's stop lands at the first bytecode after
                 # whichever git call is in flight (a slow pre-commit
@@ -4073,11 +4308,15 @@ class SorcarAgent(RelentlessAgent):
                 # ``stash_if_dirty`` itself may have been interrupted
                 # after its ``git stash push``, before it could report
                 # True: ``refs/stash`` having moved then proves this
-                # merge owns an entry.
+                # merge owns an entry.  A pop above that the stop cut is
+                # run again here, after the merge it followed: an entry
+                # it had applied is not given back twice.
                 owns_stash = bool(did_stash) or (
                     GitWorktreeOps.stash_ref(wt.repo_root) != stash_before
                 )
-                if owns_stash and not GitWorktreeOps.stash_pop(wt.repo_root):
+                if owns_stash and not GitWorktreeOps.stash_pop(
+                    wt.repo_root, merged, wt.baseline_commit,
+                ):
                     self.add_warning(
                         "Your uncommitted changes were stashed before "
                         "the interrupted merge and could not be "
@@ -4085,45 +4324,39 @@ class SorcarAgent(RelentlessAgent):
                         "recover them."
                     )
                 raise
-            if did_stash:
-                if result == MergeResult.CHECKOUT_FAILED:
-                    if not GitWorktreeOps.stash_pop(wt.repo_root):
-                        stash_warning = (
-                            "Your uncommitted changes were stashed "
-                            "before the failed checkout and could not "
-                            "be auto-restored. Run 'git stash pop' to "
-                            "recover them."
-                        )
-                elif result == MergeResult.SUCCESS:
-                    if not GitWorktreeOps.stash_pop(wt.repo_root, wt.branch, wt.baseline_commit):
-                        stash_warning = (
-                            "Your uncommitted changes could not be "
-                            "auto-restored after merging the worktree "
-                            f"('{wt.branch}'). Run 'git stash pop' to "
-                            "recover them."
-                        )
-                        logger.warning("git stash pop failed after merge of '%s'", wt.branch)
-                else:
-                    stash_warning = (
-                        "Your uncommitted changes were saved before "
-                        "the merge attempt and are safe in "
-                        "'git stash'. After resolving the merge, "
-                        "run 'git stash pop' to restore them."
-                    )
 
-            if result == MergeResult.SUCCESS and not GitWorktreeOps.delete_branch(
-                wt.repo_root, wt.branch
-            ):
-                logger.warning(
-                    "Merged branch '%s' could not be deleted; it still exists in %s",
-                    wt.branch, wt.repo_root,
-                )
-                cleanup_warning = (
-                    f"Merged branch '{wt.branch}' could not be deleted "
-                    "and still exists. Run "
-                    f"'git branch -D {shlex.quote(wt.branch)}' to "
-                    "remove it."
-                )
+            if result == MergeResult.SUCCESS:
+                stop: BaseException | None = None
+                try:
+                    deleted = GitWorktreeOps.delete_branch(wt.repo_root, wt.branch)
+                except BaseException as raised:
+                    # The stop cut the deletion, the branch perhaps gone.
+                    # Nothing is returned then: the warnings are queued,
+                    # and the deletion is run again, whole (it is safe
+                    # to repeat).
+                    stop = raised
+                    if stash_warning:
+                        self.add_warning(stash_warning)
+                    deleted = GitWorktreeOps.delete_branch(wt.repo_root, wt.branch)
+                finally:
+                    # The task goes with its branch: left pending without
+                    # it, a retry would report a merge conflict.
+                    self._wts.pop(key, None)
+                if not deleted:
+                    logger.warning(
+                        "Merged branch '%s' could not be deleted; it still exists in %s",
+                        wt.branch, wt.repo_root,
+                    )
+                    cleanup_warning = (
+                        f"Merged branch '{wt.branch}' could not be deleted "
+                        "and still exists. Run "
+                        f"'git branch -D {shlex.quote(wt.branch)}' to "
+                        "remove it."
+                    )
+                if stop is not None:
+                    if cleanup_warning:
+                        self.add_warning(cleanup_warning)
+                    raise stop
 
         return (result, resolved_by_agent, stash_warning, cleanup_warning)
 
@@ -4258,7 +4491,6 @@ class SorcarAgent(RelentlessAgent):
             )
 
         if result == MergeResult.SUCCESS:
-            self._wts.pop(_repo_key(wt), None)
             return f"Successfully merged branch '{wt.branch}'." + stash_suffix
 
         stash_step = ""
@@ -4713,6 +4945,43 @@ class SorcarAgent(RelentlessAgent):
         finally:
             self._remove_private_dir()
 
+    def _make_private_dir(self) -> None:
+        """Make this sub-agent's private folder and publish it on ``_private_dir``.
+
+        The folder is in the agents' temp directory (a resolved path, so
+        that the tools compare one).  With a container it is the folder
+        of the tools that run on the host; the commands get one of their
+        own in there.  The path is published before the folder is made,
+        so a Stop that lands as it is made finds the path and
+        :meth:`_remove_private_dir` deletes the folder
+        (``tempfile.mkdtemp`` returns the path once the folder exists: a
+        Stop in between left a folder nobody had the path of).  A path
+        the ``mkdir`` failed for is un-published, as it is not this
+        run's to delete; a name that is taken is another task's folder,
+        and the next name is drawn.  A Stop may also land before the
+        ``mkdir``, or before the un-publishing, with a published path
+        that is not this run's folder: it is this run's once
+        ``_private_dir_made`` holds an item, which the call that makes
+        the folder adds.
+
+        Raises:
+            OSError: When the folder cannot be made.
+        """
+        base = kiss_tmp_dir()
+        self._private_dir_made = []
+        while True:
+            path = str(base / f"{SUBAGENT_DIR_PREFIX}{uuid.uuid4().hex[:8]}")
+            self._private_dir = path
+            try:
+                # One call makes the folder and records that it did: a Stop
+                # is raised before that call or after it, never in between.
+                self._private_dir_made.extend(map(os.mkdir, (path,), (0o700,)))
+                return
+            except OSError as error:
+                self._private_dir = None
+                if not isinstance(error, FileExistsError):
+                    raise
+
     def _remove_private_dir(self) -> None:
         """End what a sub-agent's commands left running and delete its private folder.
 
@@ -4726,17 +4995,24 @@ class SorcarAgent(RelentlessAgent):
         (a task's Stop is injected again while its thread lives) does not
         cut them short: both are run again, whole, and the Stop is raised
         once they are done.  A top-level task has no such folder: its jobs
-        outlive the run, for the next prompt of the chat.
+        outlive the run, for the next prompt of the chat.  Nor has a
+        sub-agent stopped before it made the folder it had published the
+        path of (:meth:`_make_private_dir`): a folder at that path is
+        another task's, and nothing of it is touched.
         """
         folder, self._private_dir = self._private_dir, None
-        if folder is None:
+        if folder is None or not self._private_dir_made:
             return
         try:
             jobs = list(self._background_jobs.values())
             for job in jobs:
                 job.kill.set()
-            # 5 s is a watcher's own wait for a killed shell to be gone.
-            concurrent.futures.wait([job.ended for job in jobs], timeout=5)
+            # 5 s is a watcher's own wait for a killed shell to be gone.  The
+            # Stop is held back for the wait: raised as it takes the lock of
+            # a job's future, it left that job's watcher blocked for good.
+            call_without_injection(
+                concurrent.futures.wait, [job.ended for job in jobs], timeout=5,
+            )
         finally:
             stop: KeyboardInterrupt | None = None
             while True:

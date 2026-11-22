@@ -21,7 +21,7 @@ the per-task ones:
 * **Spend** draws a daily cost heatmap and cost-by-model bars from the
   task history, answered by :func:`spend_report` for the
   ``getSpendReport`` command;
-* **Recommendations** lists the ten next tasks the last
+* **Recommendations** lists the twenty next tasks the last
   ``/recommendations`` run suggested (a 6-hourly default cron job,
   :data:`kiss.agents.sorcar.cron_agent.DEFAULT_JOBS`), answered by
   :func:`recommendations_report` for the ``getRecommendations`` command.
@@ -90,17 +90,19 @@ _CLI_STATUS_TIMEOUT_SECONDS = 30.0
 _MACHINES_REPLY_SECONDS = (
     machines.SSH_TIMEOUT + machines.ENROLL_TIMEOUT + DNS_TIMEOUT_SECONDS
 )
+# Seconds a machine may take, beyond a request's usual budget, to ask
+# the skills registry (``skillSearch``) and to download a repository,
+# have a model read the skill and install it (``skillInstall``).
+_SKILL_REPLY_SECONDS = {"skillSearch": 30.0, "skillInstall": 900.0}
 
 _apps_lock = threading.Lock()
 _apps_cache: list[dict[str, Any]] = []
-# When the cached statuses were probed (epoch seconds, for the caller),
-# and when the last probe (which may have failed) finished: a failed
+# When the last probe (which may have failed) finished: a failed
 # probe also counts as fresh for the TTL, so callers queued behind it
-# share its outcome instead of each starting another probe.  The
-# latter is a ``time.monotonic()`` reading, as every time a cache here
-# is aged by: a wall clock that steps back (an NTP correction) would
-# keep the cache fresh for the length of the step, Refresh included.
-_apps_checked_at = 0.0
+# share its outcome instead of each starting another probe.  A
+# ``time.monotonic()`` reading, as every time a cache here is aged by:
+# a wall clock that steps back (an NTP correction) would keep the
+# cache fresh for the length of the step, Refresh included.
 _apps_attempted_at = -math.inf
 
 
@@ -207,7 +209,7 @@ def spend_report() -> dict[str, Any]:
     }
 
 
-def apps_status(refresh: bool = False) -> tuple[list[dict[str, Any]], int]:
+def apps_status(refresh: bool = False) -> list[dict[str, Any]]:
     """Return every channel agent's authentication status.
 
     Serves the cached probe result while the last probe (successful or
@@ -220,12 +222,11 @@ def apps_status(refresh: bool = False) -> tuple[list[dict[str, Any]], int]:
         refresh: Probe again even when the cache is fresh.
 
     Returns:
-        ``(apps, checked_at)``: the status dicts (see
+        The status dicts (see
         :func:`kiss.agents.third_party_agents.auth_status.channel_status`)
-        and the epoch-millisecond time of the probe they came from (0
-        before the first successful probe).
+        of the last successful probe (none before the first one).
     """
-    global _apps_cache, _apps_checked_at, _apps_attempted_at
+    global _apps_cache, _apps_attempted_at
     requested_at = time.monotonic()
     with _apps_lock:
         age = time.monotonic() - _apps_attempted_at
@@ -236,8 +237,7 @@ def apps_status(refresh: bool = False) -> tuple[list[dict[str, Any]], int]:
             _apps_attempted_at = time.monotonic()
             if apps:
                 _apps_cache = apps
-                _apps_checked_at = time.time()
-        return list(_apps_cache), _epoch_ms(_apps_checked_at)
+        return list(_apps_cache)
 
 
 _machines_lock = threading.Lock()
@@ -245,9 +245,8 @@ _machines_lock = threading.Lock()
 # the label, which is put on when the report is served, since a history
 # fetch may have taught the daemon the host name meanwhile).
 _machines_cache: list[tuple[machines.Machine, dict[str, Any]]] = []
-# When that ping finished: in epoch seconds for the caller, and on the
-# monotonic clock the cache is aged by (see ``_apps_attempted_at``).
-_machines_checked_at = 0.0
+# When that ping finished, on the monotonic clock the cache is aged by
+# (see ``_apps_attempted_at``).
 _machines_pinged_at = -math.inf
 
 
@@ -310,7 +309,7 @@ def _machine_row(machine: machines.Machine) -> tuple[machines.Machine, dict[str,
 
 def machines_report(
     local_ip: str, local_port: int, refresh: bool = False
-) -> tuple[list[dict[str, Any]], int]:
+) -> list[dict[str, Any]]:
     """Return the local machine and every registered machine with its status.
 
     The local row (first) describes this daemon at *local_ip*:*local_port*
@@ -330,14 +329,13 @@ def machines_report(
         refresh: Ping again even when the cache is fresh.
 
     Returns:
-        ``(rows, checked_at)``: the rows of :func:`_machine_row` after the
-        local one, each with ``label`` (what to call the machine,
+        The rows of :func:`_machine_row` after the local one, each with
+        ``label`` (what to call the machine,
         :func:`~kiss.agents.sorcar.machines.machine_label`, as of now:
         the machine's own host name for a machine registered by its
-        address), and the epoch-millisecond time of the ping they came
-        from.
+        address).
     """
-    global _machines_cache, _machines_checked_at, _machines_pinged_at
+    global _machines_cache, _machines_pinged_at
     requested_at = time.monotonic()
     with _machines_lock:
         registered = machines.load_machines()
@@ -354,7 +352,6 @@ def machines_report(
             with ThreadPoolExecutor(max_workers=max(1, len(registered))) as pool:
                 _machines_cache = list(pool.map(_machine_row, registered))
             _machines_pinged_at = time.monotonic()
-            _machines_checked_at = time.time()
         name = machines.local_machine_name()
         local = {
             "name": name, "label": name, "address": f"https://{local_ip}:{local_port}",
@@ -364,7 +361,7 @@ def machines_report(
             {**row, "label": machines.machine_label(machine)}
             for machine, row in _machines_cache
         ]
-        return [local, *rows], _epoch_ms(_machines_checked_at)
+        return [local, *rows]
 
 
 def machine_action(action: str, name: str, address: str = "", password: str = "") -> str:
@@ -562,24 +559,31 @@ MACHINE_PANEL_REPLIES: dict[str, str] = {
     "getMachines": "machines",
     "machineAction": "machines",
     "getAppsStatus": "appsStatus",
+    "getSkills": "skills",
+    "searchSkills": "skillSearch",
+    "installSkill": "skillInstall",
     "getSpendReport": "spendReport",
     "getRecommendations": "recommendations",
 }
 """The sidebar subpanel commands a registered machine answers, by reply type.
 
-The remote webapp's Schedule, Machines, Apps, Spend and
+The remote webapp's Schedule, Machines, Apps, Skills, Spend and
 Recommendations subpanels show the machine the chat header's
 drop-down has picked: each of these commands, when it carries
 ``machine``, is forwarded to that machine's daemon
-(:func:`machine_panel_reply`), so the subpanels list (and the Schedule
-and Machines ones edit) that machine's cron jobs, registered machines,
-app sign-ins, spend and recommendations instead of this daemon's.
+(:func:`machine_panel_reply`), so the subpanels list (and the Schedule,
+Machines and Skills ones edit) that machine's cron jobs, registered
+machines, app sign-ins, skills, spend and recommendations instead of
+this daemon's.
 """
 
 _PANEL_EMPTY_FIELDS: dict[str, dict[str, Any]] = {
     "cronJobs": {"jobs": []},
-    "machines": {"machines": [], "checkedAt": 0},
-    "appsStatus": {"apps": [], "checkedAt": 0},
+    "machines": {"machines": []},
+    "appsStatus": {"apps": []},
+    "skills": {"skills": []},
+    "skillSearch": {"results": []},
+    "skillInstall": {"status": "error", "name": "", "message": "", "findings": []},
     "spendReport": {},
     "recommendations": {"generatedAt": 0, "tasks": []},
 }
@@ -599,10 +603,14 @@ def machine_panel_reply(name: str, cmd: dict[str, Any]) -> dict[str, Any]:
         (no jobs, machines, apps or tasks) carrying the ``error`` when
         the machine is not registered, unreachable, or refused the
         command with an ``error`` frame.  Either names a
-        ``cronAction``'s ``action`` and ``jobId``, or a
-        ``machineAction``'s ``action`` and ``name``, and echoes the
-        command's ``generation`` (0 when it had none), as this daemon's
-        own replies do.
+        ``cronAction``'s ``action`` and ``jobId``, a
+        ``machineAction``'s ``action`` and ``name`` or a
+        ``searchSkills``'s ``query``, and echoes the command's
+        ``generation`` (0 when it had none or one that is no number),
+        as this daemon's own replies do.  A ``skills`` names the
+        ``workDir`` of its ``getSkills`` ("" for none) and a
+        ``skillInstall`` the command's ``id``; one that failed here has
+        the status ``error`` and repeats the error as its ``message``.
     """
     reply_type = MACHINE_PANEL_REPLIES[str(cmd["type"])]
     echo: dict[str, str] = {}
@@ -610,6 +618,13 @@ def machine_panel_reply(name: str, cmd: dict[str, Any]) -> dict[str, Any]:
         echo = {"action": str(cmd.get("action") or ""), "jobId": str(cmd.get("jobId") or "")}
     elif cmd["type"] == "machineAction":
         echo = {"action": str(cmd.get("action") or ""), "name": str(cmd.get("name") or "")}
+    elif cmd["type"] == "getSkills":
+        work_dir = cmd.get("workDir")
+        echo = {"workDir": work_dir if isinstance(work_dir, str) else ""}
+    elif cmd["type"] == "searchSkills":
+        echo = {"query": str(cmd.get("query") or "")}
+    elif cmd["type"] == "installSkill":
+        echo = {"id": str(cmd.get("id") or "")}
     refused = {**_PANEL_EMPTY_FIELDS[reply_type], **echo}
     # The machine's app probe is a subprocess of up to
     # PROBE_PROCESS_TIMEOUT_SECONDS, and its machines reply waits for its
@@ -619,25 +634,47 @@ def machine_panel_reply(name: str, cmd: dict[str, Any]) -> dict[str, Any]:
     # polls travel on a link lane of their own, so that wait holds up no
     # submit, settings or Explorer request.
     timeout = machines.REQUEST_TIMEOUT
+    lane = "panels"
     if reply_type == "appsStatus":
         timeout += PROBE_PROCESS_TIMEOUT_SECONDS
     elif reply_type == "machines":
         timeout += _MACHINES_REPLY_SECONDS
+    elif reply_type in _SKILL_REPLY_SECONDS:
+        # A search of the registry takes seconds and an install
+        # minutes: each on a link lane of its own, so that no other
+        # subpanel's poll (nor a search during an install) waits for it.
+        timeout += _SKILL_REPLY_SECONDS[reply_type]
+        lane = reply_type
     reply = _machine_reply(
         name, cmd, reply_type, refused,
-        errors=True, timeout=timeout, lane="panels", forwarded=True,
+        errors=True, timeout=timeout, lane=lane, forwarded=True,
     )
     # The machine's reply may not name them: an older daemon's, or the
     # changed registry a machine pushes to every connection after a
     # ``machineAction`` (this link's too), which may come before the
     # action's own reply and is the action's outcome all the same.
     reply.update(echo)
-    if echo:
-        # The link stamped the action with a generation of its own,
+    if cmd["type"] in ("cronAction", "machineAction", "searchSkills"):
+        # The link stamped the command with a generation of its own,
         # which the machine echoed and ``_machine_reply`` dropped: the
-        # page is answered with the one it stamped its save with, so
-        # it tells two saves' replies apart whatever their order.
-        reply["generation"] = cmd.get("generation", 0)
+        # page is answered with the one it stamped its save or its
+        # search with, so it tells two of them apart whatever the
+        # order of their replies (two searches may ask for the same
+        # text), also when the reply is the failure built here.  0 for
+        # none or a malformed one, as this daemon's own replies have
+        # it.  Imported here, not at the top: ``commands`` imports this
+        # module (through ``pr_flow``).
+        from kiss.server.commands import request_generation
+
+        reply["generation"] = request_generation(cmd)
+    if reply_type in ("skills", "skillSearch", "skillInstall"):
+        # A machine that refused the command (a daemon from before the
+        # Skills subpanel) answered with an ``error`` alone: the reply
+        # still has every field the page reads, and an install's
+        # failure is its ``message``.
+        reply = {**refused, **reply}
+        if reply_type == "skillInstall" and "error" in reply:
+            reply["message"] = reply["error"]
     return reply
 
 
@@ -658,12 +695,39 @@ def machine_task_update_reply(name: str, cmd: dict[str, Any]) -> dict[str, Any]:
     Returns:
         The machine's ``taskUpdate``, or an ``exists: false`` one (the
         subpanel hides, as for a tab without a running task) carrying
-        the command's ``tabId`` and ``token`` and the ``error`` when the
-        machine is not registered or unreachable.
+        the command's ``tabId`` and ``token``, no estimate and the
+        ``error`` when the machine is not registered or unreachable.
     """
     refused: dict[str, Any] = {k: cmd[k] for k in ("tabId", "token") if k in cmd}
-    refused.update({"taskId": "", "exists": False, "sig": "", "content": ""})
+    refused.update({
+        "taskId": "", "exists": False, "sig": "", "content": "",
+        "etaAt": 0, "etaLowAt": 0, "etaHighAt": 0,
+    })
     return _machine_reply(name, cmd, "taskUpdate", refused, lane="panels")
+
+
+def machine_task_tags_reply(name: str, cmd: dict[str, Any]) -> dict[str, Any]:
+    """Forward the task-info panel's ``getTaskTags`` / ``setTaskTags`` *cmd* to machine *name*.
+
+    The task a tab bound to a machine shows is a row of that machine's
+    history database, and so are its tags: the machine's daemon reads
+    and stores them.  The command goes on the ``panels`` link lane, as
+    the panel's Task update poll does, so a submit to the machine
+    never waits behind it.
+
+    Returns:
+        The machine's ``taskTags`` stamped ``machine``.  When the
+        machine is not registered, unreachable, or answered with an
+        ``error`` frame, a ``taskTags`` of the command's ``taskId``
+        that lists no ``tags`` and carries the ``error``: the page
+        leaves its Tags row as it is for one.  A daemon from before
+        the Tags row answers "Unknown command" that way: taken as its
+        answer, it neither counts the machine as down nor reaches the
+        transcript.
+    """
+    refused = {"taskId": str(cmd.get("taskId") or "")}
+    reply = _machine_reply(name, cmd, "taskTags", refused, errors=True, lane="panels")
+    return {**refused, **reply}
 
 
 def machine_replay_image_reply(name: str, cmd: dict[str, Any]) -> dict[str, Any]:
@@ -722,11 +786,12 @@ def machine_share_tasks_reply(name: str, cmd: dict[str, Any]) -> dict[str, Any]:
     Returns:
         The machine's ``share_tasks`` reply stamped ``machine``, or an
         empty one (no tasks, not truncated) carrying the ``error`` and
-        the command's ``tabId`` and ``chatId`` when the machine is not
-        registered or unreachable; the page then reports the share
-        failed instead of exporting this daemon's history of the chat.
+        the command's ``tabId``, ``chatId`` and ``token`` when the
+        machine is not registered or unreachable; the page then reports
+        the share failed instead of exporting this daemon's history of
+        the chat.
     """
-    refused: dict[str, Any] = {k: cmd[k] for k in ("tabId", "chatId") if k in cmd}
+    refused: dict[str, Any] = {k: cmd[k] for k in ("tabId", "chatId", "token") if k in cmd}
     refused.update({"tasks": [], "truncated": False})
     return _machine_reply(name, cmd, "share_tasks", refused, lane="panels")
 
@@ -785,13 +850,15 @@ def machine_file_usage(name: str, cmd: dict[str, Any]) -> None:
 
 
 MACHINE_HISTORY_WRITES = (
-    "setFavorite", "setChatSummary", "setChatFavorite", "deleteTask", "deleteChat",
+    "setFavorite", "setChatSummary", "setChatFavorite", "setPinned", "setChatPinned",
+    "deleteTask", "deleteChat",
 )
 """The CHATS-panel writes a registered machine applies to its own history.db.
 
 A history row of a remote machine lives in that machine's database:
-its favourite star, its chat's retyped title and star and its delete
-button send the command stamped ``machine`` (:func:`machine_history_write`)."""
+its favourite star and pin, its chat's retyped title, star and pin and
+its delete button send the command stamped ``machine``
+(:func:`machine_history_write`)."""
 
 
 def machine_history_write(name: str, cmd: dict[str, Any]) -> dict[str, Any] | None:
@@ -855,6 +922,8 @@ MACHINE_FORWARDERS: dict[str, Callable[[str, dict[str, Any]], dict[str, Any] | N
     **dict.fromkeys(MACHINE_SETTINGS_REPLIES, machine_settings_reply),
     **dict.fromkeys(MACHINE_PANEL_REPLIES, machine_panel_reply),
     "getTaskUpdate": machine_task_update_reply,
+    "getTaskTags": machine_task_tags_reply,
+    "setTaskTags": machine_task_tags_reply,
     "getReplayImage": machine_replay_image_reply,
     "getTaskEvents": machine_task_events_reply,
     "shareChatTasks": machine_share_tasks_reply,
@@ -875,6 +944,7 @@ MACHINE_READ_QUEUES: dict[str, str] = {
     ),
     "getReplayImage": "images",
     "getTaskEvents": "events",
+    "getTaskTags": "tags",
 }
 """The reads a registered machine answers in the background, by the queue each waits in.
 
@@ -884,7 +954,8 @@ status and log), each a round trip to the machine.  They change
 nothing there, so none of the sender's later commands waits for them;
 those sharing a queue are answered in the order asked, per connection
 and machine: the Explorer and the Source Control view as before, while
-a folded panel's events and a picture wait for neither."""
+a folded panel's events, a picture and the Task Info panel's tags wait
+for none of the others."""
 
 MACHINE_COMMIT_TIMEOUT = 900.0
 """Seconds a machine gets to stage, write a commit message with an LLM and commit.
@@ -913,9 +984,45 @@ def machine_autocommit(name: str, cmd: dict[str, Any]) -> dict[str, Any]:
         false and the ``error`` when the machine is not registered,
         unreachable or silent; either stamped ``machine``.
     """
-    refused = {"tabId": cmd.get("tabId"), "success": False, "committed": False}
+    return _machine_press(name, cmd, "autocommit_done", {"committed": False})
+
+
+def machine_create_pr(name: str, cmd: dict[str, Any]) -> dict[str, Any]:
+    """Run the Create PR button's ``createPrAction`` *cmd* on registered machine *name*.
+
+    The machine's daemon pushes the branch of the folder *cmd* names
+    (its own configured folder when ``workDir`` is empty), opens the
+    pull request and answers the link with the tab's ``pr_done``, on
+    the ``commit`` lane like :func:`machine_autocommit`: a pull request
+    asked while the machine still commits for this daemon waits for
+    that commit.
+
+    Returns:
+        The machine's ``pr_done``, or one with ``success`` false and
+        the ``error`` when the machine is not registered, unreachable
+        or silent; either stamped ``machine``.
+    """
+    return _machine_press(name, cmd, "pr_done", {"created": False, "url": ""})
+
+
+def _machine_press(
+    name: str, cmd: dict[str, Any], reply_type: str, nothing_done: dict[str, Any],
+) -> dict[str, Any]:
+    """Forward the button press *cmd* to machine *name* and return its *reply_type* outcome.
+
+    Args:
+        name: The registered machine's name.
+        cmd: The ``autocommitAction`` or ``createPrAction`` command.
+        reply_type: The outcome event the machine answers the link with.
+        nothing_done: The outcome's own fields when the machine did nothing.
+
+    Returns:
+        The machine's outcome, or a failed one built from
+        *nothing_done* with the ``error``; either stamped ``machine``.
+    """
+    refused = {"tabId": cmd.get("tabId"), "success": False, **nothing_done}
     return _machine_reply(
-        name, cmd, "autocommit_done", refused, timeout=MACHINE_COMMIT_TIMEOUT, lane="commit",
+        name, cmd, reply_type, refused, timeout=MACHINE_COMMIT_TIMEOUT, lane="commit",
     )
 
 
@@ -995,7 +1102,7 @@ def _adopt_machine_password(machine: machines.Machine, reply: dict[str, Any]) ->
 def recommendations_report() -> dict[str, Any]:
     """Return the RECOMMENDATIONS subpanel's content.
 
-    The ten suggested tasks the last ``/recommendations`` run stored
+    The twenty suggested tasks the last ``/recommendations`` run stored
     (:func:`kiss.agents.seas.recommendations.recommendations_sea.load_recommendations`).
 
     Returns:

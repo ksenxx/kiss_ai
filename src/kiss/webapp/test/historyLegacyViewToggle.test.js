@@ -6,14 +6,17 @@
 // End-to-end (jsdom) tests for the history panel's two views
 // (media/main.js, media/chat.html):
 //
-// * the button right of the search box switches to the legacy flat
-//   list: every task newest first, no chat panels, no day separators,
-//   and no per-chat colour on any row,
-// * the switch is remembered in localStorage and honoured on load,
+// * Group by > None, in the Filter and group menu whose button sits
+//   right of the search box, switches to the flat list: every task
+//   newest first, no chat panels, no day separators, and no per-chat
+//   colour on any row; Group by > Chat switches back (Group by >
+//   Project, the default, lists the same chat panels while no project
+//   exists; historyProjects.test.js covers the project panels),
+// * the choice is remembered in localStorage and honoured on load,
 // * switching rebuilds the loaded rows without a refetch — through the
 //   identical-refresh fast path, which must not keep the old view — and
 //   a later identical refresh keeps the flat rows, and
-// * the status filters and the keyboard focus restore work in the flat
+// * the status filter and the keyboard focus restore work in the flat
 //   list too.
 
 'use strict';
@@ -31,6 +34,9 @@ const {
   groupedSession: session,
   sendHistoryPage: sendHistory,
   listShape,
+  pressFilterOption,
+  tickedFilterOptions,
+  filterRowValue,
 } = require('./history_helpers');
 
 const VIEW_KEY = 'kissSorcar.historyLegacyView';
@@ -92,25 +98,30 @@ function dateSeparator(daysAgo) {
   return 'sep:' + dayLabel(todayNoon - daysAgo * DAY, todayNoon);
 }
 
-test('the view toggle sits right of the search box and swaps grouped <-> flat without a refetch', () => {
+test('Group by swaps grouped <-> flat without a refetch; its menu button sits right of the search box', () => {
   const {win, posted} = makePage();
-  const toggle = byId(win, 'history-view-toggle');
+  const button = byId(win, 'history-filter-btn');
   const searchWrap = byId(win, 'history-search').closest('.search-wrap');
   assert.strictEqual(
     searchWrap.nextElementSibling,
-    toggle,
-    'the toggle is the search box\u2019s next sibling (to its right)',
+    button,
+    'the button is the search box\u2019s next sibling (to its right)',
   );
-  assert.strictEqual(toggle.getAttribute('aria-pressed'), 'false');
+  assert.strictEqual(win.document.getElementById('history-view-toggle'), null);
+  assert.deepStrictEqual(tickedFilterOptions(win, 'group'), ['Project']);
+  assert.strictEqual(filterRowValue(win, 'group'), 'Project');
   assert.ok(!byId(win, 'history-list').classList.contains('legacy-view'));
 
   sendHistory(win, posted, 0, page());
   assert.deepStrictEqual(listShape(win), GROUPED);
   const fetchesBefore = posted.filter(m => m.type === 'getHistory').length;
 
-  toggle.click();
-  assert.strictEqual(toggle.getAttribute('aria-pressed'), 'true');
-  assert.ok(toggle.classList.contains('active'));
+  pressFilterOption(win, 'group', 'None');
+  assert.deepStrictEqual(tickedFilterOptions(win, 'group'), ['None']);
+  assert.strictEqual(filterRowValue(win, 'group'), 'None');
+  // Group by arranges the list and hides nothing: no filter is on.
+  assert.ok(!button.classList.contains('is-filtered'));
+  assert.strictEqual(button.getAttribute('aria-label'), 'Filter and group');
   assert.ok(byId(win, 'history-list').classList.contains('legacy-view'));
   assert.strictEqual(win.localStorage.getItem(VIEW_KEY), '1');
   assert.strictEqual(
@@ -141,9 +152,13 @@ test('the view toggle sits right of the search box and swaps grouped <-> flat wi
     'an identical refresh keeps the DOM rows',
   );
 
+  // The option that is the choice already rebuilds nothing.
+  pressFilterOption(win, 'group', 'None');
+  assert.strictEqual(all(win, '#history-list > .sidebar-item')[0], rowsBefore[0]);
+
   // Back to chat panels: the same data, regrouped.
-  toggle.click();
-  assert.strictEqual(toggle.getAttribute('aria-pressed'), 'false');
+  pressFilterOption(win, 'group', 'Chat');
+  assert.deepStrictEqual(tickedFilterOptions(win, 'group'), ['Chat']);
   assert.strictEqual(win.localStorage.getItem(VIEW_KEY), '0');
   assert.ok(!byId(win, 'history-list').classList.contains('legacy-view'));
   assert.deepStrictEqual(listShape(win), GROUPED);
@@ -154,8 +169,8 @@ test('the flat list is remembered across loads and used for the first page', () 
   const {win, posted} = makePage(w => {
     w.localStorage.setItem(VIEW_KEY, '1');
   });
-  const toggle = byId(win, 'history-view-toggle');
-  assert.strictEqual(toggle.getAttribute('aria-pressed'), 'true');
+  assert.deepStrictEqual(tickedFilterOptions(win, 'group'), ['None']);
+  assert.strictEqual(filterRowValue(win, 'group'), 'None');
   assert.ok(byId(win, 'history-list').classList.contains('legacy-view'));
   sendHistory(win, posted, 0, page());
   assert.deepStrictEqual(listShape(win), FLAT);
@@ -179,10 +194,9 @@ test('the flat list is remembered across loads and used for the first page', () 
   win.close();
 });
 
-test('toggling with nothing loaded only flips the view; filters and focus work in the flat list', () => {
+test('Group by with nothing loaded only flips the view; filters and focus work in the flat list', () => {
   const {win, posted} = makePage();
-  const toggle = byId(win, 'history-view-toggle');
-  toggle.click();
+  pressFilterOption(win, 'group', 'None');
   assert.strictEqual(
     byId(win, 'history-list').querySelectorAll('.sidebar-item').length,
     0,
@@ -200,18 +214,18 @@ test('toggling with nothing loaded only flips the view; filters and focus work i
     'row:task a2',
     'row:task b1',
   ]);
-  // The "Errored" chip hides the failed row only.
-  const hfErrors = byId(win, 'hf-errors');
-  hfErrors.checked = false;
-  hfErrors.dispatchEvent(new win.Event('change', {bubbles: true}));
+  // Status > Errored, unticked, hides the failed row only.
+  pressFilterOption(win, 'status', 'Errored');
+  assert.deepStrictEqual(tickedFilterOptions(win, 'status'), ['Running', 'Succeeded']);
+  assert.strictEqual(filterRowValue(win, 'status'), 'Running, Succeeded');
   assert.deepStrictEqual(listShape(win), [
     'sep:Running',
     'row:task a1',
     'sep:Today',
     'row:task a2',
   ]);
-  hfErrors.checked = true;
-  hfErrors.dispatchEvent(new win.Event('change', {bubbles: true}));
+  pressFilterOption(win, 'status', 'Errored');
+  assert.strictEqual(filterRowValue(win, 'status'), 'All');
   // Keyboard focus on a row survives a changed-data rebuild.
   const rowB = all(win, '#history-list > .sidebar-item')[2];
   rowB.focus();

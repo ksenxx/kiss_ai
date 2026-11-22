@@ -54,9 +54,12 @@ import json
 import os
 import re
 import shlex
+import stat
 import subprocess
 import sys
 import time
+from collections.abc import Iterator
+from contextlib import ExitStack, contextmanager, nullcontext, suppress
 from typing import IO
 
 try:
@@ -471,6 +474,11 @@ def kiss_dir(home_dir: str | None = None) -> str:
     return os.environ.get("KISS_HOME") or os.path.expanduser("~/" + (home_dir or brand_home_dir()))
 
 
+def _open_without_waiting(path: str, flags: int) -> int:
+    """Opener for ``open``: a named pipe nobody writes to opens at once instead of never."""
+    return os.open(path, flags | getattr(os, "O_NONBLOCK", 0))
+
+
 def read_note(path: str) -> str | None:
     """Return the text of the file at *path*, or ``None`` when there is none.
 
@@ -479,10 +487,14 @@ def read_note(path: str) -> str | None:
     between its write and its truncate.
 
     Raises:
-        SyncError: When the note stays locked (:func:`lock_note`).
+        SyncError: When the note stays locked (:func:`lock_note`), or *path*
+            names something other than a regular file (a named pipe, a
+            device), which is not read at all.
     """
     try:
-        with open(path, encoding="utf-8") as handle:
+        with open(path, encoding="utf-8", opener=_open_without_waiting) as handle:
+            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                raise SyncError(f"{path} is not a regular file")
             lock_note(handle, shared=True)
             return handle.read()
     except FileNotFoundError:
@@ -533,18 +545,177 @@ def unlock_note(handle: IO[str]) -> None:
         msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)  # pyright: ignore[reportAttributeAccessIssue]
 
 
+@contextmanager
+def rename_lock(path: str) -> Iterator[bool]:
+    """Hold the lock file beside *path*, ``<path>.lock``, for the block.
+
+    The lock of whoever replaces what is at *path* by a rename, held from
+    before the note is read until after the rename: a merge of the
+    evidence (:func:`merge_into_file`) and ``/rsi7d``, which rewrites the
+    evidence wholesale.  They take turns, so neither renames its text over
+    one the other wrote after it had read the note.  The lock is
+    :func:`lock_note`'s, on the lock file, which is created empty and
+    private to its user when missing and never deleted.  A merge through
+    a link that leads to the lock file renames over it, though: the lock
+    is held once the locked file is still the one at that name.
+
+    Args:
+        path: The path a file is about to be renamed over.
+
+    Yields:
+        Whether the lock is held.  ``False`` where there is no lock to be
+        had: the lock file cannot be opened (a directory that takes no new
+        file or does not exist, a lock file of another user), it is not a
+        regular file with this one name (a link may lead to the note
+        itself, or to a lock the caller holds), or it is the file *path*
+        leads to: to wait for those is to wait for oneself.  The caller
+        then writes as it did before there was a lock file, and a merge
+        renames nothing.
+
+    Raises:
+        SyncError: When the lock stays held (:func:`lock_note`).
+    """
+    with ExitStack() as stack:
+        held = False
+        try:
+            flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+            while not held:
+                fd = os.open(path + ".lock", flags, 0o600)
+                lock = os.fdopen(fd, encoding="utf-8")
+                stack.callback(lock.close)  # closing it releases it
+                status = os.fstat(fd)
+                if (
+                    not stat.S_ISREG(status.st_mode)
+                    or status.st_nlink != 1
+                    or (os.path.exists(path) and os.path.samefile(fd, path))
+                ):
+                    break
+                lock_note(lock)
+                held = os.path.samestat(status, os.stat(path + ".lock"))
+                if not held:  # renamed over while this waited: the lock is the file there now
+                    lock.close()
+        except OSError:
+            pass
+        yield held  # after the handler: an error of the block would carry that one along
+
+
+@contextmanager
+def _rename_locks(path: str) -> Iterator[str | None]:
+    """Hold the lock file of every name on the way from *path* to its file, for the block.
+
+    That of *path* and of each symlink followed from it (:func:`rename_lock`),
+    in that order.  ``/rsi7d`` replaces the note, symlink or not, and a merge
+    the file a symlinked note leads to: both wait, so *path* leads to one
+    file from here until the block ends, by whichever of its names a merge
+    was given.
+
+    Yields:
+        The path of that file, or ``None`` where one of the locks is not held.
+    """
+    with ExitStack() as stack:
+        locked = True
+        for _hop in range(41):  # the 40 links the kernel follows at most, then the file
+            locked = stack.enter_context(rename_lock(path)) and locked
+            try:
+                target = os.readlink(path)
+            except OSError:  # no symlink: the file itself, or nothing yet
+                break
+            path = os.path.join(os.path.dirname(path), target)
+        yield path if locked else None
+
+
+def _extended_attributes(fd: int) -> dict[str, bytes]:
+    """Return the extended attributes of the open file *fd*; an ACL is one of them.
+
+    Raises:
+        OSError: Off Linux, where Python cannot read them.
+    """
+    if sys.platform != "linux":  # ``os.listxattr`` is Linux's
+        raise OSError("Python reads extended attributes on Linux only")
+    return {name: os.getxattr(fd, name) for name in os.listxattr(fd)}
+
+
+def replace_note(path: str, text: str, like: IO[str] | None = None, mode: int = 0o666) -> None:
+    """Put *text* at *path* by renaming a new file over whatever is there.
+
+    The text is staged beside *path* in a file created for it, under a name
+    nothing has (so never through a link to the note), and that file is
+    renamed over *path*: whoever reads the note gets the old text or the
+    new one, whole, with the note's lock or without.  The caller holds the
+    lock file of *path* (:func:`rename_lock`).
+
+    Args:
+        path: Where the text goes; a symlink there is replaced, not followed.
+        text: The note's new text.
+        like: The open note the new file is to stand in for.  ``None`` leaves
+            the new file what it is, a file its user just made: what
+            ``/rsi7d`` has always renamed over the evidence.
+        mode: The permission bits the new file is made with (less the
+            umask's); those of *like* replace them.
+
+    Raises:
+        OSError: When nothing was renamed and the note is as it was: the
+            directory takes no new file, or the new file cannot stand in
+            for *like* -- *like* is not the file at *path* or has other
+            names as well (hard links), the new file cannot be given its
+            owner, group and permission bits, or lacks an extended
+            attribute it has (an ACL is one) -- or may lack one, off Linux,
+            where Python cannot read them.
+    """
+    staged = f"{path}.{os.urandom(8).hex()}"
+    fd = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stage:
+            stage.write(text)
+            if like is not None:
+                note = like.fileno()
+                status = os.fstat(note)
+                os.fchown(fd, status.st_uid, status.st_gid)
+                os.fchmod(fd, stat.S_IMODE(status.st_mode))
+                if (
+                    not os.path.samestat(status, os.lstat(path))
+                    or status.st_nlink != 1
+                    or _extended_attributes(fd) != _extended_attributes(note)
+                ):
+                    raise OSError(f"no new file can stand in for {path}")
+        os.replace(staged, path)
+    finally:
+        with suppress(OSError):  # gone once renamed; stays where the directory lets nothing go
+            os.unlink(staged)
+
+
 def merge_into_file(name: str, path: str, theirs: str | None) -> str:
     """Merge *theirs* into the note at *path* and write the result when it changed.
 
     The read, the merge and the write are one step under the lock the
-    agents take on the note to append a row to it (:func:`lock_note`),
-    and the note is rewritten in place rather than replaced by a rename:
-    an agent that opened the note to append and is waiting for the lock
-    keeps the file it opened, so its row lands after the merged text
-    instead of in an orphaned copy -- and two merges at once take turns.
-    ``/rsi7d`` does replace the evidence by a rename, without the lock: a
+    agents take on the note to append a row to it (:func:`lock_note`): a
+    row appended meanwhile lands after the merged text, and two merges at
+    once take turns.
+
+    The ledger is rewritten in place rather than replaced by a rename: an
+    agent that opened it to append and is waiting for the lock keeps the
+    file it opened, so its row lands after the merged text instead of in
+    an orphaned copy.  The evidence has no appender, so it is replaced by
+    a rename (:func:`replace_note`), which shows a reader the old text or
+    the new one and never a mix of them.  The file renamed over is the one
+    *path* leads to (a symlinked note stays a symlink), and the merge
+    holds the lock file of each name on the way to it from before it opens
+    the note (:func:`_rename_locks`), as ``/rsi7d`` holds the note's to
+    replace the evidence: the two take turns as well.  Evidence that is
+    not there yet is made the same way, so no reader finds it empty.
+    Where no new file can stand in for the evidence -- a lock file cannot be had, the
+    directory takes no new file, the note has an ACL or a second name, or
+    off Linux, where Python cannot tell whether it has -- it is rewritten
+    in place like the ledger, as it always was, under the lock files the
+    merge holds; a reader is sure not to see it between the write and the
+    truncate only when it takes the note's lock (:func:`read_note`).
+    Windows renames over no file that is open: the evidence is merged
+    there as the ledger is, with no lock file.
+
+    Whoever replaces a note by a rename without these locks (an editor, a
+    daemon from before ``/rsi7d`` took the lock file) is not waited for: a
     merge that then finds another file at *path* than the one it merged
-    into merges again, into that one.
+    into, in place, merges again, into that one.
 
     Args:
         name: The note's name (picks the merge rule).
@@ -556,7 +727,8 @@ def merge_into_file(name: str, path: str, theirs: str | None) -> str:
 
     Raises:
         SyncError: When the note was replaced during each of
-            :data:`MERGE_ATTEMPTS` merges, or stays locked (:func:`lock_note`).
+            :data:`MERGE_ATTEMPTS` merges, or it or its lock file stays
+            locked (:func:`lock_note`).
     """
     try:
         os.stat(path)
@@ -567,25 +739,37 @@ def merge_into_file(name: str, path: str, theirs: str | None) -> str:
         return "unchanged"  # nothing to create
     directory = os.path.dirname(path) or "."
     os.makedirs(directory, mode=0o700, exist_ok=True)
-    for _attempt in range(MERGE_ATTEMPTS):
-        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
-        with os.fdopen(fd, "r+", encoding="utf-8") as handle:
-            lock_note(handle)
-            try:
-                current = handle.read()
-                merged = merge_note(name, current, theirs or "")
-                if merged != current:
-                    handle.seek(0)
-                    handle.write(merged)
-                    handle.truncate()
-                    handle.flush()
-                if not os.path.samefile(handle.fileno(), path):
-                    continue  # merged into a file a rename has replaced meanwhile
-            finally:
-                unlock_note(handle)
-        if merged == current:
-            return "unchanged"
-        return "updated" if existed else "created"
+    replaceable = name == "AUTOROUTER.md" and os.name == "posix"
+    with _rename_locks(path) if replaceable else nullcontext() as real:
+        if real is not None and not os.path.lexists(real):
+            with suppress(OSError):  # nowhere to stage it: made in place below, as it always was
+                replace_note(real, merge_note(name, "", theirs or ""), mode=0o600)
+                return "created"
+        for _attempt in range(MERGE_ATTEMPTS):
+            fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+            with os.fdopen(fd, "r+", encoding="utf-8") as handle:
+                lock_note(handle)
+                try:
+                    current = handle.read()
+                    merged = merge_note(name, current, theirs or "")
+                    renamed = False
+                    if merged != current:
+                        if real is not None:
+                            with suppress(OSError):  # no new file can stand in for this note
+                                replace_note(real, merged, handle, 0o600)
+                                renamed = True
+                        if not renamed:
+                            handle.seek(0)
+                            handle.write(merged)
+                            handle.truncate()
+                            handle.flush()
+                    if not renamed and not os.path.samefile(handle.fileno(), path):
+                        continue  # merged into a file a rename has replaced meanwhile
+                finally:
+                    unlock_note(handle)
+            if merged == current:
+                return "unchanged"
+            return "updated" if existed else "created"
     raise SyncError(f"{path} was replaced during each of {MERGE_ATTEMPTS} merges into it")
 
 

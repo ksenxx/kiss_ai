@@ -73,6 +73,7 @@ Usage::
 """
 
 import argparse
+import asyncio
 import contextlib
 import importlib
 import json
@@ -80,8 +81,10 @@ import logging
 import math
 import os
 import re
+import selectors
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -102,8 +105,15 @@ from kiss.agents.sorcar.useful_tools import _popen_kwargs
 from kiss.core.config import kiss_home
 from kiss.core.file_lock import exclusive_file_lock
 from kiss.core.locked import locked_call
-from kiss.core.processes import SIGKILL, kill_process_group, start_process_group
-from kiss.core.tool_interrupt import inject_async_exception
+from kiss.core.processes import (
+    SIGKILL,
+    exited_unreaped,
+    kill_env_marked,
+    kill_process_group,
+    pid_handed_on,
+    start_process_group,
+)
+from kiss.core.tool_interrupt import call_without_injection, inject_async_exception
 from kiss.core.utils import atomic_write_text, read_bytes_waiting_for_writer
 
 logger = logging.getLogger(__name__)
@@ -504,9 +514,12 @@ def compute_next_run(schedule: str, now: float) -> float | None:
     m = _INTERVAL_RE.match(text.lower()) or _DURATION_RE.match(text.lower())
     if m:
         try:
-            return now + int(m.group(1)) * _UNIT_SECONDS[m.group(2)]
+            due = now + int(m.group(1)) * _UNIT_SECONDS[m.group(2)]
         except OverflowError:  # a count no float holds
             raise ValueError(unsupported) from None
+        if math.isinf(due):  # a count a float holds, whose seconds none does
+            raise ValueError(unsupported)
+        return due
     parsed = _parse_cron_expr(text)
     if parsed is not None:
         fields, dom_star, dow_star = parsed
@@ -660,6 +673,7 @@ def _first_line(text: str) -> str:
 # Words of a prompt that name a Composio-backed connector, with the SEA
 # (``kiss.agents.third_party_agents.<sea>.<sea>_sea``) whose
 # ``connection_status()`` is checked before the run, and its label.
+# Each must start a word of the prompt ("orgcalc" names no calendar).
 CONNECTOR_WORDS: dict[str, tuple[str, str]] = {
     "gmail": ("gmail", "Gmail"),
     "google calendar": ("gcal", "Google Calendar"),
@@ -710,7 +724,7 @@ def connector_problem(prompt: str, in_chat: bool = False) -> str | None:
         return None
     seen: set[str] = set()
     for word, (sea, label) in CONNECTOR_WORDS.items():
-        if word not in lowered or sea in seen:
+        if sea in seen or not re.search(rf"\b{re.escape(word)}", lowered):
             continue
         seen.add(sea)
         module = importlib.import_module(f"kiss.agents.third_party_agents.{sea}.{sea}_sea")
@@ -720,7 +734,7 @@ def connector_problem(prompt: str, in_chat: bool = False) -> str | None:
         state = "not connected" if not status else f"in state {status}"
         return (
             f"{label} is {state}: this scheduled job cannot run until it is reconnected. "
-            f"Open the Apps panel (or /{sea} authenticate) to reconnect; the job retries "
+            f"Open the Connectors panel (or /{sea} authenticate) to reconnect; the job retries "
             "with growing back-off until the connection is active."
         )
     return None
@@ -1291,47 +1305,91 @@ def _proc_descendants(root_pid: int) -> set[int]:
     return descendants
 
 
-#: The longest :func:`_kill_command_tree` keeps killing the processes that
-#: carry a run's mark: one stuck in the kernel dies later than its signal.
-_MARKED_KILL_SECONDS = 2.0
+def _parent_pid(proc_dir: int) -> int | None:
+    """Return the parent pid of the process whose ``/proc`` directory *proc_dir* is open on.
 
-
-def _kill_marked(mark: str) -> bool:
-    """SIGKILL every process whose environment has the variable *mark*.
-
-    :func:`_run_command_job` gives the variable, under a name of its
-    own, to the command it starts and to nothing else, so the processes
-    found are that command's descendants, whoever their parent is now.
-    Linux only: without ``/proc`` nothing is found.  A zombie has no
-    environment left to read and is not found.  The signal goes to the
-    pid just read: for it to reach another process the kernel would
-    have to wrap its whole pid space between the read and the signal.
+    Read through the descriptor, the answer is that process's, whoever
+    has its pid by now.
 
     Args:
-        mark: The variable's name.
+        proc_dir: A descriptor of the process's ``/proc/<pid>`` directory.
 
     Returns:
-        Whether a process with the variable was found.
+        The parent's pid, or ``None`` once the process was reaped.
     """
-    entry = f"{mark}=1".encode()
     try:
-        names = os.listdir("/proc")
-    except OSError:
-        return False
-    found = False
-    for name in names:
-        if not name.isdigit():
-            continue
-        try:
-            with open(f"/proc/{name}/environ", "rb") as fp:
-                marked = entry in fp.read().split(b"\0")
-        except OSError:
-            continue  # gone, or another user's: not ours to kill either
-        if marked:
-            found = True
+        with open(f"/proc/self/fd/{proc_dir}/stat", "rb") as fp:
+            # The ppid, as :func:`_proc_descendants` reads it.
+            return int(fp.read().rpartition(b")")[2].split()[1])
+    except (OSError, IndexError, ValueError):
+        return None
+
+
+def _pin_descendants(shell_pid: int, candidates: set[int], pinned: dict[int, int]) -> set[int]:
+    """Open the ``/proc`` directory of each of *candidates* and tell the shell's descendants.
+
+    A pid is a number, a stranger's as soon as the process that had it
+    is reaped.  Its open ``/proc/<pid>`` directory is that one process
+    for good: what is read and signalled through it is that process or
+    none.  A process is a descendant when the parent read through its
+    directory is the shell, whose pid is its own until it is reaped, or
+    a descendant whose directory, opened before that read, still
+    answered after it.
+
+    Args:
+        shell_pid: The command's shell, not reaped yet.
+        candidates: The pids :func:`_proc_descendants` found under it.
+        pinned: Receives the descriptor of every directory opened, by
+            pid, for the caller to close.
+
+    Returns:
+        The pids in *pinned* whose process descends from the shell.
+    """
+    for pid in candidates:
+        with contextlib.suppress(OSError):  # it ended meanwhile, or no descriptor is left
+            # Opened and stored by one C call: a Stop raised as ``os.open`` returns
+            # finds the descriptor in *pinned*, which the caller closes.
+            pinned.update(
+                zip((pid,), map(os.open, (f"/proc/{pid}",), (os.O_RDONLY | os.O_DIRECTORY,)))
+            )
+    descendants: set[int] = set()
+    found = True
+    while found:
+        found = False
+        for pid in pinned.keys() - descendants:
+            parent = _parent_pid(pinned[pid])
+            if parent == shell_pid or (
+                parent in descendants and _parent_pid(pinned[parent]) is not None
+            ):
+                descendants.add(pid)
+                found = True
+    return descendants
+
+
+def _kill_pinned(pid: int, proc_dir: int) -> None:
+    """SIGKILL the process whose ``/proc`` directory *proc_dir* is open on.
+
+    Through the descriptor (``pidfd_send_signal``), the signal reaches
+    that process or none.  Where there is no such call (a Python built
+    without it, a kernel before Linux 5.1, a sandbox that refuses it)
+    *pid* is signalled right after the descriptor showed that it is
+    still that process's, which shortens the time in which the number
+    could pass to a stranger and does not end it.
+
+    Args:
+        pid: The process's pid when *proc_dir* was opened.
+        proc_dir: A descriptor of its ``/proc/<pid>`` directory.
+    """
+    if sys.platform != "linux":  # pragma: no cover — only Linux's /proc pins a process
+        return
+    try:
+        signal.pidfd_send_signal(proc_dir, SIGKILL)
+    except ProcessLookupError:  # already dead
+        pass
+    except (AttributeError, OSError):  # pragma: no cover — no pidfd_send_signal here
+        if _parent_pid(proc_dir) is not None:
             with contextlib.suppress(OSError):
-                os.kill(int(name), 9)
-    return found
+                os.kill(pid, SIGKILL)
 
 
 def _kill_command_tree(proc: subprocess.Popen, mark: str) -> None:
@@ -1340,30 +1398,39 @@ def _kill_command_tree(proc: subprocess.Popen, mark: str) -> None:
     POSIX: kills the command's own process group (every ordinary
     foreground/background descendant), then — because a descendant that
     called ``setsid`` or daemonized lives in a NEW group the ``killpg``
-    misses — walks ``/proc`` for surviving descendants by parent chain
-    and kills each one's group and pid.  Descendants are snapshotted
-    BEFORE the group kill: once the shell dies its orphans re-parent to
-    init and the chain is lost (which is also why a second scan would
-    find nothing).  The chain does not lead to the ``setsid`` child of a
-    shell that has already exited (the output pipes it inherited keep
-    the run open until the timeout), nor to a process an escapee starts
-    mid-kill: those are found by the run's mark in their environment
-    (:func:`_kill_marked`), killed until a scan finds none.  Residual
-    limitation (documented, not guaranteed): a descendant that left the
-    group and the chain and dropped the mark (``env -i``), or any
-    descendant that left the group on a POSIX system without ``/proc``
-    (macOS, BSD), can still escape.
+    misses — kills the descendants ``/proc`` shows by parent chain, each
+    through its open ``/proc`` directory (:func:`_pin_descendants`): a
+    pid is not signalled, nor a group named for one, because a
+    descendant that ended since has left its pid to a stranger.
+    Descendants are pinned BEFORE the group kill: once the shell dies
+    its orphans re-parent to init and the chain is lost (which is also
+    why a second scan would find nothing).  The chain does not lead to
+    the ``setsid`` child of a shell that has already exited (the output
+    pipes it inherited keep the run open until the timeout), nor to a
+    process an escapee starts mid-kill: those are found by the run's
+    mark in their environment
+    (:func:`~kiss.core.processes.kill_env_marked`), killed until a sweep
+    finds none.  Residual limitation (documented, not guaranteed): a
+    descendant that left the group and the chain and dropped the mark
+    (``env -i``) can still escape.  So can any descendant that left the
+    group on a POSIX system without ``/proc`` (macOS, BSD) unless ``ps``
+    shows its environment: there is no parent chain to walk there, and
+    under System Integrity Protection macOS hides the environment of
+    its own programs (``sh``, ``bash``, ``sleep``, ``perl``), mark
+    included.
 
     A shell that was reaped is not signalled, and neither is its group
-    or parent chain: its pid may be a stranger's by now (see
-    :func:`kill_process_group`).  ``Popen.communicate`` reaps a shell
-    that has exited as an interrupt passes through it, so what that
-    shell left behind is found by the mark alone.
+    or parent chain: its pid may be a stranger's by now
+    (:func:`~kiss.core.processes.pid_handed_on`).  The wait does not
+    reap a shell that has exited (:func:`_communicate`), so the group
+    it left behind is still killed by its id; only a spawn that a Stop
+    cut short has reaped the shell, after killing its group
+    (:func:`~kiss.core.processes.start_process_group`).
 
     Windows: :func:`kill_process_group` runs ``taskkill /T /F`` on the
     shell's pid (kills the process tree Windows tracks), then
     ``proc.kill()`` as a fallback; a descendant that detached from the
-    tree is not covered, and neither is what a reaped shell left behind.
+    tree is not covered.
 
     Args:
         proc: The command's shell process (session leader on POSIX,
@@ -1371,32 +1438,53 @@ def _kill_command_tree(proc: subprocess.Popen, mark: str) -> None:
         mark: The variable :func:`_run_command_job` put in the
             command's environment.
     """
-    if proc.returncode is None:
+    if not pid_handed_on(proc):
         if os.name == "nt":  # pragma: no cover — Windows CI is not available here
             with contextlib.suppress(OSError):  # group already gone
                 kill_process_group(proc.pid, SIGKILL)
             proc.kill()
             return
-        survivors = _proc_descendants(proc.pid)
+        pinned: dict[int, int] = {}
+        try:
+            survivors = _pin_descendants(proc.pid, _proc_descendants(proc.pid), pinned)
+            with contextlib.suppress(OSError):  # group already gone
+                kill_process_group(proc.pid, SIGKILL)
+            for pid in survivors:
+                _kill_pinned(pid, pinned[pid])
+        finally:
+            for proc_dir in pinned.values():
+                os.close(proc_dir)
+    kill_env_marked(f"{mark}=1")
+
+
+class _HostStopping(KeyboardInterrupt):
+    """The Stop a run gets from :func:`stop_scheduler_thread`: its host is about to exit.
+
+    Handled as the daemon's Stop, a ``KeyboardInterrupt``, by every
+    handler of one but a command job's, which ends the command's own
+    process group and no more (:func:`_kill_command_group`).
+    """
+
+
+def _kill_command_group(proc: subprocess.Popen) -> None:
+    """Kill the process group a command was started in, as its host exits.
+
+    The host ends what it started, as it ends the shells of its terminal
+    tabs, and leaves what moved to a session or group of its own, which
+    :func:`_kill_command_tree` hunts down for a run that timed out or
+    was stopped: an installer run by a job restarts this very daemon
+    from a session of its own (``install.sh`` re-executes itself in one
+    to outlive the daemon it stops), and killed with the job it would
+    leave the daemon down.  A shell that has exited still leads its
+    group: its pid names no other until it is reaped, which the wait
+    leaves to its caller (:func:`_communicate`).
+
+    Args:
+        proc: The command's shell process, leader of its group.
+    """
+    if not pid_handed_on(proc):  # a reaped shell's pid may be a stranger's by now
         with contextlib.suppress(OSError):  # group already gone
             kill_process_group(proc.pid, SIGKILL)
-        for pid in survivors:
-            try:
-                pgid = os.getpgid(pid)
-            except OSError:
-                continue  # already dead
-            if pgid == proc.pid:
-                continue  # covered by the group kill above
-            # Kill the escapee's own group first (a setsid child leads a new
-            # group holding its subtree; the command's session is not ours,
-            # so the group is never our own), then the pid.
-            with contextlib.suppress(OSError):
-                os.killpg(pgid, 9)
-            with contextlib.suppress(OSError):
-                os.kill(pid, 9)
-    deadline = time.monotonic() + _MARKED_KILL_SECONDS
-    while _kill_marked(mark) and time.monotonic() < deadline:
-        time.sleep(0.01)
 
 
 #: The longest :func:`_reap_killed_command` waits for a killed command.
@@ -1431,22 +1519,36 @@ def _reap_killed_command(proc: subprocess.Popen) -> None:
 
 
 #: The longest ``_communicate`` leaves the calling thread inside one
-#: ``communicate`` slice, i.e. how late a Stop can land in its wait.
+#: wait, i.e. how late a Stop can land in it.
 _STOP_POLL_SECONDS = 0.1
+
+#: The pause between two looks at a shell that closed its pipes and has
+#: not exited (:func:`_communicate`): no descriptor announces the exit.
+_EXIT_POLL_SECONDS = 0.01
 
 
 def _communicate(proc: subprocess.Popen, timeout: float) -> tuple[str, str]:
-    """``proc.communicate(timeout=timeout)`` in short slices, so a Stop can land.
+    """Read *proc*'s output until its pipes close and it has exited, in short slices.
 
-    A quiet child leaves one ``communicate`` asleep in its selector for
+    As ``proc.communicate(timeout=timeout)``, with two differences.  A
+    quiet child leaves one ``communicate`` asleep in its selector for
     the whole *timeout* (ten minutes by default), and the runner's Stop,
     an exception injected at the next bytecode boundary of the thread,
-    stays pending until then.  Each slice returns to bytecode; a slice's
-    ``TimeoutExpired`` is retried while the budget lasts (``communicate``
-    keeps the output read so far), the last one is raised as before.
+    stays pending until then: each slice here returns to bytecode.  And
+    ``communicate`` reaps a shell that has exited as a
+    ``KeyboardInterrupt`` passes through it, after which the shell's
+    pid, the id of its process group, may be a stranger's, and the
+    children it left in that group, holding the pipes, can no longer be
+    killed by it (:func:`~kiss.core.processes.pid_handed_on`).  On
+    POSIX the pipes are therefore read here and the exit is only
+    watched (:func:`~kiss.core.processes.exited_unreaped`): the shell is the caller's to reap,
+    after its last signal to the group.
+    Windows keeps the pid of a child that was waited for and has no
+    selector for pipes, so ``communicate`` it is there, a slice's
+    ``TimeoutExpired`` retried while the budget lasts.
 
     Args:
-        proc: The running command.
+        proc: The running command, its pipes in text mode.
         timeout: Seconds the command may run.
 
     Returns:
@@ -1456,13 +1558,35 @@ def _communicate(proc: subprocess.Popen, timeout: float) -> tuple[str, str]:
         subprocess.TimeoutExpired: The command outlived *timeout*.
     """
     deadline = time.monotonic() + timeout
-    while True:
-        remaining = deadline - time.monotonic()
-        try:
-            return proc.communicate(timeout=min(_STOP_POLL_SECONDS, max(remaining, 0.0)))
-        except subprocess.TimeoutExpired:
-            if remaining <= _STOP_POLL_SECONDS:
-                raise
+    if os.name == "nt":  # pragma: no cover — Windows CI is not available here
+        while True:
+            remaining = deadline - time.monotonic()
+            try:
+                return proc.communicate(timeout=min(_STOP_POLL_SECONDS, max(remaining, 0.0)))
+            except subprocess.TimeoutExpired:
+                if remaining <= _STOP_POLL_SECONDS:
+                    raise
+    output: dict[Any, list[bytes]] = {proc.stdout: [], proc.stderr: []}
+    with selectors.DefaultSelector() as reading:
+        for pipe in output:
+            reading.register(pipe, selectors.EVENT_READ)
+        while reading.get_map() or not exited_unreaped(proc):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(proc.args, timeout)
+            # With no pipe left to read, the select is the pause before the next look.
+            poll = _STOP_POLL_SECONDS if reading.get_map() else _EXIT_POLL_SECONDS
+            for key, _ in reading.select(min(remaining, poll)):
+                chunk = os.read(key.fd, 32768)
+                output[key.fileobj].append(chunk)
+                if not chunk:
+                    reading.unregister(key.fileobj)
+    texts = []
+    for pipe, chunks in output.items():
+        pipe.close()
+        text = b"".join(chunks).decode(pipe.encoding, pipe.errors)
+        texts.append(text.replace("\r\n", "\n").replace("\r", "\n"))  # as text mode reads it
+    return texts[0], texts[1]
 
 
 def _run_command_job(
@@ -1476,7 +1600,9 @@ def _run_command_job(
     process group with an empty stdin, and a timeout — or an interrupt of the calling
     thread, which is re-raised — kills the WHOLE process tree, not
     just the shell; see :func:`_kill_command_tree` for the exact
-    guarantees and residual limitations per platform.  Its environment
+    guarantees and residual limitations per platform.  The stop of the
+    scheduler's host is the one interrupt that kills the command's own
+    process group and no more (:func:`_kill_command_group`).  Its environment
     says it is a cron run (``KISS_CRON_JOB=1``,
     :data:`~kiss.agents.sorcar.daemon_client.CRON_JOB_ENV`): a task the
     command starts through :func:`~kiss.agents.sorcar.daemon_client.run`
@@ -1535,24 +1661,30 @@ def _run_command_job(
             _kill_command_tree(proc, mark)
             _reap_killed_command(proc)
             return "error", f"command timed out after {timeout:g}s"
-    except BaseException:
+    except BaseException as stop:
         # The thread was interrupted (the daemon's Stop of the cron
         # agent's task while ``cron_job("run_now")`` runs the job,
         # Ctrl-C under ``kiss-cron --run``, or under ``--tick`` and
-        # ``--daemon`` through :func:`_stop_runs`): the command sits in its own
+        # ``--daemon`` through :func:`_stop_runs`, or the stop of the
+        # scheduler's host): the command sits in its own
         # process group, so without this it would run on unattended
         # from a scratch directory ``_execute_job`` is about to remove.
         # The timeout's handler is inside this one: an interrupt raised
         # while it kills must not end the kill.  Both ``try`` lines come
         # before the spawn: no handler covers the line of a ``try``
         # itself, were one to follow the spawn.  A command that started
-        # is killed even when its shell was reaped: ``communicate``
-        # reaps a shell that has exited as the interrupt passes through
-        # it, and the processes it left behind keep the run's mark.
+        # is killed even when its shell has exited: the wait does not
+        # reap the shell (:func:`_communicate`), so the group it left
+        # behind is still killed by its id.
         if getattr(proc, "pid", None) is not None:
-            _kill_command_tree(proc, mark)
+            if isinstance(stop, _HostStopping):
+                _kill_command_group(proc)
+            else:
+                _kill_command_tree(proc, mark)
             _reap_killed_command(proc)
         raise
+    # The shell has exited: reaped here, past the handlers that signal its group by its pid.
+    proc.wait()
     output = stdout.strip()
     if proc.returncode != 0:
         detail = (output + "\n" + stderr.strip()).strip()
@@ -1895,14 +2027,20 @@ def tick(now: float | None = None, wait: bool = True) -> int:
         # The claim of the occurrence (advanced ``next_run_at``, disabled
         # one-shot) is persisted BEFORE anything runs: a store that
         # cannot be written launches nothing, so a job never runs twice
-        # for one occurrence.
-        if changed:
-            save_jobs(jobs)
-        # Launched while holding the store lock: a job that finishes
-        # instantly merely waits for it before recording its outcome,
-        # and a job that cannot start is recorded as such before the
-        # lock is released.  One failed launch does not cost the others.
+        # for one occurrence.  Claimed and launched under the lock a
+        # stopping host marks itself under (:func:`_host_stopping`):
+        # once its stop has looked for the runs to end, nothing is
+        # claimed (the occurrence stays due for the next scheduler) or
+        # started.
         with _running_lock:
+            if _host_stopping():
+                return 0
+            if changed:
+                save_jobs(jobs)
+            # Launched while holding the store lock: a job that finishes
+            # instantly merely waits for it before recording its outcome,
+            # and a job that cannot start is recorded as such before the
+            # lock is released.  One failed launch does not cost the others.
             threads = [thread for thread in map(_launch_or_record, due) if thread is not None]
         if len(threads) < len(due):
             save_jobs(jobs)
@@ -1926,8 +2064,9 @@ def run_scheduler(
 
     Args:
         stop_event: Setting this event stops the loop (the wait
-            between ticks returns early; jobs already launched run to
-            completion in their own daemon threads).
+            between ticks returns early; jobs already launched run on
+            in their own daemon threads, which
+            :func:`stop_scheduler_thread` stops).
         interval: Seconds between scheduler passes.
     """
     while not stop_event.is_set():
@@ -1941,13 +2080,44 @@ def run_scheduler(
 
 
 class SchedulerStop(threading.Event):
-    """The stop event of a scheduler thread, which also remembers that thread.
+    """The stop event of a scheduler thread, which also remembers that thread and its host.
 
     Returned by :func:`start_scheduler_thread`; :func:`stop_scheduler_thread`
-    joins :attr:`thread` after setting the event.
+    joins :attr:`thread` after setting the event.  :attr:`loop` is the
+    event loop the scheduler was started on, the kiss-web daemon's serve
+    loop, whose handlers can ask for a run (:func:`start_job`) until it
+    is closed; ``None`` for a scheduler started outside an event loop.
     """
 
     thread: threading.Thread
+    loop: asyncio.AbstractEventLoop | None = None
+
+
+_stopping_host: SchedulerStop | None = None
+"""The scheduler host that has begun to stop the runs of this process, if any.
+
+Set by :func:`stop_scheduler_thread` under :data:`_running_lock` before
+it looks for the runs to stop, and read under that lock by every launch
+(:func:`_host_stopping`): a run is started before the stop looks, which
+then ends it, or not at all.  Without it a run started after that one
+look was left to outlive its host.  Cleared by the next
+:func:`start_scheduler_thread`, a host that stops what it starts.
+"""
+
+
+def _host_stopping() -> bool:
+    """Return whether this process's scheduler host is stopping, so that nothing may start.
+
+    The caller holds :data:`_running_lock`.  The stop outlasts
+    :func:`stop_scheduler_thread`: a daemon's handlers, and the requests
+    they have already passed to its executor, can ask for a run until
+    its event loop is closed.  A host with no event loop is its own
+    caller's, who goes on once the stop has returned.  Either way the
+    process is free again for whoever runs jobs in it next (a test, an
+    embedder) without a scheduler of its own.
+    """
+    host = _stopping_host
+    return host is not None and not (host.loop is not None and host.loop.is_closed())
 
 
 def start_scheduler_thread(
@@ -1959,7 +2129,9 @@ def start_scheduler_thread(
     Called by the kiss-web daemon on startup so scheduled automations
     fire without any external cron process.  Prompt jobs are submitted
     back to the daemon through *endpoint_file*, recorded in
-    :data:`_daemon_endpoint_file`.
+    :data:`_daemon_endpoint_file`.  The daemon calls this on its serve
+    loop, which the stop event remembers as the scheduler's host
+    (:class:`SchedulerStop`).
 
     Args:
         interval: Seconds between scheduler passes.
@@ -1972,10 +2144,14 @@ def start_scheduler_thread(
     Returns:
         The stop event, to pass to :func:`stop_scheduler_thread`.
     """
-    global _daemon_endpoint_file
+    global _daemon_endpoint_file, _stopping_host
     if endpoint_file:
         _daemon_endpoint_file = endpoint_file
     stop_event = SchedulerStop()
+    with contextlib.suppress(RuntimeError):  # none runs here: not a daemon's scheduler
+        stop_event.loop = asyncio.get_running_loop()
+    with _running_lock:
+        _stopping_host = None  # this host takes over, on the stopped one's loop or not
     stop_event.thread = threading.Thread(
         target=run_scheduler,
         args=(stop_event, interval),
@@ -1988,7 +2164,7 @@ def start_scheduler_thread(
 
 DEFAULT_JOBS: list[dict[str, str]] = [
     {
-        "name": "Recommendations: ten suggested tasks from your recent work and apps",
+        "name": "Recommendations: twenty suggested tasks from your recent work and apps",
         "prompt": "/recommendations now",
         "schedule": "0 */6 * * *",
         "deliver": "none",
@@ -2019,6 +2195,7 @@ in that chat.
 
 FORMER_DEFAULT_NAMES: dict[str, str] = {
     "Recommendations: five suggested tasks from the last 24 hours": DEFAULT_JOBS[0]["name"],
+    "Recommendations: ten suggested tasks from your recent work and apps": DEFAULT_JOBS[0]["name"],
 }
 """Earlier names of the default jobs, by the name they carry now.
 
@@ -2050,53 +2227,67 @@ def seed_default_jobs() -> list[str]:
     or not) stands untouched.  A default renamed by a later version is
     still the same default: its former names
     (:data:`FORMER_DEFAULT_NAMES`) count in the record and in the store.
+    The record is read, the jobs are created and the record is written
+    under a lock of the seeding's own, so no seeder goes on from a
+    record another has since written (it created again a default that
+    the other had seeded and the user had removed meanwhile): a seeder
+    that finds another at work, a second daemon starting on this home,
+    leaves the defaults to it.
     Never raises: a store that cannot be read, parsed, locked or written
     is left as it is and the defaults wait for a later start.
 
     Returns:
         The names of the jobs seeded on this call (empty when every
-        default was seeded before, or the store is not writable).
+        default was seeded before, another seeder is at work, or the
+        store is not writable).
     """
-    try:
-        seeded = {
-            _current_default_name(str(n))
-            for n in json.loads(_seeded_defaults_path().read_text("utf-8"))
-        }
-    except (OSError, ValueError, TypeError):
-        seeded = set()
-    pending = [spec for spec in DEFAULT_JOBS if spec["name"] not in seeded]
-    if not pending:
-        return []
     done: list[str] = []
     try:
-        # A damaged store is the user's schedules, not an empty one:
-        # strict, so nothing is seeded into it.  Whether the user's own
-        # job stands under a default's name is decided by ``seed`` under
-        # the store lock, so a job created meanwhile is never doubled.
-        load_jobs(strict=True)
-        for spec in pending:
-            result = _create_or_ensure(
-                "seed",
-                name=spec["name"],
-                prompt=spec.get("prompt", ""),
-                command=spec.get("command", ""),
-                schedule=spec["schedule"],
-                deliver=spec.get("deliver", "none"),
-                model_name="",
-                max_budget=spec.get("max_budget", ""),
-                until_delivered=False,
-                work_dir="",
-                timeout=spec.get("timeout", ""),
-                in_chat=spec.get("in_chat", "") == "true",
+        with exclusive_file_lock(
+            _seeded_defaults_path().with_suffix(".lock"), blocking=False,
+        ) as alone:
+            if not alone:
+                return done
+            try:
+                seeded = {
+                    _current_default_name(str(n))
+                    for n in json.loads(_seeded_defaults_path().read_text("utf-8"))
+                }
+            except (OSError, ValueError, TypeError):
+                seeded = set()
+            pending = [spec for spec in DEFAULT_JOBS if spec["name"] not in seeded]
+            if not pending:
+                return done
+            # A damaged store is the user's schedules, not an empty one:
+            # strict, so nothing is seeded into it.  Whether the user's own
+            # job stands under a default's name is decided by ``seed`` under
+            # the store lock, so a job created meanwhile is never doubled.
+            load_jobs(strict=True)
+            for spec in pending:
+                result = _create_or_ensure(
+                    "seed",
+                    name=spec["name"],
+                    prompt=spec.get("prompt", ""),
+                    command=spec.get("command", ""),
+                    schedule=spec["schedule"],
+                    deliver=spec.get("deliver", "none"),
+                    model_name="",
+                    max_budget=spec.get("max_budget", ""),
+                    until_delivered=False,
+                    work_dir="",
+                    timeout=spec.get("timeout", ""),
+                    in_chat=spec.get("in_chat", "") == "true",
+                )
+                if "error" in result:
+                    logger.warning(
+                        "default cron job %r not seeded: %s", spec["name"], result["error"],
+                    )
+                    continue
+                done.append(spec["name"])
+            _cron_dir().mkdir(parents=True, exist_ok=True)
+            atomic_write_text(
+                _seeded_defaults_path(), json.dumps(sorted(seeded | set(done)), indent=2),
             )
-            if "error" in result:
-                logger.warning("default cron job %r not seeded: %s", spec["name"], result["error"])
-                continue
-            done.append(spec["name"])
-        _cron_dir().mkdir(parents=True, exist_ok=True)
-        atomic_write_text(
-            _seeded_defaults_path(), json.dumps(sorted(seeded | set(done)), indent=2),
-        )
     except Exception as exc:  # noqa: BLE001 - startup must not fail on the store
         logger.warning("could not seed the default cron jobs: %s", exc)
     return done
@@ -2199,19 +2390,36 @@ def stop_scheduler_thread(stop_event: SchedulerStop) -> None:
 
     Sets *stop_event*, waits for the loop to exit — a tick in flight
     finishes launching its due jobs first, with the endpoint still
-    recorded — and then forgets the hosting daemon's endpoint file
-    (:data:`_daemon_endpoint_file`): once that daemon is down,
+    recorded — stops the runs this process launched
+    (:func:`_stop_runs`) and then forgets the hosting daemon's endpoint
+    file (:data:`_daemon_endpoint_file`): once that daemon is down,
     dispatched sub-tasks and ``run_now`` in this process must fall back
     to the standard endpoint resolution instead of a dead endpoint.
-    Jobs the scheduler launched keep running in their own threads.
+    The runs are stopped because the daemon exits next: they are daemon
+    threads, and a command job's processes, in a session of their own,
+    would run on with no timeout left to end them and no run lock to
+    keep the next daemon from starting the job beside them.  A command's
+    own process group is ended, not what left it
+    (:func:`_kill_command_group`).  They are stopped while the endpoint
+    is still recorded, through which a prompt job stops its task.
+    Nothing is started from the moment the stop looks for the runs to
+    end (:data:`_stopping_host`): a Schedule-panel ``run_now`` and a
+    tick that outlasted the wait are refused until the host is gone, a
+    daemon with its event loop, any other host when this returns.
 
     Args:
         stop_event: The event returned by :func:`start_scheduler_thread`.
     """
-    global _daemon_endpoint_file
+    global _daemon_endpoint_file, _stopping_host
     stop_event.set()
     stop_event.thread.join(timeout=30)
+    with _running_lock:
+        _stopping_host = stop_event
+    _stop_runs(_HostStopping)
     _daemon_endpoint_file = None
+    if stop_event.loop is None:
+        with _running_lock:
+            _stopping_host = None
 
 
 def _dump(data: Any) -> str:
@@ -2337,6 +2545,10 @@ def _release_run(running: dict[str, threading.Thread], job_id: str, me: threadin
         del running[job_id]
 
 
+class _RunThread(threading.Thread):
+    """A run thread this process launched (:func:`_launch`), its to stop (:func:`_stop_runs`)."""
+
+
 def _run_locked(job: dict[str, Any], handoff: dict[str, contextlib.ExitStack]) -> None:
     """Execute *job* under the run lock taken out of *handoff*, given up when the run is over.
 
@@ -2352,7 +2564,10 @@ def _run_locked(job: dict[str, Any], handoff: dict[str, contextlib.ExitStack]) -
     run_lock = handoff.pop("run_lock", None)
     if run_lock is not None:
         with run_lock:
-            _execute_job(job)
+            try:
+                _execute_job(job)
+            except _HostStopping:  # the thread ends here: no traceback in the host's log
+                logger.info("Cron job %s stopped: its host is exiting", job["id"])
 
 
 def _launch(job: dict[str, Any]) -> threading.Thread | None:
@@ -2376,7 +2591,7 @@ def _launch(job: dict[str, Any]) -> threading.Thread | None:
     """
     run_lock = contextlib.ExitStack()
     handoff = {"run_lock": run_lock}
-    thread = threading.Thread(
+    thread = _RunThread(
         target=_run_locked, args=(job, handoff),
         name=f"kiss-cron-job-{job['id']}", daemon=True,
     )
@@ -2385,7 +2600,8 @@ def _launch(job: dict[str, Any]) -> threading.Thread | None:
         if run_lock.enter_context(_job_run_lock(job["id"])) and _claim_run(
             _running, job["id"], thread,
         ):
-            thread.start()
+            # ``run_now`` launches on the cron agent's task thread.
+            call_without_injection(thread.start)
             started = True
     finally:
         # A thread the process cannot start (its thread limit) must not
@@ -2433,7 +2649,8 @@ def start_job(job: dict[str, Any], jobs: list[dict[str, Any]]) -> str:
     lock and is registered in :data:`_running` (:func:`_launch`), so a
     tick in this or another process skips the job while it runs.  A
     second start is refused, as is a start while the job's last run's
-    task may still be running (:func:`_claimed_task_id`), and a thread
+    task may still be running (:func:`_claimed_task_id`) or while the
+    scheduler's host is stopping (:func:`_host_stopping`), and a thread
     that cannot start is recorded on the job and saved with the rest of
     *jobs* (:func:`_launch_or_record`).
 
@@ -2444,7 +2661,7 @@ def start_job(job: dict[str, Any], jobs: list[dict[str, Any]]) -> str:
     Returns:
         ``""`` when the thread started, else the error text (the job is
         already running in this or another process, claimed by its
-        task, or its thread could not start).
+        task, its host is stopping, or its thread could not start).
     """
     task_id = _claimed_task_id(job)
     if task_id:
@@ -2452,6 +2669,8 @@ def start_job(job: dict[str, Any], jobs: list[dict[str, Any]]) -> str:
     if job["id"] in running_job_ids() or _running_elsewhere(job["id"]):
         return f"job {job['id']!r} is already running"
     with _running_lock:
+        if _host_stopping():
+            return f"job {job['id']!r} is not started: the scheduler's host is shutting down"
         thread = _launch_or_record(job)
     if thread is None:
         save_jobs(jobs)
@@ -3202,30 +3421,44 @@ def cron_work_dir() -> str:
     return str(work_dir)
 
 
-#: How long an interrupted ``kiss-cron`` waits for the runs it stopped
-#: (:func:`_stop_runs`) before it exits anyway; a killed command is
-#: reaped within five seconds (:func:`_reap_killed_command`), a
-#: prompt job's task stopped or given up within thirty
-#: (``agent_dispatch.kill_agent_job``), its claim then recorded.
+#: How long an interrupted ``kiss-cron`` or a stopping scheduler host
+#: waits for the runs it stopped (:func:`_stop_runs`) before it exits
+#: anyway; a killed command is reaped within five seconds
+#: (:func:`_reap_killed_command`), a prompt job's task stopped or given
+#: up within thirty (``agent_dispatch.kill_agent_job``), its claim then
+#: recorded.
 _STOP_RUNS_GRACE_SECONDS = 40.0
 
 
-def _stop_runs() -> None:
-    """Stop every job this process runs and wait, bounded, for the runs to end.
+def _stop_runs(stop: type[KeyboardInterrupt] = KeyboardInterrupt) -> None:
+    """Stop every run this process launched and wait, bounded, for the runs to end.
 
-    For ``kiss-cron --tick`` / ``--daemon`` ended by Ctrl-C: the runs
-    are daemon threads, which the exiting process would abandon, and
-    with them a command job's process tree (in its own process group,
-    out of the terminal's SIGINT) to run on unattended, past the
-    timeout its run enforced.  Each run gets the daemon's Stop, a
+    For ``kiss-cron --tick`` / ``--daemon`` ended by Ctrl-C and for the
+    kiss-web daemon stopping its scheduler
+    (:func:`stop_scheduler_thread`): the runs are daemon threads, which
+    the exiting process would abandon, and with them a command job's
+    process tree (in its own process group, out of the terminal's
+    SIGINT) to run on unattended, past the timeout its run enforced.
+    Each run gets the daemon's Stop, a
     ``KeyboardInterrupt`` raised in its thread, on which a command's
     tree is killed and reaped (:func:`_run_command_job`) and a prompt
     job's task stopped, the stop awaited (:func:`_run_prompt_job`).
+    A ``run_now`` runs on its caller's thread, under the daemon the cron
+    agent's task, and is that caller's to stop: the daemon stops its
+    tasks itself, and a second Stop raised in one would cut short the
+    cleanup the first one started.
+
+    Args:
+        stop: The Stop to raise: :class:`_HostStopping` from a host
+            that leaves alone what left a command's process group.
     """
     with _running_lock:
-        threads = [thread for thread in _running.values() if thread.is_alive()]
+        threads = [
+            thread for thread in _running.values()
+            if isinstance(thread, _RunThread) and thread.is_alive()
+        ]
     for thread in threads:
-        inject_async_exception(thread.ident or 0, KeyboardInterrupt)
+        inject_async_exception(thread.ident or 0, stop)
     deadline = time.monotonic() + _STOP_RUNS_GRACE_SECONDS
     for thread in threads:
         thread.join(max(0.0, deadline - time.monotonic()))

@@ -7,19 +7,19 @@
 // running" rule, applied to reports written by SUB-AGENTS.
 //
 // A sub-agent finishing (`subagentDone`) is NOT the task finishing: the
-// parent task is still running.  When a sub-agent writes a report into a
-// `reports/` folder and then finishes, the chat page must open the
-// report in a content tab (registered, reachable on the file screen)
-// but must NOT yank the user onto it.  Focus may only be taken on a
-// genuinely terminal event of the tab the user is on (task_done /
-// task_error / task_interrupted / task_stopped) or on a real user
+// parent task is still running.  A report a sub-agent wrote into a
+// `reports/` folder is part of its parent's work: when the sub-agent
+// finishes, the chat page asks the daemon for nothing, opens no content
+// tab and leaves the user where they are; the report is asked for with
+// the parent task's own when that task ends.  Focus may only be taken
+// on a genuinely terminal event of the user's own task (task_done /
+// task_error / task_interrupted / task_stopped), by the reports of that
+// task (the daemon's replies to the page's requests), or on a real user
 // action.
 //
 // The page is the stacked (phone-width) remote webapp: a content tab
 // shown replaces the chat on screen, and the tab strip lists content
-// tabs on the file screen only.  A parked report therefore shows up in
-// the tab registry (and on the file screen, one swipe left) but never
-// on the chat screen's strip.
+// tabs on the file screen only, one swipe left of the chat.
 //
 // The real media/chat.html + panelCopy.js + api.js + mobileSwipe.js +
 // main.js are booted in jsdom; nothing under test is mocked.
@@ -36,6 +36,8 @@ const {
 const {
   bootParallelRun,
   writeReport,
+  reportRequests,
+  answerReport,
   contentTabs,
   contentTabFor,
   stripContentTabEls,
@@ -54,8 +56,18 @@ function makePage() {
   });
 }
 
+// A task ends with the terminal event *ev*, and the daemon answers the
+// page's request for the one report that task wrote, *text*.
+function endTaskWithReport(win, posted, ev, text) {
+  send(win, ev);
+  const reqs = reportRequests(posted);
+  assert.strictEqual(reqs.length, 1, ev.type + ' must ask for its report');
+  assert.strictEqual(reqs[0].tabId, ev.tabId, "asked for as the task's tab");
+  answerReport(win, reqs[0], text);
+}
+
 function testSubagentReportDoesNotStealFocus() {
-  const {win, parentId, subTabIds} = bootParallelRun(2, makePage());
+  const {win, posted, parentId, subTabIds} = bootParallelRun(2, makePage());
 
   writeReport(win, 'reports/sub1.md', '# From sub-agent one', {
     tabId: subTabIds[0],
@@ -79,10 +91,15 @@ function testSubagentReportDoesNotStealFocus() {
     'the chat surface of the still-running parent must stay visible',
   );
 
-  const reportTab = contentTabFor(win, 'sub1.md');
-  assert.ok(
-    reportTab,
-    'the sub-agent report must still open a content tab in the registry',
+  assert.deepStrictEqual(
+    reportRequests(posted),
+    [],
+    "the daemon must not be asked for a sub-agent's report",
+  );
+  assert.strictEqual(
+    contentTabs(win).length,
+    0,
+    "a sub-agent's report must open no content tab, not even in the registry",
   );
   assert.strictEqual(
     stripContentTabEls(win).length,
@@ -90,32 +107,23 @@ function testSubagentReportDoesNotStealFocus() {
     'the chat screen stays on view: the strip lists no content tab',
   );
 
-  // ...and the user can reach it whenever they want: one swipe left
-  // puts the file screen, and the parked report, on view.
+  // ...and nothing is parked on the file screen either: with no file
+  // open, a swipe left leaves the user on the chat.
   swipeLeftToFileScreen(win);
   assert.strictEqual(
     activeTabId(win),
-    reportTab.id,
-    'the swipe to the file screen must open the parked report',
-  );
-  const stripEl = tabEl(win, reportTab.id);
-  assert.ok(
-    stripEl && stripEl.classList.contains('active'),
-    'the file screen strip lists the report as the active tab',
-  );
-  assert.ok(
-    /<h1[^>]*>From sub-agent one<\/h1>/.test(visibleSrcdoc(win)),
-    'the opened report tab must render the converted markdown report',
+    parentId,
+    'no report waits on the file screen for the swipe to open',
   );
 
   win.close();
-  console.log('  ok - a sub-agent report opens in the background only');
+  console.log("  ok - a sub-agent's report is not opened at subagentDone");
 }
 
 function testSubagentReportWhileOnAnotherSubagentTab() {
   // The user is deliberately watching sub-agent 2 while sub-agent 1
   // finishes and drops a report: their view must not move either.
-  const {win, subTabIds} = bootParallelRun(2, makePage());
+  const {win, posted, subTabIds} = bootParallelRun(2, makePage());
 
   const sub2El = tabEl(win, subTabIds[1]);
   assert.ok(sub2El, 'the second sub-agent tab must be in the tab bar');
@@ -137,98 +145,75 @@ function testSubagentReportWhileOnAnotherSubagentTab() {
     'a sibling sub-agent report must not pull the user off the tab ' +
       'they chose to watch',
   );
-  assert.ok(
-    contentTabFor(win, 'sub1.html'),
-    'the report tab must still be created for later viewing',
-  );
+  assert.deepStrictEqual(reportRequests(posted), [], 'nothing is asked for');
+  assert.strictEqual(contentTabs(win).length, 0, 'no report tab is created');
 
   win.close();
   console.log('  ok - a sibling sub-agent report keeps the chosen tab');
 }
 
-function testExistingContentTabIsRefreshedWithoutFocus() {
-  // Same report path written twice by two sub-agents: the second write
-  // must reuse (and re-render) the existing content tab, still without
-  // taking focus while the parent task runs.
-  const {win, parentId, subTabIds} = bootParallelRun(2, makePage());
-
-  writeReport(win, 'reports/shared.md', '# v1', {tabId: subTabIds[0]});
-  send(win, {type: 'subagentDone', tab_id: subTabIds[0]});
-  const firstTab = contentTabFor(win, 'shared.md');
-  assert.ok(firstTab, 'the first sub-agent report must open a content tab');
-  const reportTabId = firstTab.id;
-
-  writeReport(win, 'reports/shared.md', '# v2', {tabId: subTabIds[1]});
-  send(win, {type: 'subagentDone', tab_id: subTabIds[1]});
-
-  assert.strictEqual(
-    activeTabId(win),
-    parentId,
-    'regenerating a report from a sub-agent must not switch tabs either',
-  );
-  const tabsNow = contentTabs(win);
-  assert.strictEqual(
-    tabsNow.length,
-    1,
-    'the regenerated report must reuse its tab, not open a second one',
-  );
-  assert.strictEqual(
-    tabsNow[0].id,
-    reportTabId,
-    'the reused content tab must keep its identity',
-  );
-
-  swipeLeftToFileScreen(win);
-  assert.strictEqual(activeTabId(win), reportTabId, 'the swipe opens it');
-  assert.ok(
-    /<h1[^>]*>v2<\/h1>/.test(visibleSrcdoc(win)),
-    'the reused tab must show the regenerated content',
-  );
-
-  win.close();
-  console.log('  ok - an existing report tab is refreshed without focus');
-}
-
-function testRefreshOfTheActiveReportTabStillRenders() {
-  // If the user is ALREADY looking at the report tab, a sub-agent
-  // rewriting that report must refresh what they see in place.
-  const {win, subTabIds} = bootParallelRun(2, makePage());
-
-  writeReport(win, 'reports/live.md', '# first', {tabId: subTabIds[0]});
-  send(win, {type: 'subagentDone', tab_id: subTabIds[0]});
-  const reportTab = contentTabFor(win, 'live.md');
-  swipeLeftToFileScreen(win);
+function testSubagentRewriteLeavesAnOpenReportAlone() {
+  // The user has a report open (they opened the file themselves) while
+  // two sub-agents rewrite it: neither rewrite is asked for, so the
+  // tab keeps what it shows and the user stays where they are, on the
+  // report or back on the chat.
+  const {win, posted, parentId, subTabIds} = bootParallelRun(2, makePage());
+  send(win, {
+    type: 'fileContent',
+    tabId: parentId,
+    path: '/ws/reports/live.md',
+    name: 'live.md',
+    content: '# first',
+    version: '1:7',
+  });
   const reportTabId = activeTabId(win);
   assert.strictEqual(
+    contentTabFor(win, 'live.md').id,
     reportTabId,
-    reportTab.id,
     'precondition: the user is on the report tab',
   );
 
-  writeReport(win, 'reports/live.md', '# second', {tabId: subTabIds[1]});
-  send(win, {type: 'subagentDone', tab_id: subTabIds[1]});
-
+  writeReport(win, 'reports/live.md', '# second', {tabId: subTabIds[0]});
+  send(win, {type: 'subagentDone', tab_id: subTabIds[0]});
   assert.strictEqual(
     activeTabId(win),
     reportTabId,
     'the user must stay on the report tab they are reading',
   );
   assert.ok(
-    /<h1[^>]*>second<\/h1>/.test(visibleSrcdoc(win)),
-    'the visible report must be refreshed in place',
+    /<h1[^>]*>first<\/h1>/.test(visibleSrcdoc(win)),
+    "a sub-agent's rewrite must not replace what the tab shows",
   );
 
+  win._testApi.switchToTab(parentId);
+  writeReport(win, 'reports/live.md', '# third', {tabId: subTabIds[1]});
+  send(win, {type: 'subagentDone', tab_id: subTabIds[1]});
+  assert.strictEqual(
+    activeTabId(win),
+    parentId,
+    'regenerating a report from a sub-agent must not switch tabs either',
+  );
+  assert.strictEqual(
+    contentTabs(win)
+      .map(t => t.id)
+      .join(),
+    reportTabId,
+    'the open report tab is the only content tab, and the same one',
+  );
+  assert.deepStrictEqual(reportRequests(posted), [], 'nothing is asked for');
+
   win.close();
-  console.log('  ok - refreshing the active report tab renders in place');
+  console.log("  ok - a sub-agent's rewrite leaves an open report alone");
 }
 
 function testTaskDoneStillSwitchesToTheReport() {
   // Anti-over-fix guard: a terminal event of the tab itself MUST still
   // focus the report it produced.
-  const {win, parentId} = bootParallelRun(1, makePage());
+  const {win, posted, parentId} = bootParallelRun(1, makePage());
 
   writeReport(win, 'reports/final.md', '# Final Report', {tabId: parentId});
-  send(win, {type: 'task_done', success: true, tabId: parentId});
+  const done = {type: 'task_done', success: true, tabId: parentId};
+  endTaskWithReport(win, posted, done, '# Final Report');
 
   const reportTab = contentTabFor(win, 'final.md');
   assert.ok(reportTab, 'task_done must open the report tab');
@@ -253,9 +238,10 @@ function testTaskDoneStillSwitchesToTheReport() {
 
 function testTerminalErrorEventsStillSwitchToTheReport() {
   ['task_error', 'task_interrupted', 'task_stopped'].forEach(terminal => {
-    const {win, parentId} = bootParallelRun(1, makePage());
+    const {win, posted, parentId} = bootParallelRun(1, makePage());
     writeReport(win, 'reports/salvaged.md', '# Salvaged', {tabId: parentId});
-    send(win, {type: terminal, tabId: parentId});
+    const end = {type: terminal, tabId: parentId};
+    endTaskWithReport(win, posted, end, '# Salvaged');
     const reportTab = contentTabFor(win, 'salvaged.md');
     assert.ok(reportTab, terminal + ' must open the report tab');
     assert.strictEqual(
@@ -269,20 +255,33 @@ function testTerminalErrorEventsStillSwitchToTheReport() {
 }
 
 function testParentTaskDoneAfterSubagentReportSwitches() {
-  // The full realistic flow: a sub-agent quietly parks its report, and
-  // when the PARENT task finally finishes the user is taken to it.
-  const {win, parentId, subTabIds} = bootParallelRun(1, makePage());
+  // The full realistic flow: a sub-agent's report waits quietly, and
+  // when the PARENT task finally finishes both reports are asked for,
+  // as that task's, and the user is taken to the one written last, the
+  // parent's own.
+  const {win, posted, parentId, subTabIds} = bootParallelRun(1, makePage());
 
   writeReport(win, 'reports/sub.md', '# Sub report', {tabId: subTabIds[0]});
   send(win, {type: 'subagentDone', tab_id: subTabIds[0]});
   assert.strictEqual(
     activeTabId(win),
     parentId,
-    'the sub-agent report must stay in the background',
+    'the sub-agent report must not move the user',
   );
 
   writeReport(win, 'reports/parent.md', '# Parent report', {tabId: parentId});
   send(win, {type: 'task_done', success: true, tabId: parentId});
+  const reqs = reportRequests(posted);
+  assert.deepStrictEqual(
+    reqs.map(r => [r.path, r.tabId]),
+    [
+      ['reports/sub.md', parentId],
+      ['reports/parent.md', parentId],
+    ],
+    "task_done must ask for the sub-agent's report and its own, as its own",
+  );
+  answerReport(win, reqs[0], '# Sub report');
+  answerReport(win, reqs[1], '# Parent report');
 
   const parentReport = contentTabFor(win, 'parent.md');
   assert.ok(parentReport, 'the parent report tab must open at task_done');
@@ -291,20 +290,18 @@ function testParentTaskDoneAfterSubagentReportSwitches() {
     parentReport.id,
     'the parent task finishing must focus its own report',
   );
-  assert.strictEqual(
-    contentTabs(win).length,
-    2,
-    'both the background sub-agent report and the parent report must ' +
-      'be open',
+  assert.ok(
+    contentTabFor(win, 'sub.md'),
+    "the sub-agent's report is open too, behind the parent's",
   );
   assert.strictEqual(
     stripContentTabEls(win).length,
     2,
-    'the file screen strip lists both reports, so both are reachable',
+    'the file screen strip lists both reports',
   );
 
   win.close();
-  console.log('  ok - the parent task_done focuses its report as before');
+  console.log("  ok - the parent task_done opens the sub-agent's report too");
 }
 
 // The "a user-opened file still switches to its tab" guard lives in
@@ -315,8 +312,7 @@ function main() {
   console.log('subagentReportNoTabSwitch.test.js');
   testSubagentReportDoesNotStealFocus();
   testSubagentReportWhileOnAnotherSubagentTab();
-  testExistingContentTabIsRefreshedWithoutFocus();
-  testRefreshOfTheActiveReportTabStillRenders();
+  testSubagentRewriteLeavesAnOpenReportAlone();
   testTaskDoneStillSwitchesToTheReport();
   testTerminalErrorEventsStillSwitchToTheReport();
   testParentTaskDoneAfterSubagentReportSwitches();

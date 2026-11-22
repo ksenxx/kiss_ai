@@ -218,6 +218,9 @@ class TestSubagentPartialResult:
         assert "\n\n---\n\n<h3>Partial result: " in summary
         assert "budget exhausted" in summary
         assert "between sessions" in summary
+        # The chat page shows the part after the separator alone, so it
+        # must not point at summaries "above" it.
+        assert "above" not in summary.rsplit("\n\n---\n\n", 1)[1]
         assert agent.total_steps == 1
 
     def test_top_level_exhausted_between_sessions_still_raises(

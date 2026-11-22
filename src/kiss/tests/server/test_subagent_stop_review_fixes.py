@@ -146,7 +146,6 @@ class TestPersistedReopenSubscribesRunningSubagent(_DbRedirectBase):
         ]
         assert len(opens) == 1
         assert opens[0]["tab_id"] == frontend_sub_tab
-        assert opens[0]["isDone"] is False
 
         server._stop_task(frontend_sub_tab)
         assert state.stop_event is not None and state.stop_event.is_set(), (
@@ -217,9 +216,10 @@ class TestPersistedReopenSubscribesRunningSubagent(_DbRedirectBase):
         )
 
     def test_done_sub_reopen_is_not_subscribed(self) -> None:
-        """A FINISHED sub-agent row reopens as a plain done tab: no
-        live-stream subscription and ``isDone`` is True (the frontend
-        then keeps the input hidden)."""
+        """A FINISHED sub-agent row opens no tab: no live-stream
+        subscription and no announcement, only its ``subagentDone``
+        (the tab and the task), which closes the tab on a page that
+        missed the finish."""
         server, printer, _chat_id, parent_id, sub_id = (
             self._setup_rows_and_server()
         )
@@ -230,8 +230,9 @@ class TestPersistedReopenSubscribesRunningSubagent(_DbRedirectBase):
 
         frontend_sub_tab = f"tab-parent__sub_{sub_id}"
         assert (sub_id, frontend_sub_tab) not in printer.subscribe_calls
-        opens = [
-            e for e in printer.events if e.get("type") == "openSubagentTab"
+        told = [
+            (e["type"], e["tab_id"], e["task_id"])
+            for e in printer.events
+            if e.get("type") in ("openSubagentTab", "subagentDone")
         ]
-        assert len(opens) == 1
-        assert opens[0]["isDone"] is True
+        assert told == [("subagentDone", frontend_sub_tab, sub_id)]

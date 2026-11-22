@@ -66,8 +66,8 @@ an agent takes to write or delete a page (``kiss.core.memoryfield.pages
 .MemoryDir``: ``<memory>.lock`` beside the memory, ``<memory>/<domain>.lock``
 for a domain memory; see :func:`memory_locks`), so an agent's write lands
 either before the comparison or after the rename, never between them, and
-is never lost.  :func:`merge` itself takes no lock: a caller holding the
-locks already (the sync_history_and_memory SEA) calls it directly.
+is never lost.  :func:`merge` itself takes no lock: :func:`locked_merge`,
+which the sync_history_and_memory SEA calls too, is the merge under them.
 
 Stdlib-only and self-contained, so it can be copied to a remote machine and
 run there with the system ``python3`` before the project's environment exists.
@@ -100,10 +100,9 @@ except ImportError:  # POSIX
     msvcrt = None  # type: ignore[assignment]
 
 # The page filename rules of kiss.core.memoryfield.pages (PAGE_NAME_RE,
-# DEBRIS_NAMES, is_debris, TOMBSTONES_DIR), repeated here because this file
-# cannot import the package on a machine that does not have it yet.
+# TOMBSTONES_DIR), repeated here because this file cannot import the
+# package on a machine that does not have it yet.
 PAGE_NAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$")
-DEBRIS_NAMES = frozenset({".DS_Store", "desktop.ini", "Thumbs.db"})
 TOMBSTONES_DIR = ".tombstones"
 # A leading ``---`` line, YAML, a closing ``---`` line -- the same shape
 # kiss.core.memoryfield.pages.split_frontmatter accepts.
@@ -121,12 +120,14 @@ LOCK_POLL = 0.05
 def is_page(path: Path) -> bool:
     """Return True when *path* is a memory page and not an index, debris or a symlink.
 
+    What sync tools, editors and operating systems leave behind needs no
+    rule of its own: ``.DS_Store``, ``desktop.ini``, ``Thumbs.db`` and
+    ``notes.md~`` do not end in ``.md``, and the dot in
+    ``notes.sync-conflict-1.md`` is in no page name.
+
     Args:
         path: An entry of a memory directory.
     """
-    name = path.name
-    if name in DEBRIS_NAMES or name.endswith("~") or ".sync-conflict-" in name:
-        return False
     if path.suffix != ".md" or not PAGE_NAME_RE.fullmatch(path.stem):
         return False
     return not path.is_symlink() and path.is_file()
@@ -417,9 +418,8 @@ def memory_locks(memory_dir: Path, domains: list[str]) -> Iterator[None]:
     the names, two merges into memories that reach two directories under
     swapped names each held one lock and waited for the other.  An agent
     never holds two of them at once, so it cannot deadlock with a merge
-    either.  The same protocol as ``memory_locks`` of the
-    sync_history_and_memory SEA (``memory_delta.py``), repeated here
-    because this file cannot import the package.
+    either.  The two primitives are called here rather than through
+    ``kiss.core.file_lock`` because this file cannot import the package.
 
     Args:
         memory_dir: The memory; it must exist for the domain locks to be
@@ -430,7 +430,7 @@ def memory_locks(memory_dir: Path, domains: list[str]) -> Iterator[None]:
         TimeoutError: When a lock is still held after :data:`LOCK_TIMEOUT`.
     """
     roots = {root.resolve() for root in [memory_dir, *(memory_dir / name for name in domains)]}
-    # Ordered by directory, as text: without symlinks, the order of the SEA's memory_locks.
+    # Ordered by directory, as text: one order, whatever names led to the directories.
     paths = [Path(f"{root}.lock") for root in sorted(roots, key=str)]
     # Each descriptor is closed whatever happens, and unlocked first only once its
     # lock was taken: Windows refuses to unlock a byte range that is not held.

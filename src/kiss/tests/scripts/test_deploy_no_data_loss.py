@@ -31,6 +31,7 @@ import json
 import os
 import shutil
 import sqlite3
+import stat
 import subprocess
 import sys
 import tempfile
@@ -40,7 +41,9 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import kiss.agents.sorcar.persistence as th
+from kiss.core.file_lock import lock_exclusive, unlock
 from kiss.core.remote_password import password_accepted
+from kiss.core.utils import atomic_write_text
 from kiss.scripts import running_tasks
 from kiss.tests.conftest import IS_WINDOWS, posix_only
 
@@ -368,6 +371,62 @@ class RemoteConfigTest(unittest.TestCase):
         self._configure(_SERVER)
         self._configure(_SERVER)
 
+        self.assertEqual(
+            sorted(p.name for p in self.tmp.iterdir()),
+            [".config.lock", "config.json"])
+
+    @posix_only("the deploy reaching the lock is read from its emptying the flock-ed file")
+    def test_a_link_the_web_app_repairs_meanwhile_is_not_written_through(self) -> None:
+        """Which file holds the settings is decided under the lock, not before it.
+
+        ``config.json`` is a link whose target is gone.  The web app's
+        ``save_config`` replaces such a link with a regular file, holding
+        ``.config.lock`` while it does.  A deploy that followed the link
+        before it waited for that lock wrote into the file the link used to
+        name, which nothing reads any more, and printed a password the web
+        app never got.
+        """
+        orphan = self.tmp / "dotfiles" / "config.json"
+        self.config.symlink_to(orphan)
+        stored = {"last_model": "claude-opus-5", "remote_password": "the-web-apps"}
+        with open(self.tmp / ".config.lock", "w", encoding="utf-8") as held:
+            lock_exclusive(held)
+            held.write("held")
+            held.flush()
+            deploy = subprocess.Popen(
+                [sys.executable, str(_REMOTE_CONFIG), str(self.config), _SERVER],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            try:
+                # Opening the lock file empties it, and is the last thing the
+                # script does before it waits for the lock.
+                deadline = time.monotonic() + 60
+                while os.path.getsize(held.name) and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                self.assertEqual(os.path.getsize(held.name), 0)
+                # What save_config does under its lock: a link to no file is replaced.
+                atomic_write_text(self.config, json.dumps(stored), mode=0o600)
+            finally:
+                unlock(held)
+                stdout, stderr = deploy.communicate(timeout=120)
+
+        self.assertEqual(deploy.returncode, 0, stderr)
+        self.assertEqual(stdout.strip(), "SORCAR_PASSWORD=the-web-apps")
+        self.assertEqual(json.loads(self.config.read_text()), {**stored, "work_dir": _SERVER})
+        self.assertFalse(orphan.exists())
+
+    @posix_only("needs a named pipe")
+    def test_a_named_pipe_at_the_config_path_stops_the_deploy_at_once(self) -> None:
+        """Opening a pipe nobody writes to never returns, and the lock is held meanwhile."""
+        os.mkfifo(self.config)
+
+        try:
+            done = _run(sys.executable, str(_REMOTE_CONFIG), str(self.config), _SERVER, timeout=30)
+        except subprocess.TimeoutExpired:
+            self.fail("remote_config.py blocked opening the pipe")
+
+        self.assertEqual((done.returncode, done.stdout), (1, ""), done.stderr)
+        self.assertIn("not a regular file", done.stderr)
+        self.assertTrue(stat.S_ISFIFO(self.config.stat().st_mode))
         self.assertEqual(
             sorted(p.name for p in self.tmp.iterdir()),
             [".config.lock", "config.json"])
@@ -842,11 +901,15 @@ class CarryOverTablesTest(unittest.TestCase):
         self._make(self.old, {"claude-opus-5": 40, "gpt-5.6-sol": 7},
                    files={"server.py": 3})
         self._make(self.new, {"claude-opus-5": 2})
+        os.chmod(self.new, 0o644)
+        mode = stat.S_IMODE(os.stat(self.new).st_mode)  # 0o666 on Windows: no group/other bits
 
         self._carry()
 
         self.assertEqual(self._models(self.new),
                          {"claude-opus-5": 40, "gpt-5.6-sol": 7})
+        # No API key of a project came with them: the file's mode is as it was.
+        self.assertEqual(stat.S_IMODE(os.stat(self.new).st_mode), mode)
         con = sqlite3.connect(f"file:{self.new}?mode=ro", uri=True)
         self.assertEqual(
             con.execute("SELECT path, count FROM file_usage").fetchall(),
@@ -1070,49 +1133,107 @@ class CarryOverTablesTest(unittest.TestCase):
             ("ROWLESS", "", "no row yet"), ("UNTITLED", "new", "typed elsewhere")])
         self.assertIn("0 row(s) restored, 0 counter(s) raised", self._carry().stdout)
 
-    def test_the_stars_given_to_the_chats_come_back(self) -> None:
-        """A star is the user's own mark, as a title is, and goes back the same way.
+    def test_the_stars_and_pins_given_to_the_chats_come_back(self) -> None:
+        """A star and a pin are the user's own marks, as a title is, and go back the same way.
 
-        It is put on the chat's row, or on the row its title just made for
-        a chat whose tasks have not written one yet; a star given in the
-        new database stays, and a deleted chat gets nothing.
+        Each is put on the chat's row, or on the row its title just made
+        for a chat whose tasks have not written one yet; a mark given in
+        the new database stays, and a deleted chat gets nothing.
         """
         self._make(self.old, {})
         self._make(self.new, {})
         con = sqlite3.connect(self.old)
         con.executemany(
-            "INSERT INTO chat_summaries(chat_id, summary, user_summary, is_favorite)"
-            " VALUES (?, 'old', ?, ?)",
-            [("STARRED", "", 1), ("ROWLESS", "typed here", 1), ("DELETED", "", 1),
-             ("PLAIN", "", 0), ("BOTH", "", 1)])
+            "INSERT INTO chat_summaries(chat_id, summary, user_summary, is_favorite, is_pinned)"
+            " VALUES (?, 'old', ?, ?, ?)",
+            [("STARRED", "", 1, 0), ("ROWLESS", "typed here", 1, 1), ("DELETED", "", 1, 1),
+             ("PLAIN", "", 0, 0), ("BOTH", "", 1, 0), ("PINNED", "", 0, 1)])
         con.commit()
         con.close()
         con = sqlite3.connect(self.new)
         con.executemany(
             "INSERT INTO task_history(id, timestamp, task, chat_id) VALUES (?, 1.0, 't', ?)",
-            [(chat, chat) for chat in ("STARRED", "ROWLESS", "PLAIN", "BOTH")])
+            [(chat, chat) for chat in ("STARRED", "ROWLESS", "PLAIN", "BOTH", "PINNED")])
         con.executemany(
             "INSERT INTO chat_summaries(chat_id, summary, is_favorite) VALUES (?, 'new', ?)",
-            [("STARRED", 0), ("PLAIN", 1), ("BOTH", 1)])
+            [("STARRED", 0), ("PLAIN", 1), ("BOTH", 1), ("PINNED", 0)])
         con.execute("INSERT INTO deleted_chats VALUES ('DELETED', 2000.0)")
         con.commit()
         con.close()
 
-        # ROWLESS counts twice: its title made the row, its star went on it.
-        self.assertIn("3 row(s) restored, 0 counter(s) raised", self._carry().stdout)
+        # ROWLESS counts three times: its title made the row, its star and
+        # its pin went on it.
+        self.assertIn("5 row(s) restored, 0 counter(s) raised", self._carry().stdout)
 
         con = sqlite3.connect(f"file:{self.new}?mode=ro", uri=True)
         try:
             rows = con.execute(
-                "SELECT chat_id, summary, user_summary, is_favorite"
+                "SELECT chat_id, summary, user_summary, is_favorite, is_pinned"
                 " FROM chat_summaries ORDER BY chat_id"
             ).fetchall()
         finally:
             con.close()
         self.assertEqual(rows, [
-            ("BOTH", "new", "", 1), ("PLAIN", "new", "", 1),
-            ("ROWLESS", "", "typed here", 1), ("STARRED", "new", "", 1)])
+            ("BOTH", "new", "", 1, 0), ("PINNED", "new", "", 0, 1),
+            ("PLAIN", "new", "", 1, 0), ("ROWLESS", "", "typed here", 1, 1),
+            ("STARRED", "new", "", 1, 0)])
         self.assertIn("0 row(s) restored, 0 counter(s) raised", self._carry().stdout)
+
+    def test_the_projects_and_the_chats_in_them_come_back(self) -> None:
+        """Projects are the machine's own, as its tallies are, and so is which chat is in which.
+
+        A replacement from before projects existed gets the table and the
+        chats' column.  A project only the old database had is inserted
+        with its settings and a chat goes back into its project; a project
+        both have keeps the new database's text and the later of the two
+        timestamps.  A project's settings may hold API keys, so the
+        replacement is made its owner's alone before they are written.
+        """
+        with_key = '{"api_keys": {"ANTHROPIC_API_KEY": "sk-ant-carried"}, "max_budget": 7.0}'
+        self._make(self.old, {})
+        self._make(self.new, {})
+        con = sqlite3.connect(self.old)
+        con.executemany(
+            "INSERT INTO projects(id, name, settings, is_pinned, created_at, updated_at)"
+            " VALUES (?, ?, ?, ?, 100.0, ?)",
+            [("P1", "Paper", with_key, 1, 200.0), ("P2", "Thesis", "{}", 0, 300.0)])
+        con.executemany(
+            "INSERT INTO chat_summaries(chat_id, summary, project_id) VALUES (?, 'old', ?)",
+            [("IN", "P1"), ("OUT", "")])
+        con.commit()
+        con.close()
+        con = sqlite3.connect(self.new)
+        con.execute("DROP TABLE projects")
+        con.execute("ALTER TABLE chat_summaries DROP COLUMN project_id")
+        con.executemany(
+            "INSERT INTO task_history(id, timestamp, task, chat_id) VALUES (?, 1.0, 't', ?)",
+            [("IN", "IN"), ("OUT", "OUT")])
+        con.commit()
+        con.close()
+        os.chmod(self.new, 0o644)
+
+        # Two projects and the chat's place in one of them.
+        self.assertIn("3 row(s) restored, 0 counter(s) raised", self._carry().stdout)
+        if not IS_WINDOWS:  # Windows chmod carries no group/other bits
+            self.assertEqual(stat.S_IMODE(os.stat(self.new).st_mode), 0o600)
+        con = sqlite3.connect(self.new)
+        con.execute("UPDATE projects SET name = 'Renamed', updated_at = 250.0 WHERE id = 'P2'")
+        con.commit()
+        con.close()
+        self.assertIn("0 row(s) restored, 1 counter(s) raised", self._carry().stdout)
+
+        con = sqlite3.connect(f"file:{self.new}?mode=ro", uri=True)
+        try:
+            projects = con.execute(
+                "SELECT id, name, settings, is_pinned, updated_at FROM projects ORDER BY id"
+            ).fetchall()
+            chats = con.execute(
+                "SELECT chat_id, project_id FROM chat_summaries ORDER BY chat_id").fetchall()
+        finally:
+            con.close()
+        self.assertEqual(projects, [
+            ("P1", "Paper", with_key, 1, 200.0), ("P2", "Renamed", "{}", 0, 300.0)])
+        self.assertEqual(chats, [("IN", "P1")])
 
     def test_a_database_from_before_titles_has_none_to_give(self) -> None:
         """Its older schema is skipped, not tripped over: the tallies still come back."""
@@ -1128,12 +1249,13 @@ class CarryOverTablesTest(unittest.TestCase):
 
         self.assertEqual(self._models(self.new), {"claude-opus-5": 3})
 
-    def test_reading_the_replaced_database_leaves_only_a_wal_that_holds_rows(self) -> None:
+    def test_reading_the_replaced_database_leaves_no_debris_and_loses_no_wal_row(self) -> None:
         """The empty -wal and the -shm a reader makes are debris; a -wal with rows is not.
 
         ``history.db`` is in WAL mode.  The second carry-over is held at
         its first write, the old database attached, while a writer commits
-        to it: the row is in a -wal that was not there when it started.
+        to it: the row is in a -wal that was not there when it started, and
+        is folded into the database before that -wal goes.
         """
         self._make(self.old, {})
         self._make(self.new, {})
@@ -1157,7 +1279,78 @@ class CarryOverTablesTest(unittest.TestCase):
             finally:
                 lock.close()
         carrying.result()
+        self.assertEqual(sorted(os.listdir(self.tmp)), ["new.db", "old.db"])
         self.assertEqual(self._models(self.old), {"gpt-5.6-sol": 7})
+        self.assertEqual(self._models(self.new), {"gpt-5.6-sol": 7})
+
+    def test_a_connection_still_open_on_the_replaced_database_keeps_its_index(self) -> None:
+        """The -shm is where the connections of a WAL database see each other's locks.
+
+        A writer opens the replaced database while the carry-over reads it
+        and is still connected when the carry-over is done.  With the -shm
+        unlinked under it -- "the reader made it" -- the next process to
+        open the database makes an index of its own: the two write at once,
+        and a row one of them committed is gone.  That next writer has to
+        be another process: the connections of one share one mapping.
+        """
+        self._make(self.old, {})
+        self._make(self.new, {})
+        con = sqlite3.connect(self.old)
+        con.execute("PRAGMA journal_mode=WAL")
+        con.close()
+        lock = sqlite3.connect(self.new, isolation_level=None)
+        lock.execute("BEGIN IMMEDIATE")
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            carrying = pool.submit(self._carry)
+            try:
+                deadline = time.monotonic() + 60
+                while not os.path.exists(f"{self.old}-shm") and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                writer = sqlite3.connect(self.old, isolation_level=None)
+                writer.execute("INSERT INTO model_usage(model, count) VALUES ('first', 1)")
+            finally:
+                lock.close()
+        carrying.result()
+        second = (
+            "import sqlite3, sys\n"
+            "con = sqlite3.connect(sys.argv[1], timeout=0.2, isolation_level=None)\n"
+            "con.execute('BEGIN IMMEDIATE')\n"
+            "con.execute(\"INSERT INTO model_usage(model, count) VALUES ('second', 2)\")\n"
+            "con.execute('COMMIT')\n"
+        )
+        try:
+            writer.execute("BEGIN IMMEDIATE")
+            shut_out = _run(sys.executable, "-c", second, str(self.old))
+            self.assertEqual(shut_out.returncode, 1, "two write transactions at once")
+            self.assertIn("database is locked", shut_out.stderr)
+            writer.execute("INSERT INTO model_usage(model, count) VALUES ('held', 3)")
+            writer.execute("COMMIT")
+        finally:
+            writer.close()
+        done = _run(sys.executable, "-c", second, str(self.old))
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(self._models(self.old), {"first": 1, "held": 3, "second": 2})
+
+    def test_a_wal_kept_beside_the_replaced_database_is_read_and_left_as_it_is(self) -> None:
+        """The swap keeps a -wal it could not fold in as a copy beside the file."""
+        self._make(self.old, {})
+        self._make(self.new, {})
+        kept = self.tmp / "kept.db"
+        writer = sqlite3.connect(self.old)
+        try:
+            writer.execute("PRAGMA journal_mode=WAL")
+            writer.execute("INSERT INTO model_usage(model, count) VALUES ('gpt-5.6-sol', 7)")
+            writer.commit()
+            shutil.copy(self.old, kept)
+            shutil.copy(f"{self.old}-wal", f"{kept}-wal")
+        finally:
+            writer.close()
+        self.old = kept
+        wal = Path(f"{kept}-wal").read_bytes()
+
+        self._carry()
+
+        self.assertEqual(Path(f"{kept}-wal").read_bytes(), wal)
         self.assertEqual(self._models(self.new), {"gpt-5.6-sol": 7})
 
     def test_a_carry_over_that_fails_says_so(self) -> None:
@@ -1332,9 +1525,13 @@ class ReplacementNeverLosesTest(unittest.TestCase):
             con.close()
 
     def _backups(self) -> list[Path]:
-        """Return the databases a replacement moved aside, oldest first."""
+        """Return the databases a replacement moved aside, oldest first.
+
+        Not the -wal kept beside one, nor the -shm that reading the
+        database through that -wal leaves with it.
+        """
         return sorted(p for p in self.remote_kiss.glob("history.db.replaced-*")
-                      if not p.name.endswith("-wal"))
+                      if not p.name.endswith(("-wal", "-shm")))
 
     def test_the_replaced_database_stays_readable_all_along(self) -> None:
         """It is kept as a second link, so there is never a moment without one."""

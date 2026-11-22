@@ -30,8 +30,8 @@ S3-08  The follow-up suggestion (the agent's own
 S3-09  ``_subagent_is_done`` must agree with
        ``_attach_viewer_to_running_chat``: both consult the same live-state
        predicate on the task-keyed registry, so replay can never
-       reattach a task as running while stamping its tab
-       ``isDone=True``.
+       reattach a task as running while telling its tab that the
+       sub-agent is over (``subagentDone``).
 
 S3-14  (verification) ``JsonPrinter.cleanup_task`` prunes the task's
        subscriber set after a linger period instead of retaining it
@@ -241,7 +241,7 @@ class TestSubagentDoneConsistency(unittest.TestCase):
         self.assertFalse(
             _subagent_is_done(self.task_id),
             "replay must not reattach a task as running while "
-            "simultaneously stamping its tab isDone=True",
+            "simultaneously telling its tab that the sub-agent is over",
         )
 
     def test_unknown_task_is_done(self) -> None:

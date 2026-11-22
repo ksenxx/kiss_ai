@@ -30,15 +30,18 @@ async function main() {
     win.close();
   });
 
-  await test('Git Commit reads "Committing…" with a reason while disabled', () => {
+  await test('Git commit says "A commit is in progress" while disabled', () => {
     const {win, posted} = h.makePage();
     win._testApi.endLaunch();
+    // An icon button of the task-info strip: what it says is its
+    // accessible name and its tooltip.
     const btn = h.byId(win, 'autocommit-btn');
-    const label = btn.querySelector('.more-item-label');
+    assert.strictEqual(btn.getAttribute('aria-label'), 'Git commit');
     h.click(win, btn);
     assert.strictEqual(h.ofType(posted, 'autocommitAction').length, 1);
     assert.ok(btn.disabled);
-    assert.strictEqual(label.textContent, 'Committing…');
+    assert.ok(btn.classList.contains('is-busy'), 'it shows the wait');
+    assert.strictEqual(btn.getAttribute('aria-label'), 'A commit is in progress');
     assert.strictEqual(btn.title, 'A commit is in progress');
     assert.strictEqual(btn.dataset.tooltip, 'A commit is in progress');
     h.send(win, {
@@ -48,9 +51,10 @@ async function main() {
       manual: true,
     });
     assert.ok(!btn.disabled);
-    assert.strictEqual(label.textContent, 'Git Commit');
+    assert.ok(!btn.classList.contains('is-busy'));
+    assert.strictEqual(btn.getAttribute('aria-label'), 'Git commit');
     assert.ok(!btn.hasAttribute('title'));
-    assert.strictEqual(btn.dataset.tooltip, 'git commit');
+    assert.strictEqual(btn.dataset.tooltip, 'Git commit');
     win.close();
   });
 

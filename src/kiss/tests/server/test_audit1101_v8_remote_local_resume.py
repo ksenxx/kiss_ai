@@ -51,8 +51,11 @@ class _HoldBetweenLockHolds:
     :class:`kiss.tests.server.pause.Pause`: the relay thread is held
     at the line of the second ``with self.lock:``, after the frame's
     eligibility was decided and the lock released, so a local resume
-    of the tab lands inside that window for sure.  ``held`` is set
-    once the thread is held, ``passed`` once it returned.
+    of the tab lands inside that window for sure.  A ``subagentDone``
+    that ends one of the stream's tabs leaves in that window for the
+    owner's locks (:meth:`RemoteTabs.end_sub_tab`), and is held at
+    that call.  ``held`` is set once the thread is held, ``passed``
+    once it returned.
     """
 
     def __init__(self, tab_id: str, kind: str = "task_events") -> None:
@@ -60,7 +63,8 @@ class _HoldBetweenLockHolds:
         self._kind = kind
         self._code = RemoteTab._relay_frame.__code__
         lines, first = inspect.getsourcelines(RemoteTab._relay_frame)
-        self._line = [first + i for i, s in enumerate(lines) if s.strip() == "with self.lock:"][1]
+        at = "self._owner.end_sub_tab(" if kind == "subagentDone" else "with self.lock:"
+        self._line = [first + i for i, s in enumerate(lines) if s.strip().startswith(at)][-1]
         self._frame: FrameType | None = None
         self.held = threading.Event()
         self.passed = threading.Event()

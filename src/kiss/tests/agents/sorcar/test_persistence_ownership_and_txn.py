@@ -47,7 +47,7 @@ from pathlib import Path
 
 import kiss.agents.sorcar.persistence as th
 from kiss.tests.conftest import posix_only
-from kiss.tests.persistence_helpers import close_db
+from kiss.tests.persistence_helpers import close_db, queued_events
 
 _RACE_DELAY_ENV = "KISS_RACE_DELAY"
 
@@ -612,7 +612,7 @@ class FlushScopeTest(_PersistenceTestCase):
                 {"type": "text", "content": f"chunk {i}"}, busy_id,
             )
         time.sleep(0.2)
-        self.assertGreater(th._pending_count(busy_id), 0)
+        self.assertGreater(queued_events(busy_id), 0)
 
         started = time.monotonic()
         th._flush_chat_events(idle_id)
@@ -623,7 +623,7 @@ class FlushScopeTest(_PersistenceTestCase):
         self.assertLess(elapsed, 0.3)
 
         th._flush_chat_events()
-        self.assertEqual(th._pending_count(busy_id), 0)
+        self.assertEqual(queued_events(busy_id), 0)
 
     def test_flush_restarts_a_dead_writer_thread(self) -> None:
         """Pending events are drained even if the writer already exited."""
@@ -638,7 +638,7 @@ class FlushScopeTest(_PersistenceTestCase):
 
         th._flush_chat_events(task_id)
 
-        self.assertEqual(th._pending_count(task_id), 0)
+        self.assertEqual(queued_events(task_id), 0)
         row = th._get_db().execute(
             "SELECT COUNT(*) AS n FROM events WHERE task_id = ?", (task_id,),
         ).fetchone()
@@ -650,7 +650,7 @@ class FlushScopeTest(_PersistenceTestCase):
         for i in range(500):
             th._queue_chat_event({"type": "text", "content": str(i)}, task_id)
         th._flush_chat_events()
-        self.assertEqual(th._pending_count(None), 0)
+        self.assertEqual(th._pending_count(), 0)
         row = th._get_db().execute(
             "SELECT COUNT(*) AS n FROM events WHERE task_id = ?", (task_id,),
         ).fetchone()

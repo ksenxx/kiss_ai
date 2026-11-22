@@ -5,6 +5,7 @@
 """Tests for useful_tools.py module."""
 
 import errno
+import functools
 import inspect
 import json
 import os
@@ -12,6 +13,8 @@ import pathlib
 import re
 import shutil
 import signal
+import stat
+import struct
 import subprocess
 import sys
 import tempfile
@@ -142,6 +145,23 @@ def _bash_exit(command: str, cwd: Path) -> int:
     """Return the exit code of *command* run by the host's bash in *cwd*."""
     return subprocess.run(["bash", "-c", command], cwd=cwd, timeout=60, capture_output=True,
                           stdin=subprocess.DEVNULL).returncode
+
+
+def _acl(*entries: tuple[int, ...]) -> bytes:
+    """Return the ``system.posix_acl_*`` value of *entries*, each ``(tag, permissions[, id])``.
+
+    Tags: 1 the owner, 2 the user *id*, 4 the group, 16 the mask, 32 everybody else.
+    """
+    return struct.pack("<I", 2) + b"".join(
+        struct.pack("<HHI", tag, bits, *(who or [0xFFFFFFFF])) for tag, bits, *who in entries
+    )
+
+
+def _xattrs(path: Path) -> dict[str, bytes]:
+    """Return the extended attributes of *path*."""
+    if sys.platform != "linux":  # pragma: no cover — ``os.listxattr`` is Linux's
+        raise OSError("os.listxattr is Linux's")
+    return {name: os.getxattr(path, name) for name in os.listxattr(path)}
 
 
 class TestBugs:
@@ -454,6 +474,160 @@ class TestBugs:
         assert path.read_text() == "a = 3\n"
         assert (path.stat().st_gid, path.stat().st_mode & 0o777) == (groups[0], 0o664)
 
+    @pytest.mark.skipif(sys.platform != "linux", reason="os.setxattr is Linux's")
+    def test_write_and_edit_keep_the_extended_attributes_of_the_file(self, temp_test_dir):
+        """The file a Write or an Edit leaves has the attributes and the ACL of the one it replaced.
+
+        The temporary file renamed over it had those of a new file
+        (S16/F1): a ``user.*`` attribute was gone, and so was an ACL
+        entry denying one user a file its mode lets everybody read,
+        while a file with no ACL got the default one of its directory.
+        A private file made under that default ACL holds the very ACL
+        its temporary file is made with.  The branches no test reaches:
+        a file system that lists no attributes at all (``ENOTSUP`` from
+        ``listxattr``: FUSE, 9p) cannot be mounted without privileges,
+        and ``os.listxattr`` exists on Linux only.
+        """
+        default = _acl((1, 7), (2, 4, 65534), (4, 5), (16, 5), (32, 5))
+        denying = _acl((1, 6), (2, 0, 65534), (4, 4), (16, 4), (32, 4))
+        inherited = _acl((1, 6), (2, 4, 65534), (4, 5), (16, 0), (32, 0))
+        names = ("plain", "labelled", "own")
+        plain, labelled, private = (temp_test_dir / f"{name}.txt" for name in names)
+        plain.write_text("a = 1\n")
+        try:
+            if sys.platform != "linux":  # pragma: no cover — ``os.setxattr`` is Linux's
+                raise OSError("os.setxattr is Linux's")
+            os.setxattr(temp_test_dir, "system.posix_acl_default", default)
+            labelled.write_text("a = 1\n")
+            os.setxattr(labelled, "user.marker", b"kept")
+            os.setxattr(labelled, "system.posix_acl_access", denying)
+        except OSError as e:
+            pytest.skip(f"no extended attributes or ACLs on this file system: {e}")
+        with open(private, "w", opener=functools.partial(os.open, mode=0o600)) as f:
+            f.write("a = 1\n")
+        ut = UsefulTools(work_dir=str(temp_test_dir))
+        held = {"user.marker": b"kept", "system.posix_acl_access": denying}
+        own = {"system.posix_acl_access": inherited}
+        for path, attributes in ((plain, {}), (labelled, held), (private, own)):
+            before = path.stat()
+            assert _xattrs(path) == attributes
+            ut.Read(str(path))
+            assert ut.Edit(str(path), "a = 1", "a = 2").startswith("Successfully replaced 1")
+            assert path.stat().st_ino != before.st_ino, "written in place: no rename to check"
+            assert _xattrs(path) == attributes
+            assert ut.Write(str(path), "a = 3\n").startswith("Successfully wrote")
+            assert _xattrs(path) == attributes and path.stat().st_mode == before.st_mode
+            assert path.read_text() == "a = 3\n"
+        assert sorted(os.listdir(temp_test_dir)) == ["labelled.txt", "own.txt", "plain.txt"]
+
+    def test_a_file_with_attributes_no_new_file_can_hold_is_written_in_place(self, temp_test_dir):
+        """A file whose attributes a new file cannot be given keeps its inode, and so all of them.
+
+        S16/F1: a ``security.*`` attribute (a label, a capability) is the
+        kernel's or the administrator's to give, so the rename dropped
+        it; and the directory of a file bound from another file system
+        may take no attribute at all (``ENOTSUP``), which must send the
+        write in place like the busy mount point itself.  Both are made
+        for real, in a throwaway user and mount namespace.
+        """
+        in_namespace = ["unshare", "-Urm"]
+        if (
+            sys.platform != "linux"
+            or shutil.which("unshare") is None
+            or subprocess.run([*in_namespace, "true"], capture_output=True).returncode
+        ):
+            pytest.skip("no unprivileged namespaces here")
+        (temp_test_dir / "source.txt").write_text("a = 1\n")
+        script = (
+            "import os, subprocess, sys\n"
+            "from kiss.agents.sorcar.useful_tools import UsefulTools\n"
+            "for kind in ('tmpfs', 'ramfs'):\n"
+            "    os.mkdir(kind)\n"
+            "    if subprocess.run(['mount', '-t', kind, kind, kind]).returncode:\n"
+            "        sys.exit(3)\n"
+            "    open(kind + '/file.txt', 'w').write('a = 1\\n')\n"
+            "try:\n"
+            "    os.setxattr('tmpfs/file.txt', 'security.kept', b'label')\n"
+            "    os.setxattr('source.txt', 'user.marker', b'kept')\n"
+            "except OSError:\n"
+            "    sys.exit(3)\n"
+            "if subprocess.run(['mount', '--bind', 'source.txt', 'ramfs/file.txt']).returncode:\n"
+            "    sys.exit(3)\n"
+            "tools = UsefulTools(work_dir='.')\n"
+            "for name in ('tmpfs/file.txt', 'ramfs/file.txt'):\n"
+            "    inode = os.stat(name).st_ino\n"
+            "    tools.Read(name)\n"
+            "    said = tools.Edit(name, 'a = 1', 'a = 2')[:23]\n"
+            "    print(said, tools.Write(name, 'a = 3\\n')[:18], os.stat(name).st_ino == inode,\n"
+            "          os.listxattr(name), os.listdir(name[:5]), open(name).read().split())\n"
+        )
+        run = subprocess.run(
+            [*in_namespace, sys.executable, "-c", script], cwd=temp_test_dir,
+            capture_output=True, text=True, timeout=120,
+            env={**os.environ, "PYTHONPATH": os.pathsep.join(sys.path)},
+        )
+        if run.returncode == 3:
+            pytest.skip("nothing can be mounted or given an attribute here")
+        done = "Successfully replaced 1 Successfully wrote True"
+        assert run.stdout.splitlines() == [
+            f"{done} ['security.kept'] ['file.txt'] ['a', '=', '3']",
+            f"{done} ['user.marker'] ['file.txt'] ['a', '=', '3']",
+        ], run.stdout + run.stderr
+
+    @posix_only("a mode names no group and no others on Windows")
+    def test_the_new_text_of_a_private_file_is_in_no_file_others_can_read(self, temp_test_dir):
+        """While a Write or an Edit replaces a private file, no file others may read holds its text.
+
+        S16/F2: the temporary file was made with the mode of a new file
+        (0644 under the usual umask), written, and only then given the
+        mode of the file it replaced.  The directory is looked at before
+        every line of the tool's own code.
+        """
+        path = temp_test_dir / "private.txt"
+        path.write_text("old secret\n")
+        path.chmod(0o600)
+        ut = UsefulTools(work_dir=str(temp_test_dir))
+        ut.Read(str(path))
+        modes: set[int] = set()
+
+        def look(frame: Any) -> bool:
+            if _in_tool_code(frame):
+                others = (e.stat() for e in os.scandir(temp_test_dir) if e.name != path.name)
+                modes.update(stat.S_IMODE(made.st_mode) for made in others if made.st_size)
+            return False  # no line counts: nothing is injected
+
+        def write() -> str:
+            return ut.Write(str(path), "new secret\n")
+
+        def edit() -> str:
+            return ut.Edit(str(path), "new", "newer")
+
+        umask = os.umask(0o022)
+        try:
+            _run_injecting_at(write, 0, look)
+            _run_injecting_at(edit, 0, look)
+        finally:
+            os.umask(umask)
+        assert path.read_text() == "newer secret\n" and path.stat().st_mode & 0o777 == 0o600
+        assert modes == {0o600}, f"the new text was in a file of mode {sorted(map(oct, modes))}"
+
+    def test_a_text_utf8_cannot_encode_empties_no_file_with_two_names(self, temp_test_dir):
+        """A Write or an Edit refused for a lone surrogate leaves a hard-linked file as it was.
+
+        S16/F5: such a file is written in place, and the in-place write
+        truncated it at its open and met the text UTF-8 cannot encode
+        at the write after it: both names were left empty behind the
+        error.
+        """
+        ut = UsefulTools(work_dir=str(temp_test_dir))
+        path, alias = temp_test_dir / "linked.txt", temp_test_dir / "alias.txt"
+        path.write_bytes(b"irreplaceable\n")  # bytes: text mode writes CRLF on Windows
+        os.link(path, alias)
+        ut.Read(str(path))
+        assert "surrogates not allowed" in ut.Write(str(path), "new\ud800")
+        assert "surrogates not allowed" in ut.Edit(str(path), "irreplaceable", "new\ud800")
+        assert path.read_bytes() == alias.read_bytes() == b"irreplaceable\n"
+
     @pytest.mark.skipif(sys.platform == "win32", reason="bash is found by path on Windows")
     def test_bash_runs_bash_not_the_posix_shell(self, temp_test_dir):
         """``Bash`` runs bash, so brace expansion and arrays work in every launch path.
@@ -719,20 +893,56 @@ class TestStreamingTimeout:
         result = ut.Bash("sleep 10", "should timeout", timeout_seconds=0.5)
         assert "timeout" in result.lower()
 
-    def test_timer_firing_after_completion_keeps_output(self, temp_test_dir):
-        """A timer that fires after the command already finished must not clobber output.
+    def _printf_held_past_deadline(self, timeout: float) -> tuple[bool, str]:
+        """Run ``printf hi`` with *timeout*, the loop held in the stream callback past the deadline.
 
-        The command completes almost instantly, but a slow stream callback
-        delays the loop past the timeout, so the Timer deterministically
-        fires in the gap between command completion and ``timer.cancel()``.
-        The successful output must be preserved, not replaced with a
-        timeout error.
+        The output has no newline, so the reader hands it over at the
+        pipe's EOF: the command has finished when the callback gets it.
+        The deadline is *timeout* after the launch, so it is later than
+        ``proof`` and behind once the callback has slept *timeout*.
+
+        Returns:
+            Whether the output came before the deadline for sure, so the
+            loop was held (a shell that starts slower than *timeout* is
+            killed at the deadline, or prints too late to tell), and
+            the result of the call.
         """
-        def slow_stream(_line: str) -> None:
-            time.sleep(1.0)
+        held: list[str] = []
+        proof = time.monotonic() + timeout
+        consuming = UsefulTools._consume_stream.__code__
 
-        ut = UsefulTools(stream_callback=slow_stream)
-        result = ut.Bash("echo hi", "quick command", timeout_seconds=0.5)
+        def hold_past_deadline(piece: str) -> None:
+            # Only a piece shown while the output is consumed holds the loop.
+            # One the redactor kept back (its start may open a secret) comes
+            # with the last flush, after the call has decided whether it
+            # timed out: a hold then would prove nothing.
+            frame = inspect.currentframe()
+            while frame is not None and frame.f_code is not consuming:
+                frame = frame.f_back
+            if frame is not None and time.monotonic() < proof:
+                held.append(piece)
+                time.sleep(timeout)
+
+        ut = UsefulTools(stream_callback=hold_past_deadline)
+        result = ut.Bash("printf hi", "quick command", timeout_seconds=timeout)
+        return bool(held), result
+
+    def test_timer_firing_after_completion_keeps_output(self, temp_test_dir):
+        """A deadline that passes after the command has finished must not clobber its output.
+
+        The stream callback keeps the loop busy past the deadline once
+        the command's output has ended, so the loop comes back to a
+        deadline that has passed and a shell that has exited: the output
+        must be returned, not a timeout error.  The shell has to start
+        within the timeout for that, which takes more than half a second
+        on a loaded machine: the timeout grows until it does.
+        """
+        held, result = False, ""
+        for timeout in (0.5, 2.0, 8.0, 32.0):
+            held, result = self._printf_held_past_deadline(timeout)
+            if held:
+                break
+        assert held, "no output was shown while the stream was read, with a timeout up to 32 s"
         assert "timeout" not in result.lower()
         assert "hi" in result
 

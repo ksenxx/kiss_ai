@@ -114,6 +114,7 @@ _TYPE_AND_MEASURE_JS = """
     + parseFloat(cs.paddingTop) + parseFloat(cs.lineHeight) / 2;
   const hit = document.elementFromPoint(textRight - 1, lineMiddle);
   const clear = document.getElementById('input-clear-btn').getBoundingClientRect();
+  const save = document.getElementById('input-save-btn').getBoundingClientRect();
   return {
     ghost: {left: at.left, top: at.top},
     caret: {left: caret.left, top: caret.top},
@@ -122,6 +123,8 @@ _TYPE_AND_MEASURE_JS = """
       p => ghostStyle.getPropertyValue(p) !== cs.getPropertyValue(p)),
     textRight,
     clearLeft: clear.width ? clear.left : null,
+    saveLeft: save.width ? save.left : null,
+    saveRight: save.right,
     hitAtLineEnd: hit && hit.id,
   };
 }
@@ -173,12 +176,15 @@ def test_ghost_suggestion_starts_where_the_typed_text_ends(tmp_path: Path) -> No
     for measured in (desktop, phone):
         assert abs(measured["ghost"]["left"] - measured["caret"]["left"]) <= 0.5, measured
         assert abs(measured["ghost"]["top"] - measured["caret"]["top"]) <= 0.5, measured
-        # The clear button (shown while there is text) sits over the
-        # textarea's right end: the text is laid out short of it, so a
-        # click on the last characters of a full first line moves the
-        # caret there instead of clearing the draft (A24).
+        # The save and clear buttons (shown while there is text) sit
+        # over the textarea's right end, save left of clear: the text
+        # is laid out short of both, so a click on the last characters
+        # of a full first line moves the caret there instead of saving
+        # or clearing the draft (A24).
         assert measured["clearLeft"] is not None, measured
-        assert measured["textRight"] <= measured["clearLeft"], measured
+        assert measured["saveLeft"] is not None, measured
+        assert measured["saveRight"] <= measured["clearLeft"], measured
+        assert measured["textRight"] <= measured["saveLeft"], measured
         assert measured["hitAtLineEnd"] == "task-input", measured
 
 

@@ -51,7 +51,7 @@ Version 2026.11.7 · HEAD `d522176885` (6,001 commits) · compiled 2026-11-10 ·
     - Cron jobs.
   - The web app is one page, reached in a browser tab, as an installed PWA, in the `kiss-app` desktop window or from an iOS Home Screen icon.
   - The VS Code extension was removed on 10-14.
-  - Every client of a daemon mirrors its tab registry (`~/.kiss/tabs.json`) for chat tabs, and sub-agent and browser tabs are synchronised by events, so an open task, sub-agent or browser tab appears in every client.
+  - Every client of a daemon mirrors its tab registry (`~/.kiss/tabs.json`) for chat tabs, and sub-agent and browser tabs are synchronised by events, so an open task, a running sub-agent or a browser tab appears in every client.
   - The `sorcar` CLI and a headless SEA run keep the agent in the calling process, without the daemon.
 - **Several computers, one web app** **NEW**: A daemon keeps a registry of other computers' daemons (`~/.kiss/machines.json`) and drives them from its own page (section 15):
   - Their chats, files, settings, terminals and browser pages appear on the local surfaces.
@@ -65,9 +65,9 @@ Version 2026.11.7 · HEAD `d522176885` (6,001 commits) · compiled 2026-11-10 ·
     - 144 Claude models through Amazon Bedrock.
     - 79 `cc/` (Claude Code) and 13 `codex/` CLI-backed entries, driven as plain models with the KISS system prompt and tools and billed to the Claude or ChatGPT subscription by default.
   - **Routers**: Six router entries (`autorouter`, `bestrouter`, `orautorouter`, `orbestrouter`, `ccxbestrouter`, `brbestrouter`) appear in the model picker and are implemented as SEAs.
-- **35 bundled Sorcar Extension Agents** **CHANGED** in `src/kiss/agents/seas/` (36 folders with the shared `base`; section 9):
-  - 33 slash commands, 2 hidden (`coding`, `sorcar`) and 6 model-picker entries; 19 were added since 2026-09-30.
-  - `src/kiss/agents/third_party_agents/` adds 44 SEA folders (43 commands, 42 of them channel SEAs), and `/cron` is built in, so a registry with an empty `SEAS.md` lists 77 commands.
+- **36 bundled Sorcar Extension Agents** **CHANGED** in `src/kiss/agents/seas/` (37 folders with the shared `base`; section 9):
+  - 34 slash commands, 2 hidden (`coding`, `sorcar`) and 6 model-picker entries; 20 were added since 2026-09-30.
+  - `src/kiss/agents/third_party_agents/` adds 44 SEA folders (43 commands, 42 of them channel SEAs), and `/cron` is built in, so a registry with an empty `SEAS.md` lists 78 commands.
   - Every SEA defines exactly one `BaseSea` subclass, a bundled one in `<name>/<name>_sea.py`, and every registered command defines `description()`.
 - **44 built-in tool functions** **CHANGED** in a full-profile top-level run on the host, in parallel mode with web tools and memory on and the decisions model available, before skill, MCP-server and SEA-supplied tools (section 7):
   - **Tool counts by category**: shell 3, files 3, checkpoints 2, worktree 2, browser 15, memory 7, dispatch 4, MCP sign-in 2, interaction 6 including `finish` and, when the decisions model is available, `decide`.
@@ -178,6 +178,7 @@ Version 2026.11.7 · HEAD `d522176885` (6,001 commits) · compiled 2026-11-10 ·
   - `compaction` is a run option, a SEA setting and a Settings checkbox.
   - The agent's bulk clearing of a Claude model's old tool calls (`context_edit_trigger_tokens`, 250,000 at Claude Fable 5.2's cache prices) and reasoning-turn retention (`reasoning_keep_turns`, off by default) are configurable.
   - Anthropic calls use fine-grained tool streaming.
+  - A compaction removes Claude's signed reasoning from the conversation whichever adapter holds it, and a request a provider rejects for such reasoning is sent again without it (11-20; section 6).
   - A session hand-off is one tool-less call over a scripted digest (`handoff_digest.py`).
   - Memory recall is injected into the task message.
 - **Commits**: `1509b8cc00` `79e5c494c1` `f6e4e2bd7f` `97aef43e22` `1e8f6b146b` `8a78456a95`
@@ -191,7 +192,7 @@ Version 2026.11.7 · HEAD `d522176885` (6,001 commits) · compiled 2026-11-10 ·
     1. Asks the Jev decisions model first by default (10-03) when an OpenRouter key is configured.
     2. Uses the LLM classifier as the fallback.
   - Counts any task that could change a repository file as development unless it is git-only (10-02) and returns only `is_simple` since 10-09.
-- A reviewer's budget follows the size of the diff (`review_budget`).
+- A reviewer's budget is 1/8 of what the calling task has spent so far, at least $10 (`review_budget`).
 - With prompt caching on, Bedrock Claude requests cache the conversation through a breakpoint that moves to the last cacheable block every turn (10-21, section 8).
 - **Commits**: `1509b8cc00` `d66f2ea32d` `30b388acb0` `ff7ff8b742` `8609e6ecac`
 
@@ -260,11 +261,18 @@ Version 2026.11.7 · HEAD `d522176885` (6,001 commits) · compiled 2026-11-10 ·
   - A group strip lists its sub-agent tabs.
   - The desktop page splits into a chat pane and a content pane with a draggable divider.
 - **New subpanels**:
-  - Sidebar: Machines, Schedule and Recommendations subpanels.
+  - Sidebar: Machines, Schedule, Recommendations and Skills (11-20) subpanels; Apps was renamed Connectors (11-20).
   - Settings: Bedrock, Claude Code and Codex subpanels.
-- **Task update**: Is the `/ask` agent's answer (10-03), for tasks on other machines too, and runs only while the panel polls:
-  - Once the task is 60 s old, then 10 minutes after the last run ended.
+- **Skills subpanel** (11-20): Lists the skills the agent can use, searches the skills.sh registry and adds a found skill after a security check of its files (sections 7 and 16).
+- **Projects** (11-21): Groups chats on this machine and gives their tasks settings and API keys of their own, edited on a Projects page and listed as foldable groups in the Chats panel (sections 11 and 16).
+- **Default working directory** (11-21): Settings option (`default_work_dir`) that sets the folder the page switches to when a chat is opened, overridden by a folder picked in the chat header (section 16).
+- **Task Progress** (renamed from **Task update**, 11-19): Is the `/ask` agent's answer (10-03), for tasks on other machines too, and runs only while the panel polls:
+  - Once the task is 60 s old, then 10 minutes after the last run ended, or after half of the time that run estimated to be left, at least 60 s and at most 10 minutes (11-20).
   - Or at once on refresh.
+  - The answer ends with an estimate of the time left, which the panel shows and counts down (11-20).
+- **Task Info** (11-20): The Chat id, Task id and Parent task values are buttons that insert the id into the composer, and the gap between the rows was halved.
+- **Task Info tags** (11-21): A Tags row lists a finished task's tags and edits them (remove with ×, add a name of the vocabulary, at least one kept). An edited set is stored with `tags_edited` set, so later derivations and `--refresh` keep it.
+- **Sidebar and composer changes** (11-21): Recommendations is a single card with no header, position button, refresh button or status line, never folded and hidden when empty, pinned to the bottom of the sidebar, showing one of twenty suggestions at a time for 30 s with the next one sliding in, and scrolling a suggestion taller than a third of the window. Schedule and Machines show a clickable example command. A skill review offers **Cancel** next to **Add anyway**. The right strip's buttons are left-aligned, and the user name sits further right on phones. A Save button in the composer keeps its text in `saved_input.txt`. A link to a file no tab can show opens in the default application on the daemon's machine and as a download elsewhere.
 - **UI additions**: Swipe between screens on phones, Auto mode (dark from 7 pm to 7 am) and High contrast, refresh and Reload from disk buttons with a page reload after a daemon restart, and the commit hash next to the version in Settings. Details in sections 14 and 16.
 - **Commits**: `4691d3a0d6` `29cd0b5525` `d655783f6d` `7e3e85ee9c` `c94088ebb8` `a185d2a96f` `90bde13051`
 
@@ -290,8 +298,9 @@ Version 2026.11.7 · HEAD `d522176885` (6,001 commits) · compiled 2026-11-10 ·
 
 - **Schema additions**:
   - New `task_history` columns: `success`, `is_cron`, `model_costs` and `machine`.
-  - New `chat_summaries` columns: `user_summary` (chat rename), `last_finished` and `is_favorite` (chat favourite, 11-16).
+  - New `chat_summaries` columns: `user_summary` (chat rename), `last_finished`, `is_favorite` (chat favourite, 11-16) and `project_id` (the chat's project, 11-21).
   - `deleted_tasks` and `deleted_chats` tables so that a deletion survives a sync.
+  - `projects` table in `history.db` for projects and their settings overrides (11-21).
 - **Tags and metadata**: Tags are capped at three and a trajectory that holds a credential gets the `secret` tag; the task settings record the `host`.
 - **CHATS panel**: Gained a Running section, a WORKDIR filter, a Cron filter, sorting by completion time, delete buttons for chats and tasks and a favourite star for chats (11-16).
 - **Legacy DB**: A stale pre-2026.10.2 `history.db` no longer blocks the rename (`legacy_task_db.py`). Details in sections 11 and 16.
@@ -313,7 +322,7 @@ Version 2026.11.7 · HEAD `d522176885` (6,001 commits) · compiled 2026-11-10 ·
 
 - `rsorcar` no longer copies private ssh keys by default (`SORCAR_SKIP_SSH_COPY`, agent forwarding instead) and deploys while tasks run: it skips only the `kiss-web` restart, and the history sync holds back unfinished tasks and transmits deletions.
 - `sync_db` reconciles `task_history` columns between releases instead of refusing.
-- `scripts/release.sh` publishes one `Release X.Y.Z` commit per release to the public repository (`build_release_chain`), without the paths in `scripts/exclude.json`.
+- `scripts/release.sh` publishes one `Release X.Y.Z` commit per release to the public repository (`build_release_chain`), without the paths in `scripts/exclude.json`. Release commits and tags carry the releaser's identity as mapped by `.mailmap`, and a `Co-authored-by` trailer for each outside contributor that `scripts/credits.txt` lists for that version; these trailers are what GitHub's contributor list is built from.
 - **Commits**: `e55180eb69` `c6595e6bad` `62310fac3b` `30582cb5ce` `09afbb036f`
 
 ### Memory and knowledge
@@ -827,7 +836,7 @@ Findings by project:
  │ page opened at a loopback URL  │ │ auth: token, sorcar-local.json  │ │ scripts/run_sea.py        │
  └────────┬───────────────────────┘ └────────┬────────────────────────┘ └────────────┬──────────────┘
           │ WebSocket /ws on one port (8787) │ plain on loopback, TLS elsewhere      │ run_sea runs a
-          │ 90 JSON commands (sorcar.py API) │ one object per frame, events by tab   │ SorcarAgent;
+          │ 103 JSON commands (sorcar.py API)│ one object per frame, events by tab   │ SorcarAgent;
  ┌────────▼──────────────────────────────────▼────────────────────────┐              │ run_agent and
  │ kiss-web daemon  src/kiss/server (38 modules, 45,818 lines)        │              │ run_parallel
  │ RemoteAccessServer: HTTP + WebSocket listener, auth, tunnel, TLS   │              │ need a daemon
@@ -835,8 +844,8 @@ Findings by project:
  │   sub-agent tab lifecycle, task_runner, merge_flow, autocomplete   │              │
  │ WebPrinter (json_printer): events to a task's tabs and history.db  │              │
  │ tabs: browser_tab + frame_flow · terminal_tab · explorer           │              │
- │ panels: sidebar_panels (Schedule, Machines, Apps, Spend,           │              │
- │   Recommendations) · task_update · file_index · speech             │              │
+ │ panels: sidebar_panels (Schedule, Machines, Skills, Connectors,    │              │
+ │   Spend, Recommendations) · task_update · file_index · speech      │              │
  │ machines: remote_tabs · remote_views · machine_stream forward a    │              │
  │   tab's commands to the kiss-web daemon of a registered machine    │              │
  │ background: cron scheduler thread · SEA registry watcher (2 s) ·   │              │
@@ -868,7 +877,7 @@ Findings by project:
 
 ### Figure 1. The data path from clients to models
 
-- Every client of the daemon sends commands of one catalogue (`src/kiss/server/sorcar.py`, `API`, 90 commands) over the same WebSocket listener and receives the same types of JSON event.
+- Every client of the daemon sends commands of one catalogue (`src/kiss/server/sorcar.py`, `API`, 98 commands) over the same WebSocket listener and receives the same types of JSON event.
 - Delivery of a task's events is scoped by tab:
   - One copy per subscribed tab, stamped with its `tabId`, goes to every page (which filters by tab) and to the same-machine clients that addressed that tab or none.
   - The copies of a tab closed on every page go to those clients alone.
@@ -895,18 +904,21 @@ Findings by project:
   - `src/kiss/agents/sorcar` (50 modules, 64,809 lines) holds the agent, its tools and the synchronous client `daemon_client.py`, kept in that layer so that `run_agent` and the cron scheduler submit tasks without importing `kiss.server`.
   - `src/kiss/core` (29 modules, 13,544 lines) and `src/kiss/core/models` (15 modules, 20,164 lines) hold the base agent and the model adapters.
 - **Catalogue**:
-  - 84 commands at the previous inventory, 88 now.
+  - 84 commands at the previous inventory, 103 now.
   - 21 left, among them:
     - The ten that the VS Code extension host consumed and the daemon discarded.
     - The wake-word and frequent-task commands.
     - The commit-message generator.
-  - 25 arrived:
+  - 40 arrived:
     - Four for terminal tabs.
     - Four for machines.
     - Three for the sign-in window.
     - Three for Claude Code and Codex status and login.
+    - Three for the Skills subpanel (11-20).
+    - Five for projects (11-21).
     - Two for the browser tab.
-    - `getTaskUsage`, `setChatSummary`, `deleteTask`, `deleteChat`, `openExternal`, `getReplayImage`, `cronAction`, `getRecommendations` and `dismissNotice`.
+    - `createPrAction` for the pull-request button, and `setPinned` and `setChatPinned` for pins (11-20).
+    - `getTaskUsage`, `setChatSummary`, `deleteTask`, `deleteChat`, `openExternal`, `getReplayImage`, `cronAction`, `getRecommendations`, `dismissNotice`, `setChatFavorite`, `getTaskEvents`, `openInBrowser` and `stageHtmlView`.
   - `ServerApi.dispatch` validates every command against the catalogue and answers an invalid one with an `error` event.
   - The page calls the catalogue through `media/api.js`.
 - **Machines**: A tab bound to a registered machine has its commands forwarded to that machine's daemon and that daemon's frames relayed back (section 15).
@@ -1116,6 +1128,9 @@ Files a user keeps in `~/.kiss/` (`$KISS_HOME` when set; a white-label brand nam
     1. The catalogue's declared fallback.
     2. Else the model's OpenRouter twin when `OPENROUTER_API_KEY` is set.
   - **Single-switch cap**: A run switches model this way once, and the switch is printed as `Switched model from X to Y after <reason>` (section 8).
+  - **Rejected reasoning** (11-20): When a provider rejects a request because a reasoning block is "bound to a different conversation", the agent removes Claude's reasoning from the stored conversation (on the Anthropic adapter the newest reply's blocks too) and sends the request again on the next step:
+    - The rejection is not counted among the consecutive errors; before, three of them ended the session.
+    - With no reasoning left to remove, it is handled like any other error.
 - **Hooks**:
   - Direct hooks:
     - `llm_call_hook(new_messages)` before each model call.
@@ -1139,8 +1154,12 @@ Files a user keeps in `~/.kiss/` (`$KISS_HOME` when set; a white-label brand nam
     - A call whose argument is a whole stub runs on the original text.
     - A partial or unknown stub is refused.
   - **DeepSeek-family models**: Models whose API wants every earlier turn's reasoning passed back lose whole turns instead: all but the newest 10 (11-08).
+  - **Claude reasoning under another adapter** **NEW** (11-20): Every compaction, a whole-turn removal included, removes Claude's signed reasoning from the stored conversation whichever adapter holds it (`Model.drop_stale_reasoning`):
+    - The thinking blocks of a session that `set_model` or a fail-over handed from a Claude model to another adapter, which leaves them out of its requests while a switch back sends them again.
+    - The reasoning items of a Claude model on the Responses API (those whose `format` starts with `anthropic`, as OpenRouter's do), which are sent back as they are.
+    - Before, only the Anthropic adapter removed such reasoning, and the next request that carried it to Claude after a compaction lost the block or, on Claude Fable 5.2, was refused.
   - **Events and switches**:
-    - Every compaction is logged as a `compaction` event (`step`, `context_tokens`, `dropped_tokens`, `results`, `arguments`, `target_tokens`; a stub compaction adds `reasoning_blocks`, a whole-turn removal `turns`).
+    - Every compaction is logged as a `compaction` event (`step`, `context_tokens`, `dropped_tokens`, `results`, `arguments`, `reasoning_blocks`, `target_tokens`; a whole-turn removal adds `turns`) **CHANGED** (11-20: a whole-turn removal reports `reasoning_blocks` too).
     - `compaction=False` on `run()`, the SEA setting or the global `compaction` setting turns it off (11-05).
 - **Bulk clearing of a Claude model's old tool calls** **NEW** (11-11, replacing the server-side clearing of 11-08):
   - **Scope and base thresholds**:
@@ -1163,6 +1182,7 @@ Files a user keeps in `~/.kiss/` (`$KISS_HOME` when set; a white-label brand nam
   - **Thinking blocks across Claude versions**:
     - Claude 5.1 and later, which drop a thinking block sent back after an earlier message changed or (Fable 5.2) refuse the request, lose every thinking block at a clearing.
     - An earlier model keeps those of its newest reply.
+    - A model whose name the version grammar does not read (a name of the user's own catalogue) is taken for an earlier one until a provider rejects one of its blocks; from then on it loses every block too (11-20).
   - **Server-side reasoning retention (`KISS_REASONING_KEEP_TURNS`)**:
     - `KISS_REASONING_KEEP_TURNS` (0, the default, asks for nothing) has two provider-specific forms, while other adapters ignore the setting:
       - **Anthropic API**: The value is the number of turns whose thinking the server keeps, sent as a further edit on requests with thinking on.
@@ -1377,7 +1397,7 @@ Every tool call passes through two stages in order:
   - `tasks` must be a JSON array of non-empty strings (a lenient decode repairs raw newlines and lone backslashes).
   - Review tasks and budget cap:
     - A task that reads as a review and not as an implementation runs on the read-only `review` profile.
-    - A review dispatched without a budget has the share it inherits from the caller capped at $5 plus $5 per 1,000 changed lines (10-25; an `inherit: false` review inherits no share and has no such cap).
+    - A review dispatched without a budget has the share it inherits from the caller capped at 1/8 of what the calling task has spent so far (its own calls and ended sub-agents combined), with a $10 floor (11-20; an `inherit: false` review inherits no share and has no such cap).
   - Same-family restriction (11-01, section 10): A sub-agent of the caller's own model family is refused unless:
     - The fan-out has two or more tasks over disjoint named pieces,
     - The caller's own task asks for sub-agents,
@@ -1457,6 +1477,7 @@ Every tool call passes through two stages in order:
   3. The stored `use_memory` key.
 - **`KISS_DISABLE_TASK_CLASSIFIER=1`**: The test suite's switch (section 11).
 - **`KISS_WORKDIR`**: The directory the `sorcar` wrapper was invoked from.
+- **`KISS_SKILLS_REGISTRY_URL`**, **`KISS_SKILLS_ARCHIVE_URL`** and **`KISS_SKILL_JUDGE_MODEL`** **NEW** (11-20): The base URLs a skill install reads the registry (`https://skills.sh`) and the repository archives (`https://codeload.github.com`) from, and the models that check the skill, separated by commas (section 7). All three are read at each call.
 - **`KISS_DISABLE_WORKTREE_POOL`**: Removed on 10-09.
 
 #### `~/.kiss/config.json` (`src/kiss/core/user_config.py`, 1,796 lines **NEW**, 10-14)
@@ -1464,7 +1485,7 @@ Every tool call passes through two stages in order:
 - **Storage and permissions**:
   - Before 10-14, the settings lived with the VS Code extension.
   - The file is written atomically with mode 0600 under a lock.
-- **`DEFAULTS` (17 keys)**:
+- **`DEFAULTS` (18 keys)**:
   - **`max_budget`** (default: 100.0): Budget in USD of a task started from the app.
   - **`custom_endpoint`**, **`custom_api_key`**, **`custom_headers`** (default: empty): Custom model endpoint (section 8).
   - **`use_web_browser`** (default: true): Browser tools (section 17).
@@ -1480,6 +1501,7 @@ Every tool call passes through two stages in order:
   - **`claude_code_use_subscription`** (default: true): Settings-panel form of `KISS_CLAUDE_CODE_USE_SUBSCRIPTION`.
   - **`codex_use_subscription`** (default: true): Settings-panel form of `KISS_CODEX_USE_SUBSCRIPTION`.
   - **`work_dir`** (default: empty): Work dir setting.
+  - **`default_work_dir`** (default: empty): The folder the page switches to when a chat is opened; a pick in the chat header overrides it (section 16) **NEW** (11-21).
   - **`last_model`** (default: empty): The model last picked.
   - **`last_machine`** (default: empty): The machine a new chat's tasks run on; empty means this machine (section 15) **NEW**.
 - **Environment mirroring, pass-through keys, and retired keys**:
@@ -1644,6 +1666,23 @@ Every tool call passes through two stages in order:
   6. The work dir's `.agents/skills`.
   7. The work dir's `.kiss/skills`.
 - The `skill_permissions` wildcard rules hide denied skills.
+- **Skills from the skills.sh registry** **NEW** (11-20): The web app's Skills subpanel (section 16) searches the registry and adds a found skill to `~/.kiss/skills` after a security check (`skill_registry.py`, `skill_rules.py`, `skill_check.py`, `skill_install.py`):
+  - **Search**: A query of two characters or more is the registry's search and a shorter one its all-time leaderboard. At most 50 rows come back, the most installed first, without the registry's duplicates, the skills that are not in a GitHub repository and the names that are not valid skill names.
+  - **Download**: The repository's archive comes from `codeload.github.com`, and only the skill's own folder is unpacked, into a staging folder inside `~/.kiss/skills` that skill discovery does not see:
+    - The archive may be 256 MiB, with 100,000 members and 2 GiB unpacked.
+    - The skill may hold 500 files, 5 MiB in one file and 20 MiB in all, in folders at most 32 deep.
+    - A link, a device, a sparse file or an unsafe file name refuses the skill, and nothing in it is executed.
+  - **Check**: Three layers read the staged files:
+    1. Pattern rules over every file (`skill_rules.py`): instructions that override the agent's or speak to the checker, download-and-run and decode-and-run commands, reverse shells, credential exfiltration, destructive commands, start-up persistence, hidden Unicode, compiled programs or archives among the files, a command that runs one of the skill's files that is not text (`runs-unread-file`), and a file whose special characters spell out to more than 10 million characters, which the rules do not read (`inflated-text`).
+    2. The audits that skills.sh's partners published, which count for `medium` at most: a failed audit asks for a review, and so do audits that cannot be fetched.
+    3. One model call without tools over the text files, `SKILL.md` first, up to 300,000 characters; text that does not fit is a `medium` finding.
+    - When the rules already block the skill, the audits are not fetched and the model is not called.
+  - **Verdict**: A `critical` or `high` finding blocks the install, a `medium` one asks the user to review the findings, and anything less installs the skill (the staged folder is renamed into place):
+    - **Add anyway** installs a reviewed skill only when its files are the ones the review was about (same SHA-256 digest); files that changed since are checked again. A blocked skill is never installed.
+    - **Cancel** (11-21) dismisses the review in the page and installs nothing.
+    - Nothing is installed when the model cannot be called, when every model declines to read the skill or when its reply cannot be read.
+  - **Checking model**: The default model of the first configured provider (`get_default_model`). When it declines to read the skill, the first of the `SECOND_OPINION_MODELS` of another family whose provider is configured reads it, and the skill then needs a review. `KISS_SKILL_JUDGE_MODEL` names the models instead.
+  - **Limits**: A skill whose name the agent already has is refused, and at most four installs run at once.
 
 ### Interaction (6)
 
@@ -1722,7 +1761,7 @@ Tool profiles (`TOOL_PROFILES` and `TOOL_GROUPS` in `sorcar_agent.py`):
 | `full` | everything above | default |
 | `review` **CHANGED** | `shell` + `browser` groups, `memory_search`, `memory_pull`, `memory_read`, `memory_list`, `decide`, `summary`, `talk` (26 tools); aliases `readonly`, `read_only`, `read-only` | read-only reviewer sub-agents (section 10): named by the caller, or inferred for a sub-agent in a reviewer's sub-tree whose task asks for no change (`KISS_TOOL_PROFILES=0` turns the inference off) |
 | `assistant` | `shell` + `user` + `decide` + `control` groups (9 tools) | conversational runs without file edits; one of the three profiles (`shell`, `assistant`, `review`) that `/rsi7d` proposes when a full-toolset SEA used fewer tools |
-| `none` **NEW** | nothing built in (`finish` plus what the SEA's `tools()` hook returns) | `/ask`, `/install`, `/machine`, `/good_morning`, `/memory_consolidate`, `/memory_quiz`, `/recommendations`, `/sync_history_and_memory` (all locked) |
+| `none` **NEW** | nothing built in (`finish` plus what the SEA's `tools()` hook returns) | `/ask`, `/install`, `/machine`, `/good_morning`, `/memory_consolidate`, `/memory_quiz`, `/recommendations`, `/sync_history_and_memory`, `/timeline` (all locked) |
 | `bash` | `Bash` | `/sh` (locked), `/remember`, `/forget`, `/task_update` |
 | `shell` | `Bash`, `bash_job`, `Read`, `run_commands_parallel` | `/skillopt` |
 | `edit` **NEW** | `Edit`, `Write`, `create_worktree`, `commit_and_merge`, `checkpoint`, `rollback` | `/sync` runs on `shell+edit+agents` (locked) |
@@ -2234,7 +2273,7 @@ Console script `sea` (added 10-05) **NEW**:
 
 ### Bundled SEAs
 
-`src/kiss/agents/seas/` holds 36 folders: `base` and 35 SEAs, of which 33 are commands, 2 are hidden and 6 are model-picker entries:
+`src/kiss/agents/seas/` holds 37 folders: `base` and 36 SEAs, of which 34 are commands, 2 are hidden and 6 are model-picker entries:
 
 - Below, "caller's" means the setting is left to the tab or the calling task.
 - W marks a `WorkerSea`; all others derive from `BaseSea`.
@@ -2439,7 +2478,7 @@ Console script `sea` (added 10-05) **NEW**:
 #### `/recommendations` **NEW**
 
 - **Purpose**:
-  - Reads the recent tasks and the signed-in apps and stores ten suggested next tasks in `~/.kiss/recommendations.json`.
+  - Reads the recent tasks and the signed-in apps and stores twenty suggested next tasks in `~/.kiss/recommendations.json`.
   - Run by a default cron job at `0 */6 * * *`.
 - **Profile and own tools**: W, `none` (locked): `recent_tasks`, `connected_apps`, `save_recommendations`, plus 3 read-only memory tools while the global `use_memory` setting is on (section 13).
 - **Model**: caller's.
@@ -2555,6 +2594,18 @@ Console script `sea` (added 10-05) **NEW**:
 - **Budget**: $1.
 - **Timeout**: 3,600 s.
 
+#### `/timeline` **NEW** (11-20)
+
+- **Purpose**: An SVG Gantt chart of a task's sub-agents, drawn from the task history and shown in the result (`/timeline <task id or its first six or more characters>`):
+  - One bar per sub-agent in start order, coloured by role; the model names the roles from how the sub-agents' task texts open, and the chart is refused while a sub-agent has no role.
+  - Marks the task updates and `/ask` questions, the messages sent to the running task, and every stretch of over 10 minutes that the task spent in one tool call while no sub-agent ran, with what it was waiting on.
+  - A sub-agent with no recorded end (still running, or killed) is drawn pale, up to the end of the run.
+  - Writes `reports/timeline-<first 8 characters of the task id>.svg` in the work dir unless the task names another path.
+- **Profile and own tools**: W, `none` (locked): `timeline_agents`, `draw_timeline`.
+- **Model**: caller's.
+- **Budget**: $2.
+- **Timeout**: 600 s.
+
 #### `/write` **CHANGED**
 
 - **Purpose**: Concise professional prose with the vocabulary of machine text banned.
@@ -2661,9 +2712,9 @@ One dispatcher (`src/kiss/agents/sorcar/agent_dispatch.py`, 3,422 lines, with th
 ### Budgets, timeouts, background jobs and clean-up
 
 - **Budget** **CHANGED**:
-  - A sub-task whose `max_budget` neither the call nor the SEA names gets the caller's remaining budget, less what the caller's still-running jobs of other calls hold, divided by the number of tasks in the call plus one: half for one `run_agent`, a third each for a `run_parallel` of two.
+  - A sub-task whose `max_budget` neither the call nor the SEA names gets the caller's remaining budget, less what the caller's other still-running jobs hold (the siblings of its own `run_parallel` call included), divided by the number of the call's tasks still without a budget plus one: half for one `run_agent`, a third each for a `run_parallel` of two.
   - A budget that the call or the SEA names is capped at the same unreserved remainder (`budget_cap`, applied by `sea_apply.cap_budget`); with nothing left the sub-task is refused.
-  - A review's share is at most $5 plus $5 per 1,000 changed lines of the work dir (`git diff --numstat HEAD` plus untracked files; `fanout_guard.review_budget`, 10-25); the limit does not apply to a budget that the call or the SEA names.
+  - A review's share is at most `max($10, task_spend / 8)` — one eighth of what the calling task and its ended sub-agents have spent so far, $10 at least (`fanout_guard.review_budget` of `agent_dispatch.task_spend`, 11-20); the cap applies on remote machines too, never raises the inherited share, and does not apply to a budget named by the call or the SEA.
 - **Timeouts and background jobs** **CHANGED**:
   - `timeout` bounds the call, not the sub-task.
   - Wait fallback order:
@@ -2718,7 +2769,7 @@ One dispatcher (`src/kiss/agents/sorcar/agent_dispatch.py`, 3,422 lines, with th
   - `KISS_TOOL_PROFILES=0` turns the inference off.
 - **Sandboxed and pinned callers** **NEW** (10-30):
   - A caller that runs in a Docker container or behind an exec bridge may only start plain sub-agents in the same sandbox: `inherit: false`, `machine`, `docker_image`, `work_dir`, any other SEA, `use_web_tools: true`, `use_memory: true` and a task that begins with a registered slash command are refused.
-  - A daemon started with `KISS_PIN_TASK_MODEL` (set by the Terminal-Bench harness, `src/kiss/benchmarks/terminal_bench/daemon.py`) keeps every sub-task on the caller's model: a call or a SEA that names another model or a `model_config` is refused, and so is `set_model`.
+  - A daemon started with `KISS_PIN_TASK_MODEL` (set by the Terminal-Bench harness, `src/kiss/benchmarks/terminal_bench/daemon.py`) keeps every sub-task on the caller's model: a call or a SEA that names another model or a `model_config` is refused, so is a sub-task that does not inherit from its caller (`inherit: false`, a channel), and so is `set_model`.
 
 ### Remote dispatch, configuration line and path rewrite
 
@@ -2748,9 +2799,10 @@ One dispatcher (`src/kiss/agents/sorcar/agent_dispatch.py`, 3,422 lines, with th
   - On the host, a report too long for the context is written under `<scratch dir>/tool-out/` **CHANGED** (11-18) and replaced by a digest.
 - **Sub-agent tabs**:
   - A sub-agent's tab has the deterministic id `{parent_tab_id}__sub_{task_id}`.
-  - It opens on every connected client while the sub-agent runs and is closed everywhere by `subagentDone` when the sub-agent finishes, or by `closeSubagentTab` when any client closes it.
-  - The user's close is remembered, so a replay does not reopen the tab.
-  - Expanding a finished sub-agent's panel in the parent's transcript reopens its tab on every surface until a client closes it again **NEW** (10-30); the tab of a finished `/ask` answerer stays closed.
+  - It is open on a client exactly while the sub-agent runs **CHANGED** (11-20): `new_tab` or `openSubagentTab` opens it and `subagentDone` closes it when the sub-agent finishes. Before, the user could also close it (`closeSubagentTab` closed it on every client and the daemon remembered the close), and unfolding a finished sub-agent's panel reopened its tab on every surface (10-30).
+  - A finished sub-agent has no tab: a replay sends `subagentDone` for it, so a client that missed the finish closes the tab too, and after a reconnect the sub-agent tabs a client still holds are checked again.
+  - The daemon ends the tab by itself: it drops its own state for the tab when it sends `subagentDone`, and a client sends no `closeTab` for a sub-agent tab.
+  - The tab has no close button, and a `run_agent` or `run_parallel` panel neither opens nor closes tabs.
   - Sub-agents of a task on another machine are relayed the same way (section 15).
 - **Recorded usage**:
   - 31,442 of the 41,127 recorded task rows are sub-agents; 7,644 of the 9,685 top-level tasks ran in parallel mode.
@@ -2802,6 +2854,7 @@ One dispatcher (`src/kiss/agents/sorcar/agent_dispatch.py`, 3,422 lines, with th
     4. `subagent` and `failed`.
   - The scope tag, `secret` and `failed` are never dropped by the cap; the others fill the remaining slots in that order.
   - The Chats panel's Tag filter, applied in SQL, offers the vocabulary without `subagent`; a task row no longer lists its tags **CHANGED** (11-12; section 16).
+  - The Task Info panel's Tags row shows a finished task's tags and edits them (`getTaskTags`, `setTaskTags`, event `taskTags`) **NEW** (11-21): a set the user stored is marked `tags_edited` and no derived write (task end, journal recovery, backfill) replaces it; the tags of a running task cannot be edited.
 - **Secret scanner** **NEW** (10-12, `has_secret_value`):
   - A task was already tagged `secret` when its text names a secret (a password, API key, credential, private key, credit card, `.env` and similar); it is now also tagged when its trajectory holds a credential-like value.
   - The trajectory is the task text, the result and every persisted event, tool arguments and outputs included.
@@ -2828,7 +2881,7 @@ One dispatcher (`src/kiss/agents/sorcar/agent_dispatch.py`, 3,422 lines, with th
   - `chat_summaries(chat_id, summary, last_launched)` stores a title of up to 8 words per chat (target 6-8, derived from the chat's first five top-level tasks, sometimes shorter or empty).
   - History shows it as the group header when present and the first task's text otherwise (4,927 rows on the development machine, 4,764 of them with a non-empty summary and none with a title typed by the user).
   - The title is built without a model: the tasks' leading words in order, a slash command's name as words, greetings and politeness dropped, URLs reduced to their host.
-  - The table has three more columns now: `last_finished` (the end instant of the chat's newest task, 0 while it runs; 10-16), `user_summary` and `is_favorite` (11-16).
+  - The table has five more columns now: `last_finished` (the end instant of the chat's newest task, 0 while it runs; 10-16), `user_summary`, `is_favorite` (11-16), `is_pinned` (the chat's pin, 11-20) and `project_id` (the chat's project, 11-21).
   - The row is refreshed when a task of the chat finishes, by the backfill, and by `sync_db` after a merge.
 - **Chat rename** **NEW** (10-15):
   - A title the user types is stored in `user_summary` and wins over the computed one on every recompute; an empty title brings the computed one back.
@@ -2837,6 +2890,13 @@ One dispatcher (`src/kiss/agents/sorcar/agent_dispatch.py`, 3,422 lines, with th
   - A star the user gives a chat is stored in `is_favorite` and stays through every recompute of the row.
   - The command is `setChatFavorite`, sent by the star button of the chat's header in the Chats panel (section 16); every surface refreshes.
   - A deploy that replaces the database puts the stars back, as it does the typed titles (`carry_over_tables`).
+- **Projects** **NEW** (11-21):
+  - A project groups chats on this machine and gives their tasks settings of its own (`src/kiss/agents/sorcar/projects.py`; page and sidebar in section 16); `projects(id, name, description, settings, is_pinned, created_at, updated_at)` in `history.db` stores the projects and `chat_summaries.project_id` stores a chat's project (empty when in none).
+  - `settings` is JSON and holds only what differs from the app's settings, so a field left alone keeps following the Settings sheet; a project can override eight `config.json` keys (`default_work_dir`, `max_budget`, `use_web_browser`, `use_memory`, `compaction`, `chrome_bridge`, `claude_code_use_subscription`, `codex_use_subscription`; `projects.py` `CONFIG_KEYS`), the `victory_sound` preference and the API keys.
+  - Precedence for a run is an option the command itself carries, then the chat's project, then `config.json` (a chat on a registered remote machine is in no project); the project's keys and switches reach the run through a per-run `Config` overlay (`kiss.core.config.run_overlay`), so two tasks of two projects run at the same time, each with its own keys, masked in tool output like the app's own.
+  - Five commands manage projects (`getProjects`, `saveProject`, `deleteProject`, `setProjectPinned`, `setChatProject`), with events `projects`, `chatProject`, `projectSaved` and `projectError`; `submit` and `run` accept `projectId`, and `getHistory` accepts `project` and pages that project's chats 200 at a time.
+  - Deleting a project keeps its chats and takes them out of it.
+  - Keys stay on the machine: the `projects` list is sent to this daemon's own pages and never broadcast to linked daemons, `scripts/sync-task-db.sh` takes the `projects` table and the chats' `project_id` out of a whole-database snapshot before it travels (section 21), and a deploy that replaces the database carries both across (`carry_over_tables`), making the file private (mode 0600) before it writes keys.
 - **Chat and task delete** **NEW** (10-20):
   - `deleteTask` removes a task, its sub-tasks and their events and recomputes the chat's summary.
   - `deleteChat` removes every task of the chat and its summary row.
@@ -2846,7 +2906,7 @@ One dispatcher (`src/kiss/agents/sorcar/agent_dispatch.py`, 3,422 lines, with th
   - `uv run python -m kiss.scripts.backfill_task_metadata [--db PATH] [--refresh]` (`src/kiss/scripts/backfill_task_metadata.py`, 72 lines) runs while the daemon runs:
     1. Adds missing columns.
     2. Then fills rows without tags and chats without a summary in batches of 500, and sub-agent rows without a SEA one parent task at a time (from the parent's `run_agent` calls).
-  - `--refresh` recomputes every tag and every derived summary and keeps the user's titles.
+  - `--refresh` recomputes every derived tag and every derived summary and keeps the user's titles and the tags a user edited in Task Info (`tags_edited`).
 
 ## 12. Git worktrees, merging and auto-commit
 
@@ -2943,10 +3003,18 @@ One dispatcher (`src/kiss/agents/sorcar/agent_dispatch.py`, 3,422 lines, with th
   - No setting and no step after the task.
   - The name survives in the commit `commit_and_merge` makes, in the bar's "Auto-commit and merge" button and in the wire names of the Git Commit button (`autocommitAction`, `autocommit_done`).
   - Edits made outside a worktree are not committed when the task ends; the Git Commit button and `/sync` (both below) commit them on request.
-- **Git Commit** (footer menu of the chat):
+- **Git Commit** (a button of the strip under the right sidebar **CHANGED** 11-20; before, an entry of the chat's footer menu):
   - Stages everything (`git add -A`) in the folder the chat header shows for the tab, generates a message from the diff alone and commits.
   - A tree that changed while the message was generated is not committed (the reply asks to press the button again), and one commit runs per tab at a time.
   - When the header names a registered machine, the command is forwarded and that machine commits its own folder **NEW** (10-18; 900 s timeout, section 15).
+- **Create pull request** **NEW** (11-20; the button next to Git Commit; `src/kiss/server/pr_flow.py`, wire names `createPrAction` and `pr_done`):
+  - Pushes the commits of the checked-out branch that the remote's default branch lacks, from the folder the chat header shows for the tab, and opens a pull request for them. Uncommitted changes are never part of it, and the reply says so when there are any.
+  - The remote is the branch's own, else `origin`, else the only one; the default branch is the remote's `HEAD`, else `main`, else `master`.
+  - Pressed on the default branch itself, it pushes the commits to a new branch `pr/<words of the title>-<short sha>` instead.
+  - The title and body are the commit message when one commit is ahead, and are generated from the diff otherwise.
+  - For a repository on github.com with a logged-in `gh`, the open pull request of the branch is reported as updated or a new one is created; without `gh`, or when it fails, the reply links to GitHub's page that opens the pull request with title and body filled in. For any other host the reply reports the push alone.
+  - Nothing is pushed from a folder without a repository, a detached `HEAD`, a repository without a remote or default branch, a branch with nothing new, or a checkout that moved while the description was generated.
+  - One request runs per tab at a time, under the repository lock, and a registered machine named in the header pushes its own folder.
 - **Source Control data** (`src/kiss/server/explorer.py`, 1,081 lines; the view is in section 16):
   - `git_status` lists the changes of every worktree of the repository, main checkout first, and reads them with `git --no-optional-locks status` so the view's poll never takes `index.lock` from a running task **NEW** (10-30).
   - The view's badge counts only the worktree the tab's task runs in **NEW** (10-20).
@@ -3137,16 +3205,16 @@ One dispatcher (`src/kiss/agents/sorcar/agent_dispatch.py`, 3,422 lines, with th
   - With no password stored the daemon serves only loopback peers and machine links with an enrolled client certificate: other peers get a 403 and no tunnel is started.
   - Five wrong passwords from one address within 60 s lock that address out (`auth_locked` with `retry_after`).
 - **Command catalogue**:
-  - `sorcar.py` `API` lists 90 commands (42 forwarded unchanged to the backend, 48 with their own `ServerApi` handler).
+  - `sorcar.py` `API` lists 103 commands (49 forwarded unchanged to the backend, 54 with their own `ServerApi` handler).
   - Dispatch pipeline:
     1. `validate_command` refuses an unknown name or a missing required field.
     2. `ServerApi.dispatch` routes the command.
-  - The page's whitelist (`media/api.js` `SORCAR_API_COMMANDS`) holds 82 of them; the other six are:
+  - The page's whitelist (`media/api.js` `SORCAR_API_COMMANDS`) holds 97 of them; the other six are:
     - `auth` and `ping` (sent by the page's transport itself).
     - `run` (local clients).
     - `activeTasksQuery` (the installer).
     - `browserList` and `getTaskUsage` (another machine's daemon, section 15).
-  - Since 09-30 the catalogue gained 25 commands and lost 21, among them `voiceWakeStart`/`voiceWakeStop`, `getFrequentTasks` and `generateCommitMessage`.
+  - Since 09-30 the catalogue gained 40 commands and lost 21, among them `voiceWakeStart`/`voiceWakeStop`, `getFrequentTasks` and `generateCommitMessage`.
 
 ### Tabs, sidebar and files
 
@@ -3193,14 +3261,25 @@ One dispatcher (`src/kiss/agents/sorcar/agent_dispatch.py`, 3,422 lines, with th
   - Windows has no pty: the tab reports an error.
 - **Sidebar data**:
   - `getCronJobs` with `cronAction` **NEW**: Schedule (`create`, `update`, `run_now`, `pause`, `resume`, `remove`; section 20).
-  - `getAppsStatus`: Apps (every channel module probed in one subprocess, cached 30 s).
+  - `getAppsStatus`: Connectors, titled Apps until 11-20 (every channel module probed in one subprocess, cached 30 s).
+  - `getSkills`, `searchSkills` and `installSkill` **NEW** (11-20): Skills (section 7). Each may name a `workDir`, the folder whose project skills are listed and count as installed (the page sends the working directory its Explorer shows; without one the daemon uses its own):
+    - `getSkills` is answered with `skills`: the name, description and source of every skill the agent can use, sorted by name.
+    - `searchSkills` (`query`, `generation`) is answered with `skillSearch`: the `query`, the registry's rows (`id`, `name`, `source`, `installs`, `url`, and `installed` for a name the agent already has) or an `error`, and the command's `generation`, by which the page shows the answer to its newest search only.
+    - `installSkill` (`id`, optional `force`) is answered with `skillInstall`: the `id`, a `status` of `installed`, `review`, `blocked` or `error`, the skill's `name`, a `message` and the `findings` (`severity`, `rule`, `message`, `file`, `line`). A `skills` event follows an install.
+    - A search and an install are answered from a background task, so the connection's next commands do not wait for the registry or the check.
   - `getSpendReport`: Spend (total, per day, per model from persisted `cost`/`tokens`, sub-agent rows excluded).
-  - `getRecommendations` **NEW**: ten suggested tasks from the last `/recommendations` run, a default 6-hourly cron job.
+  - `getRecommendations` **NEW**: twenty suggested tasks from the last `/recommendations` run, a default 6-hourly cron job.
   - `getMachines` with `machineAction` **NEW** (section 15).
   - `getHistory`: Chats (50 rows per page).
-  - `getTaskUpdate` **CHANGED** 10-03:
-    - Task update is the `/ask` agent's answer to "What has this task done so far, and what are its partial results?".
-    - First asked when the task is 60 s old and again once the answer is 600 s old or on Refresh; only a poll starts a run.
+  - `getTaskUpdate` **CHANGED** 10-03, **CHANGED** 11-19, **CHANGED** 11-20:
+    - **Task Progress** (formerly Task update) is the `/ask` agent's answer to "What has this task done so far, and what are its partial results?".
+    - First asked when the task is 60 s old and again once the answer is 600 s old, sooner when it estimated the time left (below), or on Refresh; only a poll starts a run.
+    - **Time left** (11-20): The question (`UPDATE_QUESTION`) also asks the agent to end its answer with `Time left: <low>-<high> min, most likely <best> min.`, or with `Time left: unknown.` when no estimate is possible, as when the task waits for the user:
+      - `_split_estimate` takes that sentence out of the answer only when it is the answer's last sentence; the same words anywhere else stay in the text.
+      - The `taskUpdate` reply carries `etaAt`, `etaLowAt` and `etaHighAt`: the most likely, earliest and latest finish in epoch milliseconds, counted from the moment the question was asked, and 0 when there is no estimate (`unknown`, numbers that are not low ≤ best ≤ high, or more than 365 days).
+      - The range is the agent's own, widened by `ETA_RANGE_WIDENING` (1.75): the low end divided by it and the high end multiplied.
+      - With an estimate, the next run is due after half of the time left, no sooner than `FIRST_UPDATE_DELAY_S` (60 s) and no later than `UPDATE_INTERVAL_S` (600 s); without one, or after a failed run, after `UPDATE_INTERVAL_S`.
+      - Measured on 11-20 at 70 checkpoints of 35 finished tasks, each task's context rebuilt as it was at the checkpoint: the most likely value was off by a median factor of about 1.9 on `claude-fable-5-2-max` and `claude-opus-5-5-medium`, the range as stated held the real time left at 50% and 46% of the checkpoints, and the widened range at 89% and 90%. `gpt-6.1-sol` and `gemini-4-carbon` underestimate more: their widened range held at 57% and 51% of 47 of those checkpoints.
     - Capped at $1 and run as a side-channel sub-agent whose spend is charged to the task.
     - The `/task_update` SEA remains as a chat command.
 - **Files**:
@@ -3366,7 +3445,7 @@ A daemon keeps a registry of other computers' daemons and drives them from its o
   - Revoking a machine means removing its ssh access there.
 - **Links**:
   - `MachineLink` is a persistent authenticated WebSocket per machine and lane, dialled on first use and again after a drop.
-  - A link answers one request at a time, so slow traffic has lanes of its own beside the default one: `panels` (sidebar polls, Task update, pictures, share), `actions` (Git and file actions), `commit`, `login` and `status`.
+  - A link answers one request at a time, so slow traffic has lanes of its own beside the default one: `panels` (sidebar polls, Task Progress, pictures, share), `events` (a folded panel's events, `getTaskEvents`), `skillSearch` and `skillInstall` (a skill search and a skill install, 11-20), `actions` (Git and file actions), `commit`, `login` and `status`.
   - Timeouts:
     - A request's reply times out after 8 s unless its forwarder allows more (`REQUEST_TIMEOUT`), and each `part` frame or `more` piece of a long reply restarts the wait.
     - Three waits have budgets of their own:
@@ -3389,7 +3468,7 @@ A daemon keeps a registry of other computers' daemons and drives them from its o
     - Lists this machine and every reachable registered machine, labelled by the host name its daemon reports when it was registered under the default name.
     - A remote pick shows green, and red once a `machines` reply has shown it down.
     - The pick for a new chat is one global setting (`setMachine` stores `last_machine` in `config.json` and broadcasts `machineChanged`), so the surfaces agree; a tab that shows a chat keeps that chat's machine.
-    - Stays enabled while the chat runs: the running task is not moved, and the pick is where the next prompt goes.
+    - Picking another machine than the chat's opens a new chat on that machine, as **New chat** does **CHANGED** (11-20; before, the pick was where the chat's next prompt went). The chat left keeps its machine and its running task and stays in the Chats panel.
   - **Working-directory drop-down**:
     - Lists the picked machine's directories (`getMachineWorkDirs` returns its `workDir`, `recentWorkDirs` and `maxBudget`).
     - A pick there sends `setWorkDir` with `machine`, which that machine's daemon adopts.
@@ -3416,13 +3495,15 @@ A daemon keeps a registry of other computers' daemons and drives them from its o
   - Every browser frame is acknowledged (`browserFrameAck`), so at most two frames of each page are in flight on the stream, and to each local connection watching the page.
   - A lost stream ends its terminals with a `terminalError` naming the machine and closes its browser tabs on every surface.
 - **Forwarded requests**:
-  - 36 commands are answered by the machine's daemon when they carry `machine` (`MACHINE_FORWARDERS`), and the page stamps them with the machine the active tab's header shows, so the sidebar, the model picker and the Settings sheet follow the chat in view:
+  - 42 commands are answered by the machine's daemon when they carry `machine` (`MACHINE_FORWARDERS`), and the page stamps them with the machine the active tab's header shows, so the sidebar, the model picker and the Settings sheet follow the chat in view:
     - Explorer, Source Control and editor (`listDir`, `gitStatus`, `gitLog`, `gitShow`, `gitAction`, `fsAction`, `openFile`, `saveFile`, `checkPaths`).
     - Settings sheet (`getConfig`, `saveConfig`, `getMyModels`, `saveMyModel`, `deleteMyModel`, `getClaudeCodeStatus`, `getCodexStatus`, `startCodexLogin`).
     - Model picker (`getModels`, `selectModel`).
     - `@` picker (`getFiles`, `recordFileUsage`).
-    - Schedule, Machines, Apps, Spend and Recommendations subpanels (seven commands).
-    - Task update (`getTaskUpdate`), a replayed transcript's pictures (`getReplayImage`), chat sharing (`shareChatTasks`) and the five CHATS writes below.
+    - Schedule, Machines, Skills, Connectors, Spend and Recommendations subpanels (ten commands):
+      - A forwarded skill search is waited for 30 s longer than the link's 8 s, and a forwarded skill install 900 s longer (11-20).
+      - A machine whose daemon does not know the Skills commands answers with an error, which the subpanel shows.
+    - Task Progress (`getTaskUpdate`), a replayed transcript's pictures (`getReplayImage`), a folded panel's events (`getTaskEvents`), chat sharing (`shareChatTasks`) and the seven CHATS writes below.
   - Remote UI behaviour:
     - The Explorer of a bound chat shows the machine's working directory alone and hides **Add Folder to Explorer...**, and a file opened from it saves back to the machine.
     - A remote machine's Settings sheet is headed `Settings of <label>` and hides this daemon's URLs and the **Update**, **Reset Server** and **Update Models** buttons.
@@ -3448,7 +3529,7 @@ A daemon keeps a registry of other computers' daemons and drives them from its o
   - Remote row display and actions:
     - Every row's **...** menu names the machine it ran on (a registered machine's label or this daemon's host name, **CHANGED** 11-19), and a machine filter (all, this machine, each registered machine) appears once a machine is registered.
     - A click resumes the chat in a local tab bound to the machine.
-    - The favourite star, title edit and delete buttons of a remote row, and the star of its chat (11-16), act on that machine's `history.db` (`setFavorite`, `setChatSummary`, `setChatFavorite`, `deleteTask`, `deleteChat`).
+    - The favourite star, title edit and delete buttons of a remote row, the star of its chat (11-16), and the pin of either (11-20), act on that machine's `history.db` (`setFavorite`, `setChatSummary`, `setChatFavorite`, `setPinned`, `setChatPinned`, `deleteTask`, `deleteChat`).
   - A task that a history sync copied in is listed under the machine it ran on: `task_history.machine` holds that machine's short host name, matched to a registered machine through `~/.kiss/machine_hosts.json`.
 
 ### Remote agents, multi-machine SEAs and brand hub
@@ -3532,13 +3613,14 @@ A daemon keeps a registry of other computers' daemons and drives them from its o
     - There is no row of chat tabs: a chat is opened from CHATS, and a tab strip shows above the chat only when the chat has sub-agent tabs to switch to.
     - On a phone, the file screen has the strip to itself: it lists the open file, browser and terminal tabs and nothing else, and shows for a single one too (11-12).
   - **Tab badges, menu and lifecycle**:
-    - A tab carries a spinner while its task runs, then a green tick or a red cross, a `?` badge while the agent waits for an answer, a dot for unsaved edits and a close button.
-    - Its menu offers Close, Close Others, Close All and Close Inactive.
+    - A tab carries a spinner while its task runs, then a green tick or a red cross, a `?` badge while the agent waits for an answer and a dot for unsaved edits.
+    - A file, browser or terminal tab has a close button and a menu offering Close, Close Others and Close All; a chat's or a sub-agent's tab has neither **CHANGED** (11-20; before, every tab had both, and the menu offered Close Inactive too).
     - A sub-agent's tab closes when the sub-agent finishes.
 - **Chat header** **NEW** (10-11, 10-12): Two drop-downs above the transcript, machine and working directory:
   - **Machine drop-down**:
     - Lists this computer and the registered machines (section 15).
-    - The pick is one setting shared by every client (10-19) and decides where the next task, the Terminal and Browser tabs and Git Commit run.
+    - The pick is one setting shared by every client (10-19) and decides where the next task, the Terminal and Browser tabs, Git Commit and Create pull request run.
+    - A pick of another machine opens a new chat there **CHANGED** (11-20).
   - **Working directory drop-down**:
     - Entries in order:
       1. The directories selected as the working directory on that machine so far, most recent first (`recent_work_dirs` of `~/.kiss/config.json`, up to 30, plus this computer's current directory; the folders that earlier tasks ran in are not offered).
@@ -3551,12 +3633,12 @@ A daemon keeps a registry of other computers' daemons and drives them from its o
     - Prompt and System Prompt panels start folded, and panels carry a copy button and a timestamp.
   - **Tool-call panels**:
     - Each tool call is a panel named after the tool.
-    - It starts folded to a one-line preview (the description of a Bash, `run_agent`, `run_parallel` or `run_commands_parallel` call, the path of a Read or Write) **CHANGED** (10-08; before, it started open), except that a Question and a `run_agent` or `run_parallel` panel start open.
+    - It starts folded to a one-line preview (the description of a Bash, `run_agent`, `run_parallel` or `run_commands_parallel` call, the path of a Read or Write) **CHANGED** (10-08; before, it started open), except that a Question starts open. A `run_agent` or `run_parallel` panel starts folded like the others **CHANGED** (11-20; before, it started open and folding or unfolding it closed or opened its sub-agent tabs).
     - It has a Stop button that interrupts that one call, except that a `finish` panel has no Stop button.
     - Bash output streams into the panel and a failed result is marked Failed.
     - **NEW** (10-08): The panel of the call in flight pulses and counts the elapsed time.
   - **Auto-folding, digests and Trajectory**:
-    - **Live sweep**: While a task runs, a sweep folds every panel older than the two newest (`STREAM_OPEN_PANELS`), except a panel the user opened and a `run_agent` or `run_parallel` panel whose sub-agent tabs are open; it never folds the Task panel, the Result, Thinking, questions, user messages, `/ask` answers and panels with pictures.
+    - **Live sweep**: While a task runs, a sweep folds every panel older than the two newest (`STREAM_OPEN_PANELS`), except a panel the user opened; it never folds the Task panel, the Result, Thinking, questions, user messages, `/ask` answers and panels with pictures.
     - **Summary digest**: A `summary` call works differently: it gathers the panels since the previous summary (or the Task panel) under one folded digest, Thinking included, and leaves questions, user messages, `/ask` answers and other panels with pictures outside it.
     - Both rules are **CHANGED** (10-06, 10-07; before, the sweep also folded Thinking and answered questions, and a digest took in questions and pictures).
     - **Trajectory** **NEW** (10-07): When the task ends, its event panels fold into a single Trajectory panel ("N events") between the task and the result.
@@ -3584,7 +3666,7 @@ A daemon keeps a registry of other computers' daemons and drives them from its o
 
 - **Composer**:
   - **Keys, completion and touch gestures**:
-    - Enter sends and Shift+Enter breaks the line.
+    - Enter sends and Shift+Enter breaks the line on the desktop; on a phone or tablet the composer sets `enterkeyhint="enter"` and Enter breaks the line while the Send button submits **CHANGED** (11-19).
     - Up and Down walk the prompt history, starting from an empty box.
     - Tab accepts the grey ghost completion, which is requested 300 ms after typing stops (two or more characters, cursor at the end).
     - On a touch screen, a right swipe accepts it and vertical swipes walk the history.
@@ -3628,13 +3710,11 @@ A daemon keeps a registry of other computers' daemons and drives them from its o
     - **New chat** (a chat-bubble icon with a `+` inside its top right, **CHANGED** 11-19; an untouched new chat is reused).
     - Inject.
     - The model picker.
-    - **...**, whose 11 entries are Voice trigger, Save chat, Attach files, Git Commit, Browser, Terminal, Dark mode or Light mode, High contrast, Auto mode, iPhone Home Screen and Settings.
+    - **...**, whose 4 entries are Voice trigger, Save chat, Attach files and iPhone Home Screen **CHANGED** (11-20, down from 11: Git Commit, Browser and Terminal are buttons of the strip under the right sidebar; Dark mode or Light mode, High contrast, Auto mode and Settings are buttons of the strip under the Chats list).
   - **Menu actions**:
     - **Save chat** (Share chat until 10-19):
       - Writes the whole chat as one standalone page, `reports/chat-<title-slug>-<chatId>.html` in the working directory.
       - A chat over the daemon's reply budget (section 14) is saved with its most recent tasks only, under a warning, and a page too large to upload is refused with an error.
-    - **Git Commit**:
-      - Commits the folder and machine of the chat header (10-18) and reports "Staging changes…", "Generating commit message…" and "Committing…" on one line; the flow is section 12.
     - **iPhone Home Screen** **NEW** (11-03):
       - Loads `/webclip.mobileconfig`, which Safari on a phone passes to the profile installer.
     - The Working directory entry is gone: it is the chat-header drop-down.
@@ -3651,60 +3731,101 @@ A daemon keeps a registry of other computers' daemons and drives them from its o
 
 The left sidebar, a drawer on a phone:
 
-- **Top bar and Filters drawer**:
-  - A refresh button that reloads the whole page **NEW** (10-23).
-  - A search box.
-  - A Flat list or Group by chat toggle.
-  - A folded Filters drawer:
-    - Chips: Running, Errored and Succeeded (on), Favorites (off; ticked, it keeps the starred tasks and every task of a starred chat, **CHANGED** 11-16) and Cron (off, so tasks started by scheduled jobs stay hidden until it is ticked) **NEW** (10-17).
-    - A From and To date range.
-    - Selects for SEA (All, None, each SEA), Machine **NEW** (10-10), WORKDIR **NEW** (10-12, in place of the workspace-only chip) and tag.
+- **Top bar and Filter and group menu**:
+  - A top row holding only a refresh button that reloads the whole page, above the **Projects** row and the search box **CHANGED** (11-21; button **NEW** 10-23; the Chats header row is gone).
+  - A search box with placeholder "Search prompts..." **CHANGED** (11-21; was "Search chats...").
+  - A **Filter and group** button to the right of the search box **NEW** (11-20; it replaces the Flat list or Group by chat toggle and the folded Filters drawer). It opens a menu with one row per setting; a row shows the setting's current value and opens a submenu whose chosen options carry a tick:
+    - **Status**: Running, Errored and Succeeded (all three on).
+    - **Favorites**: All, or Only favorites (the starred tasks and every task of a starred chat, **CHANGED** 11-16).
+    - **Cron tasks**: Hidden (the default, so tasks started by scheduled jobs stay out of the list) or Shown **NEW** (10-17).
+    - **Date**: a From and To date range that one button clears.
+    - **SEA** (All, None, each SEA), **Tag**, **Machine** (**NEW** 10-10; shown once a machine is registered) and **Work dir** (**NEW** 10-12, in place of the workspace-only chip).
+    - **Group by**, under a separator: Project (the default, **NEW** 11-21; the same as Chat while no project exists), Chat, or None for the flat list; the choice is kept in the browser.
+  - While a filter narrows the list the button wears a dot and its name says how many are on.
+  - The menu works from the keyboard: ArrowDown on the button opens it, the arrows move, Right opens a submenu on its first option, and Left or Escape closes it.
 - **Querying and filtering**:
   - Search, tag, machine and working directory are answered by the daemon, 50 tasks a page with more loaded on scroll; the other filters act on the rows already loaded.
-  - A WORKDIR pick is a folder of this computer and lists this daemon's tasks only, so while one is picked the Machine select is reset to All and disabled.
+  - A Work dir pick is a folder of this computer and lists this daemon's tasks only, so while one is picked the Machine row is reset to All and disabled.
 - **Sorting and date sections**:
   - Chats sort by completion time **CHANGED** (10-14) under sections in order:
     1. A Running section **NEW** (10-07).
-    2. Today.
-    3. Yesterday.
-    4. One section per earlier day.
+    2. A Pinned section **NEW** (11-20) with the pinned chats and tasks that are not running, and pinned projects (11-21); grouped by chat, a chat with a pinned task is listed here too.
+    3. A Projects section **NEW** (11-21) with the projects that are not pinned, shown when Group by is Project; chats in no project stay under the day sections.
+    4. Today.
+    5. Yesterday.
+    6. One section per earlier day.
 - **Chat group header and actions**:
-  - A chat is one group whose header is a single ellipsized line showing the stored chat summary (section 11) or the first task, a **...** menu button at the right and, when one applies, the last task's status mark **CHANGED** (11-19; mark **NEW** 10-07):
+  - A chat is one group whose header is a single ellipsized line showing the stored chat summary (section 11) or the first task, a fold button and a **...** menu button at the right and the last task's status mark **CHANGED** (11-19; mark **NEW** 10-07):
     - A spinner while it runs.
     - A `?` while it waits for an answer (10-06).
     - A red cross once it failed.
-    - A green tick only when it finished while this page was open; a task that succeeded before the page loaded has no mark.
+    - A green tick once it finished successfully **CHANGED** (11-20; before, only a task that finished while the page was open had one).
   - Header actions:
     - Clicking the header opens the chat **CHANGED** (10-08), and double-clicking the title renames it **NEW** (10-15).
-    - The **...** button opens a popover menu **CHANGED** (11-19) with named items (**Show the chat's tasks** or **Hide the chat's tasks**, **Favourite chat** **NEW** 11-16, **Edit the chat summary** where Enter saves, Escape cancels and an empty box restores the computed summary, and **Delete chat** **NEW** 10-20, confirmed inside the menu), followed under a hairline by the relative time of the latest task and the machine the header opens the chat on.
+    - The fold button left of the **...** button shows or hides the chat's tasks **CHANGED** (11-20; it was the first item of the menu).
+    - The **...** button opens a popover menu **CHANGED** (11-19) with named items (**Favourite chat** **NEW** 11-16, **Pin chat** or **Unpin chat** **NEW** 11-20, **Edit the chat summary** where Enter saves, Escape cancels and an empty box restores the computed summary, and **Delete chat** **NEW** 10-20, confirmed inside the menu), followed under a hairline by the relative time of the latest task and the machine the header opens the chat on.
 - **Task rows**:
-  - A task row is a single ellipsized line (**CHANGED** 11-19, down from three) with the same status mark, the task text and a **...** button whose popover menu lists **Favourite task**, **Copy task to clipboard**, **Expand task details**, **Delete task** (**NEW** 10-20, not while the task runs), the launch age and the machine name (the tag and SEA labels left on 11-12).
-  - Unfolded, it adds metrics, working directory, model, budget and the chat, task and parent ids with copy buttons.
+  - A task row is a single ellipsized line **CHANGED** (11-21; three lines until 11-19, fold button removed on 11-21) with the same status mark, the task text and a **...** button whose popover menu lists **Favourite task**, **Pin task** or **Unpin task** (**NEW** 11-20), **Copy task to clipboard**, **Delete task** (**NEW** 10-20, not while the task runs), the launch age and the machine name (the tag and SEA labels left on 11-12).
+  - Nothing is listed under a task row and a running row no longer repaints live usage **CHANGED** (11-21; chat rows and project rows keep their fold buttons): tokens and cost, working directory, model, machine, budget, agent and the chat, task and parent ids are shown in the Task Info view of the right panel, and the parallel or sequential mode of a task is no longer shown.
 - **Registered machines**:
-  - Chats of every registered machine are merged in **NEW** (10-10, 10-24), open in a tab bound to that machine (10-13), and their rename, favourite and delete are sent to the machine that owns them (11-08).
+  - Chats of every registered machine are merged in **NEW** (10-10, 10-24), open in a tab bound to that machine (10-13), and their rename, favourite, pin and delete are sent to the machine that owns them (11-08).
+- **Pins** **NEW** (11-20):
+  - A pin is stored by the daemon (`is_pinned` on the task's row and on the chat's summary row), so every client shows it; it survives a deploy as a star does.
+  - The daemon lists pinned rows right after the running ones and ahead of every other task, most recent first, so an old pinned task is loaded before newer tasks that are not pinned.
+- **Projects** **NEW** (11-21):
+  - A **Projects** row between the top refresh-button row and the search box opens a Projects page in a tab (`src/kiss/webapp/media/projects.js`): a **New project** button, then one settings panel per project (storage and overrides in section 11).
+  - A panel holds the project's name, description, default working directory with a **New folder** button, max budget, the seven check boxes of the Settings sheet and its API key groups, then **Cancel** and **Save**; a new panel is pre-filled with the app's current settings, and saving a new project or pressing its **Cancel** closes the Projects tab and takes the content window off screen (in the split desktop layout the content pane folds away with its other tabs still open in it; in the stacked phone layout the chat comes back), while saving or cancelling an existing project's panel leaves the page open.
+  - A pin button ("Pin project" or "Unpin project") in a panel's top right corner pins the project in the sidebar and is drawn like the pin of a project page in Claude Code Desktop (a borderless icon button with a pushpin tilted 45 degrees, an outline while not pinned and solid while pinned, with a soft fill under the pointer), and a saved project's panel has a **Delete** button (asking "Delete this project? Its chats are kept.").
+  - With Group by set to Project, a project is a foldable row with the same fold button as a chat row and a **...** button that opens its settings; unfolding it lists its chats (200 at a time, with **Show more chats**), each of which unfolds to its tasks, while a chat with a running task stays in the Running section at the top.
+  - Clicking a project's name starts a new chat in it.
+  - The chat header has a Project drop-down listing "Default" first **CHANGED** (11-21; was "No project") and then every project to put the chat on screen into a project or take it out (chats of this machine only; a chat on a registered remote machine is in no project).
+  - On a page served by an older daemon process started before Projects existed and still running after an in-place upgrade of the page files, the page ignores an "Unknown command" answer to the three reads it issues on its own (`getProjects`, `getInputDraft`, `getTaskTags`), showing every other error as before **NEW** (11-21).
+- **Bottom strip** **NEW** (11-19):
+  - Sits below the scrolling Chats list with the daemon's OS username on the left and buttons on the right: Dark/Light mode, High/Low contrast, Auto mode, Decrease font size, Increase font size and Settings.
+  - **CHANGED** (11-20): the buttons are 32 px with 18 px icons (24 px and 16 px before) and are the only place for these actions, which left the `...` menu; Terminal and Browser moved to the strip under the right sidebar.
 
 ### Right sidebar
 
-- Nine sections, up from five on 09-30 **CHANGED**, each collapsible and resizable with its state kept in the browser.
+- Ten sections, up from five on 09-30 **CHANGED** (Skills is the tenth, 11-20), each collapsible and resizable with its state kept in the browser.
+- **Look** **CHANGED** (11-20): set like the Chats sidebar.
+  - One UI font at two sizes: a row's text (a Task Info row, the Task Progress report, the name of a job, machine, app, model, file or commit, a recommendation) has a chat summary's size and weight, and what is secondary to it (a job's schedule line, a badge, a count, an age, an app's state, a group or form label) a day label's size; the Source Control branch and status letters left the monospace font.
+  - The Task Progress report keeps to those sizes whatever it is written in: a heading is a small grey label over its part, bold text and a table's header are the medium weight, and code keeps the monospace font at the label's size.
+  - A row is a chat row's box: its corner and a fill under the pointer that ends 8px from the panel's edges, with a list's scrollbar at the panel's edge.
+  - A recommendation keeps its border and a form's field its box, both now the Chats search field's.
+- **Bottom strip** **NEW** (11-20): below the sections, buttons of the same size as those under the Chats list:
+  - **Terminal** and **Browser** open their tabs on the chat header's machine (moved from the `...` menu and the Chats strip).
+  - **Git Commit** (moved from the `...` menu) commits the folder and machine of the chat header (10-18) and reports "Staging changes…", "Generating commit message…" and "Committing…" on one line; the flow is section 12.
+  - **Create pull request** pushes the chat's branch and opens its pull request; the outcome is a notification with a button that opens the pull request or the page that finishes it; the flow is section 12.
+  - While a commit or a pull request is under way its button is disabled, pulses and says why.
 - **Folding behaviour**:
   - The first page load after an install or update, once per browser, leaves only Recommendations open **NEW** (10-12).
   - A click on the header of a folded section opens it and folds every other section, while a click on an open section folds only that one **CHANGED** (10-11; before, a click toggled its own section alone).
-  - A task that starts in the chat on screen opens Task Info and Task update and folds the other sections **NEW** (10-09); in the split layout it folds the content pane away too.
+  - A task that starts in the chat on screen opens Task Info and Task Progress and folds the other sections **NEW** (10-09); in the split layout it folds the content pane away too.
 - **Machine routing and polling**:
-  - Schedule, Machines, Apps, Spend and Recommendations show the machine picked in the chat header **NEW** (10-18) and are re-read every 30 s while the page is visible.
+  - Schedule, Machines, Skills, Connectors, Spend and Recommendations show the machine picked in the chat header **NEW** (10-18) and are re-read every 30 s while the page is visible.
+  - A re-read replaces the rows in place when its answer arrives. A change of the chat's machine or folder keeps the old rows on screen, out of reach, until the new answer replaces them; "Loading…" shows only in a view that has shown nothing yet **CHANGED** (11-20; before, a folder broadcast from another window or a machine binding that dropped out and came back blanked the views).
 - **Sections**:
   - **Task Info**:
     - **Shows**:
       - Tokens, Cost, Steps, Time, Machine, Workdir, Max budget, Date, Base model, Chat id, Task id; Parent task and Agent when they apply.
       - Time is `Running 2m 5s` while the task runs and the time it took (`2m 5s`) once it is over, however it ended **CHANGED** (11-12; it read `Done (2m 5s)`, `Error` or `Stopped` after a live end and `Ready` for a finished task opened from the history list), and `—` when the task's row records no end.
       - The Parallel mode row left on 10-12.
-    - **Actions**: none.
-  - **Task update** **CHANGED** (10-03):
+      - The rows are 5px apart, half of the gap before **CHANGED** (11-20).
+    - **Actions** **NEW** (11-20): The Chat id, Task id and Parent task values are buttons:
+      - A click, Enter or Space inserts the id into the composer at the caret, in place of a selection when there is one.
+      - A folded composer unfolds, and below 900 px, where the sidebar is a drawer, the drawer closes first.
+      - A click that ends a drag or a double-click that selects the id inserts nothing, so the id can still be copied; an unknown id (`—`) is plain text.
+  - **Task Progress** **CHANGED** (10-03; renamed from **Task update** on 11-19; time left 11-20):
     - **Shows**: The /ask agent's answer to what the task has done so far:
       - Cadence (each run capped at $1):
         1. First asked 60 s after the start.
-        2. Then asked when the last answer is 10 minutes old.
+        2. Then asked when the last answer is 10 minutes old, or sooner when that answer estimated the time left: after half of it, 60 s at least (11-20).
       - Read every 5 s while on screen; also for a task on another machine (10-24).
+      - **Time left** **NEW** (11-20): A line above the answer words the estimate the answer ended with, such as "About 12 min left (8 to 20 min), done around 10:50 AM" (the range and its measured accuracy are in section 14):
+        - The line is rewritten every 15 s from the three finish times of the `taskUpdate` reply, so it counts down between two answers.
+        - It reads "Less than a minute left" near the end and "Taking longer than estimated" once the latest time has passed.
+        - A time of an hour or more is written as "1 h 20 min", and the finish time is led by its weekday when it falls on another day.
+        - An answer without an estimate, or the end of the task, empties the line.
     - **Actions**: Refresh runs it now.
   - **Explorer, Source Control**: See Explorer and Source Control below.
   - **Schedule**:
@@ -3717,15 +3838,24 @@ The left sidebar, a drawer on a phone:
   - **Machines** **NEW** (10-11):
     - **Shows**: Registered machines: reachability dot, address, a `local` badge (section 15).
     - **Actions**: **+** form (name, address, password); copy, delete; refresh pings again.
-  - **Apps**:
+  - **Skills** **NEW** (11-20):
+    - **Shows**:
+      - The skills the agent can use in the working directory the Explorer shows: name, a badge for where the skill comes from, description.
+      - After a search, the skills found on skills.sh, the most installed first (the registry's most installed skills for an empty search): name with a link to its registry page, repository and install count.
+    - **Actions**:
+      - Enter in the search field or its button searches the registry; Clear removes the results.
+      - **+** on a found skill has the daemon check it and add it (section 7): the row reads "Checking…", then "Added", "Needs review" with the findings and an **Add anyway** button, or "Blocked" with the findings.
+      - A found skill whose name the agent already has reads "Added" and has no **+**.
+      - Refresh reloads the list.
+  - **Connectors** **CHANGED** (11-20; titled **Apps** before):
     - **Shows**: Messaging and third-party apps with "N of M connected" (section 19).
     - **Actions**: Connect opens a new chat and sends the sign-in task at once; refresh checks the sign-in state again.
   - **Spend**:
     - **Shows**: An all-time total, a heatmap with one cell per day (at least 98 days, weeks as columns) and one bar per model.
     - **Actions**: Arrows page through earlier weeks; refresh reloads the figures.
-  - **Recommendations** **NEW** (10-12):
-    - **Shows**: The ten tasks the last `/recommendations` run stored (`RECOMMENDATION_COUNT`; section 9).
-    - **Actions**: A click puts one in a new chat's composer unsent; refresh re-reads the stored list.
+  - **Recommendations** **NEW** (10-12), **CHANGED** (11-21):
+    - **Shows**: A single card and nothing else, pinned to the bottom of the sidebar over the strip of buttons, advancing every 30 s through the twenty tasks the last `/recommendations` run stored (`RECOMMENDATION_COUNT`; section 9), the next card sliding in from the right as the previous one slides out to the left, and waiting while the pointer or keyboard focus is on the card; the card is no taller than a third of the window (nor than an equal share of the sidebar), and a longer suggestion scrolls; it has no header or title, no position button, no refresh button and no status line, never folds, and is hidden while there is no suggestion (none stored yet, or the machine's answer is an error).
+    - **Actions**: A click on the card opens a new chat with the task in the composer, unsent.
 
 ### Explorer, Source Control and content tabs
 
@@ -3734,7 +3864,7 @@ The left sidebar, a drawer on a phone:
   - For a chat bound to another machine, both show that machine's files **NEW** (10-14).
   - **Explorer**:
     - Lazy file tree rooted at the working directory; Add Folder to Explorer... adds more top-level folders, kept in the browser.
-    - Its menu has New File, New Folder, Cut, Copy, Paste, Rename, Delete, Copy Path, Copy Relative Path, Open to the Side, Find in Folder, Select for Compare and Compare with Selected, Compare Selected for a multi-selection **NEW** (09-30), Set as Working Directory and Remove Folder from Explorer.
+    - Its menu has New File, New Folder, Sort (Alphabetical, Created and Modified, ascending and descending, inherited by sub-folders and remembered for the 200 most recent folders) **NEW** (11-19), Cut, Copy, Paste, Rename, Delete, Copy Path, Copy Relative Path, Open to the Side, Find in Folder, Select for Compare and Compare with Selected, Compare Selected for a multi-selection **NEW** (09-30), Set as Working Directory and Remove Folder from Explorer.
   - **Source Control**:
     - Shows:
       - The branch and a count of uncommitted files.
@@ -3753,11 +3883,11 @@ The left sidebar, a drawer on a phone:
     - A save over a file that changed on disk asks Overwrite or Reload from disk.
     - **NEW** (10-23): Every file tab has a Reload from disk button.
   - **Viewers and diffs**:
-    - **Markdown and HTML files**: Open rendered, with an Edit source and Preview toggle.
+    - **Markdown and HTML files**: Open rendered, with an Edit source and Preview toggle; `.html` and `.htm` tabs add an **Open in Browser** button next to Save that opens the file in the OS default browser locally or stages it in daemon memory (up to 8 documents or 64 MiB) at `/view/<token>/<name>` under a `sandbox` CSP **NEW** (11-19).
     - **PDFs**: A PDF opens in the pdf.js viewer (pdfjs-dist 6.3.289: Download link, page box, Ctrl/Cmd+0 fit width, Ctrl/Cmd with `+`/`-` zoom, Home/End, PageUp/PageDown, and Left/Right, which turn the page only while the pages are no wider than the view and pan otherwise).
     - **Images, folders and binaries**: An image opens as a picture, a folder as a listing, and any other binary as a download link.
     - **Diffs**: A diff opens in Monaco's diff editor **NEW** (09-30).
-    - **Reports**: A report, that is a Markdown or HTML file that a Write call saved under a `reports` folder, opens by itself when its task ends, rendered in a tab that has no Edit source toggle until the file is opened by hand.
+    - **Reports**: A report, that is a Markdown or HTML file that a Write call saved under a `reports` folder by a task or its sub-agents, opens automatically once the top-level task has ended and its worktree is merged (and never when a sub-agent finishes or while still in an unmerged worktree) **CHANGED** (11-19), rendered in a tab with an Edit source and Preview toggle.
   - **Browser tab**:
     - Streams the daemon machine's browser as JPEG frames under an address bar and sends pointer, wheel, keyboard, paste and touch input back (the agent's browser is section 17).
   - **Terminal tab** **NEW** (10-05):
@@ -3785,6 +3915,12 @@ The left sidebar, a drawer on a phone:
   - **Remote password**:
     - **Default**: 20 random letters and digits, drawn by the first `install.sh` run and kept by later ones; empty without that run.
     - **Notes**: Plain text behind an eye toggle, editable, with a button that fills in a new random 20-character password, stored like any edit when the sheet closes **CHANGED** (10-15 to 10-19); while it is empty only this computer can connect (section 14).
+  - **Default working directory** **NEW** (11-21):
+    - **Default**: None (`default_work_dir` empty; section 6).
+    - **Notes**:
+      - A drop-down like the chat header's working-directory drop-down ("None", the recent folders and "Choose ...").
+      - The page, not the daemon, applies it when a new chat is opened, when a chat is opened from the Chats list, when a chat is put into a project, and when the field is saved while the chat on screen has not run a task yet (a chat that has run a task keeps the folder it is in); a chat in a project with a default folder of its own gets that one instead, and a folder picked in the chat header afterwards overrides it until another chat is opened.
+      - Chats of this machine only (a chat bound to a registered remote machine gets none); a plain tab switch or a reload applies none, and a task started without the page (a scheduled job or a messaging channel) runs in the daemon's current working directory.
   - **Max budget per task ($)**: Default 100.
   - **Use web tools**: Default on.
   - **Use persistent memory**: Default on (section 13).
@@ -3831,7 +3967,7 @@ The left sidebar, a drawer on a phone:
   - **CSS tokens and typography**:
     - `main.css` defines 90 root tokens (7 font sizes, 11 spacing steps, 9 radii, 5 shadows, 3 durations, a 17-layer z-index scale and the colours).
     - `remote-codex.css` sets 64 custom properties on the page body from the theme palette that the daemon inlines.
-    - Text is 13 px.
+    - Text defaults to 13 px (`--theme-font-size`, adjustable from 10 px to 20 px via the Chats sidebar footer buttons across the UI, Monaco editors and widgets, terminals, preview context menus and rendered Markdown previews, **NEW** 11-19).
   - **Auto-hiding scrollbars** **NEW** (11-19):
     - Scrollbars in the sidebars, transcript and menus stay hidden at rest and show a slim pill thumb while the user scrolls (for 1.2 s after the last user scroll, or while hovered or dragged), keeping their gutter reserved so rows do not shift.
 - **Updates and refresh**:
@@ -4065,7 +4201,7 @@ The left sidebar, a drawer on a phone:
 ### Sign-in, Muse auth, MCP connectors and recorded use
 
 - **Sign-in**:
-  - The Apps subpanel lists the auth state of the 42 channels as connected, not connected or unknown (`auth_status.py` in a subprocess: 8 workers, 20 s for all probes together, 45 s for the subprocess, result cached 30 s), and a click on an unconnected app starts a "Connect my <app>" task; the same probe feeds `/recommendations` (section 9).
+  - The Connectors subpanel (titled Apps until 11-20) lists the auth state of the 42 channels as connected, not connected or unknown (`auth_status.py` in a subprocess: 8 workers, 20 s for all probes together, 45 s for the subprocess, result cached 30 s), and a click on an unconnected app starts a "Connect my <app>" task; the same probe feeds `/recommendations` (section 9).
   - Every sign-in page is handed to the user in the Browser tab or the default browser (section 17).
   - Flows in `_device_auth.py` and QR pairing:
     - Device code: GitHub, Teams, Twitch, Matrix.
@@ -4310,6 +4446,7 @@ The left sidebar, a drawer on a phone:
          - Since 10-20, a task still in flight is held back until a later sync, and deleted tasks and chats travel as deletions (`deleted_tasks`, `deleted_chats`) instead of coming back from the other machine: the receiving database drops the deleted tasks' events and rows, except those of a task still running there, which wait for a later sync, and of a task row newer than its tombstone (section 15).
          - Since 10-17, the two machines may be on different releases, where the merge used to refuse: a `task_history` or `events` column one database lacks is added with the other's declaration, and `is_cron` is worked out for rows written without it, by the same `history_columns.py` the web app migrates with.
          - `chat_summaries` is recomputed on the receiving side, never copied.
+         - Projects never travel (11-21): the `projects` table and the chats' `project_id` are taken out of a whole-database snapshot before it leaves the machine (`scripts/sync-task-db.sh`), because a project can hold API keys.
     5. **Steps 5 and 6**:
        - The remote runs `install.sh` (`KISS_SKIP_LAUNCH=1`, `--non-interactive`), then `uv sync` in the checkout, and `kiss-web` becomes a lingering systemd user service run from the checkout's `.venv` with `--workdir` set to the checkout.
        - A running task no longer stops the deploy **CHANGED** (10-20): while one runs on the remote (its newest event within `SORCAR_LIVE_TASK_WINDOW`, 300 s) only the restart is skipped, and `SORCAR_FORCE_RESTART=1` restarts anyway.
@@ -4356,6 +4493,7 @@ The left sidebar, a drawer on a phone:
   - `python -m kiss.scripts.webclip` (361 lines, 8 options) writes an iOS Web Clip profile (`.mobileconfig`, payload `com.apple.webClip.managed` with `FullScreen`) that opens the web app without browser controls.
   - The profile is signed with a certificate issued by the daemon's local CA, so a phone that installed `/ca.crt` shows it as Verified.
   - The daemon serves the same profile for its tunnel URL, else its LAN URL, at `GET /webclip.mobileconfig` (the "..." menu's "iPhone Home Screen" item).
+  - On an iPhone with rounded display corners that the page knows (the Face ID models from the iPhone X on, told apart by screen size and pixel ratio), held upright in the Home Screen web app, the composer keeps one 8px gap to the left, right and bottom edge of the screen and rounds its bottom corners by the display's corner radius less that gap so the two curves run parallel, keeping what is in the composer above the home indicator; nothing changes in a Safari tab, with the phone held sideways, or on a phone not in the list (`media/displayCorners.js`, inlined in the page head, and the `.display-corners` rules of `media/remote-codex.css`) **NEW** (11-21).
 - **Windows**:
   - There has been no Windows installer since the extension, which installed MinGit and uv there, was removed 10-14; `install.sh` stops with `Unsupported OS` on anything but macOS and Linux.
   - Windows code paths remain (`kiss-app` finds Chrome, Edge and Brave there but registers no launcher; the installer's active-tasks probe uses a 5 s timeout there), and fixes from the cross-platform test runs landed through 11-09 (section 22).
@@ -4404,7 +4542,7 @@ The left sidebar, a drawer on a phone:
   - `pytest>=9.0.3,<9.1` stays pinned because 9.1.0 and 9.1.1 lose a package's `conftest.py` fixtures in split runs.
 - **JavaScript tests**:
   - 407 `*.test.js` files under `src/kiss/webapp/test/`, plain Node scripts that use `assert`, with 21 helper modules.
-  - `npm test` (`node test/run-all.js`) **CHANGED** (10-18) runs every suite in its own `node` process, as many at a time as the machine has CPUs up to 32 (`--serial` runs one at a time), and kills a suite's process group after 2 minutes; before, the suites ran one after another.
+  - `npm test` (`node test/run-all.js`) **CHANGED** (10-18) runs every suite in its own `node` process, as many at a time as the machine has CPUs up to 32 (`--serial` runs one at a time), and kills a suite's process group after 10 minutes; before, the suites ran one after another.
   - 23 `*.coverage.js` gates run jsdom suites under `NODE_V8_COVERAGE` (a suite that a gate names runs only through that gate):
     - 22 run one suite each and fail unless every code line fenced by `// <mark>-coverage:start` and `// <mark>-coverage:end` comments in the `media/*.js` files was executed.
     - `remotePasswordBypass.coverage.js` runs five suites and requires every code line of the whole of `transport.js` and `assetLoadGuard.js` and every branch except the empty `catch` after a `location.reload()`.
@@ -4849,7 +4987,6 @@ Figure 3. Top-level tasks and spend per month:
     - A task still running there (it waits for a later sync).
     - A row younger than its deletion (section 21).
 - **Strings in the product**:
-  - The Recommendations empty state promises "five tasks from your last 24 hours" (the SEA stores 10 and reaches back until 20 completed tasks show).
   - The Save chat tooltip names `reports/chat-<id>.html` (a titled chat is saved as `chat-<title-slug>-<chat-id>.html`).
 - **Install and recipes**:
   - `pyproject.toml:383-384` calls uv 0.12.19 "the version the installers pin" (only the `Dockerfile` pins it).

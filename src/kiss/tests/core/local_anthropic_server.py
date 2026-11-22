@@ -12,7 +12,8 @@ test can check what the client sent.  Point the SDK at it with the
 ``ANTHROPIC_BASE_URL`` environment variable.
 
 A scripted turn may carry ``thinking``, the text of its thinking block, and
-``output_tokens``, what the reply is billed for (30 by default).
+``output_tokens``, what the reply is billed for (30 by default).  A turn that
+carries ``error`` is answered with a 400 of that message instead.
 
 Served ``as_provider``, the stand-in also does what the provider does where
 the cost of a session depends on it (:mod:`kiss.tests.core.local_anthropic_provider`):
@@ -196,6 +197,9 @@ class ScriptedHandler(BaseHTTPRequestHandler):
             self._reply(200, "application/json", _ping_body())
             return
         turn = self.script[min(n_streamed, len(self.script)) - 1]
+        if "error" in turn:
+            self._reply(400, "application/json", _error_body(turn["error"]))
+            return
         if self.cache is not None:
             # The check reads what the client sent, the cache what the model reads.
             error = provider.stale_thinking(body)

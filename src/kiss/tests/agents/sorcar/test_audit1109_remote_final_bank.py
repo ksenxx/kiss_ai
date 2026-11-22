@@ -12,6 +12,11 @@
   panel splits a recovered task's own spend by the models it ran on.
 * The final save's bank waits for the offsets' publish lock in slices
   (``locked_call``), so a Stop reaches a save another publisher blocks.
+* A charge's mark and its bank are one step for the runner's injected
+  Stop: raised between the two it left a mark with no bank in a process
+  that lives on (audit 2026-11-21, FX03c R1-2).  The step starts once
+  the mark has the history's write lock and its transaction: a Stop
+  still reaches a bank that waits for them behind a reader.
 """
 
 from __future__ import annotations
@@ -24,6 +29,7 @@ import subprocess
 import sys
 import textwrap
 import threading
+import time
 from types import CodeType, FrameType
 from typing import cast
 from unittest import mock
@@ -33,9 +39,11 @@ from kiss.agents.sorcar import sorcar_agent
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.relentless_agent import _OFFSET_PUBLISH_LOCK
 from kiss.core.locked import locked_call
+from kiss.core.tool_interrupt import call_without_injection, inject_async_exception
 from kiss.server import agent_state, task_update
 from kiss.server.agent_state import AgentState
 from kiss.server.task_update import charge_remote_subtask_usage
+from kiss.tests.agents.sorcar import rwlock_probe
 from kiss.tests.agents.sorcar import test_audit1103_remote_costs as base
 from kiss.tests.agents.sorcar.test_audit1103_remote_costs import (
     ASTRA,
@@ -77,6 +85,59 @@ def _report_on_thread(child: str, report: dict[str, object], outcome: list[str])
         outcome.append(type(exc).__name__)
     finally:
         th._close_thread_db()
+
+
+def _stop_as_the_mark_returns(frame: FrameType, what: str, arg: object) -> None:
+    """Profile function of a banking thread: the runner's Stop, delivered to it with the
+    product's injector as the mark of a charge returns, committed, its record not appended."""
+    if what == "return" and frame.f_code is th._mark_remote_charge_banked.__code__:
+        sys.setprofile(None)
+        inject_async_exception(threading.get_ident(), KeyboardInterrupt)
+
+
+def _report_stopped_after_the_mark(
+    child: str, report: dict[str, object], outcome: list[str],
+) -> None:
+    """:func:`_report_on_thread` under :func:`_stop_as_the_mark_returns`."""
+    sys.setprofile(_stop_as_the_mark_returns)
+    try:
+        _report_on_thread(child, report, outcome)
+    finally:
+        sys.setprofile(None)
+
+
+def _stop_as_the_hold_starts(frame: FrameType, what: str, arg: object) -> None:
+    """Profile function of a banking thread: the runner's Stop, delivered to it as its bank,
+    the history's write lock and transaction taken, asks for the hold of its mark."""
+    caller = frame.f_back
+    if (what == "call" and frame.f_code is call_without_injection.__code__
+            and caller is not None and caller.f_code is sorcar_agent._bank_remote_charge.__code__):
+        sys.setprofile(None)
+        inject_async_exception(threading.get_ident(), KeyboardInterrupt)
+
+
+def _report_stopped_at_the_hold(
+    child: str, report: dict[str, object], outcome: list[object],
+) -> None:
+    """Charge *report* for *child* under :func:`_stop_as_the_hold_starts`; record the Stop and
+    what it left this thread with: an open transaction, the history's write lock."""
+    sys.setprofile(_stop_as_the_hold_starts)
+    try:
+        charge_remote_subtask_usage(None, child, report)
+    except KeyboardInterrupt:
+        outcome += [
+            "KeyboardInterrupt", th._get_db().in_transaction, rwlock_probe.writer(th._rw_lock)]
+    finally:
+        sys.setprofile(None)
+        th._close_thread_db()
+
+
+def _waits_for_the_history_lock(thread: threading.Thread) -> bool:
+    """Whether *thread* waits for persistence's read-write lock."""
+    frame = sys._current_frames().get(thread.ident or -1)
+    while frame is not None and frame.f_code is not th._RWLock._await.__code__:
+        frame = frame.f_back
+    return frame is not None
 
 
 def _flag_lock_wait(
@@ -310,6 +371,89 @@ class TestRemoteFinalBank(base.TestRemoteSubagentCosts):
                 self.assertEqual(agent.usage_snapshot(), (3.5, 350, 6))
                 self.assertEqual(_row(parent), (3.5, 350, 6))
                 self.assertEqual(_flags(parent), [(1, 1)])
+
+    def test_an_injected_stop_between_the_mark_and_the_bank_waits_for_the_bank(self) -> None:
+        """The runner's Stop is injected as the mark of a charge banked live returns: the
+        mark and the bank are one step it waits for.  Raised between the two it left a
+        mark with no bank in a process that lives on, whose later usage events reach the
+        marked totals plus the charge by other spend; a kill before the final save then
+        lost the charge, which no recovery could tell from a banked one."""
+        parent, agent, _state = self._parent_agent(register=True)
+        report = self._late_report()
+        th._record_remote_subtask("remote-held-mark-child", parent, "box", ASTRA, 2.0, 200, 3)
+        outcome: list[str] = []
+        banker = threading.Thread(
+            target=_report_stopped_after_the_mark,
+            args=("remote-held-mark-child", report, outcome), daemon=True)
+        banker.start()
+        banker.join(30)
+        self.assertEqual(outcome, ["KeyboardInterrupt"])
+        self.assertEqual((_flags(parent), agent.usage_snapshot()), ([(1, 0)], (3.5, 350, 6)))
+        th._save_task_result("Done", parent)
+        with th.TASK_USAGE_LOCK:
+            agent._save_final_usage({}, parent, result_summary="Done")
+        self.assertEqual(agent.usage_snapshot(), (3.5, 350, 6))
+        self.assertEqual(_row(parent), (3.5, 350, 6))
+        self.assertEqual(_flags(parent), [(1, 1)])
+
+    def test_a_stop_reaches_a_bank_waiting_for_the_history_write_lock(self) -> None:
+        """A reader of the history is inside persistence's lock while a charge is banked
+        live: the runner's Stop unwinds the bank where it waits for the write side, the
+        reader still inside and the charge neither marked nor banked, and the final save
+        banks it once.  The hold that makes the mark and the bank one step covered that
+        wait too, so the Stop waited for the reader."""
+        parent, agent, _state = self._parent_agent(register=True)
+        report = self._late_report()
+        th._record_remote_subtask("remote-reader-child", parent, "box", ASTRA, 2.0, 200, 3)
+        outcome: list[str] = []
+        banker = threading.Thread(
+            target=_report_on_thread, args=("remote-reader-child", report, outcome), daemon=True)
+        # Held as it enters the bank: the charge's own record is written by then.
+        with Pause(sorcar_agent._bank_remote_charge.__code__, lambda _locals: True) as at_bank:
+            banker.start()
+            self.assertTrue(at_bank.paused.wait(30))
+            with th._rw_lock.read_lock():
+                at_bank.release()
+                deadline = time.monotonic() + 30
+                while not _waits_for_the_history_lock(banker) and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                self.assertTrue(_waits_for_the_history_lock(banker))
+                self.assertEqual(inject_async_exception(banker.ident or 0, KeyboardInterrupt), 1)
+                banker.join(5)
+                stopped_behind_the_reader = not banker.is_alive()
+            banker.join(30)
+        self.assertTrue(stopped_behind_the_reader, "the Stop waited for the history's reader")
+        self.assertEqual(outcome, ["KeyboardInterrupt"])
+        self.assertEqual((_flags(parent), agent.usage_snapshot()), ([(0, 0)], (3.0, 300, 5)))
+        th._save_task_result("Done", parent)
+        with th.TASK_USAGE_LOCK:
+            agent._save_final_usage({}, parent, result_summary="Done")
+        self.assertEqual(agent.usage_snapshot(), (3.5, 350, 6))
+        self.assertEqual(_row(parent), (3.5, 350, 6))
+        self.assertEqual(_flags(parent), [(1, 1)])
+
+    def test_a_stop_before_the_hold_of_an_admitted_bank_releases_the_history(self) -> None:
+        """The runner's Stop lands once a bank has the history's write lock and its
+        transaction, ahead of the step no Stop cuts: the transaction is rolled back and
+        the lock released on the way out, the charge neither marked nor banked, and the
+        final save banks it once."""
+        parent, agent, _state = self._parent_agent(register=True)
+        report = self._late_report()
+        th._record_remote_subtask("remote-admitted-child", parent, "box", ASTRA, 2.0, 200, 3)
+        outcome: list[object] = []
+        banker = threading.Thread(
+            target=_report_stopped_at_the_hold,
+            args=("remote-admitted-child", report, outcome), daemon=True)
+        banker.start()
+        banker.join(30)
+        self.assertEqual(outcome, ["KeyboardInterrupt", False, False])
+        self.assertEqual((_flags(parent), agent.usage_snapshot()), ([(0, 0)], (3.0, 300, 5)))
+        th._save_task_result("Done", parent)
+        with th.TASK_USAGE_LOCK:
+            agent._save_final_usage({}, parent, result_summary="Done")
+        self.assertEqual(agent.usage_snapshot(), (3.5, 350, 6))
+        self.assertEqual(_row(parent), (3.5, 350, 6))
+        self.assertEqual(_flags(parent), [(1, 1)])
 
     def test_a_charge_from_another_process_is_banked_by_the_final_save(self) -> None:
         parent, agent, _state = self._parent_agent(register=True)

@@ -457,6 +457,93 @@ function testAMachineDirectoryNobodySelectedIsNotListed() {
   assert.strictEqual(currentDir(win), '/work/boot');
 }
 
+/** Put the new chat on screen, a chat of this machine, in project *id*. */
+function pickProject(win, id) {
+  const select = byId(win, 'chat-project');
+  select.value = id;
+  select.dispatchEvent(new win.Event('change', {bubbles: true}));
+}
+
+/** Pick /srv/other on gpu-box; returns the check sent there, unanswered. */
+function pickOnTheBox(win, posted) {
+  pickMachine(win, 'gpu-box');
+  send(win, BOX_DIRS);
+  pick(win, '/srv/other');
+  return msgs(posted, 'listDir').pop();
+}
+
+/**
+ * The daemon's answer to *check*: the folder exists, spelled *path*
+ * (none: the listing names no folder, so it is the one asked for).
+ */
+function listed(win, check, path) {
+  send(win, {
+    type: 'dirListing',
+    token: check.token,
+    path,
+    machine: check.machine,
+    entries: [],
+  });
+}
+
+function testAFolderCheckInFlightIsItsMachinesOwn() {
+  const {win, posted} = boot();
+  // Two projects: the folder of one is this machine's working directory
+  // already, the other has a folder of its own.
+  const project = (id, dir) => ({
+    id,
+    name: id,
+    description: '',
+    settings: {default_work_dir: dir},
+    isPinned: false,
+  });
+  send(win, {
+    type: 'projects',
+    projects: [project('here', '/work/ws'), project('there', '/home/u/older')],
+    chatProjects: {},
+  });
+  const adopted = () => msgs(posted, 'setWorkDir').map(m => [m.machine || '', m.workDir]);
+
+  // The machine is checking a pick when the chat, back on this machine,
+  // is put in a project whose folder is the working directory here:
+  // nothing is asked, and the machine's answer still counts.
+  let box = pickOnTheBox(win, posted);
+  pickMachine(win, '');
+  pickProject(win, 'here');
+  assert.strictEqual(msgs(posted, 'listDir').length, 1);
+  listed(win, box, '/srv/other');
+  assert.deepStrictEqual(adopted(), [['gpu-box', '/srv/other']]);
+
+  // A project with another folder asks this daemon, beside the
+  // machine's check: each answer is taken, the machine's first here.
+  box = pickOnTheBox(win, posted);
+  pickMachine(win, '');
+  pickProject(win, 'there');
+  let here = msgs(posted, 'listDir').pop();
+  assert.deepStrictEqual([here.machine, here.path], [undefined, '/home/u/older']);
+  listed(win, box, '/srv/other');
+  listed(win, here, '/home/u/older');
+  assert.deepStrictEqual(adopted().slice(1), [
+    ['gpu-box', '/srv/other'],
+    ['', '/home/u/older'],
+  ]);
+  assert.strictEqual(currentDir(win), '/home/u/older');
+
+  // The other way round: this daemon is checking a project's folder
+  // when a folder is picked on the machine.  This daemon's answer
+  // first, naming no folder: the one adopted is the one asked of this
+  // daemon, not the machine's.
+  pickProject(win, 'here');
+  here = msgs(posted, 'listDir').pop();
+  box = pickOnTheBox(win, posted);
+  listed(win, here);
+  listed(win, box, '/srv/other');
+  assert.deepStrictEqual(adopted().slice(3), [
+    ['', '/work/ws'],
+    ['gpu-box', '/srv/other'],
+  ]);
+}
+
 const tests = [
   [
     "a machine pick lists the machine's directories",
@@ -485,6 +572,10 @@ const tests = [
   [
     'a new machine unfolds the Machines subpanel',
     testANewMachineUnfoldsTheMachinesSubpanel,
+  ],
+  [
+    "a folder check in flight is its machine's own: a default folder applied here leaves the machine's pick alone, and a pick there this daemon's",
+    testAFolderCheckInFlightIsItsMachinesOwn,
   ],
 ];
 

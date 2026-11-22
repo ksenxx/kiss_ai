@@ -136,6 +136,8 @@ function testRefusedPickKeepsRootsUnchanged() {
     [OTHER, WD],
     'the old work dir is kept once accepted',
   );
+  // The tree on screen is replaced when the new folder has answered.
+  answerListing(win, posted, OTHER);
   assert.deepStrictEqual(
     rootRows(win).map(r => r.dataset.explorerPath),
     [OTHER, WD],
@@ -156,6 +158,7 @@ function testAcceptedPickOfTheSameFolderAddsNothing() {
   clickSetWorkDir(win);
   answerWorkDirCheck(win, posted, OTHER);
   assert.deepStrictEqual(savedRoots(win), [OTHER, WD]);
+  answerListing(win, posted, OTHER);
   const wdRow = rootRows(win).find(r => r.dataset.explorerPath === WD);
   click(win, wdRow.querySelector('.explorer-root-set'));
   answerWorkDirCheck(win, posted, WD);

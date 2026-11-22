@@ -111,6 +111,11 @@ class GeminiScript:
             every 30 ms, never completing the headers — bytes that reset
             any byte-level read deadline while no response exists yet
             for a stream watchdog to cut.
+        pretty: Write each chunk's JSON indented, one ``data:`` line per
+            line of it: one event of several data lines, which the SDK
+            joins before it parses them.
+        newline: The line end of a streamed body: CR LF, LF or CR, the
+            three an event stream may use.
         refusals: How many of the next requests are answered with an
             HTTP 503 and no body before the scripted response, so a test
             can drive the SDK's own retry (``http_options.retry_options``).
@@ -128,6 +133,8 @@ class GeminiScript:
         self.after = "close"
         self.delay = 0.0
         self.headers = "complete"
+        self.pretty = False
+        self.newline = "\r\n"
         self.refusals = 0
         self.refuse_thinking = ""
         self.serving = threading.Event()
@@ -142,6 +149,8 @@ class GeminiScript:
         after: str = "close",
         delay: float = 0.0,
         headers: str = "complete",
+        pretty: bool = False,
+        newline: str = "\r\n",
     ) -> None:
         """Script the next response.
 
@@ -150,11 +159,15 @@ class GeminiScript:
             after: ``"close"``, ``"silent"``, ``"cut"`` or ``"keepalive"``.
             delay: Seconds of generation time per chunk (see ``delay``).
             headers: ``"complete"`` or ``"drip"`` (see ``headers``).
+            pretty: Several ``data:`` lines per chunk (see ``pretty``).
+            newline: The stream's line end (see ``newline``).
         """
         self.chunks = chunks
         self.after = after
         self.delay = delay
         self.headers = headers
+        self.pretty = pretty
+        self.newline = newline
         self.serving.clear()
         self.hung_up.clear()
 
@@ -207,7 +220,10 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         for body in self.script.chunks:
             time.sleep(self.script.delay)
-            self.wfile.write(f"data: {json.dumps(body)}\r\n\r\n".encode())
+            text = json.dumps(body, indent=2 if self.script.pretty else None)
+            end = self.script.newline
+            event = "".join(f"data: {line}{end}" for line in text.split("\n")) + end
+            self.wfile.write(event.encode())
             self.wfile.flush()
         self.script.serving.set()
         if self.script.after == "silent":

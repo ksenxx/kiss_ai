@@ -99,7 +99,7 @@ from kiss.agents.seas.base.base_sea import BaseSea, ChannelSea
 from kiss.agents.sorcar.sea_settings import (
     _MID_IMPORT,
     SEA_BASES,
-    SOURCE_REVISION,
+    SOURCE,
     SeaError,
     declares_hidden,
     execute_python_file,
@@ -117,6 +117,7 @@ from kiss.agents.sorcar.sea_settings import (
 from kiss.core.config import kiss_home
 from kiss.core.llm_reply import LLMReply
 from kiss.core.locked import locked, locked_call
+from kiss.core.tool_interrupt import call_without_injection
 from kiss.core.tool_verdict import ALLOW, Verdict
 
 logger = logging.getLogger("kiss.sea_commands")
@@ -715,8 +716,9 @@ def _split_slash_command(prompt: str) -> tuple[str, str] | None:
 
 
 _LOADED_STAMP = "_loaded_stamp"
-"""Name, in the namespace of a SEA :func:`load_sea` returned, of the revision of the text it
-ran from (:func:`~kiss.agents.sorcar.sea_settings.source_revision`)."""
+"""Name, in the namespace of a SEA :func:`load_sea` returned, of the script it ran from: the
+real path of the file and the revision of the text that ran
+(:func:`~kiss.agents.sorcar.sea_settings.source_revision`)."""
 
 
 def load_sea(sea_path: Path) -> BaseSea:
@@ -727,12 +729,15 @@ def load_sea(sea_path: Path) -> BaseSea:
     every call observes its current contents); the SEA class is the
     one subclass of :class:`BaseSea` the file itself defines (an
     imported base class does not count).  The instance's ``path`` is
-    *sea_path*.  The revision of the text that ran is kept with the
+    *sea_path*.  The script that ran, the file and the revision of its
+    text, is kept with the
     instance (``_LOADED_STAMP``): the loader reads the file once, when
-    its turn to run it has come, and names the bytes it ran, so what
-    :func:`run_picked_hook` runs under a revision is the text of that
-    revision, whatever the file held while the load waited for
-    another load of the same script and whatever it holds since.
+    its turn to run it has come, and names the bytes it ran and the
+    file it read them from, so what
+    :func:`run_picked_hook` runs under a script is the text of that
+    script, whatever *sea_path* named (a link moved to another file)
+    or held while the load waited for another load of the same script,
+    and whatever it names or holds since.
 
     Args:
         sea_path: Absolute path of the SEA ``.py`` file.
@@ -768,7 +773,7 @@ def load_sea(sea_path: Path) -> BaseSea:
             f"SEA {str(sea_path)!r}: {classes[0].__name__}() raised: {safe_message(exc)}"
         ) from exc
     sea.path = sea_path
-    vars(sea)[_LOADED_STAMP] = namespace[SOURCE_REVISION]
+    vars(sea)[_LOADED_STAMP] = namespace[SOURCE]
     return sea
 
 
@@ -895,8 +900,12 @@ def _chain(
             # derives from it) contributes once, in the picker's place.
             # Keyed by source file, not module name: the same class is
             # one module when imported and another when its file is
-            # executed by ``load_sea``.
-            key = (str(_file_of(cls) or cls.__module__), cls.__qualname__)
+            # executed by ``load_sea``.  By the file itself, not the
+            # spelling of its path: imported through a ``sys.path``
+            # entry that is a symlink, it is the file the registry
+            # names by its resolved path.
+            file = _file_of(cls)
+            key = (_real_path(file) if file else cls.__module__, cls.__qualname__)
             if cls is BaseSea and not include_base:
                 continue
             if name in vars(cls) and key not in seen:
@@ -915,6 +924,15 @@ def sea_name(seas: list[BaseSea]) -> str:
     if type(seas[-1]) is BaseSea:
         return ""
     return script_name(str(seas[-1].path))
+
+
+def _real_path(file: Path) -> str:
+    """Return the path of *file* with its symlinks resolved; as it is spelt when it is no path
+    a file can have (an embedded NUL: a script may leave anything in its ``__file__``)."""
+    try:
+        return os.path.realpath(file)
+    except ValueError:
+        return str(file)
 
 
 def _file_of(obj: Any) -> Path | None:
@@ -1337,23 +1355,41 @@ def _check_list(label: str, value: Any) -> list[Any]:
 
 
 def _check_tools(label: str, value: Any) -> list[Callable[..., Any]]:
-    """Return *value* as a list of tool callables, or raise :exc:`SeaError`."""
+    """Return *value* as a list of tool callables, or raise :exc:`SeaError`.
+
+    A run registers a tool under its ``__name__``, the name the model calls it by.  A
+    callable that has none (a ``functools.partial``, an instance with ``__call__``) is
+    refused here, in words that name the SEA: ``/check`` and the run get the same error.
+    """
+    nameless: list[str] | None = None
     try:
         if isinstance(value, list) and all(callable(tool) for tool in value):
-            return value
+            nameless = [type(tool).__name__ for tool in value if not _tool_name(tool)]
+            if not nameless:
+                return value
     except BaseException as exc:  # noqa: BLE001 — an untrusted list may raise while iterated
         if is_stop(exc):
             raise
         raise SeaError(f"{label} returned a broken list: {safe_message(exc)}") from exc
-    raise _reject(label, value, "a list of tool callables (not a file path)")
+    if nameless is None:
+        raise _reject(label, value, "a list of tool callables (not a file path)")
+    raise SeaError(
+        f"{label} returned a tool that has no __name__ (a {nameless[0]}); "
+        "a run registers a tool under it: wrap it in a named function"
+    )
 
 
 PICKED_HOOK_TIMEOUT_SECONDS = 15.0
 """How long :func:`run_picked_hook` waits for ``on_picked_as_model()`` before moving on."""
 
-_PickedHook = tuple[str, str, str | None]
-"""A picked hook: the model name, the work directory and the revision of the text the SEA
-ran from (``_LOADED_STAMP``; ``None`` for a SEA :func:`load_sea` did not load)."""
+_Script = tuple[str, str | None]
+"""A script: the real path of the file and the revision of its text.  The file counts beside
+the text: a SEA reads its ``self.path`` and the files next to it, so two files of one text
+are two scripts, while one file is one script however its path is spelt."""
+
+_PickedHook = tuple[str, str, _Script | None]
+"""A picked hook: the model name, the work directory and the script the SEA ran from
+(``_LOADED_STAMP``; ``None`` for a SEA :func:`load_sea` did not load)."""
 
 _picked_hooks: dict[_PickedHook, threading.Thread] = {}
 """The thread each picked hook is reserved for, until the hook is over (:func:`run_picked_hook`).
@@ -1371,13 +1407,13 @@ def _log_picked_hook(hook: _PickedHook, sea: BaseSea | None) -> None:
     thread gets to it.  A thread whose entry is no longer its own (a
     later pick replaced it before it got going) runs nothing.  The
     thread gives up its entry once the hook is over.  A script that
-    loaded as another revision than the one its pick was keyed by
-    (edited, or registered anew, in between) is picked again as it
-    loaded: its hook runs under the revision that was executed, where
+    loaded as another than the one its pick was keyed by (edited, or
+    registered anew from another file, in between) is picked again as
+    it loaded: its hook runs under the script that was executed, where
     the next pick finds it, and whoever waits for this thread waits
     for that run.
     """
-    model, work_dir, revision = hook
+    model, work_dir, script = hook
     try:
         if locked_call(_lock, _picked_hooks.get, hook) is not threading.current_thread():
             return
@@ -1386,7 +1422,7 @@ def _log_picked_hook(hook: _PickedHook, sea: BaseSea | None) -> None:
             if sea_path is None:
                 return
             sea = load_sea(sea_path)
-        if vars(sea).get(_LOADED_STAMP) == revision:
+        if vars(sea).get(_LOADED_STAMP) == script:
             note = _call(_method(sea, "on_picked_as_model"), work_dir)
             if note:
                 logger.info("SEA %s picked as model: %s", model, note)
@@ -1414,11 +1450,16 @@ def _picked_hook_thread(hook: _PickedHook, sea: BaseSea | None) -> threading.Thr
     no pick finds, and every pick would start another.  The thread
     needs ``_lock`` to see that the entry is its own, so it runs
     nothing before its pick has left here.  A start that is refused
-    takes its entry back.  One that a Stop interrupted leaves it,
-    because nothing tells whether the thread exists: a thread that
-    does not is not alive, so no pick shares it and the next one
-    replaces it, as it replaces one that has yet to get going, which
-    then finds the entry is not its own.
+    takes its entry back.  The runner's injected Stop waits for the
+    start to end (``call_without_injection``): raised where
+    ``Thread.start()`` had taken the lock of the thread's ``_started``
+    event, it left the thread blocked on that lock for good, never
+    run.  A start that a Ctrl-C cuts (the main thread's own, which
+    nothing holds back) leaves its entry, because nothing tells
+    whether the thread exists: a thread that does not is not alive,
+    so no pick shares it and the next one replaces it, as it replaces
+    one that has yet to get going, which then finds the entry is not
+    its own.
 
     Raises:
         RuntimeError: The process is out of threads.
@@ -1430,7 +1471,7 @@ def _picked_hook_thread(hook: _PickedHook, sea: BaseSea | None) -> threading.Thr
         )
         _picked_hooks[hook] = thread
         try:
-            thread.start()
+            call_without_injection(thread.start)
         except RuntimeError:
             del _picked_hooks[hook]
             raise
@@ -1450,15 +1491,18 @@ def run_picked_hook(
     cron job is scheduled.  The daemon calls it when the user picks the SEA
     (``selectModel``) and once per run whose model is the SEA.  A pick
     whose hook is still running from an earlier pick of the same model,
-    directory and script revision shares that run instead of starting
-    another, so a hook that never returns holds one thread, not one per
-    pick.  The revision is that of the text the SEA ran from (a digest
+    directory and script (the file and the revision of its text, as
+    its load recorded them) shares that run instead of starting another, so a hook
+    that never returns holds one thread, not one per pick.  The
+    revision is that of the text the SEA ran from (a digest
     of the bytes its load executed), not the one the file has when it
     is picked: the hook of a script fixed since runs beside the stuck
     hook of its old text, whichever was loaded or picked first, and a
     script saved again unchanged is the same hook.  The text is the
     picked script's own: a fix in a file its class derives from is no
-    new revision of it.  Hooks of picks from different directories may
+    new revision of it.  A command registered anew from another file
+    is another script, though its text be the same: its hook runs
+    beside the stuck one of the first file.  Hooks of picks from different directories may
     overlap: a hook that must not race gets its atomicity from what it
     calls (``cron_job("ensure")`` for autorouter).  Whatever the hook
     returns is logged; a hook that raises is logged and never fails the
@@ -1483,17 +1527,20 @@ def run_picked_hook(
             Only the registry (filled first when it is still empty, as
             :func:`model_sea` fills it) and the bytes of the registered
             script are read here, for the revision its text has now.
+            The script is named as a load names it: resolved once, its
+            text read from the file it resolved to.
     """
     if sea is None:
         list_commands()  # populate the registry on a cold start
         path = _registered_path(model)
         if path is None:
             return
-        revision = file_revision(path)
+        real_path = os.path.realpath(path)
+        script: _Script | None = (real_path, file_revision(Path(real_path)))
     else:
-        revision = vars(sea).get(_LOADED_STAMP)
+        script = vars(sea).get(_LOADED_STAMP)
     try:
-        thread = locked_call(_lock, _picked_hook_thread, (model, work_dir, revision), sea)
+        thread = locked_call(_lock, _picked_hook_thread, (model, work_dir, script), sea)
     except RuntimeError:  # the process is out of threads
         logger.warning("SEA %s: on_picked_as_model() not run", model, exc_info=True)
         return
@@ -1775,6 +1822,7 @@ class _ModelCheck(threading.Thread):
         self.deadline = time.monotonic() + MODEL_CHECK_TIMEOUT_SECONDS
         self.verdict = False
         self.reads: list[dict[_Watched, _Reading]] = []
+        self.replacement: _ModelCheck | None = None
 
     def run(self) -> None:
         """Decide the verdict, then give up the script's entry in ``_model_checks``.
@@ -1833,14 +1881,35 @@ def _model_check(sea_path: Path, stale: _ModelCheck | None) -> _ModelCheck:
     """
     check = _model_checks.get(sea_path)
     if check is None or check is stale or not check.is_alive():
+        previous = check
         check = _ModelCheck(sea_path)
         _model_checks[sea_path] = check
         try:
             check.start()
         except RuntimeError:
-            del _model_checks[sea_path]
+            if previous is None:
+                del _model_checks[sea_path]
+            else:
+                _model_checks[sea_path] = previous
             raise
+        if previous is not None:
+            previous.replacement = check
+    if stale is not None and stale is not check:
+        stale.replacement = check
     return check
+
+
+def _model_check_result(check: _ModelCheck) -> tuple[_ModelCheck, bool | None]:
+    """Resolve the replacement and its terminal result atomically; the caller holds ``_lock``.
+
+    ``None`` means the current check is still within its wait budget. A completed check
+    supplies its verdict; a timed-out check is omitted until it answers.
+    """
+    while check.replacement is not None:
+        check = check.replacement
+    if not check.is_alive():
+        return check, check.verdict
+    return check, None if time.monotonic() < check.deadline else False
 
 
 def _listed_as_model(sea_path: Path) -> bool:
@@ -1854,8 +1923,11 @@ def _listed_as_model(sea_path: Path) -> bool:
     and is listed once it has answered.  A check is given up for a new
     one only once something it read has changed
     (:meth:`_ModelCheck.outdated`): the repaired script is listed
-    though the old check never returns.  A listing made by the script
-    itself, from the code its check runs, does not wait for that check;
+    though the old check never returns, its text run beside the old
+    one's import under its own revision gate. Existing listings follow
+    that replacement rather than returning the old check's default
+    verdict. A listing made by the script itself, from the code its
+    check runs, does not wait for that check;
     a process out of threads lists nothing it has not decided yet.
     """
     cached = locked_call(_lock, _model_sea_cache.get, sea_path)
@@ -1873,15 +1945,24 @@ def _listed_as_model(sea_path: Path) -> bool:
         )
         return False
     # Sliced so a Stop of the calling thread lands between slices instead of after the wait.
-    while check.is_alive() and time.monotonic() < check.deadline:
-        check.join(0.2)
-    if check.is_alive():
-        logger.warning(
-            "SEA %s: register_as_model() still running after %.0f s; not offered as a model",
-            sea_path, MODEL_CHECK_TIMEOUT_SECONDS,
-        )
-        return False
-    return check.verdict
+    while True:
+        if check.replacement is not None:
+            check = check.replacement
+            continue
+        if check.is_alive() and time.monotonic() < check.deadline:
+            check.join(0.2)
+            continue
+        # A replacement may have been installed between the link read and the deadline
+        # decision. Resolve both together under the lock that installs replacements.
+        check, result = locked_call(_lock, _model_check_result, check)
+        if result is not None:
+            if not result and check.is_alive():
+                logger.warning(
+                    "SEA %s: register_as_model() still running after %.0f s; "
+                    "not offered as a model",
+                    sea_path, MODEL_CHECK_TIMEOUT_SECONDS,
+                )
+            return result
 
 
 def model_seas() -> dict[str, Path]:
@@ -2107,8 +2188,9 @@ def _settings_text(settings: dict[str, Any]) -> str:
 
 
 def _tool_name(tool: Any) -> str:
-    """Return the name a tool callable is registered under (its ``__name__`` or its type's)."""
-    return str(getattr(tool, "__name__", None) or type(tool).__name__)
+    """Return the name a run registers a tool callable under: its ``__name__``, else ``""``."""
+    name = getattr(tool, "__name__", None)
+    return name if isinstance(name, str) else ""
 
 
 def help_text_if_command(prompt: str) -> str | None:

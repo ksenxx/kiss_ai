@@ -185,6 +185,51 @@ def truncate_result(content: str) -> str:
     return content[:half] + "\n... (truncated) ...\n" + content[-half:]
 
 
+#: What the ``Bash`` tools write around a command's output, which the
+#: stream does not carry.  The host tool opens the result of a failed,
+#: a timed-out or a left-running command with a line of its own
+#: (``useful_tools._format_bash_result`` / ``_format_bash_timeout``,
+#: the ``on_timeout="background"`` notice), as the container tool does
+#: a timed-out one's (``docker_manager._timeout_message``); a failed
+#: one's it closes with the exit code (``_with_exit_code``), before an
+#: ``until`` verdict and the note of a long sleep
+#: (``useful_tools.wait_instead_of_sleep``), each on a line of its
+#: own.  A refusal is none of these lines: the tools refuse a command
+#: before anything of the call is streamed (what the container tools
+#: run for themselves is not streamed, ``docker_manager.ToolScript``),
+#: so it is recorded whole.  Whole lines in those places only: output
+#: that reads like one elsewhere, or opens with another ``Error`` or
+#: with ``REFUSED``, is the command's.  The progress-log digest reads a
+#: command's end from these lines (``task_digest._NOT_PASSED``): one
+#: dropped here is a failed copy replayed there.
+_BASH_STATUS = re.compile(
+    r"\A(?:Error \(exit code -?\d+\):"
+    r"|Error: (?:Command execution timeout|command timed out).*"
+    r"|Still running after .+; left running as background job .+)$"
+    r"|^\[exit code: -?\d+\]"
+    r"(?=(?:\n\[until .*)?(?:\n(?:\[note: the sleep of|Waited on job) .*\n)?\Z)",
+    re.MULTILINE,
+)
+
+
+def bash_status_lines(content: str) -> list[str]:
+    """Return the lines the ``Bash`` tools wrote around a streamed command's output.
+
+    The one reading of both printers: the web transcript records these
+    lines as the result of a call whose output it streamed, the console
+    prints them after the stream.  Without them a failed, a timed-out
+    and a left-running command read as one that passed.
+
+    Args:
+        content: The result of a ``Bash`` call, as the tool returned it.
+
+    Returns:
+        The tool's own lines (:data:`_BASH_STATUS`), in the order they
+        stand; none for a command that passed.
+    """
+    return _BASH_STATUS.findall(content)
+
+
 def extract_path_and_lang(tool_input: dict) -> tuple[str, str]:
     """Extract the file path and inferred language from a tool input dict.
 

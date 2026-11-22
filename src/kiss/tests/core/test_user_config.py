@@ -18,9 +18,10 @@ import shlex
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -164,6 +165,31 @@ def _load_api_keys_into(raised: list[BaseException]) -> None:
         load_api_keys()
     except BaseException as error:  # noqa: BLE001 - the Stop under test is no Exception
         raised.append(error)
+
+
+def _call_into(
+    outcome: list[BaseException | None], fn: Callable[..., object], *args: object,
+) -> None:
+    """Call ``fn(*args)`` and record what it raises, ``None`` for nothing (a thread's target)."""
+    try:
+        fn(*args)
+    except BaseException as error:  # noqa: BLE001 - recorded for the test to assert on
+        outcome.append(error)
+    else:
+        outcome.append(None)
+
+
+def _locked_elsewhere(lock_path: Path) -> bool:
+    """Whether another open file holds the lock at *lock_path* right now."""
+    with exclusive_file_lock(lock_path, blocking=False) as mine:
+        return not mine
+
+
+def _relink(link: Path, target: Path) -> None:
+    """Point the symbolic link *link* at *target*, in one step."""
+    staged = link.with_name("relinked")
+    staged.symlink_to(target)
+    os.replace(staged, link)
 
 
 class TestLoadSaveConfig:
@@ -2844,6 +2870,369 @@ class TestReviewRegressions:
         assert target.read_text() == "# mine\n"
         assert all((tmp_path / key / ".bashrc").is_symlink() for key in keys)
 
+    @posix_only("creating a symlink needs no privilege")
+    @pytest.mark.parametrize(
+        ("store", "lock", "save"),
+        [
+            ("config.json", ".config.lock", "save_config({sys.argv[1]: 'made-up'})"),
+            ("api_keys.env", ".api_keys.env.kiss.lock", "save_api_key(sys.argv[1], 'made-up')"),
+        ],
+        ids=["config", "api-keys"],
+    )
+    def test_store_behind_two_links_is_written_under_one_lock(
+        self, store: str, lock: str, save: str, tmp_path: Path,
+    ) -> None:
+        """Two homes whose config or key store is a link to one file write it in turn.
+
+        Each writer locked a file in its own home only, so both read the
+        shared file and the second replace dropped what the first had
+        stored (audit C10-F1).  Here two processes each store one entry
+        while the lock beside the file itself is held: both wait for it,
+        and once it is free both entries are there and the links are links.
+        """
+        names = ("FIRST_ENTRY", "SECOND_ENTRY")
+        target = tmp_path / "shared" / store
+        target.parent.mkdir()
+        target.write_text("{}" if store == "config.json" else "")
+        script = "\n".join([
+            "import pathlib, sys, time",
+            "from kiss.core.user_config import save_api_key, save_config",
+            "pathlib.Path(sys.argv[2]).write_text('ready')",
+            "deadline = time.monotonic() + 120",
+            "while not pathlib.Path(sys.argv[3]).exists() and time.monotonic() < deadline:",
+            "    time.sleep(0.02)",
+            save,
+        ])
+        writers: list[subprocess.Popen[bytes]] = []
+        try:
+            with exclusive_file_lock(target.with_name(lock), timeout=30):
+                for name in names:
+                    home = tmp_path / name
+                    (home / ".kiss").mkdir(parents=True)
+                    (home / ".kiss" / store).symlink_to(target)
+                    env = {**os.environ, "HOME": str(home), "KISS_HOME": str(home / ".kiss")}
+                    ready, go = str(home / "ready"), str(tmp_path / "go")
+                    command = [sys.executable, "-c", script, name, ready, go]
+                    writers.append(subprocess.Popen(command, env={**env, "SHELL": "/bin/bash"}))
+                deadline = time.monotonic() + 120
+                while not all((tmp_path / name / "ready").exists() for name in names):
+                    assert time.monotonic() < deadline, "a writer never started"
+                    time.sleep(0.05)
+                (tmp_path / "go").write_text("go")
+                time.sleep(1.0)  # a writer that does not wait is done within milliseconds
+                assert [writer.poll() for writer in writers] == [None, None]
+                assert target.read_text() in ("{}", "")
+            assert [writer.wait(60) for writer in writers] == [0, 0]
+        finally:
+            for writer in writers:
+                if writer.poll() is None:
+                    writer.kill()
+                    writer.wait(30)
+        assert all(f"{name}=made-up" in target.read_text().replace('": "', "=") for name in names)
+        assert all((tmp_path / name / ".kiss" / store).is_symlink() for name in names)
+
+    @posix_only("creating a symlink needs no privilege")
+    @pytest.mark.parametrize("moves", [1, 2])
+    @pytest.mark.parametrize(
+        ("store", "lock", "save", "args", "meanwhile"),
+        [
+            ("config.json", ".config.lock", save_config, ({"ENTRY": "arrived"},),
+             '{"OTHER": "kept"}'),
+            ("api_keys.env", ".api_keys.env.kiss.lock", save_api_key,
+             ("OPENAI_API_KEY", "arrived"), "export GEMINI_API_KEY=kept\n"),
+        ],
+        ids=["config", "api-keys"],
+    )
+    def test_store_link_pointed_elsewhere_during_the_wait_is_written_under_the_new_lock(
+        self, store: str, lock: str, save: Callable[..., object], args: tuple[object, ...],
+        meanwhile: str, moves: int, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The file a store link names once the locks are held is the one read and replaced.
+
+        The lock beside the linked file may come first in the order all
+        writers take them in, so the link is followed before the wait.
+        Pointed at another file during it, the writer went on to read and
+        replace that file under the lock of the one the link used to name,
+        and what the file's own writer stored meanwhile was lost (audit
+        C10-F1, as reviewed).  Here the link is pointed elsewhere while the
+        writer waits for the store's own lock, and the lock beside the new
+        file is held: the writer waits for that one too, writes no file
+        until it has it, and keeps what was stored under it.  Pointed
+        elsewhere once more during that second wait, the link is followed
+        no further: the save fails and has written no file.
+        """
+        monkeypatch.setenv("SHELL", "/bin/bash")
+        empty = "{}" if store == "config.json" else ""
+        # The locks are taken in the order of their paths: a-first, home/.kiss, z-second.
+        names = ("a-first", "z-second", "third")
+        first, second, third = targets = [tmp_path / name / store for name in names]
+        for target in targets:
+            target.parent.mkdir()
+            target.write_text(empty)
+        link = user_config.CONFIG_DIR / store
+        link.parent.mkdir()
+        link.symlink_to(first)
+        own, old, new = (path.with_name(lock) for path in (link, first, second))
+        outcome: list[BaseException | None] = []
+        writer = threading.Thread(target=_call_into, args=(outcome, save, *args), daemon=True)
+        deadline = time.monotonic() + 60
+        with exclusive_file_lock(new, timeout=30):
+            with exclusive_file_lock(own, timeout=30):
+                writer.start()
+                while not _locked_elsewhere(old):  # the writer has followed the link, and waits
+                    assert writer.is_alive() and time.monotonic() < deadline, outcome
+                    time.sleep(0.01)
+                _relink(link, second)
+            if moves == 1:
+                writer.join(1.0)  # one that does not wait for the new file's lock is done by now
+                assert writer.is_alive(), outcome
+                assert [target.read_text() for target in targets] == [empty] * 3
+                second.write_text(meanwhile)  # what the holder of that lock stores
+            else:
+                while _locked_elsewhere(old) or not _locked_elsewhere(own):  # its second wait
+                    assert writer.is_alive() and time.monotonic() < deadline, outcome
+                    time.sleep(0.01)
+                _relink(link, third)
+        writer.join(60)
+        if moves == 1:
+            assert outcome == [None]
+            assert all(entry in second.read_text() for entry in ("kept", "arrived"))
+            assert [first.read_text(), third.read_text()] == [empty, empty]
+        else:
+            assert [type(error) for error in outcome] == [TimeoutError]
+            assert "named another file" in str(outcome[0])
+            assert [target.read_text() for target in targets] == [empty] * 3
+        assert link.is_symlink() and link.samefile(targets[moves])
+
+    def test_migration_leaves_a_list_bash_runs_in_the_background_to_the_shell(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """bash runs an and/or-list that one ``&`` ends in the background, all of it.
+
+        The scan judged an export by the operators beside it: ``export
+        KEY=… && true &`` was imported and stored for good, though the
+        sourcing shell never holds it (audit C10-F2).  Such a list is the
+        shell's to resolve, also where it spans lines or the ``&``
+        follows a compound command; a ``;`` before the ``&`` ends the
+        list in the foreground.  zsh puts only the last pipeline of the
+        list in the background: there the text still tells.
+        """
+        names = ("OPENAI_API_KEY", "GEMINI_API_KEY", "ANTHROPIC_API_KEY", "OPENROUTER_API_KEY")
+        text = (
+            "export OPENAI_API_KEY=background-only && true &\n"
+            "export GEMINI_API_KEY=foreground\n"
+            "export GEMINI_API_KEY=background || false &\n"
+            "export ANTHROPIC_API_KEY=foreground\n"
+            "export ANTHROPIC_API_KEY=background &&\n  { true; } &\n"
+            "export OPENROUTER_API_KEY=kept && true; true &\n"
+            "wait\n"
+        )
+        rc = Path.home() / ".bashrc"
+        rc.write_text(text)
+        monkeypatch.setenv("SHELL", "/bin/bash")
+        for name in names:
+            monkeypatch.delenv(name, raising=False)
+        assert user_config._scan_rc_text_for_keys(text, "bash", set(names)) == {
+            **dict.fromkeys(names[:3]), "OPENROUTER_API_KEY": "kept",
+        }
+        assert user_config._scan_rc_text_for_keys(text, "zsh", set(names)) == {
+            "OPENAI_API_KEY": "background-only", "GEMINI_API_KEY": "background",
+            "ANTHROPIC_API_KEY": "background", "OPENROUTER_API_KEY": "kept",
+        }
+        bash = _resolve_shell_path("bash")
+        if bash is None:
+            return  # no bash to source the RC with: the scan is all there is to check
+        load_api_keys()
+        loaded = [os.environ.get(name, "") for name in names]
+        assert loaded == ["", "foreground", "foreground", "kept"]
+        assert "background" not in api_keys_env_path().read_text()
+        # What the real shell holds, sourcing the same RC (bounded, clean environment).
+        show = 'source "$1"; printf "%s\\n" ' + " ".join(f'"${name}"' for name in names)
+        sourced = subprocess.run(
+            [bash, "--noprofile", "--norc", "-c", show, "probe", str(rc)],
+            capture_output=True, text=True, timeout=30, env={"HOME": str(Path.home())},
+        )
+        assert loaded == sourced.stdout.splitlines()
+
+    @pytest.mark.parametrize("shell", ["bash", "zsh"])
+    def test_expansion_in_a_here_document_assigns_like_one_in_a_command(
+        self, shell: str, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The shell expands ``${KEY:=…}`` in a here-document whose word is not quoted.
+
+        Its lines were text whatever the word: a save or a delete
+        reported success while every new shell went on assigning the old
+        key, and the migration stored a leftover from another shell's RC
+        in place of the value the user's shell assigns (audit C10-F3).
+        The text of a quoted document is expanded nowhere and stays inert,
+        and so does ``\\${KEY:=…}`` in one that is not quoted: the
+        backslash takes the ``$`` its meaning, the key can be deleted and
+        another RC's assignment of it is the one to import.
+        """
+        if _resolve_shell_path(shell) is None:
+            pytest.skip(f"{shell} is not installed")
+        rc = _shell_rc_path(shell)
+        other = _shell_rc_path("zsh" if shell == "bash" else "bash")
+        text = ": <<EOF\n${OPENAI_API_KEY:=legacy-token}\nEOF\nexport OPENAI_API_KEY\n"
+        leftover = "export OPENAI_API_KEY=stale-leftover\n"
+        rc.write_text(text)
+        other.write_text(leftover)
+        monkeypatch.setenv("SHELL", f"/bin/{shell}")
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        assert _sourced(shell, rc) == "key=legacy-token\n"
+        scanned = user_config._scan_rc_text_for_keys(text, shell, {"OPENAI_API_KEY"})
+        assert scanned == {"OPENAI_API_KEY": None}
+        load_api_keys()
+        store = api_keys_env_path().read_text()
+        assert "export OPENAI_API_KEY=legacy-token\n" in store
+        for value in ("new-token", ""):
+            with pytest.raises(OSError, match="line 1 may set OPENAI_API_KEY"):
+                save_api_key("OPENAI_API_KEY", value)
+        assert (rc.read_text(), other.read_text()) == (text, leftover)
+        assert api_keys_env_path().read_text() == store
+        assert os.environ["OPENAI_API_KEY"] == "legacy-token"
+        for inert in (text.replace("<<EOF", "<<'EOF'"), text.replace("${", "\\${")):
+            rc.write_text(inert)
+            assert _sourced(shell, rc) in ("key=unset\n", "key=\n")  # zsh: exported: set, empty
+            assert user_config._scan_rc_text_for_keys(inert, shell, {"OPENAI_API_KEY"}) == {}
+            save_api_key("OPENAI_API_KEY", "")
+            assert (rc.read_text(), other.read_text()) == (inert, "")
+            assert "OPENAI_API_KEY" not in os.environ
+            other.write_text(leftover)
+            load_api_keys()
+            assert os.environ["OPENAI_API_KEY"] == "stale-leftover"
+
+    @pytest.mark.parametrize("shell", ["bash", "zsh", "fish"])
+    def test_what_an_rc_prints_is_no_part_of_the_environment_read_from_it(
+        self, shell: str, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The output of a sourced RC never reaches the environment records read after it.
+
+        It shared the pipe with the ``env -0`` dump: a banner became the
+        head of the first record, whose name then matched no key, and a
+        printed ``KEY=text`` record was imported as the key.  The RC is
+        sourced once, so either mistake was stored for good (audit C10-F4).
+        Nor does what a trap or an exit handler of the RC prints reach
+        them, or what a job of the RC prints once they are written: fish
+        reads its RC at its start as well, and a job started there
+        prints to the same output.
+        """
+        if _resolve_shell_path(shell) is None:
+            pytest.skip(f"{shell} is not installed")
+        names = ("OPENAI_API_KEY", "GEMINI_API_KEY", "ANTHROPIC_API_KEY")
+        late = "printf 'GEMINI_API_KEY=printed-late\\0'"
+        if shell == "fish":
+            own = f'sh -c "sleep 0.3; {late}" &\nfunction bye --on-event fish_exit; {late}; end\n'
+            own += "set -gx ANTHROPIC_API_KEY (echo legacy-token)\n"
+        else:
+            own = f"(sleep 0.3; {late}) &\ntrap 'echo traced' DEBUG\n"
+            # Without SHELL bash lists the key first: the record the banner joined.
+            own += "unset SHELL\ntypeset -x ANTHROPIC_API_KEY=legacy-token\n"
+        rc = _shell_rc_path(shell)
+        rc.parent.mkdir(parents=True, exist_ok=True)
+        rc.write_text("printf 'OPENAI_API_KEY=printed-not-assigned\\0'\necho welcome\n" + own)
+        monkeypatch.setenv("SHELL", f"/bin/{shell}")
+        for name in names:
+            monkeypatch.delenv(name, raising=False)
+        load_api_keys()
+        loaded = [os.environ.get(name) for name in names]
+        assert loaded == [None, None, "legacy-token"]
+        store = api_keys_env_path().read_text()
+        assert store == f"export ANTHROPIC_API_KEY=legacy-token\n{user_config._RC_SOURCED_MARKER}\n"
+
+    @pytest.mark.parametrize("output", ["", " >/dev/null 2>&1"], ids=["shared", "redirected"])
+    @pytest.mark.parametrize("shell", ["bash", "zsh", "fish"])
+    def test_a_shell_sourcing_the_rc_for_its_keys_runs_its_exit_handler(
+        self, shell: str, output: str, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The shell that sources the RC for its keys ends as a shell that ran it does.
+
+        Replaced by the program that printed its environment, it never ran
+        what the RC set up for its exit.  A job that handler ends then kept
+        the output open until the timeout, and the key the RC exports was
+        given up for good, the RC being sourced once; a job with an output
+        of its own went on running (audit C10-F4, as reviewed).  The
+        handler here ends the jobs the RC started.
+        """
+        if _resolve_shell_path(shell) is None:
+            pytest.skip(f"{shell} is not installed")
+        pids = Path.home() / "jobs"
+        if shell == "fish":  # which reads the RC twice: at its start, and sourcing it
+            text = (
+                f"sleep 60{output} &\nset -ag jobs $last_pid\necho $last_pid >>{pids}\n"
+                "function bye --on-event fish_exit; kill $jobs; wait $jobs; end\n"
+                "set -gx ANTHROPIC_API_KEY (echo legacy-token)\n"
+            )
+        else:
+            ends = "kill $job; wait $job"
+            handler = f"zshexit() {{ {ends} }}" if shell == "zsh" else f"trap '{ends}' EXIT"
+            text = f"sleep 60{output} &\njob=$!\necho $job >{pids}\n{handler}\n"
+            text += "typeset -x ANTHROPIC_API_KEY=legacy-token\n"
+        rc = _shell_rc_path(shell)
+        rc.parent.mkdir(parents=True, exist_ok=True)
+        rc.write_text(text)
+        monkeypatch.setenv("SHELL", f"/bin/{shell}")
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        try:
+            load_api_keys()
+            assert os.environ.get("ANTHROPIC_API_KEY") == "legacy-token"
+            assert not any(pid_alive(int(pid)) for pid in pids.read_text().split())
+        finally:
+            for pid in pids.read_text().split():  # a job no handler ended
+                with contextlib.suppress(OSError):
+                    os.kill(int(pid), signal.SIGKILL)
+
+    @pytest.mark.parametrize("shell", ["bash", "zsh", "fish"])
+    def test_what_a_job_of_the_rc_prints_lands_in_no_key_read_from_it(
+        self, shell: str, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A long key arrives whole while a job of the RC fills the shell's output.
+
+        The keys were written to the output the shell shares with all it
+        runs.  A pipe takes more than ``PIPE_BUF`` bytes in pieces, so what
+        a job printed meanwhile landed between the bytes of a long value,
+        and the key was stored with them, or not at all, for good: the RC
+        is sourced once (audit C10-F4, as reviewed).  The job here prints
+        from before the key is set until the shell is gone, and the value
+        is larger than a pipe holds.  The file the key is read from
+        instead is gone afterwards, and it is the one file written: its
+        directory and the RC's have a name fish reads another way in
+        quotes than bash and zsh do (a backslash before a backslash), and
+        the key went to a file of that other name, which stayed.
+        """
+        if _resolve_shell_path(shell) is None:
+            pytest.skip(f"{shell} is not installed")
+        plain = Path.home()
+        flood, ready = plain / "flood.py", plain / "ready"
+        home = plain / "it's \\\\two"
+        home.mkdir()
+        (plain / "it's \\two").mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        flood.write_text(
+            "import os, sys, time\n"
+            "shell, end = os.getppid(), time.monotonic() + 3\n"
+            "open(sys.argv[1], 'w').close()\n"
+            "while os.getppid() == shell and time.monotonic() < end:\n"
+            "    os.write(1, b'NOISE' * 800)\n"
+        )
+        job = f"{shlex.quote(sys.executable)} {flood} {ready} &\n"
+        if shell == "fish":
+            wait = f"while not test -f {ready}; sleep 0.01; end\n"
+            export = "set -gx ANTHROPIC_API_KEY (string repeat -n 100000 k)\n"
+        else:
+            wait = f"while [ ! -f {ready} ]; do sleep 0.01; done\n"
+            export = "typeset -x ANTHROPIC_API_KEY=$(printf '%0100000d' 0)\n"
+        rc = _shell_rc_path(shell)
+        rc.parent.mkdir(parents=True, exist_ok=True)
+        rc.write_text(job + wait + export)
+        monkeypatch.setenv("SHELL", f"/bin/{shell}")
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.setattr(tempfile, "tempdir", str(home))
+        load_api_keys()
+        loaded = os.environ.get("ANTHROPIC_API_KEY", "")
+        assert (len(loaded), set(loaded)) == (100000, {"k" if shell == "fish" else "0"})
+        assert not list(plain.rglob("kiss-rc-keys-*"))
+
     def test_delete_scrubs_every_shell_rc(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -3001,10 +3390,33 @@ class TestReviewRegressions:
         monkeypatch.setenv("SHELL", f"/bin/{shell}")
         monkeypatch.delenv("GEMINI_API_KEY", raising=False)
         monkeypatch.setattr(user_config, "_MIGRATION_TIMEOUT_S", 0.5)
+        monkeypatch.setattr(tempfile, "tempdir", str(Path.home()))
         start = _time.monotonic()
         load_api_keys()
         elapsed = _time.monotonic() - start
         assert elapsed < 5.0, f"load_api_keys blocked for {elapsed:.1f}s"
+        # The file the shell wrote the key to is not left behind by the timeout.
+        assert not list(Path.home().glob("kiss-rc-keys-*"))
+
+    def test_no_directory_for_the_file_the_rc_writes_its_keys_to_stops_no_start(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Where no temporary file can be made the RC is not sourced, and loading goes on.
+
+        The keys the text of the RC tells are imported; the one only the
+        shell can resolve stays unset, as for a shell that cannot start.
+        """
+        shell = _installed_posix_shell()
+        _shell_rc_path(shell).write_text(
+            'V=indirect\nexport GEMINI_API_KEY="$V"\nexport OPENAI_API_KEY=plain\n'
+        )
+        monkeypatch.setenv("SHELL", f"/bin/{shell}")
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.setattr(tempfile, "tempdir", str(Path.home() / "gone"))
+        load_api_keys()
+        loaded = [os.environ.get(name) for name in ("GEMINI_API_KEY", "OPENAI_API_KEY")]
+        assert loaded == [None, "plain"]
 
     @posix_only("the RC is sourced by a POSIX shell")
     @pytest.mark.parametrize("stop", [KeyboardInterrupt, ToolCallInterrupted])
@@ -3029,6 +3441,7 @@ class TestReviewRegressions:
         monkeypatch.delenv("GEMINI_API_KEY", raising=False)
         # Only the Stop ends the sourcing: under load the 5 s limit could come first.
         monkeypatch.setattr(user_config, "_MIGRATION_TIMEOUT_S", 120.0)
+        monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
         raised: list[BaseException] = []
         group: list[int] = []
         loader = threading.Thread(target=_load_api_keys_into, args=(raised,), daemon=True)
@@ -3044,6 +3457,7 @@ class TestReviewRegressions:
             loader.join(20)
             assert not loader.is_alive(), "load_api_keys still waits for the RC's shell"
             assert [type(error) for error in raised] == [stop]
+            assert not list(tmp_path.glob("kiss-rc-keys-*"))
             deadline = time.monotonic() + 20
             while any(pid_alive(pid) for pid in group):
                 assert time.monotonic() < deadline, f"the RC's processes still run: {group}"

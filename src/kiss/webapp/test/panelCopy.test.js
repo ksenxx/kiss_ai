@@ -14,6 +14,7 @@ const PANEL_COPY_PATH = path.join(__dirname, '..', 'media', 'panelCopy.js');
 
 const {test, report} = require('./ui_antipattern_harness').makeRunner();
 const {stubClipboard, flushMicrotasks, click} = require('./simplify2_harness');
+const {makePage, send, queueRaf} = require('./simplify2_harness');
 
 // Every window made, closed once the run is over so node can exit.
 const openWindows = [];
@@ -136,6 +137,36 @@ async function run() {
     assert.strictEqual(PanelCopy.getRawText(panel), 'Result\n# Hello\n\nWorld');
   });
 
+  // Audit 2026-11-21 (L4): a file link, a highlighted token, a diff
+  // highlight and an argument's value are inline: each stays on the
+  // line of the text around it.  A block still starts a line, and ends
+  // it before an inline element that follows, without a second break
+  // where its text or its neighbour's already has one.
+  await test('getRawText keeps an inline element on its line', () => {
+    const {document, PanelCopy} = makeWindow();
+    const panel = document.createElement('div');
+    panel.innerHTML =
+      '<div><span>path:</span> <span data-path="/ws/a.py">/ws/a.py</span></div>' +
+      '<pre><code><span>cat</span> /ws/a.py | <span>head</span> -3</code></pre>' +
+      '<div>- f(<span>old</span>) <a href="#">link</a> <code>x</code> ' +
+      '<strong>y</strong> <em>z</em></div>' +
+      '<span>after a block</span><span>, on its line</span>' +
+      '<div>ends\n</div><div>a line</div><div>\nstarts</div>';
+    assert.strictEqual(
+      PanelCopy.getRawText(panel),
+      'path: /ws/a.py\ncat /ws/a.py | head -3\n' +
+        '- f(old) link x y z\nafter a block, on its line\n' +
+        'ends\na line\nstarts',
+    );
+    // The one inline predicate the text walkers share (getRawText
+    // here, main.js's collapsed-preview text).
+    assert.strictEqual(PanelCopy.isInline(document.createElement('ins')), true);
+    assert.strictEqual(
+      PanelCopy.isInline(document.createElement('div')),
+      false,
+    );
+  });
+
   await test('addCopyButton attaches a single button (idempotent)', () => {
     const {document, PanelCopy} = makeWindow();
     const panel = document.createElement('div');
@@ -201,6 +232,43 @@ async function run() {
     await flushMicrotasks();
 
     assert.strictEqual(getClipboard(), bashOut);
+  });
+
+  // Audit 2026-11-21 (L4), on the real page: a streamed Bash line that
+  // names a file is copied as the panel shows it, while the path waits
+  // for the daemon's verdict and once it is a link; so is the call's
+  // panel, whose command is highlighted token by token.  Here the
+  // frames, the clipboard and the verdict are the harness's.  With a
+  // real browser's, and the daemon's own verdict on a real file:
+  // tests/webapp/test_result_ls_listing_file_links.py
+  // (test_copy_keeps_a_streamed_file_path_on_its_line).
+  await test('copy of a Bash output panel keeps a file path on its line', () => {
+    const {win} = makePage({
+      extraScripts: ['highlight.min.js'],
+      beforeScripts: w => (w.flushRaf = queueRaf(w).run),
+    });
+    openWindows.push(win);
+    const copied = stubClipboard(win).writes;
+    const tabId = win._testApi.getActiveTabId();
+    const workDir = '/ws/proj';
+    const command = 'cat /ws/proj/out/x.log | head -3';
+    const line = 'Log: /ws/proj/out/x.log done';
+    send(win, {type: 'configData', config: {work_dir: workDir}, apiKeys: {}});
+    const bash = {type: 'tool_call', name: 'Bash', command, description: 'd'};
+    send(win, {...bash, tabId});
+    send(win, {type: 'system_output', text: line + '\n', tabId});
+    win.flushRaf();
+    const call = win.document.querySelector('#output .ev.tc');
+    const output = call.querySelector('.bash-panel');
+    clickFirst(output, '.panel-copy-btn');
+    const results = {'/ws/proj/out/x.log': true};
+    send(win, {type: 'pathsExist', results, tabId, workDir});
+    assert.ok(output.querySelector('.kiss-filelink'), 'the path is a link');
+    clickFirst(output, '.panel-copy-btn');
+    assert.ok(call.querySelector('pre code span'), 'the command has tokens');
+    clickFirst(call, ':scope > .panel-copy-btn');
+    const whole = 'Bash\ndescription: d\n' + command + '\n' + line;
+    assert.deepStrictEqual(copied, [line, line, whole]);
   });
 
   await test(

@@ -22,10 +22,13 @@ no separator a legal file name could collide with.
 
 from __future__ import annotations
 
+import ctypes
+import functools
 import heapq
 import os
 import re
 import stat
+import struct
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -52,6 +55,32 @@ Mirrors VS Code's default ``files.exclude`` (``**/.git``, ``**/.svn``,
 DIR_LISTING_MAX_ENTRIES = 2000
 """Cap on the entries of one ``listDir`` reply (the rest is truncated)."""
 
+DIR_SORT_ORDERS: frozenset[str] = frozenset(
+    {
+        "name-asc", "name-desc", "created-asc", "created-desc",
+        "modified-asc", "modified-desc",
+    }
+)
+"""The ``sort`` values of ``listDir``: a key and a direction.
+
+The key is the entry's name, its birth time (:func:`birth_time`) or its
+modification time; ``name-asc`` is the order of a request naming none.
+"""
+
+_AT_FDCWD = -100
+"""``statx``'s *dirfd* for "relative to the current directory" (an
+absolute path ignores it)."""
+
+_STATX_BTIME = 0x800
+"""``statx`` mask bit: the birth time is wanted / was filled in."""
+
+_STATX_SIZE = 256
+"""Size of ``struct statx``, the same on every architecture; its
+``stx_mask`` is the ``u32`` at offset 0."""
+
+_STATX_BTIME_OFFSET = 80
+"""Offset of ``stx_btime`` (``s64 tv_sec; u32 tv_nsec``) in ``struct statx``."""
+
 GIT_LOG_DEFAULT_LIMIT = 50
 """Commits returned by ``gitLog`` when the client names no limit."""
 
@@ -73,19 +102,27 @@ _LOG_HEADER_FIELDS = 7
 subject, body (the ``%x00``-joined format string below)."""
 
 
-def list_directory(directory: Path) -> dict[str, Any]:
+def list_directory(directory: Path, sort: str = "name-asc") -> dict[str, Any]:
     """List *directory* for the Explorer view.
 
     Args:
         directory: The resolved, existing directory to list.
+        sort: One of :data:`DIR_SORT_ORDERS`; anything else means
+            ``"name-asc"``.  ``name`` orders the entries
+            case-insensitively by name, ``created`` by birth time
+            (:func:`birth_time`) and ``modified`` by modification time,
+            entries with equal times by name; an entry that cannot be
+            stat'ed has time 0.  ``-desc`` is the reverse of ``-asc``
+            within the folders and within the files.
 
     Returns:
         ``{"entries": [...], "truncated": bool}`` where every entry is
         ``{"name", "path", "isDir"}`` (``path`` absolute; a symlinked
         folder also carries ``"real"``, its resolved target), folders
-        first, each group sorted case-insensitively by name, names in
+        first, each group in the *sort* order, names in
         :data:`EXPLORER_EXCLUDED_NAMES` skipped, and at most
-        :data:`DIR_LISTING_MAX_ENTRIES` entries kept.
+        :data:`DIR_LISTING_MAX_ENTRIES` entries kept (the first of
+        that order).
 
     Raises:
         OSError: When the directory cannot be read.
@@ -108,7 +145,9 @@ def list_directory(directory: Path) -> dict[str, Any]:
             except (OSError, RuntimeError):
                 pass
         (dirs if is_dir else files).append(item)
-    entries = sorted(dirs, key=_entry_sort_key) + sorted(files, key=_entry_sort_key)
+    key, _, direction = (sort if sort in DIR_SORT_ORDERS else "name-asc").partition("-")
+    descending = direction == "desc"
+    entries = _sort_entries(dirs, key, descending) + _sort_entries(files, key, descending)
     truncated = len(entries) > DIR_LISTING_MAX_ENTRIES
     return {
         "entries": entries[:DIR_LISTING_MAX_ENTRIES],
@@ -120,6 +159,91 @@ def _entry_sort_key(item: dict[str, Any]) -> tuple[str, str]:
     """Sort key: case-insensitive name, then exact name for stability."""
     name: str = item["name"]
     return (name.casefold(), name)
+
+
+def _sort_entries(
+    items: list[dict[str, Any]], key: str, descending: bool,
+) -> list[dict[str, Any]]:
+    """Order one group (the folders or the files) of a listing.
+
+    *key* is ``"name"``, ``"created"`` or ``"modified"``.  A time order
+    sorts the name-ordered group by time with a stable sort, so entries
+    with equal times are in name order; *descending* reverses the group.
+    """
+    ordered = sorted(items, key=_entry_sort_key)
+    if key != "name":
+        ordered.sort(key=functools.partial(_entry_time, created=key == "created"))
+    if descending:
+        ordered.reverse()
+    return ordered
+
+
+def _entry_time(item: dict[str, Any], created: bool) -> float:
+    """Return when the entry *item* was created (*created*) or last modified.
+
+    Seconds since the epoch, read through a symlink (the listing shows
+    a linked folder as a folder); 0 for an entry that cannot be stat'ed
+    (a dangling link, a file deleted meanwhile).  Where no birth time
+    is known the inode change time stands in for it.
+    """
+    path: str = item["path"]
+    try:
+        st = os.stat(path)
+    except OSError:
+        return 0.0
+    if not created:
+        return st.st_mtime
+    born = birth_time(path, st)
+    return st.st_ctime if born is None else born
+
+
+def birth_time(path: str, st: os.stat_result) -> float | None:
+    """Return when the file at *path* was created, or ``None`` when unknown.
+
+    The stat result's ``st_birthtime`` where it has one (macOS,
+    Windows).  On Linux, where it has none, the ``statx`` system call
+    of libc (through ctypes), which follows a symlink as ``os.stat``
+    does.
+
+    Args:
+        path: The file's path.
+        st: The file's ``os.stat`` result.
+
+    Returns:
+        Seconds since the epoch; ``None`` when libc has no ``statx``,
+        the call fails, or the file system records no birth time.
+    """
+    born = getattr(st, "st_birthtime", None)
+    if born is not None:
+        return float(born)
+    statx = _libc_statx()
+    if statx is None:
+        return None
+    buf = ctypes.create_string_buffer(_STATX_SIZE)
+    if statx(_AT_FDCWD, os.fsencode(path), 0, _STATX_BTIME, buf) != 0:
+        return None
+    (mask,) = struct.unpack_from("=I", buf, 0)
+    if not mask & _STATX_BTIME:
+        return None
+    seconds, nanoseconds = struct.unpack_from("=qI", buf, _STATX_BTIME_OFFSET)
+    return float(seconds + nanoseconds / 1e9)
+
+
+@functools.cache
+def _libc_statx() -> Any:
+    """Return libc's ``statx`` function, or ``None`` when libc has none.
+
+    The handle is looked up once per process.
+    """
+    try:
+        statx = ctypes.CDLL(None).statx
+    except (OSError, AttributeError):
+        return None
+    statx.argtypes = [
+        ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_uint, ctypes.c_void_p,
+    ]
+    statx.restype = ctypes.c_int
+    return statx
 
 
 def _chomp(text: str) -> str:

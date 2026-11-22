@@ -27,6 +27,7 @@ import contextlib
 import json
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -48,11 +49,28 @@ local_shell = posix_only("the bridged local environment runs sh commands")
 needs_gnu_sed = pytest.mark.skipif(not host_sed_is_gnu(), reason="needs GNU sed as the oracle")
 
 
+class _OwnCdpath(LocalEnvironment):
+    """A local environment whose shells inherit its own ``CDPATH``, not this process's."""
+
+    cdpath = ".."
+
+    async def exec(self, command: str, timeout_sec: int | None = None, **_: Any) -> Any:
+        return await super().exec(f"export CDPATH={self.cdpath}; {command}", timeout_sec)
+
+
+class _NoCdpath(_OwnCdpath):
+    """A local environment whose shells inherit no ``CDPATH``, whatever this process's is."""
+
+    cdpath = ""
+
+
 @contextlib.contextmanager
-def _bridge_in(workdir: Path) -> Iterator[ExecBridge]:
-    """An entered bridge to a local environment working in *workdir*."""
+def _bridge_in(
+    workdir: Path, environment: type[LocalEnvironment] = LocalEnvironment,
+) -> Iterator[ExecBridge]:
+    """An entered bridge to a local *environment* working in *workdir*."""
     loop = _Loop()
-    server = ExecBridgeServer(LocalEnvironment(str(workdir)), loop.loop)
+    server = ExecBridgeServer(environment(str(workdir)), loop.loop)
     try:
         # ``workdir`` is the host-side directory the agent passes; the
         # environment's own working directory is another one.
@@ -243,6 +261,58 @@ def test_run_commands_parallel_refuses_them_too(bridged: tuple[Path, ExecBridge]
     with _bridge_in(odd) as inner:
         assert inner.Bash("cd up && rm -rf *", "wipe") == DESTRUCTIVE_VERDICT
     assert odd.is_dir()
+
+
+@local_shell
+def test_a_cd_before_a_delete_is_judged_by_the_cdpath_of_the_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review 2026-11-21 of S12/F1: a bridged command was judged by this process's ``CDPATH``.
+
+    Bash looks a bare ``cd w`` up in the ``CDPATH`` its own shell inherits: with ``..`` there
+    and none here, ``cd w && rm -rf *`` in a work directory named ``w`` stayed in it, passed
+    as a delete in ``w/w`` and emptied it; with one here and none there, a delete in a
+    directory of the work directory was refused.  The environment says what its shells inherit.
+    """
+    work = tmp_path / "w"
+    (work / "sub").mkdir(parents=True)
+    (work / "keep.txt").write_text("keep")
+    (work / "sub" / "junk").write_text("junk")
+    monkeypatch.delenv("CDPATH", raising=False)
+    with _bridge_in(work, _OwnCdpath) as bridge:
+        landed = bridge.Bash("cd w && pwd -P", "where bash lands").split()[-1]
+        assert Path(landed).resolve() == work.resolve()
+        assert bridge.Bash("cd w && rm -rf *", "wipe") == DESTRUCTIVE_VERDICT
+        assert DESTRUCTIVE_VERDICT in bridge.run_commands_parallel('["cd w && rm -rf ./*"]')
+        # Nor is a here-document after that ``cd`` a new file of ``w/w`` (item B7 of FX45b):
+        # the here-document guard asked this process's ``CDPATH`` too.  So did the conversion
+        # of the copy after ``cd w &&`` (it refused that ``cd``), and nobody was asked about a
+        # ``<<`` the text spells apart for the shell it starts (LH2).
+        copy = "cd w; cat > keep.txt <<'EOF'\nowned\nEOF"
+        spelled = "'cd w; cat > keep.txt <''<EOF\nowned\nEOF'"
+        refusal = HEREDOC_UNRESOLVED_VERDICT.format(path="keep.txt")
+        for asked in (copy, copy.replace(";", " &&"), f"sh -c {spelled}", f"eval {spelled}"):
+            assert bridge.Bash(asked, "copy") == refusal, asked
+            assert refusal in bridge.run_commands_parallel(json.dumps([asked])), asked
+        assert (work / "keep.txt").read_text() == "keep" and (work / "sub" / "junk").exists()
+        # ``CDPATH`` is not searched for an operand that ``./`` starts.
+        assert bridge.Bash("cd ./sub && rm -rf * && echo emptied", "ok").strip() == "emptied"
+        assert not (work / "sub" / "junk").exists()
+    monkeypatch.setenv("CDPATH", "..")
+    with _bridge_in(work, _NoCdpath) as bridge:
+        assert bridge.Bash("cd sub; cat > fresh.txt <<'EOF'\nnew\nEOF", "create") == ""
+        assert (work / "sub" / "fresh.txt").read_text() == "new\n"
+        with pytest.raises(ToolRedirect) as write:  # the copy after ``cd sub &&`` is a Write
+            bridge.Bash("cd sub && cat > fresh.txt <<'EOF'\nnewer\nEOF", "write")
+        assert write.value.arguments["file_path"] == str(work / "sub" / "fresh.txt")
+        for command in ("cd sub && rm -rf *", "cd sub && rm -rf ./*"):
+            (work / "sub" / "junk").write_text("junk")
+            assert bridge.Bash(f"{command} && echo emptied", "ok").strip() == "emptied"
+            assert not (work / "sub" / "junk").exists()
+        (work / "sub" / "junk").write_text("junk")
+        report = bridge.run_commands_parallel('["cd sub && rm -rf * && echo emptied"]')
+        assert report.startswith("1 commands: 1 succeeded") and "emptied" in report, report
+    assert (work / "keep.txt").read_text() == "keep" and not (work / "sub" / "junk").exists()
 
 
 @local_shell

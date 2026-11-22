@@ -137,15 +137,22 @@ function testFrameCancelledByAnEarlierFrameDoesNotRun() {
 
 async function testConditionMetBeforeALatePollIsNotATimeout() {
   let met = '';
-  // Runs right after waitFor's first look and stalls past its budget,
-  // which is wide enough that a busy machine does not use it up before
-  // the first look is over.
-  queueMicrotask(() => {
-    met = 'value';
-    const end = Date.now() + 120;
-    while (Date.now() < end);
-  });
-  assert.strictEqual(await waitFor(() => met, 'timed out', 100), 'value');
+  // The clock waitFor reads is this test's, so the order holds however
+  // long the process stalls: the first look finds nothing with the whole
+  // budget left, then the microtask meets the condition and moves the
+  // clock past the deadline before the second look.
+  const realNow = Date.now;
+  let now = realNow();
+  Date.now = () => now;
+  try {
+    queueMicrotask(() => {
+      met = 'value';
+      now += 120;
+    });
+    assert.strictEqual(await waitFor(() => met, 'timed out', 100), 'value');
+  } finally {
+    Date.now = realNow;
+  }
   await assert.rejects(waitFor(() => false, 'never met', 5), /never met/);
   await assert.rejects(waitFor(() => false, '', 0), /waitFor timed out/);
   console.log('  ok - waitFor: a late poll returns a condition met in time');

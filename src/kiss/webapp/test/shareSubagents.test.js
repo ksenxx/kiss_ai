@@ -10,8 +10,8 @@
 //   sub-agent of the `share_tasks` reply — grandchildren included —
 //   into hidden .share-subagent sections and stamps each run_parallel
 //   panel with the task ids it fanned out (data-rp-subagents),
-// * on the exported page, share.js re-creates the page's sub-agent
-//   tab behaviour: expanded fan-outs open their tabs on load,
+// * on the exported page, share.js gives the sub-agents tabs of
+//   their own: expanded fan-outs open their tabs on load,
 //   collapsing a fan-out closes its tabs, expanding reopens them, a
 //   hand-closed tab stays closed until a collapse / expand cycle,
 //   closing a tab takes its descendants' tabs with it, and selecting
@@ -48,8 +48,8 @@ function makePage() {
 
 /**
  * Drive a task through the page whose last panel is a run_parallel
- * fan-out declaring *taskDescs*, so the live transcript ends with an
- * EXPANDED fan-out panel exactly like a live run's screen.
+ * fan-out declaring *taskDescs*, and unfold that panel as its reader
+ * would: the live transcript ends with an EXPANDED fan-out panel.
  */
 function runFanoutTask(wv, chatId, taskId, taskDescs) {
   const win = wv.win;
@@ -66,6 +66,7 @@ function runFanoutTask(wv, chatId, taskId, taskDescs) {
     taskId: taskId,
     ts: now,
   });
+  click(win.document.querySelector('.tc-run-parallel > .collapse-header'));
   return TAB;
 }
 
@@ -303,7 +304,7 @@ async function run() {
     );
     assert.ok(
       subTab.querySelector('.chat-tab-close'),
-      'sub-agent tabs close like page tabs',
+      'a sub-agent tab carries a close button',
     );
     assert.ok(
       !tabsOf(win)[0].querySelector('.chat-tab-close'),
@@ -430,8 +431,8 @@ async function run() {
     const doc = win.document;
     click(tabsOf(win)[1]);
     assert.ok(!sectionByTask(win, 'sub-1').hasAttribute('hidden'));
-    // The page's user-close rule is index adjacency: whatever now
-    // sits where the closed tab was comes forward — here sub-2.
+    // The user-close rule is index adjacency: whatever now sits
+    // where the closed tab was comes forward — here sub-2.
     click(tabsOf(win)[1].querySelector('.chat-tab-close'));
     assert.ok(sectionByTask(win, 'sub-1').hasAttribute('hidden'));
     assert.ok(!sectionByTask(win, 'sub-2').hasAttribute('hidden'));
@@ -526,7 +527,8 @@ async function run() {
         {
           type: 'tool_call',
           name: 'run_parallel',
-          extras: {tasks: JSON.stringify(['alpha job', 'beta job'])},
+          // The `tasks` argument as a list, not its JSON text.
+          extras: {tasks: ['alpha job', 'beta job']},
         },
       ],
       subagents: [

@@ -64,6 +64,7 @@ from kiss.core.models.stream_abort import (
     stop_error,
     stop_or_stall_error,
 )
+from kiss.core.tool_interrupt import call_without_injection
 
 logger = logging.getLogger(__name__)
 
@@ -228,7 +229,7 @@ def _await_call(
         target=_call_into, args=(outcome, create, kwargs), name=name, daemon=True
     )
     try:
-        worker.start()
+        call_without_injection(worker.start)
         while worker.is_alive():
             if stop_event.is_set():
                 # A reply landing this very moment is billed too: give
@@ -911,7 +912,8 @@ class OpenAICompatibleBase(Model):
         ``openrouter/`` prefix stripped) and applies the catalog's default
         thinking level: when ``MODEL_INFO`` declares one for this model
         and the caller asked for no effort (:meth:`_asks_for_effort`),
-        ``reasoning_effort`` is defaulted on a copy of ``model_config``.
+        ``reasoning_effort`` is defaulted on a copy of ``model_config``
+        and the level is kept in ``default_reasoning_effort``.
 
         Args:
             model_name: The KISS catalog model name.
@@ -931,9 +933,15 @@ class OpenAICompatibleBase(Model):
         self.api_key = api_key
         self._api_model_name = _provider_model_name(model_name)
         thinking_level = _model_thinking_level(self.model_name)
+        # The effort defaulted below, ``None`` when the caller's own stands or
+        # the model has none.  Sorcar's ``set_model`` leaves a default behind
+        # (the next model gets its own) by this record: the registry it came
+        # from may say something else by then.
+        self.default_reasoning_effort: str | None = None
         if thinking_level is not None and not self._asks_for_effort():
             self.model_config = dict(self.model_config)
             self.model_config["reasoning_effort"] = thinking_level
+            self.default_reasoning_effort = thinking_level
 
     def _asks_for_effort(self) -> bool:
         """Whether ``model_config`` names a reasoning effort, in either spelling.
@@ -1142,6 +1150,12 @@ class OpenAICompatibleBase(Model):
                 self._abort_pending_request,
                 "model-blocking-request",
             )
+        except BaseException:
+            # A forced Stop, which may have landed before the teardown of
+            # the pending request began: it goes down with its client, as
+            # a stream's opening call does.
+            self._abort_pending_request()
+            raise
         finally:
             # Also on a KeyboardInterrupt raised into this thread: a
             # reply the worker already stored is still billed.
@@ -1182,12 +1196,23 @@ class OpenAICompatibleBase(Model):
         Shuts the pool's sockets down (the only thing that wakes the
         worker parked in ``recv()``), then closes the client and drops it
         so :meth:`_ensure_client` builds a new one for the next turn.
+        A forced Stop (the runner's ``KeyboardInterrupt``) landing in the
+        teardown is answered by doing it over: the request would
+        otherwise run on in a client nobody holds any more.
         """
-        client, self.client = self.client, None
+        client = self.client
         if client is None:
             return
-        shutdown_pool_sockets(client._client)
-        client.close()
+        try:
+            # Dropped first: the request's own retry looks for that
+            # (:meth:`_create_chat_completion_adaptive`).
+            self.client = None
+            shutdown_pool_sockets(client._client)
+            client.close()
+        except BaseException:
+            shutdown_pool_sockets(client._client)
+            client.close()
+            raise
 
     def _config_request_params(self) -> dict[str, Any]:
         """Return the ``model_config`` entries that may be request parameters.
@@ -2509,6 +2534,8 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
                             "file_data": file_data,
                         }
                     )
+                elif file_info.get("file_id"):  # an uploaded file, named by its id
+                    converted.append({"type": "input_file", "file_id": file_info["file_id"]})
             elif ptype == "input_audio":
                 converted.append(part)
             else:
@@ -2681,6 +2708,9 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
             function_calls, content, response = delegate.generate_and_process_with_tools(
                 function_map, tools
             )
+            # The delegate gave its record of the response up as it
+            # returned: it stays billable here until the turn is filed.
+            self._rejected_response = response
         except BaseException:
             # A rejected delegated response was still billed; the agent
             # drains this model's hook, not the delegate's.  BaseException:
@@ -2726,6 +2756,7 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
             self._delegate_raw_items[function_calls[0]["id"]] = new_items
         self._append_assistant_turn(content, function_calls, raw_tool_calls)
         self._prune_delegate_raw_items()
+        self._rejected_response = None
         return function_calls, content, response
 
     def _prune_delegate_raw_items(self) -> None:

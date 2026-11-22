@@ -21,6 +21,9 @@ a prompt cache and checks the thinking blocks they send back.
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
+import logging
 import os
 import re
 from typing import Any
@@ -43,16 +46,20 @@ from kiss.core.models.anthropic_model import (
     AnthropicModel,
     context_edits,
 )
-from kiss.core.models.model_info import get_cache_discount, get_cache_write_ratio
+from kiss.core.models.model_info import MODEL_INFO, get_cache_discount, get_cache_write_ratio
 from kiss.core.models.model_info import model as build_model
 from kiss.core.models.openai_compatible_model2 import (
     OpenAICompatibleModel2,
     supports_reasoning_context,
 )
 from kiss.core.printer import Printer
+from kiss.tests.agents.sorcar.local_model_server import MODEL as CHAT_MODEL
+from kiss.tests.agents.sorcar.local_model_server import serve as serve_chat
+from kiss.tests.agents.sorcar.local_model_server import tool_call_body
 from kiss.tests.core import local_anthropic_provider as provider
 from kiss.tests.core import local_anthropic_server as anthropic_server
-from kiss.tests.core.test_context_compaction import Write, big_output
+from kiss.tests.core.models.openai_sse_harness import Reply, Request, ScriptedOpenAIServer
+from kiss.tests.core.test_context_compaction import PASSBACK_MODEL, Write, big_output
 
 APPLIED = [{"type": "clear_thinking_20251015", "cleared_thinking_turns": 3,
             "cleared_input_tokens": 1234}]
@@ -637,6 +644,276 @@ def test_only_a_model_that_binds_its_thinking_drops_that_of_its_newest_reply(
     assert model.conversation[1]["content"] == "I start."
     assert model.conversation[2]["content"] == reply[2:]
     assert model.conversation[4]["content"] == (reply[2:] if binds else reply)
+
+
+def test_another_adapter_drops_what_claude_signed_and_nothing_else() -> None:
+    # An edit made while another adapter holds the conversation takes Claude's
+    # blocks and items, redacted ones too.  Another vendor's reasoning and an
+    # item that is no message (the edit's planner reads past one) stay.
+    model = build_model(CHAT_MODEL, model_config={"base_url": "http://localhost:9", "api_key": "x"})
+    gemini = {"type": "reasoning", "format": "google-gemini-v1", "encrypted_content": "kept"}
+    reply = [{"type": "redacted_thinking", "data": "gone"}, {"type": "text", "text": "I start."}]
+    model.conversation = [
+        "junk", {"role": "assistant", "content": reply}, gemini,
+        {"type": "reasoning", "format": "anthropic-claude-v1", "signature": "gone"},
+    ]
+    assert model.drop_stale_reasoning() == 2
+    assert model.conversation == ["junk", {"role": "assistant", "content": reply[1:]}, gemini]
+
+
+CLAUDE = "claude-fable-5-2"
+"""A model whose provider rejects a thinking block sent back after its conversation changed."""
+
+
+class _Switch:
+    """The ``set_model`` tool of a session: continues it on another model, as Sorcar's does."""
+
+    def __init__(self, agent: KISSAgent, configs: dict[str, dict[str, Any]]) -> None:
+        self.agent = agent
+        self.configs = configs
+
+    def set_model(self, model_name: str) -> str:
+        """Continue the session on another model.
+
+        Args:
+            model_name: The model to continue on.
+        """
+        new = build_model(model_name, model_config=dict(self.configs[model_name]))
+        new.initialize("")
+        self.agent.switch_model(new, model_name, self.configs[model_name])
+        return f"Model changed to {model_name}."
+
+
+@pytest.mark.parametrize(("other", "removed"), [(CHAT_MODEL, "results"), (PASSBACK_MODEL, "turns")])
+def test_a_compaction_on_another_model_takes_the_claude_thinking_it_invalidates(
+    monkeypatch: pytest.MonkeyPatch, other: str, removed: str
+) -> None:
+    # The session that ended in three 400s on 2026-11-20: steps on Claude
+    # Fable 5.2, a set_model to a model on the Chat Completions API, and one
+    # back.  The context Claude left is past the other model's compaction
+    # threshold, so before its first call the old outputs are stubbed (the
+    # old turns removed whole, on a DeepSeek model).  That adapter leaves
+    # Claude's thinking out of its requests only: every block was still in
+    # the conversation, signed over messages the compaction had changed.
+    monkeypatch.setattr(DEFAULT_CONFIG, "compaction_start_tokens", 20_000)
+    script = [anthropic_server.tool_use_message("long_output", {}, 0, f"toolu_{i}")
+              for i in range(24)]
+    script.append(anthropic_server.tool_use_message(
+        "set_model", {"model_name": other}, 0, "toolu_away"))
+    script.append(anthropic_server.tool_use_message(
+        "finish", {"result": "<p>done</p>"}, 0, "toolu_end"))
+    back = [tool_call_body("set_model", {"model_name": CLAUDE}, 30_000)]
+    recorder = _Recorder()
+    agent = KISSAgent("round-trip-session")
+    with (
+        anthropic_server.serve(script, as_provider=True) as (url, requests),
+        serve_chat(back) as (chat_url, chat_requests),
+    ):
+        monkeypatch.setenv("ANTHROPIC_BASE_URL", url)
+        monkeypatch.setattr(DEFAULT_CONFIG, "ANTHROPIC_API_KEY", "local")
+        switch = _Switch(agent, {other: {"base_url": chat_url, "api_key": "local"}, CLAUDE: {}})
+        result = agent.run(
+            model_name=CLAUDE, prompt_template="Call long_output repeatedly.",
+            tools=[long_output, switch.set_model], max_steps=30, max_budget=500.0,
+            printer=recorder,
+        )
+    assert "done" in result
+    # One compaction, before the other model's one call ...
+    (event,) = [e for e in recorder.events if e["type"] == "compaction"]
+    assert event["step"] == 26 and len(chat_requests) == 1 and event[removed] > 0
+    # ... which took the thinking of the 25 Claude replies (of the ten turns
+    # a whole-turn removal keeps) with it.
+    assert event["reasoning_blocks"] == (25 if removed == "results" else 10)
+    # No request was answered 400: the one after the switch back sends no thinking.
+    assert [provider.stale_thinking(r) for r in requests] == [None] * 26
+    assert len(_blocks(requests[24], "thinking")) == 24 and not _blocks(requests[25], "thinking")
+
+
+def _claude_on_responses(request: Request) -> Reply:
+    """Answer as Claude behind a Responses endpoint, where its reasoning is bound too.
+
+    A reply is a ``reasoning`` item, as OpenRouter returns Claude's, and a
+    call of ``long_output``, after 14 results one of ``finish``.  The item is
+    signed over the tools and the input items before it, reasoning left out,
+    as the thinking of :func:`~kiss.tests.core.local_anthropic_provider.signatures`;
+    a request that sends an item back after any of those changed gets the 400
+    of the upstream as OpenRouter passes it on, inside its own.
+    """
+    body = request.body
+    digest = hashlib.sha256(json.dumps(body.get("tools"), sort_keys=True).encode())
+    for item in body["input"]:
+        if item.get("type") != "reasoning":
+            digest.update(json.dumps(item, sort_keys=True).encode())
+        elif item["signature"] != digest.hexdigest():
+            raw = {"type": "error", "error": {
+                "type": "invalid_request_error",
+                "message": "Invalid `signature` in `thinking` block. The block is bound to a "
+                           "different conversation."}}
+            error = {"message": "Provider returned error", "code": 400,
+                     "metadata": {"raw": json.dumps(raw), "provider_name": "Google"}}
+            return Reply(status=400, json_body={"error": error})
+    done = sum(item.get("type") == "function_call_output" for item in body["input"])
+    name, arguments = ("long_output", "{}") if done < 14 else ("finish", '{"result": "<p>ok</p>"}')
+    output = [
+        {"type": "reasoning", "id": f"rs_{done}", "summary": [], "format": "anthropic-claude-v1",
+         "signature": digest.hexdigest()},
+        {"type": "function_call", "id": f"fc_{done}", "call_id": f"call_{done}", "name": name,
+         "arguments": arguments},
+    ]
+    return Reply(json_body={
+        "id": f"resp_{done}", "object": "response", "created_at": 0, "model": body["model"],
+        "output": output,
+        "usage": {"input_tokens": 20_000, "output_tokens": 30, "total_tokens": 20_030},
+    })
+
+
+def _claude_session_on_responses(agent: KISSAgent) -> tuple[list[list[dict[str, Any]]], list[str]]:
+    """Run *agent* against :func:`_claude_on_responses` until its ``finish``.
+
+    Returns:
+        The ``input`` of every request, and what the ``llm_call_hook`` was
+        shown, in order: the ``call_id`` of a tool result, the ``role`` of
+        any other message.
+    """
+    shown: list[str] = []
+
+    def hook(messages: list[Any]) -> list[Any]:
+        shown.extend(m.get("call_id", m.get("role")) for m in messages)
+        return messages
+
+    with ScriptedOpenAIServer(_claude_on_responses) as server:
+        result = agent.run(
+            model_name="openrouter/anthropic/claude-fable-5.2",
+            prompt_template="Call long_output repeatedly.", tools=[long_output], max_steps=20,
+            max_budget=500.0, llm_call_hook=hook, verbose=False,
+            model_config={"use_responses_api": True, "base_url": server.base_url,
+                          "api_key": "local"},
+        )
+        sent = [request.body["input"] for request in server.requests]
+    assert "ok" in result
+    return sent, shown
+
+
+def test_claude_reasoning_on_the_responses_api_goes_with_the_outputs_a_compaction_stubs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The sessions that ended in three 400s on 2026-11-16: Claude Fable 5.2
+    # through OpenRouter's Responses API, whose signed reasoning items the
+    # adapter sends back as they are.  A compaction stubs outputs that
+    # precede them, and the upstream rejects the first item it finds stale.
+    monkeypatch.setattr(DEFAULT_CONFIG, "compaction_start_tokens", 20_000)
+    sent, shown = _claude_session_on_responses(KISSAgent("claude-on-responses"))
+    # Every request was answered: none had to be sent again.
+    assert len(sent) == 15
+    reasoning = [sum(item.get("type") == "reasoning" for item in items) for items in sent]
+    first = next(i for i, items in enumerate(sent)
+                 if any(str(item.get("output")).startswith(STUB_PREFIX) for item in items))
+    # Until the compaction a request sends back the reasoning of every reply
+    # before it; the first one with a stubbed output sends none, and the
+    # later ones that of the replies since.
+    assert 0 < first < 14 and reasoning == [*range(first), *range(15 - first)]
+    # The items removed had all been shown to the llm_call_hook, whose
+    # boundary moved back with them: after the prompt it is shown every
+    # result once.
+    assert shown == ["user", *(f"call_{i}" for i in range(14))]
+
+
+@pytest.mark.parametrize("name", [CLAUDE, "claude-fable-5-2-latest"])
+def test_a_request_rejected_for_stale_thinking_is_sent_again_without_it(
+    name: str, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A session of reasoning, where nothing else can be cleared, with four
+    # requests answered 400.  The third for another reason: an error like
+    # any other, and the thinking stays.  The sixth after an edit of an
+    # earlier message that removes no reasoning (the agent's own leave none
+    # behind; a hook makes this one): the provider names its remedy, so the
+    # thinking goes and the next step sends the request again, at the price
+    # of the prompt cache instead of the session.  The eighth and the ninth
+    # in the same words whatever they hold: the first takes the thinking of
+    # the one reply since, the second finds nothing left to remove and is
+    # an error like any other again.  All of it holds under a name of the
+    # user's own catalog that the adapter reads no version from, and so
+    # takes for a model that keeps its newest thinking through an edit: the
+    # rejection tells it otherwise.
+    entry = copy.copy(MODEL_INFO[CLAUDE])
+    entry.extended_thinking = entry.adaptive_thinking = True
+    monkeypatch.setitem(MODEL_INFO, "claude-fable-5-2-latest", entry)
+    monkeypatch.setattr(DEFAULT_CONFIG, "context_edit_trigger_tokens", 1_000)
+    monkeypatch.setattr(DEFAULT_CONFIG, "context_edit_clear_at_least", 9_000)
+    script = [{**anthropic_server.tool_use_message("note", {}, 0, f"toolu_{i}"), **REASONED}
+              for i in range(14)]
+    script[2] = {"error": "max_tokens: 1 is less than the minimum"}
+    script[7] = script[8] = {"error": "The block is bound to a different conversation."}
+    script.append(anthropic_server.tool_use_message(
+        "finish", {"result": "<p>done</p>"}, 0, "toolu_end"))
+    recorder = _Recorder()
+    agent = KISSAgent("rejected-thinking-session")
+
+    def edit(model: Any) -> None:
+        if agent.step_count == 6:
+            _blocks({"messages": model.conversation}, "tool_result")[0]["content"] = "edited"
+
+    agent.pre_step_hook = edit
+    with anthropic_server.serve(script, as_provider=True) as (url, requests):
+        monkeypatch.setenv("ANTHROPIC_BASE_URL", url)
+        monkeypatch.setattr(DEFAULT_CONFIG, "ANTHROPIC_API_KEY", "local")
+        with caplog.at_level(logging.WARNING, logger="kiss.core.kiss_agent"):
+            result = agent.run(
+                model_name=name, prompt_template="Call note repeatedly.", tools=[note],
+                max_steps=20, max_budget=500.0, printer=recorder,
+            )
+    # Each 400 cost its step and no more: the rejected sixth request is
+    # answered in the seventh step.
+    assert "done" in result and len(requests) == 15
+    assert recorder.steps("llm_call") == [1, 2, 4, 5, 7, 10, 11, 12, 13, 14, 15]
+    # The sixth request held the thinking of four replies, the second signed
+    # over the result the hook changed.  The seventh is that request without
+    # any, the newest reply's included, and with nothing added: a "Failed to
+    # get response" message follows the third and the ninth request only.
+    assert "messages.3.content.0" in str(provider.stale_thinking(requests[5]))
+    thinking = [len(_blocks(request, "thinking")) for request in requests]
+    assert thinking == [0, 1, 2, 2, 3, 4, 0, 1, 0, 0, 1, 2, 3, 4, 0]
+    failures = [json.dumps(r["messages"]).count("Failed to get response") for r in requests]
+    assert failures == [0, 0, 0, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2]
+    # A warning for each removal, with the count and the provider's message,
+    # which names the block.
+    first, second = [r.getMessage() for r in caplog.records if r.name == "kiss.core.kiss_agent"]
+    assert "4 reasoning blocks" in first and "messages.3.content.0" in first
+    assert "1 reasoning blocks" in second
+    # The agent counts the reasoning that is left, none after a removal.  So
+    # the one clear of the session comes when the five replies since the
+    # last one hold the minimum, and removes what it reports; counted as
+    # before the first removal, the reply after it would have been cleared
+    # as five.
+    (clear,) = _clears(recorder)
+    assert clear["step"] == 15 and clear["reasoning_blocks"] == 5
+    assert 9_000 <= clear["freed"] == pytest.approx(clear["dropped_tokens"], rel=0.05)
+
+
+def test_a_rejection_on_the_responses_api_takes_claudes_reasoning_items_the_same_way() -> None:
+    # The same edit by a hook on the route of OpenRouter's Responses API,
+    # before the sixth request: the upstream rejects the reasoning items
+    # signed over the result as it was, and the seventh request is the sixth
+    # without those of all five replies.  A message the user sends in
+    # between follows it, and the llm_call_hook, whose boundary moved back
+    # with the items removed, is shown that message.
+    agent = KISSAgent("claude-on-responses")
+
+    def edit(model: Any) -> None:
+        if agent.step_count == 6:
+            next(i for i in model.conversation if i.get("type") == "function_call_output")[
+                "output"] = "edited"
+        elif agent.step_count == 7:
+            model.add_message_to_conversation("user", "User says: go on.")
+
+    agent.pre_step_hook = edit
+    sent, shown = _claude_session_on_responses(agent)
+    reasoning = [sum(item.get("type") == "reasoning" for item in items) for items in sent]
+    assert reasoning == [*range(6), *range(10)]
+    *resent, _message = sent[6]
+    assert resent == [item for item in sent[5] if item.get("type") != "reasoning"]
+    calls = [f"call_{i}" for i in range(14)]
+    assert shown == ["user", *calls[:5], "user", *calls[5:]]
 
 
 def test_responses_requests_render_the_current_turns_reasoning_only_on_gpt_5_6(

@@ -223,8 +223,8 @@ def decision_usage(
 
     Args:
         decisions_model: The model the request was made with: its usage
-            and cost readers parse *response*, and the catalog prices of
-            its name are used only when the response carries no
+            and cost readers parse *response*, and the catalog prices it
+            was built with are used only when the response carries no
             ``usage.cost``.
         response: The dict returned by :meth:`DecisionsModel.decide`, or a
             charged reply it rejected (see ``take_partial_usage_response``).
@@ -239,7 +239,7 @@ def decision_usage(
     )
     cost = decisions_model.extract_cost_from_response(response)
     if cost is None:
-        cost = calculate_cost(decisions_model.model_name, input_tokens, output_tokens)
+        cost = calculate_cost(decisions_model, input_tokens, output_tokens)
     return cost, input_tokens, output_tokens
 
 

@@ -780,6 +780,17 @@ class TestRemoteFixes(base.TestRemoteSubagentCosts):
                                                 "models": self._split(0.5)})
         self.assertEqual(_row(parent), (3.25, 325, 6))
         self.assertEqual(_costs_by_model(), {OPUS: 1.0, ASTRA: 1.5, FABLE: 0.75})
+        # Spend on a free model moves tokens and steps, not dollars: a report of the
+        # same cost with more tokens is newer, one with fewer tokens or steps older.
+        free = {ASTRA: [1.5, 150.0], FABLE: [0.75, 75.0], "free": [0.0, 100.0]}
+        charge_remote_subtask_usage(None, "q", {"cost": 2.25, "tokens": 325, "steps": 5,
+                                                "models": free})
+        for tokens, steps in ((225, 4), (325, 4)):
+            charge_remote_subtask_usage(None, "q", {"cost": 2.25, "tokens": tokens,
+                                                    "steps": steps, "models": self._split(0.75)})
+        self.assertEqual(_row(parent), (3.25, 425, 7))
+        self.assertEqual(th._task_usage([parent])[parent]["models"],
+                         {OPUS: [1.0, 100.0], **free})
 
 
 class TestSyncTriggers:

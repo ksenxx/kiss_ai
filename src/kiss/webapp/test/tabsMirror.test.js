@@ -24,8 +24,7 @@ const {
   tabIds: tabBarIds,
 } = require('./simplify2_harness');
 const {trackWindow, runTests} = require('./workdir_helpers');
-const {activeTabId, tabEl} = require('./subagent_tab_helpers');
-const {pickTabMenuItem} = require('./ui_antipattern_harness');
+const {activeTabId} = require('./subagent_tab_helpers');
 
 // The runner closes every window once its test returns: a `daemonStatus
 // connected:true` arms main.js's SCM badge poll (`setInterval`), which
@@ -301,7 +300,6 @@ function testSubagentAndContentTabsSurviveReconcile() {
     description: 'sub work',
     task_id: 'task-9',
     isSubagentTab: true,
-    isDone: false,
   });
   assert.deepStrictEqual(tabBarIds(win), ['t1', 'sub-1']);
   // A file opened from the chat creates a client-local content tab.
@@ -345,7 +343,6 @@ function testSiblingSubagentTabsKeepTheirOrderAcrossSnapshots() {
       description: 'sub ' + (i + 1),
       task_id: 'task-' + (i + 1),
       isSubagentTab: true,
-      isDone: false,
     }),
   );
   assert.deepStrictEqual(tabBarIds(win), ['t1', 'sub-1', 'sub-2', 'sub-3']);
@@ -450,20 +447,19 @@ function testCloseTabStillAnnouncedToDaemon() {
   const {win, posted} = makePage(undefined);
   send(win, {
     type: 'tabs_state',
-    tabs: [snapshotEntry('t1', 'one'), snapshotEntry('t2', 'two')],
+    tabs: [snapshotEntry('t1', 'one'), snapshotEntry('t2', 'two', 'chat-2')],
   });
-  // Only the chat on screen is rendered (its own entry on the group
-  // strip carries the close button), so bring t2 on screen first.
+  // The user leaves the idle chat t2 for a new one: "+" brings the
+  // unused chat t1 on screen and retires t2, which closes its tab.
   win._testApi.switchToTab('t2');
+  send(win, {type: 'status', running: false, tabId: 't2'});
   posted.length = 0;
-  const closeBtn = win.document.querySelector(
-    '#tab-list .chat-tab[data-tab-id="t2"] .chat-tab-close',
-  );
-  assert.ok(closeBtn, 'the chat on screen has a close button on the strip');
-  closeBtn.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  win.document.getElementById('new-chat-btn').click();
   const closes = msgsOf(posted, 'closeTab');
   assert.strictEqual(closes.length, 1);
   assert.strictEqual(closes[0].tabId, 't2');
+  // A chat's close is not marked as the end of a sub-agent's view.
+  assert.deepStrictEqual(Object.keys(closes[0]).sort(), ['ack', 'tabId', 'type']);
 }
 
 // --- the boot placeholder's live draft ------------------------------------
@@ -587,15 +583,12 @@ function testChatClosedElsewhereUnderItsFileClearsTheRun() {
 }
 
 function testChatClosedLocallyUnderItsFileClearsTheRun() {
-  // The same through the file tab's menu: the file screen's strip lists
-  // the file alone, and Close Others closes the chats behind it.
-  const {win, posted} = makePage(undefined);
+  // The same for a chat the page closes itself: the daemon refused to
+  // register it.
+  const {win} = makePage(undefined);
   const shown = openRunningChatFile(win);
-  pickTabMenuItem(win, tabEl(win, shown.file.id), 'Close Others');
-  assert.deepStrictEqual(
-    msgsOf(posted, 'closeTab').map(m => m.tabId),
-    ['ta', 'tb'],
-  );
+  send(win, {type: 'openTabRejected', tabId: 'ta'});
+  assert.deepStrictEqual(tabBarIds(win), ['tb', shown.file.id]);
   assertRunCleared(win, shown);
 }
 

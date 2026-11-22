@@ -162,11 +162,15 @@ class TestFinishConflictedMerge:
     def test_resolved_and_staged_is_committed_with_task_metadata(self) -> None:
         (self.repo / "f.txt").write_text("a\nB-both\nc\nd-agent\n")
         _run(self.repo, "add", "f.txt")
+        (self.repo / "unrelated.txt").write_text("PRIVATE\n")
+        _run(self.repo, "add", "unrelated.txt")
 
         assert self._finish() == MergeResult.SUCCESS
 
         assert _run(self.repo, "rev-parse", "HEAD").strip() != self.head_before
-        assert GitWorktreeOps.status_porcelain(self.repo) == ""
+        assert GitWorktreeOps.status_porcelain(self.repo) == "A  unrelated.txt"
+        assert _run(self.repo, "show", ":unrelated.txt") == "PRIVATE\n"
+        assert "unrelated.txt" not in _run(self.repo, "ls-tree", "--name-only", "HEAD")
         message = _run(self.repo, "log", "-1", "--format=%B")
         assert "do the thing" in message and "did the thing" in message
         assert _run(self.repo, "show", "HEAD:f.txt") == "a\nB-both\nc\nd-agent\n"

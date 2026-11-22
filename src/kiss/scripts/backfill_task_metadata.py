@@ -10,8 +10,9 @@ NOT EXISTS`` migration the daemon runs at start-up), then fills them for
 every row that lacks a value with
 :func:`kiss.agents.sorcar.task_metadata.backfill_task_metadata`.
 ``--refresh`` recomputes every task's tags and every chat summary first
-(for a classifier change).  Safe to run while the daemon is up: writes
-are committed in short batches and wait up to 30 s for a busy database.
+(for a classifier change), except the tags the user edited in the Task
+Info panel.  Safe to run while the daemon is up: writes are committed in
+short batches and wait up to 30 s for a busy database.
 """
 
 from __future__ import annotations
@@ -69,7 +70,8 @@ def main(argv: list[str] | None = None) -> int:
         "--refresh",
         action="store_true",
         help="recompute every task's tags and every chat summary (after a classifier change) "
-        "instead of filling only the empty ones; inferred SEAs are kept",
+        "instead of filling only the empty ones; inferred SEAs and the tags the user edited "
+        "are kept",
     )
     args = parser.parse_args(argv)
     try:
@@ -82,7 +84,11 @@ def main(argv: list[str] | None = None) -> int:
         with conn:
             _init_tables(conn)
             if args.refresh:
-                conn.execute("UPDATE task_history SET tags = ''")
+                # Blank the derived tags only: the ones the user edited
+                # (``tags_edited``) are the user's, as a typed title is.
+                conn.execute(
+                    "UPDATE task_history SET tags = '' WHERE COALESCE(tags_edited, 0) = 0"
+                )
                 # Blank the derived summary only: ``user_summary`` is the
                 # title the user typed and nothing can recompute it.
                 conn.execute("UPDATE chat_summaries SET summary = ''")

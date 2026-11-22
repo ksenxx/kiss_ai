@@ -30,10 +30,13 @@ function testRemotelyClosedTabForgetsItsPick() {
   const first = api.getActiveTabId();
   api.createNewTab();
   const second = api.getActiveTabId();
-  // The second chat ran a task here; gpu-box is picked for its next.
+  // The second chat is new: gpu-box is picked for it and its task is
+  // sent there.  The machine stands as the chat's unsent pick until
+  // the daemon binds the chat, which it never does here.
+  pick(win, 'gpu-box');
+  assert.strictEqual(api.getActiveTabId(), second, 'a new chat is kept');
   typeAndSend(win, 'two');
   send(win, {type: 'status', running: false, tabId: second});
-  pick(win, 'gpu-box');
   // The registry lists both tabs: both are now mirrored tabs.
   send(win, {
     type: 'tabs_state',

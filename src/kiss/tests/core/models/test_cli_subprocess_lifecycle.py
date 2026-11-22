@@ -44,6 +44,7 @@ from pathlib import Path
 
 import pytest
 
+from kiss.core.kiss_error import KISSError
 from kiss.core.models import claude_code_model as cc_module
 from kiss.core.models import codex_model as cx_module
 from kiss.core.models.claude_code_model import ClaudeCodeModel, _find_claude_cli
@@ -202,6 +203,20 @@ _CLAUDE_LINGERS_AFTER_CLOSING_STDOUT = """
 """
 
 
+_CLAUDE_LINGERS_WITH_STDOUT_OPEN = """
+    import json
+    import sys
+    import time
+
+    sys.stdin.read()
+    print(json.dumps({"type": "result", "result": "FINAL", "is_error": IS_ERROR,
+                      "subtype": "reported",
+                      "usage": {"input_tokens": 10, "output_tokens": 5}}),
+          flush=True)
+    time.sleep(60)
+"""
+
+
 _ONE_EVENT_THEN_QUIET_CODEX = """
     import json
     import sys
@@ -318,6 +333,39 @@ class TestC4LingeringChild:
 
         assert content == "DONE"
         assert response["usage"]["output_tokens"] == 5
+        assert child_pids() - before_pids == set()
+
+
+class TestTerminalResultEndsTheTurn:
+    """The ``result`` event ends a Claude Code turn, whatever the CLI does afterwards."""
+
+    @pytest.mark.parametrize("is_error", [False, True], ids=["success", "error"])
+    def test_a_claude_cli_lingering_with_stdout_open_still_ends_the_turn(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, is_error: bool
+    ) -> None:
+        """A CLI winding down behind an open stdout must not turn its result into a stall.
+
+        The parser used to read on after the terminal ``result``: the
+        finished turn then ended as a ``TimeoutError``, and its answer (or
+        the error it reported) was discarded together with the usage only
+        the ``result`` carries.
+        """
+        body = _CLAUDE_LINGERS_WITH_STDOUT_OPEN.replace("IS_ERROR", str(is_error))
+        install_cli(tmp_path, monkeypatch, "claude", body)
+        model = ClaudeCodeModel("cc/opus", model_config={"timeout": 3})
+        model.initialize("hi")
+
+        before_pids = child_pids()
+        if is_error:
+            with pytest.raises(KISSError, match="reported an error.*'reported'") as failure:
+                model.generate()
+            assert "FINAL" in str(failure.value)
+            response = model.take_partial_usage_response()
+        else:
+            content, response = model.generate()
+            assert content == "FINAL"
+
+        assert response["usage"] == {"input_tokens": 10, "output_tokens": 5}
         assert child_pids() - before_pids == set()
 
 

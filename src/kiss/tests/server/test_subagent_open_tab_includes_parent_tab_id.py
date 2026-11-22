@@ -10,17 +10,18 @@ The frontend's ``closeTab`` (in ``media/main.js``) walks the
 ``parentTabId`` chain it built from incoming ``openSubagentTab``
 events.  If the backend omits ``parent_tab_id`` from the broadcast,
 the new sub-agent tab is created with no parent linkage and the
-recursive close stops there — leaking the sub-agent tab when the user
-closes the parent.
+recursive close stops there — leaking the sub-agent tab when its
+parent tab closes.
 
 Repro: when a parent task spawns a parallel sub-agent, the
 ``new_tab`` broadcast causes the frontend to allocate a fresh chat
 tab and post ``resumeSession`` for the sub-agent's
 ``task_history.id``.  ``AgentServer._replay_session`` then sees
-``extra.subagent`` and broadcasts ``openSubagentTab`` to flip the
-new tab into sub-agent styling.  This broadcast MUST include
-``parent_tab_id`` pointing at the parent's frontend tab so the
-frontend can register the parent → child relationship.
+``extra.subagent`` and, while the sub-agent runs, broadcasts
+``openSubagentTab`` to flip the new tab into sub-agent styling.  This
+broadcast MUST include ``parent_tab_id`` pointing at the parent's
+frontend tab so the frontend can register the parent → child
+relationship.
 """
 
 from __future__ import annotations
@@ -57,6 +58,7 @@ def _make_server() -> tuple[AgentServer, list[dict]]:
 def _seed_subagent_row(
     *, parent_task_id: str, chat_id: str, description: str,
 ) -> str:
+    """Insert a sub-agent row of *parent_task_id* whose task is running."""
     task_id, _ = th._add_task(description, chat_id=chat_id)
     th._save_task_extra(
         {
@@ -70,6 +72,12 @@ def _seed_subagent_row(
             "subagent": {"parent_task_id": parent_task_id},
         },
         task_id=task_id,
+    )
+    agent_state.register(
+        agent_state.AgentState(
+            task_id, chat_id=chat_id, tab_id=f"owner-{task_id}", parent_task_id=parent_task_id,
+            server_owned=True, is_task_active=True,
+        )
     )
     return task_id
 

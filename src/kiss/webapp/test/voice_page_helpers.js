@@ -276,16 +276,17 @@ async function startPipeline(page) {
 }
 
 /**
- * Feed `blocks` onaudioprocess blocks (4096 samples at 16 kHz = 256 ms
- * each), loud or silent, to a processor node; returns the samples the
- * node wrote to its output.
+ * Feed `blocks` onaudioprocess blocks (4096 samples at `sampleRate`:
+ * 256 ms each at the default 16 kHz, 85 ms at 48 kHz), loud or silent,
+ * to a processor node; returns the samples the node wrote to its
+ * output.
  */
-function feed(proc, loud, blocks) {
+function feed(proc, loud, blocks, sampleRate = 16000) {
   const samples = new Float32Array(4096);
   if (loud) samples.fill(0.5);
   const inputBuffer = {
     getChannelData: () => samples,
-    sampleRate: 16000,
+    sampleRate,
     numberOfChannels: 1,
   };
   const output = new Float32Array(4096);
@@ -388,8 +389,9 @@ function fireTimer(page, ms) {
 }
 
 /**
- * A bare jsdom window running only media/voice.js: the mic button and
- * the task textarea, `window.__VOICE__ = cfg`, then `beforeScript(win)`
+ * A bare jsdom window running only media/voice.js: its two buttons (the
+ * voice trigger and the dictation mic) and the task textarea,
+ * `window.__VOICE__ = cfg`, then `beforeScript(win)`
  * for the suite's stubs (fake mediaDevices, Vosk, timers, listeners)
  * before the script is injected.  Returns the window.
  */
@@ -397,6 +399,7 @@ function makeBareVoiceWindow(cfg, beforeScript) {
   const dom = new JSDOM(
     '<!DOCTYPE html><html><body>' +
       '<button id="voice-btn" class="toggle-btn"></button>' +
+      '<button id="dictate-btn" class="toggle-btn"></button>' +
       '<textarea id="task-input"></textarea>' +
       '</body></html>',
     {runScripts: 'dangerously', url: 'https://localhost/'},

@@ -141,7 +141,10 @@ def test_squash_merge_checks_the_index_once(repo: Path, git_log: Path) -> None:
 
     assert (repo / "new.txt").read_text() == "new\n"
     assert GitWorktreeOps.status_porcelain(repo) == ""
-    assert _spawns(git_log, "diff", "--cached", "--quiet") == 1
+    # One comparison of the merged tree with the tree of HEAD, and no look at
+    # the index: it also holds what the user stages meanwhile.
+    assert _spawns(git_log, "rev-parse", "HEAD", "HEAD^{tree}") == 1
+    assert _spawns(git_log, "diff", "--cached", "--quiet") == 0
 
 
 @posix_only("the git shim is a sh script")
@@ -154,8 +157,10 @@ def test_empty_squash_merge_is_success_without_a_commit(repo: Path, git_log: Pat
     assert GitWorktreeOps.squash_merge_branch(repo, "same") == MergeResult.SUCCESS
 
     assert _run(repo, "rev-parse", "HEAD").strip() == head
-    assert _spawns(git_log, "diff", "--cached", "--quiet") == 1
+    assert _spawns(git_log, "rev-parse", "HEAD", "HEAD^{tree}") == 1
+    assert _spawns(git_log, "diff", "--cached", "--quiet") == 0
     assert _spawns(git_log, "commit", "-F", "-") == 0
+    assert not (repo / ".git" / "SQUASH_MSG").exists()
 
 
 @posix_only("the git shim is a sh script")

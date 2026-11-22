@@ -48,7 +48,7 @@ import pytest
 
 import kiss.agents.sorcar.persistence as th
 from kiss.server.task_runner import inject_keyboard_interrupt
-from kiss.tests.persistence_helpers import close_db
+from kiss.tests.persistence_helpers import close_db, queued_events
 
 _INJECTIONS = 250
 
@@ -138,7 +138,7 @@ def test_injected_stops_inside_queue_chat_event_never_wedge_the_writer(
             break
         # Let the writer catch up while the producer is parked (the flat-out
         # producer starves it of the GIL), so the final flush stays short.
-        while th._pending_count(None) > 5000:
+        while th._pending_count() > 5000:
             time.sleep(0.005)
         paused.clear()
         resume.set()
@@ -158,8 +158,8 @@ def test_injected_stops_inside_queue_chat_event_never_wedge_the_writer(
     flusher = threading.Thread(target=flush, name="s6-flusher", daemon=True)
     flusher.start()
     assert flushed.wait(10), "_flush_chat_events(task_id) did not return within 10 s"
-    assert th._pending_count(task_id) == 0
-    assert th._pending_count(None) == 0
+    assert queued_events(task_id) == 0
+    assert th._pending_count() == 0
     row = th._get_db().execute(
         "SELECT COUNT(*) AS n FROM events WHERE task_id = ?", (task_id,),
     ).fetchone()

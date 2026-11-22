@@ -254,7 +254,7 @@ class TestStopEventWriterDrainsLateEnqueues(_TempDbTestBase):
         # Producers may have enqueued after the first stop completed.
         th._stop_event_writer()
 
-        assert th._pending_count(None) == 0, (
+        assert th._pending_count() == 0, (
             "stop returned with unfinished queue items (stranded events)"
         )
         db = th._get_db()

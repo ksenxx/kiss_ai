@@ -15,9 +15,12 @@ that spawned sub-agents the restored parent tab must:
    events of the most recently persisted sub-agent row, which shares
    the parent's chat_id and was inserted later),
 2. NOT be converted into a sub-agent tab, and
-3. reopen every persisted sub-agent row in its own sub-agent tab
-   (``openSubagentTab`` + ``task_events``) anchored to the parent tab
-   so the restored layout mirrors the live execution layout.
+3. end the tab of every persisted sub-agent (``subagentDone``): none
+   of them runs after a restart, and a sub-agent has a tab only while
+   it runs.
+
+This module covers point 1 at the persistence layer; the daemon's
+side of all three is in ``tests/server/test_restore_tabs_with_subagents.py``.
 """
 
 from __future__ import annotations

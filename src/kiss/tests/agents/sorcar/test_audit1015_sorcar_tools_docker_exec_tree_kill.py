@@ -30,6 +30,20 @@ engines into one ``_exec`` lost two behaviours and exposed a third:
    exec whose client went away, so the result is a failure, not a
    truncated success.  The connection is dropped for real here by a
    unix-socket proxy between docker-py and the daemon.
+4. (audit 2026-11-21, S4/F2) A transport that stalls instead of dropping
+   never passes the end of a killed exec's stream on: the worker stayed
+   in its read of that stream for good, with its socket, after the
+   timeout had killed the command.  The cancellation shuts the stream's
+   socket down itself, also when the daemon hands the stream over only
+   after the cancellation.  The same proxy withholds the end here.
+5. (audit 2026-11-21, S4/F1) The reaper takes a sweep for one only when
+   it ran to its end, and asks whether the container still runs when it
+   did not.  A daemon that answers nothing at all fails both; the reaper
+   must outlast that and sweep once the daemon is back.  The proxy takes
+   the daemon away for two seconds as the task is stopped.
+
+Not reached here: an exec stream that is no plain socket (a Windows named
+pipe, ssh), which no cancellation can shut; the daemon used is local.
 
 Every test runs a real exec in a real container; nothing is mocked.
 """
@@ -53,17 +67,27 @@ _EXEC_START = re.compile(rb"POST /[^ ]*/exec/[^/ ]+/start HTTP/1\.1\r\n")
 
 
 class _DockerSocketProxy:
-    """A unix-socket proxy to the docker daemon that can drop exec streams.
+    """A unix-socket proxy to the docker daemon that can drop or stall exec streams.
 
     Each client connection is forwarded byte for byte on its own
     threads.  When :attr:`cut_exec_stream_after` is set, a connection
     whose request line is an exec start (``POST /.../exec/<id>/start``)
     is shut down that many seconds after it was opened, the way a
-    daemon restart or a dying network path would end it.
+    daemon restart or a dying network path would end it.  When
+    :attr:`stall_next_exec` is set, the next exec start is stalled the
+    way a half-open path stalls it: the daemon's answer is held back
+    for :attr:`stalled_answer_delay` seconds, and the end of the stream
+    is not passed on until that event is set.  :meth:`outage` takes the
+    daemon away altogether for a while.
     """
 
     def __init__(self) -> None:
         self.cut_exec_stream_after: float | None = None
+        self.stall_next_exec: threading.Event | None = None
+        self.stalled_answer_delay = 0.0
+        self._claim = threading.Lock()
+        self._links: list[tuple[socket.socket, socket.socket]] = []  # the connections served now
+        self._down_until = 0.0
         # Directly under /tmp: inside the session temp root under macOS's
         # long TMPDIR the socket path (104 bytes) is too long for bind().
         self.directory = tempfile.mkdtemp(prefix="kiss-docker-proxy-", dir="/tmp")
@@ -79,6 +103,12 @@ class _DockerSocketProxy:
         os.unlink(self.path)
         os.rmdir(self.directory)
 
+    def outage(self, seconds: float) -> None:
+        """Drop every connection now and every request of the next *seconds*, as a restart does."""
+        self._down_until = time.monotonic() + seconds
+        for client, upstream in list(self._links):
+            _shutdown_both(client, upstream)
+
     def _accept_loop(self) -> None:
         while True:
             try:
@@ -90,37 +120,56 @@ class _DockerSocketProxy:
     def _serve(self, client: socket.socket) -> None:
         upstream = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         upstream.connect(_DOCKER_SOCKET)
-        threading.Thread(target=_pump, args=(upstream, client), daemon=True).start()
+        link = (client, upstream)
+        self._links.append(link)
+        stalled: list[threading.Event] = []  # the release of the exec stalled on this connection
+        threading.Thread(
+            target=self._pump_back, args=(upstream, client, stalled), daemon=True,
+        ).start()
         try:
             while True:
                 data = client.recv(65536)
-                if not data:
+                if not data or time.monotonic() < self._down_until:
                     break
-                upstream.sendall(data)
                 # Inspect every request, not just the first: docker-py
                 # may send the exec start on a pooled keep-alive connection.
-                if self.cut_exec_stream_after is not None and _EXEC_START.match(data):
+                starts_exec = _EXEC_START.match(data) is not None
+                if starts_exec:
+                    with self._claim:  # taken before the daemon can answer the start
+                        release, self.stall_next_exec = self.stall_next_exec, None
+                    if release is not None:
+                        stalled.append(release)
+                upstream.sendall(data)
+                if self.cut_exec_stream_after is not None and starts_exec:
                     threading.Timer(
                         self.cut_exec_stream_after, _shutdown_both, args=(client, upstream),
                     ).start()
         except OSError:
             pass
         finally:
+            self._links.remove(link)
             _shutdown_both(client, upstream)
 
-
-def _pump(source: socket.socket, sink: socket.socket) -> None:
-    """Copy bytes from *source* to *sink* until either side ends."""
-    try:
-        while True:
-            data = source.recv(65536)
-            if not data:
-                break
-            sink.sendall(data)
-    except OSError:
-        pass
-    finally:
-        _shutdown_both(source, sink)
+    def _pump_back(
+        self, upstream: socket.socket, client: socket.socket, stalled: list[threading.Event],
+    ) -> None:
+        """Copy the daemon's bytes to the client until either side ends, stalling a claimed exec."""
+        answered = False
+        try:
+            while True:
+                data = upstream.recv(65536)
+                if not data:
+                    break
+                if stalled and not answered:
+                    answered = True
+                    time.sleep(self.stalled_answer_delay)
+                client.sendall(data)
+            if stalled:
+                stalled[0].wait()  # the stream has ended; the client is not told
+        except OSError:
+            pass
+        finally:
+            _shutdown_both(upstream, client)
 
 
 def _shutdown_both(first: socket.socket, second: socket.socket) -> None:
@@ -221,12 +270,20 @@ class TestExecTreeKill(unittest.TestCase):
         self._wait_until_no_process("sle", "ep 74")
 
 
+def _exec_threads_since(before: set[threading.Thread]) -> list[str]:
+    """Names of the exec worker and reaper threads alive now that were not in *before*."""
+    return [
+        thread.name for thread in threading.enumerate()
+        if thread not in before and thread.name.startswith("docker-exec-")
+    ]
+
+
 @unittest.skipUnless(
     is_docker_available() and os.path.exists(_DOCKER_SOCKET),
     "Docker daemon is not reachable through /var/run/docker.sock",
 )
 class TestDroppedExecStream(unittest.TestCase):
-    """The daemon connection drops mid-stream; the exec keeps running."""
+    """The daemon connection drops mid-stream (the exec keeps running) or stalls."""
 
     env: DockerManager
     proxy: _DockerSocketProxy
@@ -253,7 +310,71 @@ class TestDroppedExecStream(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.proxy.cut_exec_stream_after = None
+        self.proxy.stall_next_exec = None
+        self.proxy.stalled_answer_delay = 0.0
         self.env.stream_callback = None
+        self.env.stop_event = None
+
+    def _stop_into_an_outage(self, text: str) -> None:
+        """Stream callback: take the daemon away for 2 s and stop the task."""
+        del text
+        if not self.stop.is_set():
+            self.proxy.outage(2.0)
+            self.stop.set()
+
+    def test_reaper_outlasts_a_daemon_outage(self) -> None:
+        """(5) A reaper the daemon does not answer keeps its watch and sweeps once it does.
+
+        The outage begins as the task is stopped: the reaper's first
+        sweep fails, and so does its question whether the container
+        still runs.  Neither may end the reaper, and the command must be
+        dead once the daemon is back.
+        """
+        self.stop = threading.Event()
+        self.env.stop_event = self.stop
+        self.env.stream_callback = self._stop_into_an_outage
+        before = set(threading.enumerate())
+        result = self.env.Bash("echo started; sleep 57", "daemon outage", timeout_seconds=30)
+        self.assertIn("Killed: the task was stopped.", result)
+        self.env.stop_event = None
+        deadline = time.monotonic() + 30
+        while _exec_threads_since(before) and time.monotonic() < deadline:
+            time.sleep(0.1)
+        self.assertEqual(_exec_threads_since(before), [])
+        count = self.env.Bash(_count_processes_script("sle", "ep 57"), "count leftover processes")
+        self.assertEqual(count.strip().splitlines()[-1], "0")
+
+    def _assert_timeout_ends_the_threads_of_a_stalled_exec(self, command: str) -> None:
+        """Run *command* past its 1 s deadline on a stalled stream: its worker and reaper end.
+
+        The proxy does not pass the end of the stream on before the
+        test is over, so only the cancellation itself can take the
+        worker out of its read.
+        """
+        released = threading.Event()
+        self.addCleanup(released.set)
+        self.proxy.stall_next_exec = released
+        before = set(threading.enumerate())
+        result = self.env.Bash(command, "stalled stream", timeout_seconds=1)
+        self.assertIn("timed out", result)
+        deadline = time.monotonic() + 15
+        while _exec_threads_since(before) and time.monotonic() < deadline:
+            time.sleep(0.1)
+        self.assertEqual(_exec_threads_since(before), [])
+
+    def test_timeout_ends_the_worker_of_a_stalled_stream(self) -> None:
+        """(4) The worker of a timed-out exec ends though its stream's end never arrives."""
+        self._assert_timeout_ends_the_threads_of_a_stalled_exec("sleep 53")
+
+    def test_timeout_ends_the_worker_handed_a_stalled_stream_afterwards(self) -> None:
+        """(4) A stream the daemon hands over after the cancellation is not read either.
+
+        The answer to the exec start arrives 3 s after the request, 2 s
+        after the deadline: the cancellation found no stream to shut,
+        and the worker must not start reading the one it is then given.
+        """
+        self.proxy.stalled_answer_delay = 3.0
+        self._assert_timeout_ends_the_threads_of_a_stalled_exec("sleep 54")
 
     def test_dropped_stream_waits_for_exit_code(self) -> None:
         """Output before the drop plus the real exit code, no crash, no early return."""

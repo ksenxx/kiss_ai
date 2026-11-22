@@ -1,6 +1,6 @@
 # Models in the bundled catalog
 
-KISS Sorcar ships a catalog of **988 models** across **7 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json); `uv run python -m kiss.scripts.update_models` refreshes that file and rewrites the counts and lists below, so do not edit them by hand. Models are grouped by the provider that routes them (whose API key or CLI serves the model). How costs are computed from these prices is described in [README.md](README.md#models-supported).
+KISS Sorcar ships a catalog of **993 models** across **7 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json); `uv run python -m kiss.scripts.update_models` refreshes that file and rewrites the counts and lists below, so do not edit them by hand. Models are grouped by the provider that routes them (whose API key or CLI serves the model). How costs are computed from these prices is described in [README.md](README.md#models-supported).
 
 The Amazon Bedrock entries (`bedrock/<Bedrock model or inference-profile id>`, such as `bedrock/us.anthropic.claude-opus-4-6-v1` or `bedrock/global.anthropic.claude-haiku-4-5-20251001-v1:0`) are the Claude ids the updater found in its AWS region (`AWS_REGION`, default `us-east-1`): the system-defined cross-region inference profiles and any foundation model id that accepts on-demand calls there. Each one is a copy of its `claude-*` entry (same context length, capabilities and `-low`/`-medium`/`-high`/`-max` effort suffixes) with the prices scaled by Bedrock's regional premium: a `global.` profile costs the same as the `claude-*` entry, a geographic (`us.`, `eu.`, `apac.`, `jp.`, `au.`) or in-region (`anthropic.`) id of a Claude 4.5-or-later model 10% more. Configure `AWS_BEARER_TOKEN_BEDROCK` or an `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` pair, plus `AWS_REGION`, to use them; re-running the updater on a machine in another region relists the ids that region serves. An id the region serves that is not in the catalog can still be used by name or added under Settings → Custom Models.
 
@@ -9,17 +9,17 @@ The Amazon Bedrock entries (`bedrock/<Bedrock model or inference-profile id>`, s
 | OpenAI | 99 |
 | Anthropic | 82 |
 | Amazon Bedrock (`bedrock/*`) | 144 |
-| Gemini | 57 |
-| OpenRouter | 514 |
+| Gemini | 61 |
+| OpenRouter | 515 |
 | Claude Code CLI (`cc/*`) | 79 |
 | Codex CLI (`codex/*`) | 13 |
 
 Current catalog capability totals:
 
-- **937** generation-capable models
-- **803** function-calling-capable models
+- **941** generation-capable models
+- **807** function-calling-capable models
 - **6** embedding models
-- **37** decision models
+- **38** decision models
 
 Full model list:
 
@@ -367,7 +367,7 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>Gemini (57)</strong></summary>
+<summary><strong>Gemini (61)</strong></summary>
 
 - `gemini-2.5-flash`
 - `gemini-2.5-flash-image`
@@ -422,6 +422,10 @@ Full model list:
 - `gemini-4-hydrogen-high`
 - `gemini-4-hydrogen-low`
 - `gemini-4-hydrogen-medium`
+- `gemini-4-neon`
+- `gemini-4-neon-high`
+- `gemini-4-neon-low`
+- `gemini-4-neon-medium`
 - `gemini-embedding-001`
 - `gemini-embedding-2`
 - `gemini-embedding-2-preview`
@@ -430,7 +434,7 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>OpenRouter (514)</strong></summary>
+<summary><strong>OpenRouter (515)</strong></summary>
 
 - `openrouter/aion-labs/aion-2.0`
 - `openrouter/aion-labs/aion-3.0`
@@ -522,7 +526,9 @@ Full model list:
 - `openrouter/anthropic/claude-sonnet-5.5-max`
 - `openrouter/anthropic/claude-sonnet-5.5-medium`
 - `openrouter/anthropic/claude-sonnet-5.5-xhigh`
+- `openrouter/baseten/bison-1`
 - `openrouter/baseten/elephant-1`
+- `openrouter/baseten/groundhog-1`
 - `openrouter/baseten/joey-1`
 - `openrouter/baseten/mammoth-1`
 - `openrouter/bytedance-seed/seed-2-1-turbo`
@@ -577,6 +583,7 @@ Full model list:
 - `openrouter/google/gemini-4-argon`
 - `openrouter/google/gemini-4-carbon`
 - `openrouter/google/gemini-4-hydrogen`
+- `openrouter/google/gemini-4-neon`
 - `openrouter/google/gemini-decision-1`
 - `openrouter/google/gemini-omni-1.1-flash`
 - `openrouter/google/gemini-omni-1.2-flash`
@@ -600,7 +607,6 @@ Full model list:
 - `openrouter/inference-net/schematron-v2-turbo`
 - `openrouter/jaredpalmer/kev-4b`
 - `openrouter/kt/midm-k-3.0-pro`
-- `openrouter/liquid/d1`
 - `openrouter/liquid/d1-ultra`
 - `openrouter/liquid/d1.1`
 - `openrouter/liquid/d1.2`
@@ -608,10 +614,8 @@ Full model list:
 - `openrouter/liquid/lfm-2.5-24b-a2b`
 - `openrouter/liquid/lfm-3-1.7b`
 - `openrouter/mancer/weaver`
-- `openrouter/meituan/longcat-2.0`
 - `openrouter/meta-llama/llama-3.1-70b-instruct`
 - `openrouter/meta-llama/llama-3.1-8b-instruct`
-- `openrouter/meta-llama/llama-3.2-1b-instruct`
 - `openrouter/meta-llama/llama-3.2-3b-instruct`
 - `openrouter/meta-llama/llama-3.3-70b-instruct`
 - `openrouter/meta-llama/llama-4-maverick`
@@ -646,6 +650,7 @@ Full model list:
 - `openrouter/mistralai/mistral-small-3.1-24b-instruct`
 - `openrouter/mistralai/mistral-small-3.2-24b-instruct`
 - `openrouter/mistralai/mixtral-8x22b-instruct`
+- `openrouter/mistralai/pixtral-large-2502`
 - `openrouter/mistralai/voxtral-small-24b-2507`
 - `openrouter/moondream/moondream3-preview`
 - `openrouter/moondream/moondream3.1-9b-a2b`
@@ -827,6 +832,7 @@ Full model list:
 - `openrouter/qwen/qwen3.8-max-0902`
 - `openrouter/qwen/qwen3.8-max-prime`
 - `openrouter/qwen/qwen3.8-omni-flash`
+- `openrouter/radixark/daisyrose-27b`
 - `openrouter/reflection/beam-1.0-501b-a23b`
 - `openrouter/rekaai/reka-edge`
 - `openrouter/rekaai/reka-flash-3`
@@ -847,7 +853,6 @@ Full model list:
 - `openrouter/tencent/hy-mt2-30b-a3b`
 - `openrouter/tencent/hy-mt2-7b`
 - `openrouter/tencent/hy3`
-- `openrouter/tencent/hy3-preview`
 - `openrouter/tencent/hy4`
 - `openrouter/tencent/hy4-flash`
 - `openrouter/tencent/hy4-preview`
@@ -855,6 +860,7 @@ Full model list:
 - `openrouter/thedrummer/skyfall-36b-v2`
 - `openrouter/thedrummer/unslopnemo-12b`
 - `openrouter/thinkingmachines/inkling`
+- `openrouter/thinkingmachines/inkling-2-mini`
 - `openrouter/thinkingmachines/inkling-2-small`
 - `openrouter/thinkingmachines/inkling-small`
 - `openrouter/togethercomputer/tev1-4b-experimental`
@@ -881,7 +887,6 @@ Full model list:
 - `openrouter/x-ai/grok-4.5-medium`
 - `openrouter/x-ai/grok-4.6`
 - `openrouter/x-ai/grok-4.7`
-- `openrouter/x-ai/grok-build-0.1`
 - `openrouter/xiaomi/mimo-v2.5`
 - `openrouter/xiaomi/mimo-v2.5-pro`
 - `openrouter/xiaomi/mimo-v2.6-flash`

@@ -29,15 +29,18 @@ import itertools
 import json
 import os
 import shlex
+import shutil
 import signal
+import subprocess
 import sys
 import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
 from urllib.parse import urlsplit
 
 import pytest
@@ -55,6 +58,7 @@ from kiss.core.kiss_error import KISSError
 from kiss.core.models import model_families
 from kiss.core.models.model_families import other_family_model
 from kiss.core.models.model_info import MODEL_INFO, get_fast_model
+from kiss.core.processes import kill_process_tree, pid_handed_on
 from kiss.core.tool_verdict import ALLOW, allow_with_note, refuse
 from kiss.server.json_printer import JsonPrinter
 from kiss.tests.agents.seas.test_coding_sea import _live_container
@@ -772,8 +776,15 @@ def test_the_gate_runs_its_checks_with_the_trials_original_shell(tmp_path: Path)
         assert harness.host_digest("/tmp/empty") is None  # no regular file in it
         assert harness.host_digest("/tmp/empty", save=tmp_path / "partial") is None
         assert not (tmp_path / "partial").exists()  # a failed copy leaves no host file
-        # a copy that stalls past its deadline is killed, not waited for
-        assert harness.host_digest(harness.shell_path, timeout=0.0001) is None
+        # a copy still running at its deadline is killed, not waited for: the daemon
+        # would stream a sparse terabyte for tens of minutes.  Not asked of Docker Desktop:
+        # its daemon streams on to the end for a copy that was killed, hours here, and holds
+        # the container's lock until then (no exec, no removal, and no image delete at all)
+        if live.client.info()["OperatingSystem"] != "Docker Desktop":
+            assert live.exec_run(["truncate", "-s", "1T", "/tmp/endless"]).exit_code == 0
+            started = time.monotonic()
+            assert harness.host_digest("/tmp/endless", timeout=1) is None
+            assert time.monotonic() - started > 0.9  # the deadline's doing, no failed copy's
         # the agent replaces bash by `exit 0`: its own tools are fooled, the gate is not
         swap = ('cp "$(command -v bash)" /tmp/bash.orig && printf "#!/bin/sh\\nexit 0\\n" '
                 '> "$(command -v bash)"')
@@ -2204,43 +2215,184 @@ class ExecResult:
     return_code: int
 
 
+async def _read_to_end(pipe: IO[bytes]) -> bytes:
+    """Return what is written to *pipe* until its last writer closes it, read on the running loop.
+
+    A caller that is cancelled stops reading and waits for nothing; the pipe is its owner's to
+    close (the transport closes it too, in a later turn of the loop).
+    """
+    reader = asyncio.StreamReader()
+    transport, _ = await asyncio.get_running_loop().connect_read_pipe(
+        partial(asyncio.StreamReaderProtocol, reader), pipe)
+    try:
+        return await reader.read()
+    finally:
+        transport.close()
+
+
+async def _result(shell: subprocess.Popen[bytes]) -> ExecResult:
+    """Return *shell*'s output and exit status, once its two pipes have ended and it has exited."""
+    assert shell.stdout is not None and shell.stderr is not None
+    out, err = await asyncio.gather(_read_to_end(shell.stdout), _read_to_end(shell.stderr))
+    while shell.poll() is None:
+        await asyncio.sleep(0.005)
+    return ExecResult(out.decode(), err.decode(), shell.returncode)
+
+
 class LocalEnvironment:
-    """A Harbor-like environment whose ``exec`` runs on this machine (asyncio subprocesses).
+    """A Harbor-like environment whose ``exec`` runs on this machine (``sh`` subprocesses).
 
     As Harbor's providers do, a timeout kills the shell alone: killing the
-    tree is the bridge's job, which the tests prove.  Each command leads
-    its own session so that :meth:`kill_all` can end whatever a test left
-    running: the bridge's tagged-tree sweep scans ``/proc``, which macOS
-    has not, so there a stopped ``sleep 20`` and the reaper thread
-    sweeping for it would otherwise outlive the test.
+    tree is the bridge's job, which the tests prove.  Every command runs
+    in the process group of :attr:`leader` so that :meth:`kill_all` can end
+    whatever a test left running: the bridge's tagged-tree sweep scans
+    ``/proc``, which macOS has not, so there a stopped ``sleep 20`` and the
+    reaper thread sweeping for it would otherwise outlive the test.  The
+    leader, a ``cat`` of a pipe this environment holds, stays unreaped
+    until :meth:`kill_all`, and the kernel gives the pid of an unreaped
+    child to no other process: the group's id stays this environment's,
+    whereas the pid of a command that ended can be a stranger's next.
+    :meth:`kill_all` closes the environment as well: the group can outlive
+    its leader (a killed orphan nobody has reaped yet is still a member),
+    and a shell that joined it then would be nobody's to kill.
+    Leaving the environment's ``with`` block calls :meth:`kill_all`.
+
+    A command's shell is started at once (``subprocess.Popen``) under
+    :attr:`lock`, and only its output and exit are awaited, outside the
+    lock.  A launch that is awaited (``asyncio.create_subprocess_shell``)
+    is one :meth:`kill_all` has to wait for, and a cancelled one waits in
+    turn for the end of its shell's output, which only the kill brings.
     """
 
     def __init__(self, cwd: str) -> None:
         self.cwd = cwd
-        self.sessions: list[asyncio.subprocess.Process] = []
+        self.leader = subprocess.Popen(
+            ["cat"], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, process_group=0)
+        #: Held while a command's shell is started and while :meth:`kill_all` kills the group,
+        #: never across a wait: a shell is in the group before the kill, or is not started.
+        self.lock = threading.Lock()
+        #: Whether :meth:`kill_all` has killed the group (set under :attr:`lock`).
+        self.closed = False
+
+    def __enter__(self) -> LocalEnvironment:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.kill_all()
 
     @staticmethod
     def type() -> str:
         return "local"
 
     async def exec(self, command: str, timeout_sec: int | None = None, **_: Any) -> Any:
-        proc = await asyncio.create_subprocess_shell(
-            command, cwd=self.cwd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-            start_new_session=True,
-        )
-        self.sessions.append(proc)
-        try:
-            out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout_sec)
-        except TimeoutError:
-            proc.kill()
-            raise
-        return ExecResult(out.decode(), err.decode(), proc.returncode or 0)
+        with self.lock:
+            # a leader that is reaped (by ``kill_all``, or with a leaked environment by the
+            # suite's subprocess reaper) no longer reserves the group's id
+            if self.closed or pid_handed_on(self.leader):
+                raise RuntimeError("the environment is closed")
+            shell = subprocess.Popen(
+                command, shell=True, cwd=self.cwd, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, process_group=self.leader.pid,
+            )
+        assert shell.stdout is not None and shell.stderr is not None
+        # closed here however the launch ends: one that is cancelled at its first wait, or
+        # timed out at once, ends before the tasks that read the pipes have run
+        with shell.stdout, shell.stderr:
+            try:
+                return await asyncio.wait_for(_result(shell), timeout=timeout_sec)
+            except TimeoutError:
+                shell.kill()
+                raise
 
     def kill_all(self) -> None:
-        """Kill what is left of every session this environment started."""
-        for proc in self.sessions:
-            with contextlib.suppress(ProcessLookupError):
-                os.killpg(proc.pid, signal.SIGKILL)
+        """Kill what is left of every command this environment started, and reap the leader.
+
+        Waits for no command and for no loop: every shell was started under
+        the lock and is in the group this kills, and a command launched
+        after that is refused (``exec`` raises).  Only the first call
+        kills: the leader is reaped outside the lock, so by a second call
+        its pid may be free.  Every call returns with the leader reaped.
+        """
+        with self.lock:
+            first, self.closed = not self.closed, True
+            if first and not pid_handed_on(self.leader):  # unreaped: its pid is the group's id
+                kill_process_tree(self.leader)
+        self.leader.communicate()
+
+
+def _stranger_with_pid(pid: int) -> subprocess.Popen[bytes]:
+    """Start a ``cat`` that leads a session of its own and to which the kernel gives *pid*.
+
+    For a caller in a PID namespace of its own, where nothing else takes a
+    pid: ``ns_last_pid`` is the pid the kernel gave last, and the next
+    process gets the one after it when that is free.
+    """
+    Path("/proc/sys/kernel/ns_last_pid").write_text(str(pid - 1))
+    stranger = subprocess.Popen(
+        ["cat"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, start_new_session=True)
+    assert stranger.pid == pid, (stranger.pid, pid)
+    return stranger
+
+
+def _pid_reuse_scenario(cwd: str) -> None:
+    """What :func:`test_kill_all_signals_no_process_that_got_one_of_its_old_pids` runs as pid 1.
+
+    Pid 1 of a PID namespace adopts the namespace's orphans: the ``sleep``
+    a command left running is this process's to reap.  A ``cat`` that was
+    sent a ``SIGKILL`` never runs again, so it echoes nothing.
+    """
+    environment = LocalEnvironment(cwd)
+    ended = int(asyncio.run(environment.exec("echo $$", timeout_sec=30)).stdout)
+    left = asyncio.run(environment.exec("sleep 60 > /dev/null 2>&1 & echo $!", timeout_sec=30))
+    stranger = _stranger_with_pid(ended)
+    environment.kill_all()
+    assert stranger.communicate(b"alive", timeout=30) == (b"alive", None)
+    assert os.waitpid(int(left.stdout), 0) == (int(left.stdout), signal.SIGKILL)
+    # the leader is reaped and its group is empty: its pid is free too, and no longer signalled
+    stranger = _stranger_with_pid(environment.leader.pid)
+    environment.kill_all()
+    assert stranger.communicate(b"alive", timeout=30) == (b"alive", None)
+    # a leaked environment, its leader ended and reaped as the suite's subprocess reaper does:
+    # nothing joins or signals the group its pid named
+    leaked = LocalEnvironment(cwd)
+    leaked.leader.kill()
+    leaked.leader.wait()
+    stranger = _stranger_with_pid(leaked.leader.pid)
+    with pytest.raises(RuntimeError, match="the environment is closed"):
+        asyncio.run(leaked.exec("true", timeout_sec=30))
+    leaked.kill_all()
+    assert stranger.communicate(b"alive", timeout=30) == (b"alive", None)
+
+
+def _run_as_pid_1(scenario: Callable[[str], None], cwd: Path) -> None:
+    """Run ``scenario(cwd)`` as pid 1 of a private PID namespace; skip where there is none.
+
+    There the kernel gives a process the pid the scenario asks for, and
+    the scenario, which adopts the namespace's orphans, decides when a
+    killed one is reaped.  The namespace ends with the scenario.
+    """
+    unshare = ["unshare", "--user", "--map-root-user", "--pid", "--fork", "--kill-child",
+               "--mount-proc"]
+    if shutil.which("unshare") is None or subprocess.run(
+            [*unshare, "true"], capture_output=True, check=False, timeout=30).returncode != 0:
+        pytest.skip("needs a pid namespace of its own (unshare, user namespaces)")
+    name = scenario.__name__
+    done = subprocess.run(
+        [*unshare, sys.executable, "-c", f"from {__name__} import {name}; {name}({str(cwd)!r})"],
+        capture_output=True, text=True, check=False, timeout=300,
+        env={**os.environ, "PYTHONPATH": os.pathsep.join(filter(None, sys.path))},
+    )
+    assert done.returncode == 0, done.stderr
+
+
+def test_kill_all_signals_no_process_that_got_one_of_its_old_pids(tmp_path: Path) -> None:
+    """``kill_all`` ends what a command left running and spares a stranger with a recycled pid.
+
+    The pid of a command that ended is free for any process, and so is the
+    group leader's once it is reaped: by ``kill_all``, or by the suite's
+    subprocess reaper when a test leaked the environment.
+    """
+    _run_as_pid_1(_pid_reuse_scenario, tmp_path)
 
 
 class _Loop:
@@ -2602,6 +2754,129 @@ def test_bridge_kill_covers_a_launch_the_provider_delays(tmp_path: Path) -> None
         _close(server, loop)
 
 
+def _pending_launch_scenario(cwd: str) -> None:
+    """What :func:`test_a_launch_pending_when_the_environment_is_killed_never_starts` runs as pid 1.
+
+    The loop is busy when the bridge hands it the second command, so that
+    launch is pending while ``kill_all`` runs.  The ``sleep`` the first
+    command left running is by then this process's to reap, and is not
+    reaped yet: killed, it is still a member of the leader's group, which
+    the pending command's shell could therefore still join.
+    """
+    environment = LocalEnvironment(cwd)
+    loop = _Loop()
+    server = ExecBridgeServer(environment, loop.loop)
+    sleeper = "sleep 60 > /dev/null 2>&1 & echo $!"
+    left = int(server.run(sleeper, 30, "left")["output"])
+    busy = threading.Event()
+    loop.loop.call_soon_threadsafe(busy.wait, 60)
+    with ThreadPoolExecutor(1) as bridge_thread:
+        late = bridge_thread.submit(server.run, sleeper, 30, "late")
+        assert wait_for(partial(_launch_pending, server), 30)
+        environment.kill_all()  # what ``_close`` does first
+        killed = os.waitid(os.P_PID, left, os.WEXITED | os.WNOWAIT)  # waited for, not reaped
+        assert killed is not None and killed.si_status == signal.SIGKILL
+        busy.set()  # the loop gets to the pending launch only now
+        assert late.result(60) == {  # refused: it ran nothing
+            "exit_code": 255, "output": "exec failed: RuntimeError: the environment is closed"}
+    _close(server, loop)
+    assert os.waitpid(left, 0)[0] == left
+    with pytest.raises(ProcessLookupError):  # the group has no member left, dead or alive
+        os.killpg(environment.leader.pid, 0)
+
+
+def test_a_launch_pending_when_the_environment_is_killed_never_starts(tmp_path: Path) -> None:
+    """A command the bridge still holds when ``kill_all`` runs is refused, not left running.
+
+    Its shell would join a group whose leader is reaped, which no later
+    ``kill_all`` signals: ``_close`` would return with the command alive.
+    """
+    _run_as_pid_1(_pending_launch_scenario, tmp_path)
+
+
+async def _cancel_a_launch_once_its_sleep_runs(
+    environment: LocalEnvironment, pidfile: Path, cancelling: threading.Event,
+) -> bool:
+    """Cancel a command of *environment* in the loop turn after the one that began its launch.
+
+    That one turn takes the launch to its first wait.  The loop then runs
+    nothing until the command's shell has recorded the ``sleep`` it left
+    with its output pipes, and cancels the launch there, as the bridge's
+    timeout cancels one.  Returns whether the launch ended cancelled.
+    """
+    pid = shlex.quote(str(pidfile))
+    launch = asyncio.ensure_future(environment.exec(
+        f"sleep 600 & echo $! > {pid}.tmp && mv {pid}.tmp {pid}; wait", timeout_sec=60))
+    await asyncio.sleep(0)
+    assert wait_for(pidfile.exists, 30)
+    launch.cancel()
+    cancelling.set()
+    await asyncio.wait([launch])
+    return launch.cancelled()
+
+
+@linux_only
+def test_kill_all_does_not_wait_for_a_launch_that_is_being_cancelled(tmp_path: Path) -> None:
+    """``kill_all`` returns and kills what a cancelled launch left, whatever that launch waits for.
+
+    A launch cancelled while its shell was being started waited for the
+    end of the shell's output, which the shell's ``sleep`` held open: a
+    ``kill_all`` that waited for the launch first never got to the kill
+    that would have ended both.
+    """
+    environment, loop = LocalEnvironment(str(tmp_path)), _Loop()
+    pidfile, cancelling = tmp_path / "pid", threading.Event()
+    # on a thread of its own: a kill that waited for the launch would hold the test for ever
+    killer = threading.Thread(target=environment.kill_all, daemon=True)
+    try:
+        cancelled = asyncio.run_coroutine_threadsafe(
+            _cancel_a_launch_once_its_sleep_runs(environment, pidfile, cancelling), loop.loop)
+        launched = cancelling.wait(60)
+        killer.start()
+        killer.join(10)
+        assert launched and not killer.is_alive()
+        assert wait_for(partial(_dead, pidfile), 10)
+        assert cancelled.result(10)
+    finally:
+        loop.close()
+
+
+async def _end_launches_at_every_stage(environment: LocalEnvironment) -> None:
+    """Run commands of *environment* that end before, while and after their output is read.
+
+    A launch is cancelled after one to four turns of the loop: at its
+    first wait, before the tasks that read its shell's output have run,
+    then while they connect and read.  One more times out before it waits
+    at all, and one runs to its end.
+    """
+    for turns in range(1, 5):
+        launch = asyncio.ensure_future(environment.exec("sleep 600", timeout_sec=60))
+        for _ in range(turns):
+            await asyncio.sleep(0)
+        launch.cancel()
+        await asyncio.wait([launch])
+        assert launch.cancelled()
+    with pytest.raises(TimeoutError):
+        await environment.exec("sleep 600", timeout_sec=0)
+    assert (await environment.exec("echo done", timeout_sec=30)).stdout == "done\n"
+
+
+@local_shell
+def test_a_launch_closes_its_pipes_however_it_ends(tmp_path: Path) -> None:
+    """A command's two output pipes are closed when its ``exec`` ends, read or not.
+
+    Only the tasks reading a shell's output closed its pipes, and a launch
+    cancelled at its first wait, or timed out at once, ended before they
+    had run: two descriptors stayed open per command for as long as
+    anything held its ``Popen``, which the suite's subprocess reaper does
+    until the test ends.
+    """
+    with LocalEnvironment(str(tmp_path)) as environment:
+        before = len(os.listdir("/dev/fd"))
+        asyncio.run(_end_launches_at_every_stage(environment))
+        assert len(os.listdir("/dev/fd")) == before
+
+
 def test_bridge_server_rejects_bad_requests_and_reports_a_broken_environment() -> None:
     import urllib.error
     import urllib.request
@@ -2662,7 +2937,8 @@ def test_harbor_agent_bridges_a_non_docker_environment(tmp_path: Path) -> None:
         reviewer="none", reading_check="same", reasoning_effort="max",
     )
     context = AgentContext()
-    asyncio.run(agent.run("do it", LocalEnvironment(str(tmp_path)), context))  # type: ignore[arg-type]
+    with LocalEnvironment(str(tmp_path)) as environment:
+        asyncio.run(agent.run("do it", environment, context))  # type: ignore[arg-type]
     config = json.loads((tmp_path / "config.json").read_text())
     assert config["container"].startswith("exec:http://127.0.0.1:")
     assert config["workdir"] == str(tmp_path) and config["reviewer"] == ""
@@ -2681,7 +2957,8 @@ def test_harbor_agent_bridges_a_non_docker_environment(tmp_path: Path) -> None:
     (tmp_path / "s" / "trajectory.jsonl").write_text(
         json.dumps({"event": "review", "cost_usd": 0.25, "tokens": 25}) + "\n")
     reused = AgentContext()
-    asyncio.run(same.run("do it", LocalEnvironment(str(tmp_path)), reused))  # type: ignore[arg-type]
+    with LocalEnvironment(str(tmp_path)) as environment:
+        asyncio.run(same.run("do it", environment, reused))  # type: ignore[arg-type]
     config = json.loads((tmp_path / "s" / "config.json").read_text())
     assert config["reviewer"] == config["reading_check"] == harbor_agent.OTHER_FAMILY
     assert config["blind_verifier"] == "" and config["model_config"] is None
@@ -2701,7 +2978,8 @@ def test_harbor_agent_closes_the_bridge_when_the_setup_fails(tmp_path: Path) -> 
 
     agent = harbor_agent.SeaHarborAgent(logs_dir=tmp_path, model_name="m",
                                         home=str(tmp_path / "no-daemon"))
-    with pytest.raises(ConnectionError, match="sandbox is gone"):
-        asyncio.run(agent.run("do it", Unreachable(str(tmp_path)), AgentContext()))  # type: ignore[arg-type]
+    with Unreachable(str(tmp_path)) as environment, \
+            pytest.raises(ConnectionError, match="sandbox is gone"):
+        asyncio.run(agent.run("do it", environment, AgentContext()))  # type: ignore[arg-type]
     assert wait_for(_no_server_thread, 5)  # the server thread ends right after shutdown()
     assert not (tmp_path / "config.json").exists()

@@ -12,9 +12,9 @@
 // * `scheduleAdd.saving` never cleared when the connection dropped
 //   before the reply, and a save sent while disconnected waited for a
 //   reply that could never come;
-// * the Machines / Recommendations / Apps refresh buttons started their
-//   spin on a click made while already disconnected (the request is
-//   never answered on its own);
+// * the Machines / Apps refresh buttons (and the Recommendations one,
+//   since removed) started their spin on a click made while already
+//   disconnected (the request is never answered on its own);
 // * the folder picker stayed on "Loading..." when the connection
 //   dropped before its listing arrived: nothing re-listed on reconnect;
 // * a double-click on an Explorer file row sent two openFile requests
@@ -26,8 +26,9 @@
 //
 // * the double-click fix compared version stamps only: a reply with
 //   the same `<mtime_ns>:<size>` but different bytes, or for a tab
-//   whose editor had failed (Monaco fallback) or been replaced by a
-//   report view, was dropped instead of re-rendered;
+//   whose editor had failed (Monaco fallback), was dropped instead of
+//   re-rendered (a report is the file's own view now: the reply that
+//   shows it reuses the open tab);
 // * the Schedule editor's in-flight guard lived in the DOM only: the
 //   poll's rebuild re-enabled Save before the update was answered;
 // * a `history` reply's relabel repaint replayed the cached `machines`
@@ -51,6 +52,11 @@ const {
   ofType,
 } = require('./simplify2_harness');
 const {makeRunner, key} = require('./ui_antipattern_harness');
+const {
+  writeReport,
+  reportRequests,
+  answerReport,
+} = require('./subagent_tab_helpers');
 
 const {test, report} = makeRunner();
 
@@ -309,7 +315,6 @@ async function main() {
     posted.length = 0;
     const buttons = [
       byId(win, 'meta-machines-refresh'),
-      byId(win, 'meta-recommendations-refresh'),
       byId(win, 'meta-apps-refresh'),
     ];
     for (const btn of buttons) {
@@ -329,7 +334,7 @@ async function main() {
       ofType(posted, 'getMachines').map(m => m.refresh),
       [true, undefined],
     );
-    assert.strictEqual(ofType(posted, 'getRecommendations').length, 2);
+    assert.strictEqual(ofType(posted, 'getRecommendations').length, 1);
     assert.deepStrictEqual(
       ofType(posted, 'getAppsStatus').map(m => m.refresh),
       [true],
@@ -476,25 +481,20 @@ async function main() {
     win.close();
   });
 
-  await test('reopening a Markdown file shown as a report restores its editable preview', async () => {
-    const {win} = makePage();
+  await test('a Markdown file open in a tab keeps its editable preview when it is shown as a report', async () => {
+    const {win, posted} = makePage();
     send(win, {type: 'configData', config: {work_dir: '/ws/a'}, apiKeys: {}});
     const file = '/ws/a/reports/test.md';
     const text = '# Title\n\nbody';
-    send(win, {type: 'tool_call', name: 'Write', path: file, content: text});
-    send(win, {
-      type: 'tool_result',
-      content: 'Successfully wrote ' + text.length + ' characters to ' + file,
-      is_error: false,
-      tool_name: 'Write',
-      path: file,
-    });
+    writeReport(win, file, text);
     // The file is opened (editable: it carries a stamp) before the task
-    // finishes; task_done then renders it as a report in the same tab.
+    // finishes; task_done then asks the daemon for it as the task's
+    // report, and the reply is the same file in the same tab.
     openText(win, file, text, '5:13');
     await sleep(0);
     assert.ok(contentViews(win)[0].querySelector('.content-mode-btn'));
     send(win, {type: 'task_done', success: true});
+    answerReport(win, reportRequests(posted)[0], text, {version: '5:13'});
     await sleep(0);
     assert.strictEqual(
       contentViews(win).length,
@@ -503,16 +503,19 @@ async function main() {
     );
     assert.ok(
       contentViews(win)[0].querySelector('iframe.content-html-frame'),
-      'the report view replaced the preview',
+      'the report is the preview of the file',
     );
-    assert.ok(!contentViews(win)[0].querySelector('.content-mode-btn'));
-    // Opening the unchanged file again brings the editable preview back.
+    assert.ok(
+      contentViews(win)[0].querySelector('.content-mode-btn'),
+      'the report is the file itself: its Edit source toggle stays',
+    );
+    // Opening the unchanged file again keeps the editable preview.
     openText(win, file, text, '5:13');
     await sleep(0);
     assert.strictEqual(contentViews(win).length, 1);
     assert.ok(
       contentViews(win)[0].querySelector('.content-mode-btn'),
-      'the Edit source toggle is back',
+      'the Edit source toggle is still there',
     );
     win.close();
   });

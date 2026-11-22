@@ -26,6 +26,7 @@ const {
   lastGetHistory,
   chatHeader: header,
   chatTabs,
+  pressFilterOption,
 } = require('./history_helpers');
 
 function makePage() {
@@ -97,24 +98,21 @@ function assertMirrors(win, chatId, taskId, where) {
     r.getAttribute('aria-label'),
     'same label ' + where,
   );
-  // Before the title; then the "…" button and the menu it opens (the
-  // action strip: Show details, last launched).
+  // Before the title; then the fold button, the "…" button and the
+  // menu it opens (the action strip).
   const btn = header(win, chatId);
   assert.strictEqual(btn.children[0], h, 'icon first ' + where);
-  assert.strictEqual(
-    btn.children[1].classList.contains('history-chat-title'),
-    true,
-    'title second ' + where,
-  );
-  assert.strictEqual(
-    btn.children[2].classList.contains('sidebar-item-more'),
-    true,
-    '"…" button third ' + where,
-  );
-  assert.strictEqual(
-    btn.children[3].classList.contains('history-chat-actions'),
-    true,
-    'its menu, the action strip, last ' + where,
+  assert.deepStrictEqual(
+    Array.from(btn.children)
+      .slice(1)
+      .map(el => el.classList[el.classList.length - 1]),
+    [
+      'history-chat-title',
+      'history-chat-collapse',
+      'sidebar-item-more',
+      'history-chat-actions',
+    ],
+    'title, fold button, "…" button and its menu ' + where,
   );
   assert.strictEqual(
     win.getComputedStyle(h).marginRight,
@@ -154,23 +152,21 @@ function testHeaderShowsLastTaskIcon() {
       is_running: true,
       startTs: 1_700_000_500_000,
     }),
-    // chat D: last task settled before the page loaded: no icon.
+    // chat D: last task succeeded before the page loaded.
     makeRow({id: 'D', task_id: 6, startTs: 1_700_000_400_000}),
     makeRow({id: 'D', task_id: 7, failed: true, startTs: 1_700_000_300_000}),
   ]);
   assertMirrors(win, 'A', 1, 'chat A (running)');
   assertMirrors(win, 'B', 3, 'chat B (asking)');
   assertMirrors(win, 'C', 4, 'chat C (failed)');
-  assert.strictEqual(headerMark(win, 'D'), null, 'chat D shows no icon');
-  assert.strictEqual(rowMark(win, 6), null, 'nor does its last row');
-  assert.ok(rowMark(win, 7), 'the older failed row keeps its cross');
-  assert.strictEqual(
-    header(win, 'D').children.length,
-    3,
-    'title, "…" button and its menu only when there is no icon',
+  assertMirrors(win, 'D', 6, 'chat D (succeeded)');
+  assert.ok(headerMark(win, 'D').classList.contains('status-tick'), 'a tick');
+  assert.ok(
+    rowMark(win, 7).classList.contains('status-cross'),
+    'the older failed row keeps its cross',
   );
   // Clicking the icon (part of the header) opens the chat, as the rest
-  // of the header does; only the Show details chevron folds the panel.
+  // of the header does; only the fold button folds the panel.
   const a = group(win, 'A');
   const before = a.classList.contains('collapsed');
   posted.length = 0;
@@ -215,13 +211,13 @@ function testHeaderFollowsTaskStatus() {
   ]);
   assertMirrors(win, 'A', 1, 'while asking');
 
-  // Answered and finished: the just-completed tick, on both.
+  // Answered and finished: the tick, on both.
   posted.length = 0;
   send(win, {type: 'tasks_updated'});
   sendHistory(win, posted, [
     makeRow({id: 'A', task_id: 1, startTs: 1_700_000_900_000, endTs: 1}),
   ]);
-  assertMirrors(win, 'A', 1, 'just completed');
+  assertMirrors(win, 'A', 1, 'once completed');
   assert.ok(headerMark(win, 'A').classList.contains('status-tick'), 'a tick');
 
   // A newer task launched in the same chat fails: the header follows
@@ -310,19 +306,16 @@ function testNewestLaunchWinsAcrossPagesAndOrder() {
       startTs: 1_700_000_200_000,
     }),
     makeRow({id: 'D', task_id: 91, failed: true, startTs: 1_700_000_200_000}),
-    // An older failed row first, then the newer settled last task: the
-    // cross put up for the older row comes down again.
+    // An older failed row first, then the newer succeeded last task:
+    // the cross put up for the older row gives way to the tick.
     makeRow({id: 'E', task_id: 95, failed: true, startTs: 1_700_000_100_000}),
     makeRow({id: 'E', task_id: 96, startTs: 1_700_000_200_000}),
   ]);
   assertMirrors(win, 'B', 71, 'the newer launch wins out of order');
   assertMirrors(win, 'C', 81, 'a dated row displaces an undated one');
   assertMirrors(win, 'D', 90, 'the first row wins a tie');
-  assert.strictEqual(
-    headerMark(win, 'E'),
-    null,
-    'a settled newer task clears the icon',
-  );
+  assertMirrors(win, 'E', 96, 'a succeeded newer task replaces the cross');
+  assert.ok(headerMark(win, 'E').classList.contains('status-tick'), 'a tick');
   assert.ok(
     rowMark(win, 95).classList.contains('status-cross'),
     'the older row keeps its cross',
@@ -337,7 +330,7 @@ function testLegacyFlatViewHasNoHeaders() {
   const {win, posted} = makePage();
   openSidebar(win);
   sendEmptyWorkDir(win);
-  win.document.getElementById('history-view-toggle').click();
+  pressFilterOption(win, 'group', 'None');
   sendHistory(win, posted, [makeRow({id: 'A', task_id: 1, is_running: true})]);
   assert.strictEqual(
     win.document.querySelector('#history-list .history-chat-status'),
@@ -356,12 +349,12 @@ function hasTab(win, tabId) {
   return win._testApi.openTabs().some(t => t.id === tabId);
 }
 
-/** The chat panel's "Show details" chevron. */
+/** The chat panel's fold button, on the header's line. */
 function chevron(win, chatId) {
   const btn = header(win, chatId).querySelector(
-    '.history-chat-actions > .history-chat-collapse',
+    ':scope > .history-chat-collapse',
   );
-  assert.ok(btn, 'Show details chevron for ' + chatId);
+  assert.ok(btn, 'fold button for ' + chatId);
   return btn;
 }
 
@@ -405,8 +398,8 @@ function testChevronFoldsAndHeaderOpensLastTask() {
   const idleTab = win._testApi.getActiveTabId();
   posted.length = 0;
 
-  // The chevron only shows / hides the chat's task panels; it reads
-  // like a task panel's and opens nothing.
+  // The chevron only shows / hides the chat's task panels and opens
+  // nothing.
   const chev = chevron(win, 'A');
   assert.strictEqual(
     chev.dataset.tooltip,

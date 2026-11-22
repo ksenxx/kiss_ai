@@ -21,9 +21,8 @@ nested sub-agent's ``new_tab`` must still arrive, under that derived
 parent id, and so must each sub-agent's ``subagentDone`` for the
 derived tab the surface opened.  ``_notify_subagent_done`` used to
 address only the registered viewers plus the synthetic ``api-…`` tab,
-so such a surface learned ``isDone`` only from the ``openSubagentTab``
-answering its late ``resumeSession``, which marks a tab finished but
-never closes it: the tab stayed open there and closed everywhere else.
+so such a surface was never told that the sub-agent was over: the tab
+stayed open there and closed everywhere else.
 """
 
 from __future__ import annotations

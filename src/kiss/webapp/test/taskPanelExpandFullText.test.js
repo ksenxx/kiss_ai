@@ -14,11 +14,7 @@ const {
   openRunningTask,
   readyTabId,
 } = require('./simplify2_harness');
-const {
-  spawnSubagent,
-  runParallelPanel,
-  openSubTabIds,
-} = require('./subagent_tab_helpers');
+const {spawnSubagent, openSubTabIds} = require('./subagent_tab_helpers');
 
 const LONG_TASK = Array.from(
   {length: 12},
@@ -216,8 +212,8 @@ function testChevronPassWorksWithoutButton() {
   );
   assert.ok(readPanel, 'the Read tool panel must exist');
   assert.ok(
-    !rpPanel.classList.contains('collapsed'),
-    'precondition: the fan-out panel is open while the task runs',
+    rpPanel.classList.contains('collapsed'),
+    'precondition: the fan-out panel starts folded like every tool call',
   );
   // A tool-call panel starts folded; the user opens the adopted one.
   assert.ok(
@@ -282,7 +278,7 @@ function testChevronPassWorksWithoutButton() {
     'opening the Trajectory shows the folded panels, one click away',
   );
   // (The sub-agent tab is the daemon's to close, by `subagentDone`, not
-  // the fold's: conc2026_adjacent_task_races.test.js pins that.)
+  // the fold's: subagentTabAutoCloseOnDone.test.js pins that.)
 
   // The user opens a folded panel: a later chevron pass (any trailing
   // event) leaves the panel the user pinned open.
@@ -317,8 +313,21 @@ function testChevronPassWorksWithoutButton() {
     late.classList.contains('collapsed') && isDisplayed(win, late),
     'the chevron pass folds a late finished panel but keeps it on screen',
   );
-  // A late fan-out is born OPEN (its open panel is what keeps the
-  // sub-agent tabs up); with the task over, the chevron pass folds it.
+  // The late command fails: its "Failed" panel is born open and, with
+  // the task over, the chevron pass folds it.
+  send(win, {
+    type: 'tool_result',
+    name: 'Bash',
+    content: 'exit 1',
+    is_error: true,
+    tabId: parentId,
+  });
+  const lateFailure = late.querySelector(':scope > .tr.err');
+  assert.ok(
+    lateFailure && lateFailure.classList.contains('collapsed'),
+    'the chevron pass folds a late failure once the task is over',
+  );
+  // A late fan-out is a tool call like any other: folded at birth.
   send(win, {
     type: 'tool_call',
     name: 'run_parallel',
@@ -329,7 +338,7 @@ function testChevronPassWorksWithoutButton() {
   assert.ok(lateRp, 'the late fan-out renders outside the Trajectory');
   assert.ok(
     lateRp.classList.contains('collapsed') && isDisplayed(win, lateRp),
-    'the chevron pass folds a late fan-out once the task is over',
+    'a late fan-out stands folded on screen once the task is over',
   );
 
   send(win, {
@@ -410,6 +419,23 @@ function testNeighbourSpliceLeavesOwnPanelsAlone() {
   const {win, posted} = makePage();
   openRunningTask(win, posted, 'Fix the bug');
   const tabId = readyTabId(posted);
+  // A command fails and the reader opens its panel: the "Failed" panel
+  // inside is born open.
+  send(win, {type: 'tool_call', name: 'Bash', command: 'make', tabId});
+  send(win, {
+    type: 'tool_result',
+    name: 'Bash',
+    content: 'exit 2',
+    is_error: true,
+    tabId,
+  });
+  const command = win.document.querySelector('#output > .tc-bash');
+  command.querySelector(':scope > .collapse-header').click();
+  const failure = command.querySelector(':scope > .tr.err');
+  assert.ok(
+    failure && !failure.classList.contains('collapsed'),
+    'a "Failed" panel is born open',
+  );
   send(win, {
     type: 'tool_call',
     name: 'run_parallel',
@@ -417,14 +443,9 @@ function testNeighbourSpliceLeavesOwnPanelsAlone() {
     extras: {tasks: JSON.stringify(['sub 1'])},
   });
   spawnSubagent({win, posted}, tabId, 'sub-task-1', 'sub 1', 0);
-  const fanOut = runParallelPanel(win);
-  assert.ok(
-    fanOut && !fanOut.classList.contains('collapsed'),
-    'a fan-out is born open',
-  );
   send(win, {type: 'stop_ack', accepted: false, tabId});
   assert.ok(
-    !fanOut.classList.contains('collapsed'),
+    !failure.classList.contains('collapsed'),
     'a refused stop folds nothing',
   );
 
@@ -445,7 +466,7 @@ function testNeighbourSpliceLeavesOwnPanelsAlone() {
     'the older task arrives with its panels folded behind its Trajectory',
   );
   assert.ok(
-    !fanOut.classList.contains('collapsed') && isDisplayed(win, fanOut),
+    !failure.classList.contains('collapsed') && isDisplayed(win, failure),
     "the tab's own open panel stays as the reader left it",
   );
   assert.strictEqual(
@@ -456,7 +477,7 @@ function testNeighbourSpliceLeavesOwnPanelsAlone() {
 
   send(win, {type: 'usage_info', tabId});
   assert.ok(
-    fanOut.classList.contains('collapsed'),
+    failure.classList.contains('collapsed'),
     "the tab's own next event folds its panel: its task is over",
   );
   win.close();

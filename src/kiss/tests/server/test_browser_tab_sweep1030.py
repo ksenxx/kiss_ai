@@ -29,9 +29,13 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import functools
+import gc
 import http.server
+import socket
+import sys
 import threading
 import time
+import warnings
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -45,14 +49,17 @@ from kiss.server.browser_tab import (
     _INTERRUPT_PROBE_TIMEOUT,
     BrowserTabService,
     _result_in_slices,
+    _run_loop,
     normalize_url,
 )
+from kiss.tests.lock_injection import stop_as_it_takes_its_lock
 from kiss.tests.server.conftest import ensure_loop
-from kiss.tests.server.pause import Pause
+from kiss.tests.server.pause import Pause, Pauses
 from kiss.tests.server.test_browser_tab_service import (
     _PLAYWRIGHT_CACHE,
     ConnPrinter,
     _events,
+    _unclosed_event_loops,
     _wait,
     daemon,  # noqa: F401 - pytest fixture
     page_server,  # noqa: F401 - pytest fixture
@@ -119,6 +126,205 @@ def test_stop_reaches_an_agent_waiting_for_the_browser(tmp_path: Path) -> None:
     finally:
         # Shut down while the open is still queued: it then finds the
         # service closed and launches nothing.
+        service.shutdown()
+
+
+def _loop_threads() -> set[threading.Thread]:
+    """The running loop threads of every browser-tab service of this process."""
+    return {thread for thread in threading.enumerate() if thread.name == "kiss-browser-tab"}
+
+
+@pytest.mark.parametrize(
+    ("held_in", "thread_held"),
+    [
+        (asyncio.new_event_loop, False),
+        (socket.socketpair, False),
+        (threading.Thread.__init__, False),
+        (threading.Thread.start, False),
+        (threading.Event.wait, True),
+        (threading.Event.wait, False),
+    ],
+    ids=[
+        "no_loop_yet",
+        "loop_half_built",
+        "no_thread_built",
+        "no_thread_yet",
+        "thread_waits",
+        "thread_runs",
+    ],
+)
+def test_a_stop_while_the_loop_thread_starts_leaves_no_thread_behind(
+    tmp_path: Path, held_in: Callable[..., object], thread_held: bool
+) -> None:
+    """A Stop that lands while the first open starts the loop thread orphans nothing.
+
+    The first open starts the service's loop thread and recorded it
+    only once ``Thread.start()`` had returned.  A Stop raised inside
+    that call skipped the record: the thread ran its loop for the life
+    of the daemon, where no ``shutdown`` could find it, and the open's
+    coroutine, never handed to a loop, was never closed.  The task
+    thread is stopped before it has a loop, while the loop is being
+    made (it makes its self-pipe last), where it builds the thread and
+    where it starts it, no thread started yet (the loop is then
+    nobody's to run, and must not wait for the garbage collector to be
+    closed), and where it waits for the new thread to come up, the loop
+    thread alive: once held back before it takes the loop, which the
+    task thread then takes back and closes, once free to run it.
+    """
+    service = BrowserTabService(ConnPrinter(), tmp_path / "profile")
+    loops_before = _unclosed_event_loops()
+    threads_before = _loop_threads()
+    caller = _Caller(service.open_for_agent)
+    starting = Pause(held_in.__code__, lambda local: threading.current_thread() is caller)
+    taking = Pause(_run_loop.__code__, lambda local: thread_held)
+    try:
+        with warnings.catch_warnings(record=True) as caught, Pauses(starting, taking):
+            warnings.simplefilter("always")
+            caller.start()
+            assert starting.paused.wait(10), "the open never started its loop thread"
+            assert (_loop_threads() <= threads_before) is (held_in is not threading.Event.wait)
+            assert not thread_held or taking.paused.wait(10), "the loop thread never came up"
+            assert caller.ident is not None
+            assert inject_async_exception(caller.ident, KeyboardInterrupt) == 1
+            starting.release()
+            caller.join(10)
+            assert isinstance(caller.error, KeyboardInterrupt), caller.error
+            taking.release()
+            _wait(lambda: _loop_threads() <= threads_before, "the unrecorded thread to end", 10)
+            caller.error = None  # its traceback holds the loop
+            gc.collect()
+        assert [
+            str(w.message) for w in caught
+            if "never awaited" in str(w.message) or "unclosed event loop" in str(w.message)
+        ] == []
+        assert service._loop is None and service._thread is None
+        assert [loop for loop in _unclosed_event_loops() if loop not in loops_before] == []
+        # The service is unharmed: the next call starts a loop thread of its own.
+        ran = functools.partial(asyncio.sleep, 0, "ran")
+        assert service._run_threadsafe(ran).result(10) == "ran"
+    finally:
+        service.shutdown()
+        for loop in _unclosed_event_loops():  # the orphan of a failed run
+            if loop not in loops_before:
+                loop.call_soon_threadsafe(loop.stop)
+
+
+def test_a_stop_while_the_first_open_is_handed_to_the_loop_leaves_nothing_unawaited(
+    tmp_path: Path,
+) -> None:
+    """A Stop that lands as the open is handed to the loop leaves no coroutine behind.
+
+    The open's coroutine was made on the task thread, and counted as
+    the loop's before it was queued there: a Stop raised in between
+    left it, and the ``wait_for`` around it, never awaited.  The
+    coroutine is now made on the loop's thread, so the task thread,
+    stopped where it queues the request, holds none: the service has
+    started, nothing was queued, and no browser is launched for an
+    agent that is gone.
+    """
+    printer = ConnPrinter()
+    service = BrowserTabService(printer, tmp_path / "profile")
+    caller = _Caller(service.open_for_agent)
+    queueing = Pause(
+        asyncio.BaseEventLoop.call_soon_threadsafe.__code__,
+        lambda local: threading.current_thread() is caller,
+    )
+    try:
+        with warnings.catch_warnings(record=True) as caught, queueing:
+            warnings.simplefilter("always")
+            caller.start()
+            assert queueing.paused.wait(10), "the open never reached the loop"
+            assert caller.ident is not None
+            assert inject_async_exception(caller.ident, KeyboardInterrupt) == 1
+            queueing.release()
+            caller.join(10)
+            assert isinstance(caller.error, KeyboardInterrupt), caller.error
+            caller.error = None  # its traceback holds what the open had made
+            gc.collect()
+        assert [str(w.message) for w in caught if "never awaited" in str(w.message)] == []
+        # The loop the open started is the service's, and still serves it.
+        ran = functools.partial(asyncio.sleep, 0, "ran")
+        assert service._run_threadsafe(ran).result(10) == "ran"
+        assert service._context is None and not _events(printer, "openBrowserTab")
+    finally:
+        service.shutdown()
+
+
+def _profiled(hook: Callable[..., None], call: Callable[[], object]) -> None:
+    """Make *call* with the profile *hook* set on the calling thread."""
+    sys.setprofile(hook)
+    try:
+        call()
+    finally:
+        sys.setprofile(None)
+
+
+def _stopped_as_it_takes_its_lock(call: Callable[[], object], taker: Any, *under: Any) -> None:
+    """Make *call* on a task thread stopped where *taker*, running in *under*, took its lock."""
+    caller = _Caller(functools.partial(_profiled, stop_as_it_takes_its_lock(taker, *under), call))
+    caller.start()
+    caller.join(20)
+    assert isinstance(caller.error, KeyboardInterrupt), caller.error
+
+
+def test_a_stop_as_the_start_of_the_loop_thread_takes_its_lock_strands_no_thread(
+    tmp_path: Path,
+) -> None:
+    """A Stop landing where the start of the loop thread has taken its lock strands no thread.
+
+    ``Thread.start`` ends in a wait for the thread to come up, which
+    enters a ``threading.Condition``: a Stop raised as its ``__enter__``
+    returns leaves the lock held (gh-74174), and the new thread, which
+    sets the event that lock belongs to, blocked there for good.  The
+    Stop is now raised once the start is over.
+    """
+    service = BrowserTabService(ConnPrinter(), tmp_path / "profile")
+    threads_before = _loop_threads()
+    try:
+        _stopped_as_it_takes_its_lock(
+            service.open_for_agent,
+            threading.Event.wait, threading.Thread.start, BrowserTabService._ensure_loop_locked,
+        )
+        assert service._loop is None and service._context is None
+    finally:
+        service.shutdown()
+    _wait(lambda: _loop_threads() <= threads_before, "the loop thread to end", 10)
+
+
+@pytest.mark.parametrize(
+    ("taker", "under"),
+    [
+        (threading.Event.wait, (concurrent.futures.wait, _result_in_slices)),
+        (concurrent.futures.Future.done, (_result_in_slices,)),
+        (concurrent.futures.Future.add_done_callback, (BrowserTabService._submit,)),
+    ],
+    ids=["slice", "done", "log"],
+)
+def test_a_stop_as_a_wait_for_the_loop_takes_its_lock_leaves_the_loop_free(
+    tmp_path: Path, taker: Any, under: tuple[Any, ...]
+) -> None:
+    """A Stop landing where a task thread's wait for the loop has taken its lock blocks no loop.
+
+    An open waits for its request in slices, and a request nobody waits
+    for has its failure logged: both enter the condition of the
+    request's future, or of the event the wait is told through.  A Stop
+    raised as ``Condition.__enter__`` returns leaves that lock held
+    (gh-74174), and the loop thread, which takes it to end the future,
+    blocked for good: the daemon's browser answered nothing ever after.
+    """
+    service = BrowserTabService(ConnPrinter(), tmp_path / "profile")
+    try:
+        # The loop is busy: the request is pending when it is waited for.
+        ensure_loop(service).call_soon_threadsafe(time.sleep, 0.2)
+        if under[-1] is _result_in_slices:
+            future = service._run_threadsafe(functools.partial(asyncio.sleep, 0))
+            call: Callable[[], object] = functools.partial(_result_in_slices, future, 10)
+        else:
+            call = functools.partial(service.viewer_gone, "nobody")
+        _stopped_as_it_takes_its_lock(call, taker, *under)
+        ran = functools.partial(asyncio.sleep, 0, "ran")
+        assert service._run_threadsafe(ran).result(10) == "ran"
+    finally:
         service.shutdown()
 
 

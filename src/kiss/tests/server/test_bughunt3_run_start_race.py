@@ -138,7 +138,11 @@ class TestRunStartRace(unittest.TestCase):
         return tab_id, run_state.chat_id, other_chat
 
     def test_replay_published_after_the_run_keeps_the_tab(self) -> None:
-        """The run's startup frames do not wipe the newer replay's transcript."""
+        """The run's startup frames do not wipe the newer replay's transcript.
+
+        And the tab's next task continues the chat the tab shows since,
+        not the chat of the run it launched before.
+        """
         tab_id, _run_chat, other_chat = self._replay_into_start_window(
             AgentServer._publish_tabs_state.__code__,
         )
@@ -148,6 +152,9 @@ class TestRunStartRace(unittest.TestCase):
         assert (tab_id, other_chat) in [
             (tab, chat) for tab, chat, _task in self.server.tab_registry.bound_tabs()
         ]
+        self.server._cmd_run(self._run_cmd(tab_id))
+        self._wait_until_idle(tab_id)
+        assert [e.get("chat_id") for e in self._frames("clear")] == [other_chat]
 
     def test_run_published_after_a_replay_takes_the_tab_back(self) -> None:
         """The registry's last word is the run's: so are the view, the frames and the context."""

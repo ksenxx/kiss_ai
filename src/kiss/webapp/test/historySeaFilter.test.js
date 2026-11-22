@@ -18,6 +18,11 @@ const {
   visibleTitles,
   finishedSession,
   selectFilter,
+  filterSubmenu,
+  filterOptions,
+  tickedFilterOptions,
+  pressFilterOption,
+  filterRowValue,
 } = require('./history_helpers');
 
 /** A finished row run by the script `sea` (undefined: a legacy row). */
@@ -49,12 +54,15 @@ function testMarkupAndDefault() {
   const sel = doc.getElementById('hf-sea');
   assert.ok(sel, 'hf-sea select must exist');
   assert.strictEqual(sel.tagName, 'SELECT');
-  assert.ok(
-    doc.querySelector('.history-filter-bar .history-filter-sea'),
-    'the SEA group must live inside the filter bar',
+  assert.strictEqual(
+    sel.parentElement,
+    filterSubmenu(win, 'sea'),
+    'the select holds the choice of the SEA submenu',
   );
   assert.strictEqual(sel.value, '', 'default selection is All');
   assert.deepStrictEqual(optionValues(win), ['', '__none__']);
+  assert.deepStrictEqual(filterOptions(win, 'sea'), ['All', 'None']);
+  assert.deepStrictEqual(tickedFilterOptions(win, 'sea'), ['All']);
   win.close();
   console.log('  ok - SEA select markup and default');
 }
@@ -66,6 +74,11 @@ function testOptionsBuiltFromRowsAndRowsStamped() {
     optionValues(win),
     ['', '__none__', 'cron_agent', 'write_paper_sea'],
     'options are All, None and the distinct trimmed SEAs, sorted',
+  );
+  assert.deepStrictEqual(
+    filterOptions(win, 'sea'),
+    ['All', 'None', 'cron_agent', 'write_paper_sea'],
+    'the submenu offers them',
   );
   const rows = win.document.querySelectorAll('#history-list .sidebar-item');
   const bySea = {};
@@ -92,11 +105,13 @@ function testSelectingSeaFiltersRows() {
   const {win} = makePage();
   send(win, {type: 'history', sessions: SESSIONS_FIXTURE, offset: 0});
 
-  selectFilter(win, 'hf-sea', 'write_paper_sea');
+  pressFilterOption(win, 'sea', 'write_paper_sea');
   assert.deepStrictEqual(visibleTitles(win), [
     'paper task',
     'second paper task',
   ]);
+  assert.deepStrictEqual(tickedFilterOptions(win, 'sea'), ['write_paper_sea']);
+  assert.strictEqual(filterRowValue(win, 'sea'), 'write_paper_sea');
 
   selectFilter(win, 'hf-sea', 'cron_agent');
   assert.deepStrictEqual(visibleTitles(win), ['cron task']);
@@ -106,6 +121,7 @@ function testSelectingSeaFiltersRows() {
     'legacy row without sea field',
     'plain task',
   ]);
+  assert.strictEqual(filterRowValue(win, 'sea'), 'None');
 
   selectFilter(win, 'hf-sea', '');
   assert.strictEqual(visibleTitles(win).length, 5, 'All restores every row');

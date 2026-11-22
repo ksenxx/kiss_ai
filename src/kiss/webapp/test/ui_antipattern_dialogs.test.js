@@ -453,6 +453,35 @@ async function main() {
     win.close();
   });
 
+  // Any other exception a page listener leaves uncaught never reaches
+  // the test either: the runner used to count the test as passed and the
+  // suite ended with status 0.  The error is the failure of the test it
+  // was thrown in, also when that test fails on its own, and one the
+  // test handles itself (it provokes it on purpose) is not uncaught.
+  await test('an exception a page leaves uncaught fails the test', () => {
+    const res = runProbe(
+      'const {win} = h.makePage();' +
+        "const btn = win.document.getElementById('send-btn');" +
+        "btn.addEventListener('click', () => { throw new Error('boom'); });" +
+        "test('throws', () => h.click(win, btn));" +
+        "test('fails', () => { h.click(win, btn); throw new Error('own'); });" +
+        "test('quiet', () => {});" +
+        "win.addEventListener('error', e => e.preventDefault());" +
+        "test('handled', () => h.click(win, btn));" +
+        'win.close();' +
+        "report('probe');",
+    );
+    assert.strictEqual(res.status, 1, res.stdout + res.stderr);
+    assert.match(
+      res.stdout,
+      /\u2717 throws\n {6}Error: uncaught page error:\nError: boom\n/,
+    );
+    assert.match(res.stdout, /\u2717 fails\n {6}Error: own\n/);
+    assert.match(res.stdout, /\u2713 quiet\n/, 'the ledger is per test');
+    assert.match(res.stdout, /\u2713 handled\n/);
+    assert.match(res.stdout, /\nprobe: 2 passed, 2 failed\n$/);
+  });
+
   // An async test still running when report() is called is not in the
   // totals yet: the failure it reports afterwards used to leave the exit
   // status 0.  report() exits the process, so the probe is a child.

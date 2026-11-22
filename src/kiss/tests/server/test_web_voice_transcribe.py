@@ -62,6 +62,7 @@ from kiss.tests.server.conftest import (
     redirect_persistence,
     restore_persistence,
 )
+from kiss.tests.server.test_voice_dual_check import CannedOpenAiServer, _tone_pcm
 
 HAVE_MAC_TTS = bool(shutil.which("say")) and bool(shutil.which("afconvert"))
 HAVE_OPENAI_KEY = bool(os.environ.get("OPENAI_API_KEY"))
@@ -94,6 +95,14 @@ def _tts_pcm(directory: Path, name: str, text: str) -> bytes:
     )
     with wave.open(str(wav), "rb") as wf:
         return wf.readframes(wf.getnframes())
+
+
+def _restore_env(key: str, value: str | None) -> None:
+    """Put the environment variable *key* back to *value* (``None``: unset)."""
+    if value is None:
+        os.environ.pop(key, None)
+    else:
+        os.environ[key] = value
 
 
 class WebVoiceTranscribeTest(IsolatedAsyncioTestCase):
@@ -273,6 +282,36 @@ class WebVoiceTranscribeTest(IsolatedAsyncioTestCase):
         self.assertEqual(msg["text"], "")
         self.assertIsNone(msg["speaker"])
         self.assertIsNone(msg["language"])
+
+    async def test_dictation_comes_back_whole_and_names_no_speaker(self) -> None:
+        """Speech typed with the composer's mic keeps its first word.
+
+        A message marked ``dictation`` follows no wake word, so a first
+        word that sounds like the name ("Soccer") is the user's and must
+        come back; it used to be cut.  No speaker is looked for either:
+        the page types the words for the user, and the speaker model is
+        a download no dictation should wait for.  The transcription API
+        is a local stand-in with a fixed reply.
+        """
+        canned = CannedOpenAiServer("en\nSoccer practice is at five.")
+        self.addCleanup(canned.close)
+        for key, value in (
+            ("OPENAI_BASE_URL", f"http://127.0.0.1:{canned.port}/v1"),
+            ("OPENAI_API_KEY", "sk-kiss-dictation-test"),
+        ):
+            self.addCleanup(_restore_env, key, os.environ.get(key))
+            os.environ[key] = value
+        ws = await self._connect_ok()
+        msg = await self._voice_speech_reply(
+            ws, base64.b64encode(_tone_pcm(1.0)).decode("ascii"), timeout=60,
+            extra={"dictation": True, "round": 3},
+        )
+        self.assertEqual(msg["text"], "Soccer practice is at five.")
+        self.assertEqual(msg["language"], "en")
+        self.assertEqual(msg["round"], 3)
+        self.assertIsNone(msg["speaker"])
+        self.assertIsNone(self.server._voice_speaker_identifier)
+        self.assertFalse(self.server._voice_speaker_broken)
 
     @pytest.mark.live_api
     @unittest.skipUnless(

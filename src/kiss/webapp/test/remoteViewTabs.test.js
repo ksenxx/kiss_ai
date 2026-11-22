@@ -13,6 +13,9 @@
 //     the tab is titled with the machine's label; so does a terminal
 //     opened from that chat's terminal, whichever chat it was reached
 //     from;
+//   * once that chat closed, its terminal still stands for `box`: the
+//     terminal, the browser page and the Projects page opened from it
+//     belong to the machine it froze when it opened;
 //   * its Browser button sends browserOpen {url:'', machine:'box'};
 //   * a page the daemon announces with `machine` is a browser tab
 //     labelled with the machine, whose "+" opens the next page on the
@@ -35,10 +38,10 @@ const {
 const {makeRunner} = require('./ui_antipattern_harness');
 
 /** A chat page with browserTab.js / terminalTab.js over stubbed xterm. */
-function makePage() {
+function makePage(moreScripts) {
   return makeChatPage({
     beforeScripts: withTabViews,
-    extraScripts: ['browserTab.js', 'terminalTab.js'],
+    extraScripts: ['browserTab.js', 'terminalTab.js'].concat(moreScripts || []),
   });
 }
 
@@ -95,6 +98,52 @@ async function main() {
         ['box', '/remote/ws'],
       ],
     );
+    win.close();
+  });
+
+  await test('views opened from a terminal whose chat closed stay on its machine', async () => {
+    const {win, posted} = makePage(['projects.js']);
+    const byId = id => win.document.getElementById(id);
+    const terminalOpens = () =>
+      ofType(posted, 'terminalOpen').map(m => [m.machine, m.workDir]);
+    const viewTabs = () =>
+      plain(
+        win._testApi
+          .openTabs()
+          .filter(t => t.isContentTab)
+          .map(t => [t.title, t.ownerBrowseMachine]),
+      );
+    openChat(win);
+    bindToBox(win);
+    click(win, byId('terminal-btn'));
+    await settle();
+    const first = win._testApi.openTabs().find(t => t.isContentTab);
+    // The bound chat closes (the registry no longer lists it): its
+    // terminal stays, and is all that is left of the workspace on `box`.
+    send(win, {type: 'tabs_state', tabs: []});
+    win._testApi.switchToTab(first.id);
+    click(win, byId('terminal-btn'));
+    await settle();
+    assert.deepStrictEqual(terminalOpens(), [
+      ['box', '/remote/ws'],
+      ['box', '/remote/ws'],
+    ]);
+    assert.deepStrictEqual(viewTabs(), [
+      ['Terminal (Box)', 'box'],
+      ['Terminal 2 (Box)', 'box'],
+    ]);
+    // The second terminal, now on screen, froze the same workspace: the
+    // Browser button and the Projects page follow it ...
+    click(win, byId('browser-btn'));
+    assert.deepStrictEqual(plain(ofType(posted, 'browserOpen')), [
+      {type: 'browserOpen', url: '', machine: 'box'},
+    ]);
+    click(win, byId('projects-row'));
+    assert.deepStrictEqual(viewTabs()[2], ['Projects', 'box']);
+    // ... as does a terminal opened from the Projects page.
+    click(win, byId('terminal-btn'));
+    await settle();
+    assert.deepStrictEqual(terminalOpens()[2], ['box', '/remote/ws']);
     win.close();
   });
 
@@ -213,6 +262,21 @@ async function main() {
     assert.deepStrictEqual(plain(ofType(posted, 'browserOpen')), [
       {type: 'browserOpen', url: ''},
     ]);
+    // The chat closes and new chats go to `box` from now on: a
+    // terminal opened from this machine's terminal is still here, in
+    // the folder that one froze (the daemon has reported no global
+    // one), and so is the next, opened from it.
+    send(win, {type: 'tabs_state', tabs: []});
+    send(win, {type: 'machineChanged', machine: 'box'});
+    win._testApi.switchToTab(tab.id);
+    click(win, win.document.getElementById('terminal-btn'));
+    await settle();
+    click(win, win.document.getElementById('terminal-btn'));
+    await settle();
+    const [, next, third] = ofType(posted, 'terminalOpen');
+    assert.ok(next && !('machine' in next), 'the next terminal is local too');
+    assert.deepStrictEqual([next.workDir, third.workDir], ['/ws', '/ws']);
+    assert.strictEqual(win._testApi.openTabs().pop().title, 'Terminal 3');
     win.close();
   });
 

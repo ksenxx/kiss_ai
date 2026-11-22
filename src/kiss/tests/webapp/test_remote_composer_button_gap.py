@@ -6,11 +6,11 @@
 
 The composer row below the input textbox (``#input-footer`` in
 ``media/chat.html``) holds the left button group (``#footer-tools``:
-burger menu ``#menu-btn``, new chat ``#new-chat-btn``, inject promptlet
-``#tricks-btn`` and the "..." overflow menu ``#more-btn``) and the
+burger menu ``#menu-btn``, new chat ``#new-chat-btn``, the dictation
+mic ``#dictate-btn`` and the "..." overflow menu ``#more-btn``) and the
 right group (``#input-actions``: model button ``#model-btn``, then
-send/stop).  Mic, share and attach live inside the "..." menu and are
-not part of the idle row.
+send/stop).  Inject promptlet, the voice trigger, share and attach live
+inside the "..." menu and are not part of the idle row.
 
 Historically ``remote-codex.css`` pulled the remote webapp's 36px
 circular controls together with ``margin-left/right: -8px``, so the
@@ -55,7 +55,7 @@ from kiss.tests.conftest import goto_retrying_network_change
 _LEFT_GROUP_IDS = [
     "menu-btn",
     "new-chat-btn",
-    "tricks-btn",
+    "dictate-btn",
     "more-btn",
 ]
 _ALL_IDS = _LEFT_GROUP_IDS + ["model-btn", "send-btn"]
@@ -93,8 +93,16 @@ _FOOTER_LAID_OUT_JS = """
 }
 """
 
+# The served page boots with the placeholder label "loading..." and swaps
+# in the daemon's model name whenever that answer lands, which this layout
+# test has no stake in.  A short label makes a button narrower than its cap
+# with nothing cut (67.7px for the placeholder on Windows), so the boxes
+# are read with a model name longer than the cap, as most are, set in the
+# same script that reads them.
 _GEOMETRY_JS = """
 (ids) => {
+  document.getElementById('model-name').textContent =
+    '\\u200eprovider/a-model-with-a-long-name\\u200e';
   const out = {boxes: {}};
   for (const id of ids) {
     const r = document.getElementById(id).getBoundingClientRect();
@@ -348,12 +356,7 @@ def test_remote_composer_buttons_spread_out(tmp_path: Path) -> None:
     _assert_no_separator(geometry)
     _assert_new_chat_icon(new_chat_icon)
     boxes = geometry["boxes"]
-    for bid in (
-        "menu-btn",
-        "new-chat-btn",
-        "tricks-btn",
-        "more-btn",
-    ):
+    for bid in _LEFT_GROUP_IDS:
         assert boxes[bid]["width"] == 36, boxes
         assert boxes[bid]["height"] == 36, boxes
 

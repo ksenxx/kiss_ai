@@ -4,25 +4,18 @@
 // add your name here
 
 // The `/ask` side channel's nested tab, driven the way the daemon drives
-// it.  Unlike a run_parallel / run_agent child there is NO tool-call
-// panel in the parent that owns the child, so the daemon is the only
-// thing that decides whether the tab exists:
+// it.  The daemon is the only thing that decides whether the tab
+// exists:
 //
 //  1. live: `new_tab` (parent_tab_id = the asking tab) opens a nested
 //     background tab and resumes the child; `subagentDone` closes it and
-//     the daemon is told (`closeTab`).
+//     the daemon, which ended the view itself, is told nothing.
 //  2. replay: a finished side-channel child is announced as
 //     `subagentDone` for its deterministic `<parent>__sub_<task>` id,
 //     never as `openSubagentTab`.  That close is a no-op when the tab is
 //     already gone, and closes a tab restored from saved state.
 //  3. the parent keeps the answer: the `ask_answer` event renders in the
 //     asking tab and is untouched by the child's close.
-//
-// Regression guard for the other direction too: an
-// `openSubagentTab{isDone:true}` with no owning panel DOES re-open a
-// finished tab in the page (that is the run_agent/merge-resolver
-// behaviour), which is exactly why the daemon must not send one for a
-// finished side channel.
 
 'use strict';
 
@@ -87,11 +80,11 @@ function testLiveAskChildClosesOnDone() {
   assert.strictEqual(
     subagentTabEls(win).length,
     0,
-    'the child tab closes on subagentDone without any owning panel',
+    'the child tab closes on subagentDone',
   );
   assert.ok(
-    posted.some(m => m.type === 'closeTab' && m.tabId === subTabId),
-    'the daemon is told about the close',
+    !posted.some(m => m.type === 'closeTab'),
+    'the daemon ended the view: it is told nothing',
   );
 
   // The answer lands in the PARENT's transcript afterwards.
@@ -154,33 +147,10 @@ function testReplayCloseRemovesRestoredTab() {
   console.log('  ok - replay: subagentDone closes a lingering /ask tab');
 }
 
-function testOpenAnnouncementWouldReopenFinishedTab() {
-  const {win, parentId} = runningParentWithAsk();
-  const subTabId = parentId + '__sub_' + CHILD;
-  send(win, {
-    type: 'openSubagentTab',
-    tab_id: subTabId,
-    parent_tab_id: parentId,
-    description: QUESTION,
-    task_id: CHILD,
-    isSubagentTab: true,
-    isDone: true,
-  });
-  assert.strictEqual(
-    subagentTabEls(win).length,
-    1,
-    'an isDone openSubagentTab with no owning panel re-opens the tab -- ' +
-      'the daemon must not send it for a finished side channel',
-  );
-  win.close();
-  console.log('  ok - control: openSubagentTab{isDone} without a panel re-opens');
-}
-
 function main() {
   testLiveAskChildClosesOnDone();
   testReplayCloseIsNoopWhenTabAlreadyGone();
   testReplayCloseRemovesRestoredTab();
-  testOpenAnnouncementWouldReopenFinishedTab();
   console.log('askSubagentTabAutoClose: all tests passed');
 }
 

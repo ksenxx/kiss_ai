@@ -14,11 +14,15 @@
 //  4. .htm renders the same way, and a document without <head> too;
 //  5. a Python file still opens as text (the Monaco editor), not a frame;
 //  6. an existing path outside the work dir opens like any other;
-//  7. a missing path (the daemon replies with an error) opens nothing.
+//  7. a missing path (the daemon replies with an error) opens nothing;
+//  8. the frame's document runs the page's own scripts as written, also
+//     one that names `</body>` in a string, and the menu and the swipe
+//     detector the page ships into it.
 
 'use strict';
 
 const assert = require('assert');
+const {JSDOM, VirtualConsole} = require('jsdom');
 const {
   makePage,
   send,
@@ -27,8 +31,10 @@ const {
   activeFrameDoc,
   stubMonaco,
   flushMicrotasks,
+  settle,
 } = require('./simplify2_harness.js');
 const {contentTabs} = require('./subagent_tab_helpers');
+const {rightClick} = require('./ui_antipattern_harness');
 
 function pageWithMonaco() {
   let created;
@@ -61,6 +67,70 @@ function openFile(win, tabId, path, content, extra) {
       extra || {},
     ),
   );
+}
+
+// One finger goes down on, or lifts from, *target* at x.
+function touch(win, type, target, x) {
+  const e = new win.Event(type, {bubbles: true, cancelable: true});
+  const at = [{clientX: x, clientY: 100}];
+  Object.defineProperty(e, 'touches', {value: type === 'touchend' ? [] : at});
+  Object.defineProperty(e, 'changedTouches', {value: at});
+  target.dispatchEvent(e);
+}
+
+// The frame's document as a browser builds it from the `srcdoc` (jsdom
+// loads no srcdoc frame): parsed with its scripts run.  The right
+// click and the swipe on its text are answered by what the page
+// shipped into it; the swipe is posted to the parent, which for a
+// top-level jsdom window is the window itself.
+async function testFrameDocumentRunsItsScripts() {
+  const {win} = makePage({
+    extraScripts: ['contentContextMenu.js', 'mobileSwipe.js'],
+  });
+  const tabId = win._testApi.getActiveTabId();
+  const page =
+    '<!doctype html><body><p id="p">Hello</p>' +
+    '<script>window.rendered = true; window.template = "</body>";</' +
+    'script>';
+  const pages = {
+    // A closing body tag may be left out: the only `</body>` of this
+    // document is the one inside its script.
+    'open.html': page,
+    'closed.html': page + '</body></html>',
+  };
+  for (const name of Object.keys(pages)) {
+    // No version stamp: a read-only preview, without the Ctrl+S bridge
+    // of an editable one (it needs a MessagePort, which jsdom lacks).
+    openFile(win, tabId, '/ws/proj/site/' + name, pages[name], {
+      version: undefined,
+    });
+    const errors = [];
+    const virtualConsole = new VirtualConsole();
+    virtualConsole.on('jsdomError', e => errors.push(String(e)));
+    const frame = new JSDOM(activeFrameDoc(win), {
+      runScripts: 'dangerously',
+      pretendToBeVisual: true,
+      virtualConsole,
+    }).window;
+    assert.deepStrictEqual(errors, [], name + ': every script parses');
+    assert.strictEqual(frame.rendered, true, name + ": the page's script ran");
+    assert.strictEqual(frame.template, '</body>', name + ': as it was written');
+    const text = frame.document.getElementById('p');
+    rightClick(frame, text);
+    assert.ok(
+      frame.document.getElementById('sorcar-content-context-menu'),
+      name + ': the right click opens the menu',
+    );
+    const swipes = [];
+    frame.addEventListener('message', e => swipes.push(e.data.kissMobileSwipe));
+    touch(frame, 'touchstart', text, 300);
+    touch(frame, 'touchend', text, 100);
+    await settle();
+    assert.deepStrictEqual(swipes, ['left'], name + ': the swipe is reported');
+    frame.close();
+  }
+  win.close();
+  console.log('  ok - the frame runs its scripts, the menu and the swipe');
 }
 
 async function main() {
@@ -153,6 +223,7 @@ async function main() {
   assert.ok(toast.textContent.includes('File not found: no/such/page.html'));
   console.log('  ok - missing html path opens nothing');
   win.close();
+  await testFrameDocumentRunsItsScripts();
 }
 
 main()

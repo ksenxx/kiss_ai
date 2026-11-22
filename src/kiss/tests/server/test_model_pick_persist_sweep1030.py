@@ -23,6 +23,7 @@ import functools
 import sqlite3
 import sys
 import unittest
+from contextlib import closing
 from typing import Any
 
 from kiss.agents.sorcar import persistence
@@ -143,7 +144,7 @@ class ModelPickPersistTest(TwoClientHarness):
         self.wait_for(lambda: persistence._load_last_model() == FIRST, what="first pick")
         self.wait_for(lambda: agent_server._model_picks_pending == 0, what="first pick done")
 
-        with sqlite3.connect(persistence._DB_PATH) as db:
+        with closing(sqlite3.connect(persistence._DB_PATH)) as db, db:
             db.execute("DROP TABLE model_usage")
         a.send({"type": "selectModel", "tabId": a.tab_id, "model": SECOND})
         self.wait_for(

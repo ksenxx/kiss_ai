@@ -5,7 +5,8 @@
 //
 // End-to-end (jsdom) tests for anti-patterns A12/A13 in media/main.js:
 // the Settings and Promptlets sheets close on Escape like every other
-// popup and hand focus back to the control that opened them; an inner
+// popup and hand focus back to the control that opened them (the "..."
+// button for Promptlets, whose own item is hidden with its menu); an inner
 // popup (promptlet editor, server-reset confirm) consumes Escape first;
 // the promptlet toggle exposes its state through aria-expanded.  Each
 // test fails on the old code.
@@ -29,34 +30,41 @@ function escape(win) {
 }
 
 async function main() {
-  await test('Escape closes the settings sheet and focuses the "..." button', () => {
+  await test('Escape closes the settings sheet and returns focus to its button', () => {
     const {win} = h.makePage();
+    // Settings is on the strip of the Chats panel, docked on this wide
+    // page (a drawer its click closes hands the focus to its toggle:
+    // sidebarFooterStrip.test.js).
+    assert.ok(isOpen(win, 'sidebar'), 'precondition: panel docked');
     const settingsBtn = h.byId(win, 'settings-btn');
     settingsBtn.focus();
     h.click(win, settingsBtn);
     assert.ok(isOpen(win, 'settings-panel'), 'precondition: sheet open');
+    h.byId(win, 'settings-panel-close').focus();
     escape(win);
     assert.ok(!isOpen(win, 'settings-panel'), 'Escape closes the sheet');
     assert.ok(!isOpen(win, 'settings-overlay'), 'and its backdrop');
-    // #settings-btn lives in the (now closed) "..." menu and cannot
-    // take focus there: its trigger gets it.
-    assert.strictEqual(win.document.activeElement, h.byId(win, 'more-btn'));
+    assert.strictEqual(win.document.activeElement, settingsBtn);
     win.close();
   });
 
-  await test('Escape closes the promptlets sheet and returns focus to its button', () => {
+  await test('Escape closes the promptlets sheet and returns focus to the "..." button', () => {
     const {win} = h.makePage();
     win.__TRICKS__ = ['do the thing'];
+    const moreBtn = h.byId(win, 'more-btn');
     const tricksBtn = h.byId(win, 'tricks-btn');
+    h.click(win, moreBtn);
+    assert.ok(isOpen(win, 'more-menu'), 'precondition: menu open');
     tricksBtn.focus();
     h.click(win, tricksBtn);
+    assert.ok(!isOpen(win, 'more-menu'), 'the item closes its menu');
     assert.ok(isOpen(win, 'tricks-panel'));
     assert.strictEqual(tricksBtn.getAttribute('aria-expanded'), 'true');
     h.byId(win, 'tricks-search').focus();
     escape(win);
     assert.ok(!isOpen(win, 'tricks-panel'), 'Escape closes the sheet');
     assert.strictEqual(tricksBtn.getAttribute('aria-expanded'), 'false');
-    assert.strictEqual(win.document.activeElement, tricksBtn);
+    assert.strictEqual(win.document.activeElement, moreBtn);
     win.close();
   });
 

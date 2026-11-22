@@ -9,7 +9,7 @@
 // Reproduces the issue where createResultPanel() piped the summary through
 // marked.parse(), so an HTML summary was mangled by the Markdown parser and
 // Markdown syntax was styled even though finish() now guarantees HTML.
-// Also covers splitMultiSessionSummary()'s new <h3> HTML session markers
+// Also covers finalSessionSummary()'s new <h3> HTML session markers
 // (with backward compatibility for old persisted Markdown markers).
 //
 // media/main.js is served to the remote webapp by
@@ -110,15 +110,14 @@ function testMultiSessionSplitWithHtmlMarkers() {
   const headings = panels.map(p => p.querySelector('.rc-h h3').textContent);
   assert.deepStrictEqual(
     headings,
-    ['Previous Sessions', 'Result'],
-    'BUG: HTML <h3> session markers must split into two panels; got ' +
+    ['Result'],
+    'HTML <h3> session markers must leave the final session alone on screen; got ' +
       headings.join(' -> '),
   );
-  assert.ok(panels[0].textContent.includes('did A'));
-  assert.ok(!panels[0].textContent.includes('finished B'));
-  assert.ok(panels[1].textContent.includes('finished B'));
+  assert.ok(!panels[0].textContent.includes('did A'));
+  assert.ok(panels[0].textContent.includes('finished B'));
   assert.ok(
-    panels[1].querySelector('.rc-body p'),
+    panels[0].querySelector('.rc-body p'),
     'final session HTML must render as elements',
   );
   win.close();
@@ -133,10 +132,11 @@ function testMultiSessionSplitExhaustionBannerWithHtmlMarkers() {
   );
   const panels = Array.from(win.document.querySelectorAll('#output > .rc'));
   const headings = panels.map(p => p.querySelector('.rc-h h3').textContent);
-  assert.deepStrictEqual(headings, ['Previous Sessions', 'Result']);
+  assert.deepStrictEqual(headings, ['Result']);
   assert.ok(
-    panels[1].textContent.includes('Task failed after 2 sub-sessions'),
+    panels[0].textContent.includes('Task failed after 2 sub-sessions'),
   );
+  assert.ok(!panels[0].textContent.includes('did A'));
   win.close();
 }
 
@@ -151,10 +151,12 @@ function testMultiSessionSplitKeepsMarkdownBackCompat() {
   const headings = panels.map(p => p.querySelector('.rc-h h3').textContent);
   assert.deepStrictEqual(
     headings,
-    ['Previous Sessions', 'Result'],
+    ['Result'],
     'old Markdown session markers must still split; got ' +
       headings.join(' -> '),
   );
+  assert.ok(!panels[0].textContent.includes('did A'));
+  assert.ok(panels[0].textContent.includes('finished B'));
   win.close();
 }
 

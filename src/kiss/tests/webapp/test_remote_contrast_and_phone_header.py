@@ -4,7 +4,7 @@
 # add your name here
 """Served page + real Chromium: the High contrast palettes and the phone chat header.
 
-* The ``...`` menu's High contrast item paints the dark palette at
+* The Chats strip's High contrast button paints the dark palette at
   full contrast on the dark theme (black canvas, white text, white
   primary button) and the light palette at full contrast on the light
   theme (white canvas, black text, black primary button); Low contrast
@@ -22,7 +22,9 @@
   directory) share ONE row whatever their lengths: a machine name that
   fits in its half of the row is shown whole and the directory takes
   the rest, two long names halve the row, and what does not fit is cut
-  with an ellipsis.  Each name's down chevron follows it directly.
+  with an ellipsis: a machine name loses its end, a directory its
+  beginning (the last folder stays in view).  Each name's down chevron
+  follows it directly.
 """
 
 from __future__ import annotations
@@ -54,20 +56,35 @@ _PROBE_JS = """() => {
     bodyBg: cs('body', 'backgroundColor'),
     bodyFg: cs('body', 'color'),
     send: cs('#send-btn', 'backgroundColor'),
-    contrastLabel: document.querySelector('#contrast-btn .more-item-label').textContent,
-    themeLabel: document.querySelector('#theme-btn .more-item-label').textContent,
+    contrastLabel: document.getElementById('contrast-btn').getAttribute('aria-label'),
+    themeLabel: document.getElementById('theme-btn').getAttribute('aria-label'),
   };
 }"""
 
 _HEADER_JS = """() => {
   const header = document.getElementById('chat-header');
   const h = header.getBoundingClientRect();
+  // Whether the characters [from, to) of the label's text lie inside
+  // the label's box: a cut label clips the others behind its ellipsis.
+  const inside = (label, from, to) => {
+    if (!label.firstChild) return false;
+    const range = document.createRange();
+    range.setStart(label.firstChild, from);
+    range.setEnd(label.firstChild, to);
+    const r = range.getBoundingClientRect();
+    const l = label.getBoundingClientRect();
+    return r.width > 0 && r.left >= l.left - 1 && r.right <= l.right + 1;
+  };
   const box = id => {
     const select = document.getElementById(id);
     const label = select.previousElementSibling;
     const r = select.getBoundingClientRect();
+    const n = label.textContent.length;
     return {left: r.left, right: r.right, top: r.top, width: r.width,
-            shown: label.textContent, cut: label.scrollWidth > label.clientWidth};
+            shown: label.textContent, cut: label.scrollWidth > label.clientWidth,
+            direction: getComputedStyle(label).direction,
+            startShown: inside(label, 0, Math.min(n, 6)),
+            endShown: inside(label, Math.max(0, n - 6), n)};
   };
   return {
     viewport: window.innerWidth,
@@ -82,9 +99,12 @@ _HEADER_JS = """() => {
 # task.  The page repaints both drop-downs when a daemon reply such as
 # ``machines`` arrives, so a measurement taken by a later ``evaluate``
 # can see the daemon's own names instead of these.
+_LONG_DIR = "/home/someone/projects/a-very-long-directory-name/deeper"
 _PHONE_HEADER_JS = (
     """machine => {
-  const dir = '/home/someone/projects/a-very-long-directory-name/deeper';
+  const dir = '"""
+    + _LONG_DIR
+    + """';
   window.dispatchEvent(new MessageEvent('message', {data: {
     type: 'configData', machine,
     config: {work_dir: dir, recent_work_dirs: [{path: dir, ts: 1}]}}}));
@@ -184,8 +204,8 @@ def test_page_inlines_the_high_contrast_palettes_once() -> None:
     assert page.count("--theme-button-background: #000000;") == 1
 
 
-def _click_menu_item(page, item_id: str) -> None:
-    page.evaluate(f"() => document.getElementById('{item_id}').click()")
+def _press_strip_button(page, button_id: str) -> None:
+    page.evaluate(f"() => document.getElementById('{button_id}').click()")
 
 
 @pytest.mark.timeout(180)
@@ -221,7 +241,7 @@ def test_live_contrast_toggle_and_phone_header(tmp_path: Path) -> None:
                 page.evaluate(_TOOL_CARDS_JS)
                 failures = page.evaluate(_FAILURE_COLOURS_JS)
                 low_text = {"light": _low_contrast_text(page)}
-                _click_menu_item(page, "contrast-btn")
+                _press_strip_button(page, "contrast-btn")
                 page.wait_for_function(
                     "() => getComputedStyle(document.getElementById('send-btn'))"
                     ".backgroundColor === 'rgb(0, 0, 0)'",
@@ -229,7 +249,7 @@ def test_live_contrast_toggle_and_phone_header(tmp_path: Path) -> None:
                 )
                 high_light = page.evaluate(_PROBE_JS)
                 low_text["high-contrast light"] = _low_contrast_text(page)
-                _click_menu_item(page, "theme-btn")
+                _press_strip_button(page, "theme-btn")
                 page.wait_for_function(
                     "() => getComputedStyle(document.getElementById('send-btn'))"
                     ".backgroundColor === 'rgb(255, 255, 255)'",
@@ -237,7 +257,7 @@ def test_live_contrast_toggle_and_phone_header(tmp_path: Path) -> None:
                 )
                 high_dark = page.evaluate(_PROBE_JS)
                 low_text["high-contrast dark"] = _low_contrast_text(page)
-                _click_menu_item(page, "contrast-btn")
+                _press_strip_button(page, "contrast-btn")
                 page.wait_for_function(
                     "() => getComputedStyle(document.getElementById('send-btn'))"
                     ".backgroundColor === 'rgb(239, 239, 239)'",
@@ -303,7 +323,9 @@ def test_live_contrast_toggle_and_phone_header(tmp_path: Path) -> None:
 
     _assert_chevrons_follow_the_names(phone_chevrons)
     # One row inside the viewport: the machine, then the directory, the
-    # long directory cut with an ellipsis.
+    # long directory cut with an ellipsis at its beginning: its label (the
+    # path between two left-to-right marks, which keep the leading "/" in
+    # front) runs right to left, so the last folder stays in view.
     for shot in (short_name, long_name):
         assert shot["viewport"] == 390, shot
         assert shot["machine"]["width"] > 40, shot
@@ -311,12 +333,19 @@ def test_live_contrast_toggle_and_phone_header(tmp_path: Path) -> None:
         assert shot["machine"]["left"] >= 0 and shot["workdir"]["right"] <= 390, shot
         assert shot["machine"]["right"] < shot["workdir"]["left"], shot
         assert shot["machine"]["top"] == shot["workdir"]["top"], shot
-        assert shot["workdir"]["shown"].endswith("/deeper") and shot["workdir"]["cut"], shot
+        workdir = shot["workdir"]
+        assert workdir["shown"] == f"\u200e{_LONG_DIR}\u200e" and workdir["cut"], shot
+        assert workdir["direction"] == "rtl", shot
+        assert workdir["endShown"] and not workdir["startShown"], shot
+        assert shot["machine"]["direction"] == "ltr", shot
     # A name that fits in its half of the row is shown whole; a long one
-    # is cut too and the two halve the row, which stays one line tall.
+    # is cut too (at its end) and the two halve the row, which stays one
+    # line tall.
     assert short_name["machine"]["shown"] == "koushik-sorcar", short_name
     assert not short_name["machine"]["cut"], short_name
+    assert short_name["machine"]["startShown"] and short_name["machine"]["endShown"], short_name
     assert long_name["machine"]["cut"], long_name
+    assert long_name["machine"]["startShown"] and not long_name["machine"]["endShown"], long_name
     assert long_name["machine"]["width"] == pytest.approx(
         long_name["workdir"]["width"], abs=1
     ), long_name

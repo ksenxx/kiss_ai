@@ -192,15 +192,3 @@ class TestResolveParentTabIdForSub:
             sub_task_id="t-helper",
         )
         assert out == "root-tab"
-
-    def test_finished_sub_keeps_finished_parent(self) -> None:
-        """Finished history keeps its real parent (also finished) so a
-        hand-close of that parent's reopened tab still cascades."""
-        server = AgentServer()
-        _register("t-root", "root-tab", chat_id="c7")
-        out = server._resolve_parent_tab_id_for_sub(
-            parent_task_id="t-mid", chat_id="c7",
-            sub_tab_id="root-tab__sub_t-mid__sub_t-leaf",
-            sub_task_id="t-leaf",
-        )
-        assert out == "root-tab__sub_t-mid"

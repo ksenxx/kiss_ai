@@ -48,6 +48,7 @@ import tempfile
 import threading
 import time
 import unittest
+from contextlib import closing
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
@@ -113,6 +114,10 @@ class _DelegatingModel(BaseHTTPRequestHandler):
     calls = 0
     tool_results: list[str] = []
     requests: list[dict[str, Any]] = []
+    # Clear while a test's late surface attaches: an answer that pauses for a
+    # viewer then waits for that viewer, however slow the daemon under test is.
+    attached = threading.Event()
+    attached.set()
 
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
         pass
@@ -127,6 +132,8 @@ class _DelegatingModel(BaseHTTPRequestHandler):
         script = _DelegatingModel.script
         answer = script[min(_DelegatingModel.calls, len(script)) - 1]
         time.sleep(answer["pause"])
+        if answer["pause"]:
+            _DelegatingModel.attached.wait(60)
         tool_calls = []
         for index, (name, arguments) in enumerate(answer["calls"]):
             if name == "agent_job":
@@ -165,7 +172,7 @@ def _restore_config(saved: str | None) -> None:
         vc._config_path().write_text(saved)
 
 
-def _machine_state() -> tuple[list[mach.Machine], dict[str, str], str | None]:
+def _machine_state() -> tuple[list[mach.Machine], dict[str, tuple[str, str]], str | None]:
     """The registry, the host names learnt of its machines and the text of their file."""
     hosts_file = kiss_home() / mach.HOSTS_FILE
     return (
@@ -175,7 +182,7 @@ def _machine_state() -> tuple[list[mach.Machine], dict[str, str], str | None]:
 
 
 def _restore_machine_state(
-    registry: list[mach.Machine], hosts: dict[str, str], hosts_text: str | None,
+    registry: list[mach.Machine], hosts: dict[str, tuple[str, str]], hosts_text: str | None,
 ) -> None:
     """Put back what :func:`_machine_state` returned."""
     mach.save_machines(registry)
@@ -190,11 +197,23 @@ def _restore_machine_state(
 
 def _remote_rows(home: Path) -> list[tuple[str, str]]:
     """The ``(task, parent_task_id)`` rows of the remote daemon's history."""
-    with sqlite3.connect(home / "history.db") as db:
+    with closing(sqlite3.connect(home / "history.db")) as db:
         return [
             (str(task), str(parent or ""))
             for task, parent in db.execute("SELECT task, parent_task_id FROM task_history")
         ]
+
+
+def _remote_results(home: Path, task_id: str) -> list[dict[str, Any]]:
+    """The ``result`` events in the transcript the remote daemon's history keeps of *task_id*."""
+    with closing(sqlite3.connect(home / "history.db")) as db:
+        events = [
+            json.loads(event)
+            for (event,) in db.execute(
+                "SELECT event_json FROM events WHERE task_id = ? ORDER BY seq", (task_id,),
+            )
+        ]
+    return [event for event in events if event.get("type") == "result"]
 
 
 class TwoDaemonsCase(IsolatedAsyncioTestCase):
@@ -298,6 +317,9 @@ class TwoDaemonsCase(IsolatedAsyncioTestCase):
         Returns the frames seen until the tab went idle and the
         sub-agent tab id this client opened ("" when no ``new_tab`` came).
         """
+        if late:  # the sub-agent's answer waits for the late surface
+            _DelegatingModel.attached.clear()
+            self.addCleanup(_DelegatingModel.attached.set)
         await self._send({
             "type": "submit", "prompt": prompt, "tabId": tab,
             "model": self.model, "workDir": work_dir or self.tmpdir,
@@ -315,9 +337,27 @@ class TwoDaemonsCase(IsolatedAsyncioTestCase):
                 })
                 if late:
                     self.late = await self._late_surface(tab, msg["task_id"])
+                    _DelegatingModel.attached.set()
             if msg.get("type") == "status" and msg.get("tabId") == tab and not msg["running"]:
                 return seen, child
         raise AssertionError("the calling task never went idle")
+
+    async def _until_ended(self, seen: list[dict[str, Any]], child: str) -> None:
+        """Read on, into *seen*, until the sub-agent tab *child* is told its end (``subagentDone``).
+
+        The box tells that end after the status that ends the run,
+        which is what ``run_agent`` waits for, so the caller may be
+        idle before it comes: the frames read until then held no end in
+        a run of the whole suite (run 2026-11-22, the box short of a
+        core).  The stream relays the box's end, or, retired before it
+        came, ends the tab itself.
+        """
+        deadline = time.monotonic() + 60
+        while ("subagentDone", child) not in [(m["type"], m.get("tab_id")) for m in seen]:
+            try:
+                seen.append(await self._next(timeout=deadline - time.monotonic()))
+            except TimeoutError:
+                self.fail(f"the sub-agent tab {child} was never told its end")
 
     async def _late_surface(self, tab: str, task_id: str) -> dict[str, dict[str, Any]]:
         """Connect a surface, send ``ready``, open the running sub-agent's tab as it would.
@@ -395,13 +435,11 @@ class TestRunAgentOnMachine(TwoDaemonsCase):
         # into the same tab, its result included.
         child_frames = [m for m in seen if m.get("tabId") == child]
         self.assertIn(CHILD_SUMMARY, json.dumps(child_frames))
-        self.assertIn(("subagentDone", child), types)
+        await self._until_ended(seen, child)
         # A surface that connected while the sub-agent ran was told of it
         # too (the same new_tab), and got its transcript on its own tab.
         self.assertEqual(self.late["new_tab"]["task_id"], settings["settings"]["task_id"])
         self.assertEqual(self.late["task_events"]["task"], CHILD_TASK)
-        # Its end reached the stream once: nothing was left to announce
-        # when the stream was retired.
         self.assertEqual(
             [m["tabId"] for m in seen if m["type"] == "task_events"], [child],
             "the late surface's replay went to it alone",
@@ -448,7 +486,7 @@ class TestRunAgentOnMachine(TwoDaemonsCase):
             m for m in seen if m["type"] == "task_settings" and m.get("tabId") == tab
         )
         parent_id = caller["settings"]["task_id"]
-        with sqlite3.connect(self.remote.home / "history.db") as db:
+        with closing(sqlite3.connect(self.remote.home / "history.db")) as db:
             child_id, child_cost = db.execute("SELECT id, cost FROM task_history").fetchone()
 
         def parent_row() -> tuple[float, int]:
@@ -614,8 +652,7 @@ class TestRunAgentOnMachine(TwoDaemonsCase):
                 "<p>first done</p>" in text or "<p>second done</p>" in text,
                 f"no result on {child}: {[m['type'] for m in frames]}",
             )
-            self.assertIn(("subagentDone", child),
-                          [(m["type"], m.get("tab_id")) for m in seen])
+            await self._until_ended(seen, child)
         results = [t for t in _DelegatingModel.tool_results if "machine=box" in t]
         self.assertTrue(any("first done" in t for t in results), results)
         self.assertTrue(any("second done" in t for t in results), results)
@@ -705,14 +742,24 @@ class TestRunAgentOnMachine(TwoDaemonsCase):
         # An HTML summary, as every sub-agent result is.
         self.assertIn("<p>Task failed with error:", tool_result)
         self.assertIn("not-a-dir", tool_result)
-        # The failure is the sub-task's terminal result event on its tab
-        # too: live when the tab's ``resumeSession`` reached the box
-        # before the run ended, else in the transcript the resume
-        # replays (the run ends milliseconds after its ``new_tab``, and
-        # the box's agent stopped recording before the result went out).
-        # Rendered as a surface does: a replay replaces the transcript,
-        # a live event appends to it.
+        # The failure is the sub-task's terminal result event too, once,
+        # in the transcript the box keeps of it: stored before the box
+        # announced the end that ``run_agent`` waited for.  It is not
+        # read off the sub-agent's tab, which shows it only when its
+        # ``resumeSession`` reaches the box before the run ends,
+        # milliseconds after the ``new_tab``; a later one is told the
+        # end alone.
         self.assertTrue(child, f"no new_tab; the model saw {_DelegatingModel.tool_results}")
+        kept = _remote_results(self.remote.home, child.removeprefix(f"{tab}__sub_"))
+        self.assertEqual(len(kept), 1, kept)
+        self.assertFalse(kept[0].get("success", True))
+        # In ``summary``, which a surface renders as HTML: as ``text``
+        # alone its tags would be shown escaped.
+        self.assertIn("<p>Task failed with error:", str(kept[0].get("summary")))
+        # The tab shows that result or none, never two, and its end
+        # either way.  Rendered as a surface does: a replay replaces
+        # the transcript, a live event appends to it.
+        await self._until_ended(seen, child)
         transcript: list[dict[str, Any]] = []
         for m in seen:
             if m.get("tabId") != child:
@@ -721,16 +768,8 @@ class TestRunAgentOnMachine(TwoDaemonsCase):
                 transcript = list(m.get("events", []))
             elif m["type"] == "result":
                 transcript.append(m)
-        child_results = [ev for ev in transcript if ev.get("type") == "result"]
-        self.assertEqual(len(child_results), 1, child_results)
-        self.assertFalse(child_results[0].get("success", True))
-        # In ``summary``, which a surface renders as HTML: as ``text``
-        # alone its tags would be shown escaped.
-        self.assertIn("<p>Task failed with error:", str(child_results[0].get("summary")))
-        self.assertIn(
-            ("subagentDone", child),
-            [(m["type"], m.get("tabId") or m.get("tab_id")) for m in seen],
-        )
+        shown = [ev.get("summary") for ev in transcript if ev.get("type") == "result"]
+        self.assertIn(shown, ([], [kept[0]["summary"]]))
 
     async def test_a_sub_agent_that_finishes_unsuccessfully_reports_once(self) -> None:
         """``finish(success=False)`` prints its own result: the daemon adds none.
@@ -819,7 +858,9 @@ def test_a_two_daemons_test_leaves_the_machine_state_as_found() -> None:
     class _Registered(TwoDaemonsCase):
         async def test_only_box_is_known(self) -> None:
             self.assertEqual([m.name for m in mach.load_machines()], ["box"])
-            self.assertEqual(mach._hosts, {"box": mach.local_machine_name()})
+            self.assertEqual(mach._hosts, {
+                "box": (mach.local_machine_name(), mach.load_machines()[0].address()),
+            })
 
     found = _machine_state()
     earlier = mach.Machine(name="earlier", url="https://127.0.0.1:1", password="x")

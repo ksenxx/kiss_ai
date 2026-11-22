@@ -57,6 +57,12 @@ PYPI_PACKAGE_NAME="kiss-agent-framework"
 # these paths literally too and does not follow renames, so a file that was
 # published under an earlier path must list that old path as well.
 EXCLUDE_FILE="scripts/exclude.json"
+# Outside contributors credited in the public repo, one per line:
+# "<version> <Name> <email>" puts a "Co-authored-by: <Name> <email>" trailer on
+# the "Release <version>" commit. Public main holds release commits only, so
+# these trailers are the only way GitHub lists anyone but the releaser as a
+# contributor. Deleting a line removes the credit at the next release.
+CREDITS_FILE="scripts/credits.txt"
 # Local ref namespaces mirroring the public repo's branches and tags. They are
 # fetched here instead of into refs/tags/* (and instead of relying on
 # refs/remotes/$PUBLIC_REMOTE/*, whose symbolic HEAD entry would shadow a branch
@@ -291,21 +297,39 @@ commit_parents() {
     git rev-list --parents -n 1 "$1" | cut -s -d' ' -f2-
 }
 
+# Print the message of the "Release <version>" commit: that subject, then one
+# Co-authored-by trailer per line of $CREDITS_FILE naming <version>. Without
+# the file nobody is credited.
+release_message() {
+    local version="$1" trailers=""
+    if [[ -f "$CREDITS_FILE" ]]; then
+        trailers=$(awk -v version="$version" \
+            '$1 == version { sub(/^[^ \t]+[ \t]+/, ""); print "Co-authored-by: " $0 }' "$CREDITS_FILE")
+    fi
+    printf 'Release %s\n' "$version"
+    if [[ -n "$trailers" ]]; then
+        printf '\n%s\n' "$trailers"
+    fi
+}
+
 # Print the id of a "Release <version>" commit holding <tree> on top of
 # <parent> ("" for the first release). Author, committer and dates are copied
 # from <source-commit> (the released commit, or the previously published commit
 # a release-only history is rebuilt from), so the same inputs always yield the
-# same commit id and build_release_chain can recognise its own work.
+# same commit id and build_release_chain can recognise its own work. The
+# identities are read through .mailmap (%aN, not %an): a placeholder identity
+# that leaked into this checkout's git config ("Test <test@test.com>") and is
+# mapped there is never published, where GitHub would credit whoever owns it.
 release_commit() {
     local version="$1" tree="$2" parent="$3" source_commit="$4"
     local ident=() line parent_args=()
     while IFS= read -r line; do
         ident+=("$line")
-    done < <(git log -1 --date=raw "$source_commit" --format='GIT_AUTHOR_NAME=%an
-GIT_AUTHOR_EMAIL=%ae
+    done < <(git log -1 --date=raw "$source_commit" --format='GIT_AUTHOR_NAME=%aN
+GIT_AUTHOR_EMAIL=%aE
 GIT_AUTHOR_DATE=%ad
-GIT_COMMITTER_NAME=%cn
-GIT_COMMITTER_EMAIL=%ce
+GIT_COMMITTER_NAME=%cN
+GIT_COMMITTER_EMAIL=%cE
 GIT_COMMITTER_DATE=%cd')
     if [[ ${#ident[@]} -ne 6 ]]; then
         print_error "Cannot read the author and committer of $source_commit" >&2
@@ -314,7 +338,7 @@ GIT_COMMITTER_DATE=%cd')
     if [[ -n "$parent" ]]; then
         parent_args=(-p "$parent")
     fi
-    env "${ident[@]}" git commit-tree "$tree" "${parent_args[@]}" -m "Release $version"
+    env "${ident[@]}" git commit-tree "$tree" "${parent_args[@]}" -m "$(release_message "$version")"
 }
 
 # Print the id of an annotated tag object <tag> ("Release <version>") pointing
@@ -329,12 +353,17 @@ release_tag() {
 }
 
 # Succeed when <commit> is the "Release <version>" commit holding <tree> on top
-# of <parent> ("" for a root): the shape every commit of public main must have.
+# of <parent> ("" for a root), with the message release_message gives it and
+# identities .mailmap leaves as they are: the shape every commit of public main
+# must have. A commit published before a credit or a .mailmap entry changed
+# fails the check and is rebuilt.
 release_commit_shape_ok() {
     local commit="$1" tree="$2" parent="$3" version="$4"
     [[ "$(git rev-parse "${commit}^{tree}")" == "$tree" &&
         "$(commit_parents "$commit")" == "$parent" &&
-        "$(git log -1 --format=%s "$commit")" == "Release $version" ]]
+        "$(git log -1 --format=%B "$commit")" == "$(release_message "$version")" &&
+        "$(git log -1 --format='%an <%ae> %cn <%ce>' "$commit")" == \
+            "$(git log -1 --format='%aN <%aE> %cN <%cE>' "$commit")" ]]
 }
 
 # Build the history that the public repo's main must consist of: one

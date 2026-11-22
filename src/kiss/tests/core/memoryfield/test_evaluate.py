@@ -7,14 +7,17 @@ cannot be reached without a fake model and is a one-line skip-with-warning.
 
 import argparse
 import json
+import logging
 import os
 import sqlite3
+import sys
 import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from pathlib import Path
+from types import FrameType
 from typing import Any
 
 import pytest
@@ -342,6 +345,66 @@ def test_main_cli_offline(tmp_path: Path, capsys: pytest.CaptureFixture[str]) ->
     assert len(list((tmp_path / "memory").glob("*.md"))) == 2
     assert main(args) == 0
     assert json.loads(out.read_text())["corpus_pages"] == 5
+
+
+class _EvaluatesDuringEvaluation:
+    """Profile hook of an evaluation: as it is about to run its probes, another thread
+    starts an evaluation with *args*.
+
+    The first goes on once the other has returned, or sleeps: between two
+    tries for a lock that the first holds.
+    """
+
+    def __init__(self, args: list[str]) -> None:
+        self.args = args
+        self.settled = threading.Event()
+        self.thread = threading.Thread(target=self._evaluate)
+        self.code = -1
+
+    def __call__(self, frame: FrameType, event: str, arg: object) -> None:
+        if (event == "call" and frame.f_code is run_evaluation.__code__
+                and self.thread.ident is None):
+            self.thread.start()
+            assert self.settled.wait(120)
+
+    def _evaluate(self) -> None:
+        sys.setprofile(self._sleeps)
+        try:
+            self.code = main(self.args)
+        finally:
+            sys.setprofile(None)
+            self.settled.set()
+
+    def _sleeps(self, frame: FrameType, event: str, arg: object) -> None:
+        if event == "c_call" and arg is time.sleep:
+            self.settled.set()
+
+
+def test_an_evaluation_waits_for_another_of_its_corpus(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A second evaluation of one corpus directory, of fewer tasks, pruned the pages of the
+    first, which then failed to read the gold page of a probe (``FileNotFoundError``)."""
+    db = make_db(tmp_path / "history.db")
+    out, other_out = tmp_path / "eval" / "results.json", tmp_path / "other" / "results.json"
+    common = ["--db", str(db), "--memory-dir", str(tmp_path / "memory"), "--llm-probes", "0",
+              "--embedding-model", HASHED_EMBEDDING_MODEL_CODE, "--min-result-chars", "10"]
+    hook = _EvaluatesDuringEvaluation([*common, "--out", str(other_out), "--limit", "2"])
+    previous = sys.getprofile()
+    sys.setprofile(hook)
+    try:
+        with caplog.at_level(logging.INFO, logger="kiss.core.memoryfield.evaluate"):
+            assert main([*common, "--out", str(out), "--limit", "10"]) == 0
+    finally:
+        sys.setprofile(previous)
+    hook.thread.join(120)
+    assert not hook.thread.is_alive() and hook.code == 0
+    assert "Waiting for another evaluation of the corpus" in caplog.text
+    data = json.loads(out.read_text())
+    assert data["corpus_pages"] == 5 and len(data["probes"]) == 3
+    # The first one done, the second had the corpus, and made it its own.
+    assert json.loads(other_out.read_text())["corpus_pages"] == 2
+    assert len(list((tmp_path / "memory").glob("*.md"))) == 2
 
 
 def test_main_cli_keeps_its_default_outputs_in_the_agents_temp_directory(

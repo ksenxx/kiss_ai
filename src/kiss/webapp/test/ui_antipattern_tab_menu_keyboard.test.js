@@ -4,12 +4,13 @@
 // add your name here
 //
 // End-to-end (jsdom) tests for anti-patterns A5/A12 in media/main.js:
-// the tab context menu of the group strip (#tab-list: the chat on
-// screen and its sub-agent tabs) is keyboard operable like the sidebar
-// tree menus.  Shift+F10 / the ContextMenu key open it from a focused
-// tab, its items are focusable menuitems reached with the arrows, Home
-// and End, Enter picks one, and Escape closes it and hands focus back
-// to the tab.  Each test fails on the old code.
+// the context menu of a content tab (a file, report, browser or
+// terminal tab) is keyboard operable like the sidebar tree menus.
+// Shift+F10 / the ContextMenu key open it from a focused tab, its
+// items are focusable menuitems reached with the arrows, Home and End,
+// Enter picks one, and Escape closes it and hands focus back to the
+// tab.  A chat's or a sub-agent's tab has no menu: its entries close
+// tabs, and those tabs are not the user's to close.
 'use strict';
 
 const assert = require('assert');
@@ -26,38 +27,37 @@ function items(win) {
   return h.all(win, '#tab-context-menu .tab-ctx-item');
 }
 
-// Two chats; tabA is on screen with a sub-agent tab, so the strip is
-// shown (a lone chat has no strip) and tabA's entry can take focus.
-function twoTabs() {
+// A chat with a running sub-agent (so the group strip is shown: a lone
+// chat has no strip) and a file it opened, on the content pane's row.
+function chatWithFile() {
   const {win, posted} = h.makePage();
-  const tabA = win._testApi.getActiveTabId();
+  const chat = win._testApi.getActiveTabId();
   win._testApi.endLaunch();
-  win._testApi.createNewTab();
-  const tabB = win._testApi.getActiveTabId();
-  assert.notStrictEqual(tabA, tabB);
-  win._testApi.switchToTab(tabA);
   h.send(win, {
     type: 'openSubagentTab',
     tab_id: 'sub-a',
-    parent_tab_id: tabA,
+    parent_tab_id: chat,
     description: 'a sub-agent',
     task_id: 'sub-task-a',
     taskIndex: 0,
-    isSubagentTab: true,
   });
-  assert.strictEqual(win._testApi.getActiveTabId(), tabA, 'tabA is on screen');
-  assert.notStrictEqual(
-    h.byId(win, 'tab-bar').style.display,
-    'none',
-    'the group strip is shown',
-  );
-  return {win, posted, tabA};
+  h.send(win, {
+    type: 'fileContent',
+    tabId: chat,
+    path: '/ws/a.py',
+    name: 'a.py',
+    content: 'print(1)\n',
+    version: 'v1',
+  });
+  const tab = h.contentTabStrips(win)[0];
+  assert.ok(tab, "the file has a tab on the content pane's row");
+  assert.strictEqual(win._testApi.getActiveTabId(), chat, 'the chat is on screen');
+  return {win, posted, chat, tab};
 }
 
 async function main() {
   await test('Shift+F10 on a focused tab opens the menu with the first item focused', () => {
-    const {win, tabA} = twoTabs();
-    const tab = tabEl(win, tabA);
+    const {win, tab} = chatWithFile();
     tab.focus();
     h.key(win, tab, 'F10', {shiftKey: true});
     assert.ok(menu(win).classList.contains('open'));
@@ -69,47 +69,84 @@ async function main() {
     win.close();
   });
 
+  await test('the ContextMenu key opens the menu too', () => {
+    const {win, tab} = chatWithFile();
+    tab.focus();
+    h.key(win, tab, 'ContextMenu');
+    assert.ok(menu(win).classList.contains('open'));
+    assert.strictEqual(win.document.activeElement, items(win)[0]);
+    win.close();
+  });
+
+  await test("a chat's and a sub-agent's tab have no menu", () => {
+    const {win, chat} = chatWithFile();
+    for (const id of [chat, 'sub-a']) {
+      const tab = tabEl(win, id);
+      assert.ok(tab, `tab ${id} is on the group strip`);
+      tab.focus();
+      assert.strictEqual(
+        h.key(win, tab, 'F10', {shiftKey: true}),
+        true,
+        'Shift+F10 keeps its browser default',
+      );
+      assert.strictEqual(h.key(win, tab, 'ContextMenu'), true);
+      h.rightClick(win, tab);
+      assert.ok(!menu(win).classList.contains('open'), `no menu on ${id}`);
+    }
+    win.close();
+  });
+
+  await test("a right click on a chat's tab closes the open menu of a file's", () => {
+    const {win, chat, tab} = chatWithFile();
+    h.rightClick(win, tab);
+    assert.ok(menu(win).classList.contains('open'), 'precondition');
+    h.rightClick(win, tabEl(win, chat));
+    assert.ok(!menu(win).classList.contains('open'));
+    win.close();
+  });
+
   await test('arrows, Home and End move between the items (wrapping)', () => {
-    const {win, tabA} = twoTabs();
-    const tab = tabEl(win, tabA);
+    const {win, tab} = chatWithFile();
     tab.focus();
     h.rightClick(win, tab);
     const list = items(win);
-    assert.strictEqual(list.length, 4);
+    assert.deepStrictEqual(
+      list.map(el => el.textContent),
+      ['Close', 'Close Others', 'Close All'],
+    );
     assert.strictEqual(win.document.activeElement, list[0]);
     h.key(win, list[0], 'ArrowDown');
     assert.strictEqual(win.document.activeElement, list[1]);
     h.key(win, list[1], 'End');
-    assert.strictEqual(win.document.activeElement, list[3]);
-    h.key(win, list[3], 'ArrowDown');
+    assert.strictEqual(win.document.activeElement, list[2]);
+    h.key(win, list[2], 'ArrowDown');
     assert.strictEqual(win.document.activeElement, list[0], 'wraps to the top');
     h.key(win, list[0], 'ArrowUp');
-    assert.strictEqual(win.document.activeElement, list[3], 'wraps to the end');
-    h.key(win, list[3], 'Home');
+    assert.strictEqual(win.document.activeElement, list[2], 'wraps to the end');
+    h.key(win, list[2], 'Home');
     assert.strictEqual(win.document.activeElement, list[0]);
     win.close();
   });
 
   await test('Enter picks the focused item (Close closes the tab)', () => {
-    const {win, posted, tabA} = twoTabs();
-    const tab = tabEl(win, tabA);
+    const {win, chat, tab} = chatWithFile();
     tab.focus();
     h.rightClick(win, tab);
     const close = items(win).find(el => el.textContent === 'Close');
     close.focus();
     h.key(win, close, 'Enter');
     assert.ok(!menu(win).classList.contains('open'), 'the menu closed');
-    assert.ok(!tabEl(win, tabA), 'the tab is gone');
-    assert.ok(
-      h.ofType(posted, 'closeTab').some(m => m.tabId === tabA),
-      'the close was posted',
+    assert.strictEqual(h.contentTabStrips(win).length, 0, 'the tab is gone');
+    assert.strictEqual(
+      win._testApi.openTabs().map(t => t.id).join(','),
+      chat + ',sub-a',
+      'the chat and its sub-agent stay',
     );
     win.close();
   });
 
   await test('Escape closes the menu and returns focus to the tab', () => {
-    const {win, tabA} = twoTabs();
-    const tab = tabEl(win, tabA);
+    const {win, tab} = chatWithFile();
     tab.focus();
     h.rightClick(win, tab);
     assert.notStrictEqual(win.document.activeElement, tab, 'precondition');
@@ -122,8 +159,7 @@ async function main() {
   // The menu is no focus trap: Tab closes it and keeps the browser's own
   // focus move (the keydown is not default-prevented).
   await test('Tab leaves the menu: it closes without trapping the key', () => {
-    const {win, tabA} = twoTabs();
-    const tab = tabEl(win, tabA);
+    const {win, tab} = chatWithFile();
     tab.focus();
     h.rightClick(win, tab);
     const first = items(win)[0];

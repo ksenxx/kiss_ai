@@ -116,21 +116,37 @@ ZSH_ZSHENV = r"""# Start-up files of a terminal tab (kiss/server/terminal_rc.py)
 # zsh reads its dotfiles from $ZDOTDIR, which the tab points at this
 # directory so that, after the user's own files, .zshrc can make the
 # tab's history outlive the tab.  Each file here runs the user's file
-# of the same name with ZDOTDIR as the user has it (value and export
-# state, as their earlier files left it), and the user's ZDOTDIR is
-# back in place as soon as no file of this directory is left to read.
+# of the same name with ZDOTDIR as the user has it (set or not, value
+# and export state, as their earlier files left it), and the user's
+# ZDOTDIR is back in place as soon as no file of this directory is
+# left to read.
 KISS_TERMINAL_ZDOTDIR="${ZDOTDIR:-}"
-# The user's ZDOTDIR: empty when they have none; exported when it came
-# from the environment (KISS_USER_ZDOTDIR) or they export it.
+# The user's ZDOTDIR: set (an empty one counts: zsh then looks for
+# /.zshrc, not ~/.zshrc) and exported when it came from the
+# environment (KISS_USER_ZDOTDIR) or they set and export it.
+KISS_USER_ZDOTDIR_SET=${+KISS_USER_ZDOTDIR}
+KISS_USER_ZDOTDIR_EXPORTED=$KISS_USER_ZDOTDIR_SET
+# Exported, but only by an `export ZDOTDIR` of an unset one (see the capture).
+KISS_USER_ZDOTDIR_UNASSIGNED=0
 KISS_USER_ZDOTDIR="${KISS_USER_ZDOTDIR:-}"
-KISS_USER_ZDOTDIR_EXPORTED=0
-if [[ -n "$KISS_USER_ZDOTDIR" ]]; then KISS_USER_ZDOTDIR_EXPORTED=1; fi
 
-# Put the user's ZDOTDIR in place for one of their files.
+# Put the user's ZDOTDIR in place for one of their files.  (The
+# functions set variables with `typeset -g`: a plain assignment in a
+# function is warned about under the user's `setopt warn_nested_var`,
+# one that creates the variable under their `warn_create_global`, and
+# a `typeset +x` without it acts on a variable of the function's own
+# under their `unsetopt global_export`.)
 __kiss_terminal_prepare() {
-  if [[ -n "$KISS_USER_ZDOTDIR" ]]; then
-    ZDOTDIR="$KISS_USER_ZDOTDIR"
-    if (( KISS_USER_ZDOTDIR_EXPORTED )); then export ZDOTDIR; else typeset +x ZDOTDIR; fi
+  if (( KISS_USER_ZDOTDIR_UNASSIGNED )); then
+    # `export` leaves an unset one unset under posix_builtins, and
+    # empty without.
+    setopt local_options
+    if (( KISS_USER_ZDOTDIR_SET )); then unsetopt posix_builtins; else setopt posix_builtins; fi
+    unset ZDOTDIR
+    export ZDOTDIR
+  elif (( KISS_USER_ZDOTDIR_SET )); then
+    typeset -g ZDOTDIR="$KISS_USER_ZDOTDIR"
+    if (( KISS_USER_ZDOTDIR_EXPORTED )); then export ZDOTDIR; else typeset -g +x ZDOTDIR; fi
   else
     unset ZDOTDIR
   fi
@@ -138,24 +154,56 @@ __kiss_terminal_prepare() {
 
 # Note what the user's file did to ZDOTDIR; point zsh back here for
 # the next shim (unexported: no child of a later file sees this dir).
+# Where ZDOTDIR cannot do that (their file made it read-only or
+# something other than a plain scalar, or switched zsh to its sh or
+# ksh emulation, which reads the files of $HOME whatever ZDOTDIR
+# says), and in a restricted shell (which lets the tab neither try
+# that in silence nor set HISTFILE), it stays as it is, zsh reads the
+# rest of their files itself, and the shim is told (a non-zero status)
+# to stop with nothing of the tab's left.
 __kiss_terminal_capture() {
-  KISS_USER_ZDOTDIR="${ZDOTDIR:-}"
-  KISS_USER_ZDOTDIR_EXPORTED=0
-  if [[ "${(t)ZDOTDIR-}" == *export* ]]; then KISS_USER_ZDOTDIR_EXPORTED=1; fi
-  ZDOTDIR="$KISS_TERMINAL_ZDOTDIR"
-  typeset +x ZDOTDIR
+  # A subshell tries, under posix_builtins (an unset ZDOTDIR that was
+  # made read-only or exported under it still is, whatever the option
+  # says now): a ZDOTDIR that cannot be assigned ends it with nothing
+  # printed, and one that is no plain scalar keeps another type.
+  case "$( [[ -o restricted ]] || { setopt posix_builtins; unsetopt all_export
+             typeset -g ZDOTDIR="$KISS_TERMINAL_ZDOTDIR"
+             builtin print -rn -- "${(t)ZDOTDIR} "; builtin emulate; } 2>/dev/null )" in
+    ("scalar-export "[cz]sh) typeset -g KISS_USER_ZDOTDIR_EXPORTED=1 ;;
+    ("scalar "[cz]sh) typeset -g KISS_USER_ZDOTDIR_EXPORTED=0 ;;
+    (*) __kiss_terminal_forget; return 1 ;;
+  esac
+  typeset -g KISS_USER_ZDOTDIR="${ZDOTDIR:-}" KISS_USER_ZDOTDIR_SET=${+ZDOTDIR}
+  # `export ZDOTDIR` of an unset one leaves it out of the environment
+  # until it is assigned (and unset still under posix_builtins, empty
+  # without): put back the same way.  Only a child process can tell,
+  # whatever PATH is (`command -p`); one that did not run tells nothing.
+  typeset -g KISS_USER_ZDOTDIR_UNASSIGNED=0
+  if (( KISS_USER_ZDOTDIR_EXPORTED )) && [[ -z "$KISS_USER_ZDOTDIR" \
+    && "$(command -p sh -c 'echo "${ZDOTDIR-unset}"' 2>/dev/null)" == unset ]]; then
+    typeset -g KISS_USER_ZDOTDIR_UNASSIGNED=1
+  fi
+  typeset -g ZDOTDIR="$KISS_TERMINAL_ZDOTDIR"
+  typeset -g +x ZDOTDIR
+}
+
+# Drop the tab's variables and functions.
+__kiss_terminal_forget() {
+  unset KISS_USER_ZDOTDIR KISS_USER_ZDOTDIR_SET KISS_USER_ZDOTDIR_EXPORTED \
+    KISS_USER_ZDOTDIR_UNASSIGNED KISS_TERMINAL_ZDOTDIR
+  unfunction __kiss_terminal_prepare __kiss_terminal_capture __kiss_terminal_forget \
+    __kiss_terminal_restore
 }
 
 # Put the user's ZDOTDIR back for good and drop the tab's variables.
 __kiss_terminal_restore() {
   __kiss_terminal_prepare
-  unset KISS_USER_ZDOTDIR KISS_USER_ZDOTDIR_EXPORTED KISS_TERMINAL_ZDOTDIR
-  unfunction __kiss_terminal_prepare __kiss_terminal_capture __kiss_terminal_restore
+  __kiss_terminal_forget
 }
 
 __kiss_terminal_prepare
-if [[ -r "${ZDOTDIR:-$HOME}/.zshenv" ]]; then . "${ZDOTDIR:-$HOME}/.zshenv"; fi
-__kiss_terminal_capture
+if [[ -r "${ZDOTDIR-$HOME}/.zshenv" ]]; then . "${ZDOTDIR-$HOME}/.zshenv"; fi
+__kiss_terminal_capture || return 0
 # No further file is read with `unsetopt rcs`, nor by a shell that is
 # neither a login shell nor interactive.
 if [[ ! -o rcs || ( ! -o login && ! -o interactive ) ]]; then __kiss_terminal_restore; fi
@@ -163,22 +211,24 @@ if [[ ! -o rcs || ( ! -o login && ! -o interactive ) ]]; then __kiss_terminal_re
 
 ZSH_ZPROFILE = r"""# See .zshenv in this directory.
 __kiss_terminal_prepare
-if [[ -r "${ZDOTDIR:-$HOME}/.zprofile" ]]; then . "${ZDOTDIR:-$HOME}/.zprofile"; fi
-__kiss_terminal_capture
+if [[ -r "${ZDOTDIR-$HOME}/.zprofile" ]]; then . "${ZDOTDIR-$HOME}/.zprofile"; fi
+__kiss_terminal_capture || return 0
 if [[ ! -o rcs ]]; then __kiss_terminal_restore; fi
 """
 
 ZSH_ZSHRC = r"""# See .zshenv in this directory.
-__kiss_terminal_prepare
-if [[ -r "${ZDOTDIR:-$HOME}/.zshrc" ]]; then . "${ZDOTDIR:-$HOME}/.zshrc"; fi
-__kiss_terminal_capture
-# History that outlives the tab.  A system rc that ran before this
-# file (macOS's /etc/zshrc) derives HISTFILE from the ZDOTDIR of the
-# moment, which was this directory: move such a file to the user's.
+# A system rc that ran before this file (macOS's /etc/zshrc) derives
+# HISTFILE from the ZDOTDIR of the moment, which was this directory:
+# move such a file to where that rc has it for the user (`:-`: with an
+# empty ZDOTDIR too it is $HOME's), before their .zshrc looks at it.
 if [[ "${HISTFILE:-}" == "$KISS_TERMINAL_ZDOTDIR/"* ]]; then
   HISTFILE="${KISS_USER_ZDOTDIR:-$HOME}/${HISTFILE#"$KISS_TERMINAL_ZDOTDIR"/}"
 fi
-# zsh keeps no history file unless told to; then the usual one.
+__kiss_terminal_prepare
+if [[ -r "${ZDOTDIR-$HOME}/.zshrc" ]]; then . "${ZDOTDIR-$HOME}/.zshrc"; fi
+__kiss_terminal_capture || return 0
+# History that outlives the tab.  zsh keeps no history file unless
+# told to; then the usual one.
 if [[ -z "${HISTFILE:-}" ]]; then
   HISTFILE="${KISS_USER_ZDOTDIR:-$HOME}/.zsh_history"
   (( SAVEHIST > 0 )) || SAVEHIST=10000
@@ -195,8 +245,8 @@ if [[ ! -o rcs || ! -o login ]]; then __kiss_terminal_restore; fi
 
 ZSH_ZLOGIN = r"""# See .zshenv in this directory.
 __kiss_terminal_prepare
-if [[ -r "${ZDOTDIR:-$HOME}/.zlogin" ]]; then . "${ZDOTDIR:-$HOME}/.zlogin"; fi
-__kiss_terminal_capture
+if [[ -r "${ZDOTDIR-$HOME}/.zlogin" ]]; then . "${ZDOTDIR-$HOME}/.zlogin"; fi
+__kiss_terminal_capture || return 0
 __kiss_terminal_restore
 """
 
@@ -260,8 +310,9 @@ def with_persistent_history(argv: list[str]) -> tuple[list[str], dict[str, str]]
             for filename, text in _ZSH_FILES.items():
                 _write(zdotdir / filename, text)
             env = {"ZDOTDIR": str(zdotdir)}
-            user_zdotdir = os.environ.get("ZDOTDIR", "")
-            if user_zdotdir:
+            # An empty one is passed along too: to zsh it is not an unset one.
+            user_zdotdir = os.environ.get("ZDOTDIR")
+            if user_zdotdir is not None:
                 env["KISS_USER_ZDOTDIR"] = user_zdotdir
             return list(argv), env
     except OSError as exc:

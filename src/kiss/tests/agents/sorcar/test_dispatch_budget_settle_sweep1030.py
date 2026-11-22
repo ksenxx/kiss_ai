@@ -23,9 +23,14 @@ queued events.  With the event writer blocked, one settling job kept
 the registry from every ``finish()``, ``agent_job`` call and job
 completion of the daemon.  The spend now lands outside that lock,
 between two short holds that mark the job as settling and lapse its
-reservation; the last two tests hold a settling job's thread in between
-and check that the registry answers and that a share resolved meanwhile
-waits for the spend, so the job is still counted once.
+reservation; the second and the last test hold a settling job's thread
+in between and check that the registry answers and that a share
+resolved meanwhile waits for the spend, so the job is still counted once.
+
+The landed spend has a second reader, which the third test checks: a
+read-only review dispatched without a budget holds an eighth of what is
+on the caller's ledger and $10 at least (``fanout_guard.review_budget``),
+an ended sub-agent's spend included.
 """
 
 from __future__ import annotations
@@ -159,6 +164,40 @@ def test_a_share_resolved_during_a_settle_waits_for_the_spend(
         second.join(60)
         for job in live_agent_jobs(parent):
             assert agent_dispatch.join_agent_job(job, 30.0), job.job_id
+        agent_dispatch.kill_jobs_of(parent)
+
+
+def test_a_review_holds_an_eighth_of_what_its_caller_and_ended_sub_agents_spent(
+    tmp_path: Path, daemon: RecordingDaemon,
+) -> None:
+    """A review's budget follows the spend on the caller's ledger, an ended sub-agent's included.
+
+    The caller has $1,000 and has spent $76 itself.  An eighth of that
+    is under $10, so its first review holds $10, not half of the $924
+    left.  The review's own $4.90 is spend like any other, and so is
+    the $4.90 of the sub-agent that runs next: with $85.80 on the
+    ledger the second review holds an eighth of it.
+    """
+    parent = _parent()
+    parent.max_budget = 1000.0
+    parent.budget_used = 76.0
+    run_agent = make_run_agent_tool(str(tmp_path), parent)
+
+    def review() -> None:
+        out = run_agent(
+            "Verify the listed changes", DEFAULT_AGENT_PATH, tool_profile="review", timeout="60",
+        )
+        assert "success: true" in out, out
+
+    try:
+        review()
+        assert parent._live_budget_used() == pytest.approx(80.9)
+        run_agent("first", DEFAULT_AGENT_PATH, timeout="60")
+        assert parent._live_budget_used() == pytest.approx(85.8)
+        review()
+        budgets = [float(command["maxBudget"]) for command in daemon.run_commands]
+        assert budgets == pytest.approx([10.0, 459.55, 10.725])
+    finally:
         agent_dispatch.kill_jobs_of(parent)
 
 
