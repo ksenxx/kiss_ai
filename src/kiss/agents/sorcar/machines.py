@@ -118,7 +118,9 @@ MACHINES_FILE = "machines.json"
 MACHINE_CERTS_DIR = "machines"
 DEFAULT_PORT = 8787
 HISTORY_PAGE = 50
-"""Rows per ``getHistory`` page (``server._get_history``'s page size)."""
+"""Rows of a ``getHistory`` page that asks for no ``limit`` (``server._get_history``)."""
+HISTORY_MAX_PAGE = 500
+"""Most rows a page of the history stream holds, whatever ``limit`` it asks for."""
 LOCAL_MACHINE = "__local__"
 """``getHistory``'s ``machine`` value asking for the daemon's own rows only."""
 REQUEST_TIMEOUT = 8.0
@@ -2427,8 +2429,11 @@ def machine_label(machine: Machine) -> str:
 def fetch_history(machine: Machine, query: str, tag: str, limit: int) -> HistoryPage:
     """Return up to *limit* history rows of *machine* matching *query* and *tag*.
 
-    Pages through the remote ``getHistory`` (``HISTORY_PAGE`` rows per
-    reply), asking for the machine's own rows only (``machine:
+    Asks the remote ``getHistory`` for all the rows still wanted in one
+    request, and again while the machine sends as many as it grants: the
+    reply's ``limit`` (``HISTORY_MAX_PAGE`` at most), or ``HISTORY_PAGE``
+    of a daemon too old to name one, which sends a page whatever it is
+    asked for.  It asks for the machine's own rows only (``machine:
     LOCAL_MACHINE``) so two daemons registered with each other do not
     query each other without end, and stamps every row with ``machine``
     (the name) and ``machine_url`` (the machine's URL).  The page's
@@ -2444,7 +2449,7 @@ def fetch_history(machine: Machine, query: str, tag: str, limit: int) -> History
     while len(page.rows) < limit:
         reply = link.request({
             "type": "getHistory", "query": query, "tag": tag, "offset": len(page.rows),
-            "machine": LOCAL_MACHINE,
+            "limit": limit - len(page.rows), "machine": LOCAL_MACHINE,
         }, "history")
         note_host(machine, reply.get("localMachine"))
         rows = [s for s in reply.get("sessions") or [] if isinstance(s, dict)]
@@ -2457,7 +2462,8 @@ def fetch_history(machine: Machine, query: str, tag: str, limit: int) -> History
             page.date_min, page.date_max = _float_or_none(date_range.get("min")), _float_or_none(
                 date_range.get("max"),
             )
-        if len(rows) < HISTORY_PAGE:
+        granted = reply.get("limit")
+        if len(rows) < (granted if isinstance(granted, int) and granted > 0 else HISTORY_PAGE):
             break
     del page.rows[limit:]
     return page

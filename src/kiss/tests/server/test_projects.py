@@ -38,7 +38,7 @@ import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar import projects, sea_commands
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.chrome_bridge import CONFIG_FILE_NAME, ChromeBridge, extension_dir
-from kiss.agents.sorcar.machines import HISTORY_PAGE
+from kiss.agents.sorcar.machines import HISTORY_MAX_PAGE, HISTORY_PAGE
 from kiss.agents.sorcar.useful_tools import UsefulTools
 from kiss.core import config as config_module
 from kiss.core.config import DEFAULT_CONFIG
@@ -482,7 +482,16 @@ def test_chats_are_put_in_projects_and_a_project_page_lists_only_its_chats() -> 
         _history(server, events, project=paper, limit=-3),
         _history(server, events, project=paper, limit="many"),
     )] == [(rows, rows), (rows + 5, rows)] + [(projects.HISTORY_PROJECT_PAGE,) * 2] * 2
-    assert "limit" not in _history(server, events, limit=3)
+    # A page of everything holds as many rows as it is asked for too (the list
+    # asks for the rows that fill it in one request), up to a bound; here are
+    # the project's rows and the two tasks of no project.
+    assert [(page["limit"], len(page["sessions"])) for page in (
+        _history(server, events, limit=3),
+        _history(server, events, offset=rows, limit=3),
+        _history(server, events),
+        _history(server, events, limit=rows),
+        _history(server, events, limit=10**6),
+    )] == [(3, 3), (3, 2), (HISTORY_PAGE,) * 2, (rows, rows), (HISTORY_MAX_PAGE, rows + 2)]
     # The page holds the tasks that ran on this machine: a row a history
     # sync copied in from another one is listed with everything, not here.
     synced, _ = th._add_task("ran on the box", chat_id=chat)

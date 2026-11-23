@@ -22,9 +22,11 @@ import shutil
 import sqlite3
 import stat
 import subprocess
+import sys
 import tarfile
 import threading
 import time
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -48,8 +50,18 @@ from kiss.agents.seas.sync_history_and_memory.sync_history_and_memory_sea import
 from kiss.agents.sorcar import history_columns, sea_commands
 from kiss.agents.sorcar import machines as machine_registry
 from kiss.agents.sorcar.machines import Machine, save_machines
+from kiss.core import stop_signal
 from kiss.core.file_lock import exclusive_file_lock
 from kiss.core.memoryfield.pages import MemoryDir
+from kiss.core.tool_interrupt import (
+    ToolCallInterrupted,
+    end_tool_call,
+    interrupt_tool_call,
+    new_tool_call,
+    register_tool_call,
+    unregister_tool_call,
+)
+from kiss.scripts.sync_db import PHASE_MANIFEST, PHASE_MERGE, Location, SyncError
 from kiss.tests.agents.seas.conftest import run_sea
 from kiss.tests.agents.seas.sea_contract import (
     assert_worker_contract,
@@ -1299,6 +1311,203 @@ def test_ssh_peer_reports_a_refused_master_connection(
         for leftover in control.glob("*"):
             leftover.unlink()
         control.rmdir()
+
+
+# ---------------------------------------------------------------- stopping a run
+
+
+def stand_ins_gone(box: Sandbox) -> bool:
+    """Whether no stand-in ssh of *box*, nor a command naming a path of it, is running."""
+    listed = subprocess.run(
+        ["pgrep", "-f", str(box.root)], capture_output=True, check=False
+    )
+    return listed.returncode == 1
+
+
+def sync_as_a_tool_call(outcome: list[Any]) -> None:
+    """Thread body: call the tool inside a registered tool call, as the agent does."""
+    token = new_tool_call("sync_history_and_memory")
+    register_tool_call(token)
+    try:
+        outcome.append(sync_history_and_memory())
+        end_tool_call(token)
+    except ToolCallInterrupted as exc:
+        outcome.append(exc)
+    finally:
+        unregister_tool_call(token)
+
+
+def sync_under_a_task_stop(sync: PeerSync, stop: threading.Event, outcome: list[Any]) -> None:
+    """Thread body: run *sync* on a thread whose task is stopped by setting *stop*."""
+    stop_signal.set_thread_stop_event(stop)
+    outcome.append(sync.run())
+
+
+def cancel_once_reached(reached: Path, cancel: threading.Event) -> None:
+    """Thread body: set *cancel* once a stand-in ssh waits at its machine's gate."""
+    wait_for(reached.exists)
+    cancel.set()
+
+
+def merge_waiter() -> threading.Thread | None:
+    """The thread waiting for the lock a merge into this machine's database takes, if any.
+
+    ``LockedRunner.run`` is its innermost frame for as long as it waits there.
+    """
+    frames = sys._current_frames()
+    for thread in threading.enumerate():
+        frame = frames.get(thread.ident or 0)
+        if frame is not None and frame.f_code is peer_sync.LockedRunner.run.__code__:
+            return thread
+    return None
+
+
+def a_merge_waits() -> bool:
+    """Whether a thread waits for the lock a merge into this machine's database takes."""
+    return merge_waiter() is not None
+
+
+def test_the_stop_of_the_tool_call_ends_a_sync_whose_ssh_never_returns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The tool panel's Stop kills the ssh a machine holds and ends the call; the next run is whole.
+
+    2026-11-22: an ssh that never returned kept the tool in waits no Stop reaches
+    (``subprocess.run`` on the workers, ``future.result()`` on the task's thread).
+    """
+    box = Sandbox(tmp_path, monkeypatch, "alpha", "beta")
+    make_db(box.db(), {"L1": {}})
+    make_db(box.db("alpha"), {"A1": {}})
+    make_db(box.db("beta"), {"B1": {}})
+    save_machines(box.machines())
+    gate = box.root / "remotes" / "alpha.gate"
+    gate.touch()
+    outcome: list[Any] = []
+    thread = threading.Thread(target=sync_as_a_tool_call, args=(outcome,), daemon=True)
+    thread.start()
+    try:
+        assert wait_for(Path(f"{gate}.reached").exists)
+        assert thread.ident is not None
+        assert interrupt_tool_call(thread.ident, "sync_history_and_memory") is True
+        thread.join(timeout=20)
+        assert not thread.is_alive(), "the Stop did not end the sync"
+        # Looked for while the gate still holds it: a parked ssh is gone only if it was killed.
+        assert wait_for(partial(stand_ins_gone, box), 5), "the parked ssh outlived the Stop"
+    finally:
+        gate.unlink()
+    assert isinstance(outcome[0], ToolCallInterrupted), outcome
+    assert tasks_in(box.db("beta")) == {"B1": 3}  # stopped in the first wave: nothing travelled
+    # Nothing of the stopped run is in the way of the next one.
+    assert sync_history_and_memory().startswith("Synced 2 of 2 machine(s).")
+    assert tasks_in(box.db("alpha")) == {"L1": 3, "A1": 3, "B1": 3}
+
+
+def test_the_stop_of_the_task_ends_a_sync_and_reports_its_machines_as_stopped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A task's Stop ends the run: the ssh is killed and each unfinished machine says it stopped."""
+    box = Sandbox(tmp_path, monkeypatch, "alpha", "beta")
+    make_db(box.db(), {"L1": {}})
+    make_db(box.db("alpha"), {"A1": {}})
+    make_db(box.db("beta"), {"B1": {}})
+    gate = box.root / "remotes" / "alpha.gate"
+    gate.touch()
+    sync = PeerSync(box.machines(), home=box.home)
+    stop = threading.Event()
+    outcome: list[Any] = []
+    thread = threading.Thread(
+        target=sync_under_a_task_stop, args=(sync, stop, outcome), daemon=True
+    )
+    thread.start()
+    try:
+        assert wait_for(Path(f"{gate}.reached").exists)
+        stop.set()
+        thread.join(timeout=20)
+        assert not thread.is_alive(), "the Stop did not end the sync"
+        # Looked for while the gate still holds it: a parked ssh is gone only if it was killed.
+        assert wait_for(partial(stand_ins_gone, box), 5), "the parked ssh outlived the Stop"
+    finally:
+        gate.unlink()
+    alpha, beta = outcome[0]
+    # beta was stopped in its first wave or refused the next: the same words either way.
+    assert alpha.error == "alpha (me@alpha): stopped" and beta.error == "beta (me@beta): stopped"
+    failed = "alpha (me@alpha): FAILED: alpha (me@alpha): stopped"
+    assert failed in format_reports(outcome[0], False)
+    assert not sync.control_dir.exists()
+    assert tasks_in(box.db()) == {"L1": 3} and tasks_in(box.db("beta")) == {"B1": 3}
+
+
+def test_a_stop_does_not_wait_for_a_merge_into_this_machine(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Stop ends the run although a worker waits to merge here, and that merge never starts."""
+    box = Sandbox(tmp_path, monkeypatch, "alpha")
+    make_db(box.db(), {"L1": {}})
+    make_db(box.db("alpha"), {"A1": {}})
+    sync = PeerSync(box.machines(), home=box.home)
+    stop = threading.Event()
+    outcome: list[Any] = []
+    thread = threading.Thread(
+        target=sync_under_a_task_stop, args=(sync, stop, outcome), daemon=True
+    )
+    with sync.lock:  # held as by another machine's merge, which no Stop ends
+        thread.start()
+        assert wait_for(a_merge_waits)
+        waiter = merge_waiter()
+        stop.set()
+        thread.join(timeout=10)
+        assert not thread.is_alive(), "the Stop waited for the merge"
+        assert outcome[0][0].error == "alpha (me@alpha): stopped"
+    # The lock is free: the merge that waited for it is refused, as every phase after a Stop is.
+    assert waiter is not None
+    waiter.join(timeout=10)
+    assert not waiter.is_alive() and tasks_in(box.db()) == {"L1": 3}
+
+
+def test_an_ssh_ends_when_it_stalls_or_its_run_is_stopped_but_not_while_it_moves(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A silent ssh is killed at its deadline, a stopped one at once; a slow one runs to its end."""
+    box = Sandbox(tmp_path, monkeypatch, "alpha")
+    make_db(box.db("alpha"), {"A1": {}})
+    control = control_directory()
+    peer = SshPeer("alpha", "me@alpha", control)
+    marker = tmp_path / "ran"
+    try:
+        # Silent for longer than it may be: killed, with the command it started.
+        with pytest.raises(PeerError, match=r"alpha \(me@alpha\): ssh moved no data for 0\.3 s"):
+            peer.call(peer.command(f"sleep 3; touch {marker}"), peer.cancel, 0.3)
+        assert wait_for(partial(stand_ins_gone, box), 5) and not marker.exists()
+        # A line every 0.1 s for over a second: never silent for the 0.5 s it may be.
+        slow = "for i in 1 2 3 4 5 6 7 8 9 10 11 12; do echo $i; sleep 0.1; done; echo end >&2"
+        with (tmp_path / "out").open("wb") as out:
+            assert peer.call(peer.command(slow), peer.cancel, 0.5, stdout=out) == (0, b"end\n")
+        assert (tmp_path / "out").read_text().split() == [str(i) for i in range(1, 13)]
+        # A Stop while a phase waits on the machine ends the phase,
+        gate = box.root / "remotes" / "alpha.gate"
+        gate.touch()
+        stopper = threading.Thread(
+            target=cancel_once_reached, args=(Path(f"{gate}.reached"), peer.cancel)
+        )
+        stopper.start()
+        remote = Location("me@alpha:~/.kiss/history.db")
+        with pytest.raises(SyncError, match=r"alpha \(me@alpha\): stopped"):
+            peer.runner().run(remote, PHASE_MANIFEST, [], None, str(tmp_path / "manifest"))
+        stopper.join()
+        assert wait_for(partial(stand_ins_gone, box), 5)  # killed: the gate still holds
+        gate.unlink()
+        # and nothing starts after it: no phase, not even a merge on this machine, no command.
+        merge = peer_sync.LockedRunner(peer, threading.Lock())
+        with pytest.raises(SyncError, match="stopped"):
+            merge.run(Location(str(box.db())), PHASE_MERGE, [], None, str(tmp_path / "stats"))
+        with pytest.raises(PeerError, match="stopped"):
+            peer.run("echo never")
+        # No ssh to start is an OSError, as it was.
+        monkeypatch.setenv("PATH", str(tmp_path / "nowhere"))
+        with pytest.raises(OSError):
+            SshPeer("alpha", "me@alpha", control).open()
+    finally:
+        shutil.rmtree(control)
 
 
 # ---------------------------------------------------------------- the tool and the agent

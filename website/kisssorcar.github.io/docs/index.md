@@ -9,7 +9,7 @@
 - [Installation](installation.md) — One-line installer, install from a checkout, Docker, pipx/uv, API-key configuration, updating
 - [Client Interfaces](cli.md) — The `kiss-web` daemon, web/mobile app, Python client API, and the `sorcar` terminal command
 - [Python API Reference](api.md) — KISSAgent, RelentlessAgent, SorcarAgent, ChatSorcarAgent, GitWorktreeOps
-- [Supported Models](models.md) — 988-model catalog across 7 provider categories
+- [Supported Models](models.md) — 993-model catalog across 7 provider categories
 - [Messaging & Third-Party Agents](messaging-agents.md) — 32 messaging-channel agents and 10 service agents, plus infrastructure agents, the Govee smart-home CLI, and Muse-auth credential isolation
 - [Slash Commands for SEAs](sea-commands.md) — Every SEA folder `xxx/xxx_sea.py` is a chat command `/xxx` and `/xxx help` prints its `description()`; `~/.kiss/SEAS.md` syntax for adding your own SEA folders, precedence, and the dispatch flow
 - [Sample Tasks](sample-tasks.md) — Ready-to-use example prompts

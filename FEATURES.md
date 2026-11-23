@@ -3270,7 +3270,7 @@ One dispatcher (`src/kiss/agents/sorcar/agent_dispatch.py`, 3,422 lines, with th
   - `getSpendReport`: Spend (total, per day, per model from persisted `cost`/`tokens`, sub-agent rows excluded).
   - `getRecommendations` **NEW**: twenty suggested tasks from the last `/recommendations` run, a default 6-hourly cron job.
   - `getMachines` with `machineAction` **NEW** (section 15).
-  - `getHistory`: Chats (50 rows per page).
+  - `getHistory` **CHANGED** (11-22): Chats, in pages of `limit` rows (50 when none is named, 500 at most), which the reply echoes. A list that does not fill its panel asks for as many rows again as it holds, and a refresh asks in one request for as many rows as the list has asked for so far. When the daemon grants fewer than a refresh asked for (more than 500 rows, or a daemon that sends 50 whatever it is asked for), the page asks for the rest and builds the list once all are in, so the list is never emptied and filled again in sight. The "Loading..." row shows only at the end of a list the user scrolled through and in a list that has no task to show yet.
   - `getTaskUpdate` **CHANGED** 10-03, **CHANGED** 11-19, **CHANGED** 11-20:
     - **Task Progress** (formerly Task update) is the `/ask` agent's answer to "What has this task done so far, and what are its partial results?".
     - First asked when the task is 60 s old and again once the answer is 600 s old, sooner when it estimated the time left (below), or on Refresh; only a poll starts a run.
@@ -3519,7 +3519,7 @@ A daemon keeps a registry of other computers' daemons and drives them from its o
   - A machine registered elsewhere, by `/machine add` or on another surface, unfolds the subpanel on every surface.
 - **Merged CHATS**:
   - `getHistory` runs `merged_history`:
-    - Every registered machine is asked for its rows from the first to the end of the requested page of 50 rows, 50 per request (same query and tag, its own rows only, `machine: "__local__"`, so two daemons registered with each other do not echo each other).
+    - Every registered machine is asked for its rows from the first to the end of the requested page, in one request **CHANGED** (11-22; one per 50 rows before, and still so of a machine whose daemon does not echo `limit`; one per 500 rows of a longer page) (same query and tag, its own rows only, `machine: "__local__"`, so two daemons registered with each other do not echo each other).
     - The union is ranked with one copy per task id and cut to that page, ordered:
       1. Running tasks first.
       2. Newest first.
@@ -3779,7 +3779,7 @@ The left sidebar, a drawer on a phone:
   - With Group by set to Project, a project is a foldable row with the same fold button as a chat row and a **...** button that opens its settings; unfolding it lists its chats (200 at a time, with **Show more chats**), each of which unfolds to its tasks, while a chat with a running task stays in the Running section at the top.
   - Clicking a project's name starts a new chat in it.
   - The chat header has a Project drop-down listing "Default" first **CHANGED** (11-21; was "No project") and then every project to put the chat on screen into a project or take it out (chats of this machine only; a chat on a registered remote machine is in no project).
-  - On a page served by an older daemon process started before Projects existed and still running after an in-place upgrade of the page files, the page ignores an "Unknown command" answer to the three reads it issues on its own (`getProjects`, `getInputDraft`, `getTaskTags`), showing every other error as before **NEW** (11-21).
+  - On a page served by an older daemon process started before Projects existed and still running after an in-place upgrade of the page files, the page ignores an "Unknown command" answer to the four reads it issues on its own (`getProjects`, `getInputDraft`, `getTaskTags` and, since 11-22, the Skills subpanel's `getSkills`), showing every other error as before **NEW** (11-21). The Skills subpanel of such a page says that the server runs an older version and is to be restarted.
 - **Bottom strip** **NEW** (11-19):
   - Sits below the scrolling Chats list with the daemon's OS username on the left and buttons on the right: Dark/Light mode, High/Low contrast, Auto mode, Decrease font size, Increase font size and Settings.
   - **CHANGED** (11-20): the buttons are 32 px with 18 px icons (24 px and 16 px before) and are the only place for these actions, which left the `...` menu; Terminal and Browser moved to the strip under the right sidebar.
@@ -3981,7 +3981,7 @@ The left sidebar, a drawer on a phone:
   - A click opens the provider's page in a new tab; when the sign-in completes, the dialog closes in every window.
   - A paste row takes the address of the final page for a browser on another computer than the daemon.
   - Not now dismisses the dialog.
-- **Welcome page**: A new chat shows the product logo in a light or dark variant, "Welcome to KISS Sorcar" and the tagline from `brand.json`.
+- **Welcome page**: A new chat shows the product logo in a light or dark variant, "Welcome to KISS Sorcar" and the tagline from `brand.json` ("Your SI assistant. Ask me anything!" in the stock build). The logo is 560px wide **CHANGED** (11-22; 280px before), and narrower in a narrow pane or a short window.
 
 ## 17. Browser, web research and sign-in hand-off
 

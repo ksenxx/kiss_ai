@@ -47,6 +47,13 @@ is already in place.  Nothing else is held back and no row is ever
 updated or dropped by the sync, so a sync run while tasks run on every
 machine loses nothing: it only postpones the tasks in flight to the next
 run.
+
+A run can be stopped, by the Stop of its task or of the tool call it
+runs in: the ssh commands in flight are killed, no further one starts,
+and each machine not finished by then is reported as stopped.  A merge
+into this machine's stores that is under way is not cut (it is this
+process's own work, and whole or not at all); it ends on its own, on a
+thread the stopped run no longer waits for.
 """
 
 from __future__ import annotations
@@ -54,19 +61,28 @@ from __future__ import annotations
 import io
 import json
 import shlex
+import shutil
 import sqlite3
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
 from kiss.agents.seas.sync_history_and_memory import memory_delta
-from kiss.agents.seas.sync_history_and_memory.ssh_peer import PeerError, SshPeer, control_directory
+from kiss.agents.seas.sync_history_and_memory.ssh_peer import (
+    POLL_SECONDS,
+    REAP_SECONDS,
+    PeerError,
+    PeerRunner,
+    SshPeer,
+    control_directory,
+)
 from kiss.agents.sorcar.local_endpoint import LOCAL_ENDPOINT_FILE
 from kiss.agents.sorcar.machines import Machine, note_host
+from kiss.core import stop_signal, tool_interrupt
 from kiss.core.brand import DEFAULT_BRAND, HOME_DIR
 from kiss.core.config import kiss_home
 from kiss.scripts import sync_db
@@ -207,12 +223,12 @@ def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
     return {str(row[1]) for row in conn.execute(f'PRAGMA table_info("{table}")')}
 
 
-class LockedRunner(Runner):
-    """A ``sync_db`` runner that takes a lock around merges into this machine's database."""
+class LockedRunner(PeerRunner):
+    """A peer's ``sync_db`` runner that takes a lock around merges into this machine's database."""
 
-    def __init__(self, inner: Runner, lock: threading.Lock) -> None:
-        """Wrap *inner*; local merges run under *lock*."""
-        super().__init__(inner.python, inner.port, inner.ssh_options)
+    def __init__(self, peer: SshPeer, lock: threading.Lock) -> None:
+        """Run *peer*'s phases; local merges run under *lock*."""
+        super().__init__(peer)
         self.lock = lock
 
     def run(
@@ -264,6 +280,7 @@ class PeerSync:
         self.daemon_ports: dict[str, int | None] = {}
         self.dry_run = dry_run
         self.lock = threading.Lock()
+        self.cancel = threading.Event()
         self.control_dir = control_directory()
         self.reports: list[PeerReport] = []
         self.peers: list[tuple[SshPeer, PeerReport]] = []
@@ -277,7 +294,8 @@ class PeerSync:
             self.reports.append(report)
             if machine.ssh:
                 self.daemon_ports[machine.name] = urlsplit(machine.url).port
-                self.peers.append((SshPeer(machine.name, machine.ssh, self.control_dir), report))
+                peer = SshPeer(machine.name, machine.ssh, self.control_dir, cancel=self.cancel)
+                self.peers.append((peer, report))
             else:
                 report.error = f"not an ssh machine ({machine.url}); only ssh machines are synced"
 
@@ -298,34 +316,91 @@ class PeerSync:
     def run(self) -> list[PeerReport]:
         """Sync every machine: connect to all, pull from all of them, then push the union to all.
 
+        The Stop of the calling thread's task, or of the tool call it is
+        in, stops the run (:attr:`cancel`).  Both are looked up here, on
+        the thread they belong to: the workers cannot see them.
+
         Returns:
             The per-machine reports; a machine that failed carries the error
-            and whatever was done before it.
+            and whatever was done before it, one a stopped run did not
+            finish says so.
+
+        Raises:
+            ToolCallInterrupted: When the tool call the run is in was stopped.
         """
+        stops = [
+            event
+            for event in (
+                stop_signal.get_thread_stop_event(),
+                tool_interrupt.current_tool_interrupt_event(),
+            )
+            if event is not None
+        ]
+        pool = ThreadPoolExecutor(max_workers=max(1, len(self.peers)))
         try:
-            with ThreadPoolExecutor(max_workers=max(1, len(self.peers))) as pool:
-                self._wave(pool, self.connect)
-                skews = [0.0] + [report.skew for _, report in self.peers if not report.error]
-                self.tolerance = round(max(skews) - min(skews), 3)
-                self._wave(pool, self.pull)
-                self._wave(pool, self.push)
+            self._wave(pool, self.connect, stops)
+            skews = [0.0] + [report.skew for _, report in self.peers if not report.error]
+            self.tolerance = round(max(skews) - min(skews), 3)
+            self._wave(pool, self.pull, stops)
+            self._wave(pool, self.push, stops)
         finally:
+            # The run is over, however it ended: nothing of it starts from
+            # here on, and a worker a Stop left behind is not waited for.
+            # Joined, as ``with`` joins it, a worker that could not be
+            # ended kept this thread in a wait no Stop reaches.
+            self.cancel.set()
+            pool.shutdown(wait=False, cancel_futures=True)
             for peer, _ in self.peers:
                 peer.close()
-            for leftover in self.control_dir.glob("*"):
-                leftover.unlink(missing_ok=True)
-            self.control_dir.rmdir()
+            shutil.rmtree(self.control_dir, ignore_errors=True)
         return self.reports
 
-    def _wave(self, pool: ThreadPoolExecutor, wave: Any) -> None:
-        """Run *wave* for every peer not yet failed, all at once, and wait for the last."""
+    def _wave(self, pool: ThreadPoolExecutor, wave: Any, stops: list[threading.Event]) -> None:
+        """Run *wave* for every peer not yet failed, all at once, to the last one's end or a Stop.
+
+        The wait is taken in slices, between which a Stop is seen and an
+        exception injected into this thread is raised.  Each submit and
+        each slice is held against that injection: raised inside the
+        pool's or a future's lock, it left the lock held and a worker
+        blocked on it for good.
+
+        A peer whose worker a Stop left running is reported as stopped.
+
+        Raises:
+            ToolCallInterrupted: When the tool call the run is in was stopped.
+        """
+        started = [(peer, report) for peer, report in self.peers if not report.error]
         futures = [
-            pool.submit(self._guarded, wave, peer, report)
-            for peer, report in self.peers
-            if not report.error
+            tool_interrupt.call_without_injection(pool.submit, self._guarded, wave, peer, report)
+            for peer, report in started
         ]
-        for future in futures:
-            future.result()
+        while not tool_interrupt.call_without_injection(self._ended, futures, stops):
+            pass
+        for future, (peer, report) in zip(futures, started, strict=True):
+            if future.done():
+                future.result()
+            else:
+                report.error = f"{peer.name} ({peer.ssh}): stopped"
+        # Closing the call before the raise keeps the forced interrupt out
+        # of the cleanup the raise unwinds through.
+        tool_interrupt.raise_if_interrupted()
+
+    def _ended(self, futures: list[Future[None]], stops: list[threading.Event]) -> bool:
+        """Wait for a wave's *futures*, one slice of the wait; whether the wave is over.
+
+        The slice is :data:`POLL_SECONDS`, and the wave is over once all
+        are done, unless a Stop was asked for by now.  That sets
+        :attr:`cancel`, which kills the ssh commands the workers wait
+        for, and the slice is then the time those workers need to end
+        with them: their own slice of the wait, the kill and the reap.
+        A worker still running after it merges into this machine's
+        stores, which nothing ends: the wave is over without it.
+        """
+        if any(stop.is_set() for stop in stops):
+            self.cancel.set()
+            wait(futures, timeout=POLL_SECONDS + REAP_SECONDS)
+            return True
+        return not wait(futures, timeout=POLL_SECONDS).not_done
 
     def _guarded(self, wave: Any, peer: SshPeer, report: PeerReport) -> None:
         """Run one wave for one peer, recording its time and any failure in the report."""
@@ -368,7 +443,7 @@ class PeerSync:
         with ThreadPoolExecutor(max_workers=1) as side:
             listing = side.submit(self.remote_manifest, peer)
             report.pulled = self.history(
-                self.remote_db(peer), self.local_db, LockedRunner(peer.runner(), self.lock), held
+                self.remote_db(peer), self.local_db, LockedRunner(peer, self.lock), held
             )
         listing.result()
         report.held_back_there = held.held

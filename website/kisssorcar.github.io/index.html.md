@@ -1,67 +1,99 @@
 # KISS Sorcar — Tell it what to do, in English. It picks the best LLM and ships the work.
 
-> Open-source AI agent. Tell it what to do in English — it picks the best LLM, runs on your laptop, and ships the work. Apache 2.0, 988 models. Works as a web/mobile app, a Python API, and a terminal command.
+> Open-source general-purpose recursively self-evolving AI agent for long-horizon tasks and AI discovery and optimization. Apache 2.0, 993 models. Works as a web/mobile app, a Python API, and a terminal command.
 
-This is the plain-Markdown twin of <https://kisssorcar.github.io/>. Machine-readable entry points: [/llms.txt](https://kisssorcar.github.io/llms.txt) and [/llms-full.txt](https://kisssorcar.github.io/llms-full.txt).
+- Website: <https://kisssorcar.github.io/>
+- Source: <https://github.com/ksenxx/kiss_ai>
+- PyPI: <https://pypi.org/project/kiss-agent-framework/>
+- Paper: <https://arxiv.org/abs/2604.23822>
+- Full docs: <https://kisssorcar.github.io/docs/index.md>
+- LLM index: <https://kisssorcar.github.io/llms.txt>
 
-## What Is KISS Sorcar
+*"Everything should be made as simple as possible, but not simpler." — Albert Einstein*
 
-**KISS Sorcar is a free, simple, local-first, bring-your-own-key AI agent framework** for long-horizon tasks and AI discovery. It runs as a browser/mobile web app served by a local daemon (`kiss-web`), and offers a Python client API for scripting tasks. Your prompts and code are sent directly to the model provider or local endpoint you configure — not through our servers. It supports multi-model workflows just via prompts. Agents run as daemons hosted by the local server (a standalone `sorcar` terminal command can also run a task without the daemon). Complex AI systems/techniques can be replaced with a paragraph of prompt.
+**KISS Sorcar is a free, simple, local-first, bring-your-own-key AI agent framework.** It runs as a browser/mobile web app served by a local daemon, and offers a Python client API for scripting tasks. Your prompts and code go directly to the model provider or local endpoint you configure — *never through our servers*. Multi-model workflows take a paragraph of prompt, not a pipeline: complex AI systems and techniques can be replaced with a paragraph of prompt in KISS Sorcar.
 
-- **License:** Apache-2.0 · **Source:** <https://github.com/ksenxx/kiss_ai> · **PyPI:** `kiss-agent-framework`
-- **988 models** across 7 provider categories (OpenAI, Anthropic, Amazon Bedrock, Gemini, OpenRouter, Claude Code CLI, Codex CLI)
-- **44 third-party agents**: 32 messaging channels (Slack, Gmail, Email, WhatsApp, SMS, iMessage, Telegram, Discord, Signal, Phone Control, Home Assistant, …) plus service agents for GitHub, Notion, Overleaf, Postgres, Brave Search, Firecrawl, and Google Workspace
-- Unique features: AI discovery via prompt, GEPA prompt optimization via prompt, multi-vendor multi-model tasks, dynamic `set_model` switching, steering-on-the-fly, git-worktree task isolation, wake-word voice chat, persistent agent memory, inbound channel gateways, Muse-auth credential isolation for connector secrets
+- **Version:** 2026.11.15
+- **License:** Apache-2.0
+- **Python:** 3.13+
 
-## Install
+## § 01 — Terminal-Bench 2.0: KISS Sorcar vs Pi, Codex CLI and Claude Code
+
+On the HarnessTax study's 30 Terminal-Bench 2.0 tasks and seven models, KISS Sorcar solved **75.6%** of attempts against 70.0% for Pi, 65.7% for Codex CLI, and 65.1% for Claude Code, with the best point estimate on every model. Paired reruns of Pi on Claude Fable 5 put KISS Sorcar **+11.1 points** ahead on the 30 study tasks (95% CI +3.3 to +20.0) and **+10.5 points** ahead on 57 unsampled tasks (95% CI +2.9 to +18.7). Full benchmark details: [docs/benchmarks.md](docs/benchmarks.md) and [blog/harness-tax-terminal-bench-blog.html](blog/harness-tax-terminal-bench-blog.html).
+
+## § 02 — Installation
+
+### Full install (recommended, macOS and Linux)
 
 ```bash
-# Full install (macOS/Linux)
 curl -fsSL https://raw.githubusercontent.com/ksenxx/kiss_ai/main/scripts/install.sh | bash
-
-# Or Python package only (Python 3.13+)
-pipx install kiss-agent-framework
-
-# Start the daemon that serves the web app (the full installer registers it as a user service)
-kiss-web
 ```
 
-Then open the web app at <http://127.0.0.1:8787>, or the remote web app URL from its Settings panel. From Python: `kiss.server.sorcar.run("What is 2435*234?")`.
+Or from a checkout:
 
-## Documentation
+```bash
+git clone https://github.com/ksenxx/kiss_ai.git && cd kiss_ai && ./install.sh
+```
 
-- [Documentation index](docs/index.md)
-- [Overview & comparison vs Claude Code / Cursor](docs/overview.md)
-- [Terminal-Bench 2.0 benchmark vs Pi, Codex CLI, Claude Code](docs/benchmarks.md)
-- [Installation](docs/installation.md)
-- [Client interfaces](docs/cli.md)
-- [Python API reference](docs/api.md)
-- [Supported models](docs/models.md)
-- [Messaging & third-party agents](docs/messaging-agents.md)
-- [Slash commands for SEAs](docs/sea-commands.md)
-- [Sample tasks](docs/sample-tasks.md)
-- [Prompt tricks](docs/prompt-tricks.md)
-- [Tips](docs/tips.md)
+### Python package install (Python 3.13+)
 
-## Papers
+```bash
+pipx install kiss-agent-framework
+# or
+uv tool install kiss-agent-framework
+```
 
-- **KISS Sorcar: A Stupidly-Simple General-Purpose and Software Engineering AI Assistant** — [PDF](assets/kiss_sorcar.pdf) · [arXiv:2604.23822](https://arxiv.org/abs/2604.23822). Introduces KISS Sorcar and the underlying KISS Agent Framework: a deliberately minimal, open-source agent runtime designed for long-horizon tasks, rigorous review, multi-model orchestration, and AI discovery.
-- **Software Engineering KISS Sorcar with KISS Sorcar** — [PDF](assets/se_kiss_sorcar.pdf). A case study of building KISS Sorcar with KISS Sorcar itself: over 44 days the developer issued 3,099 tasks through the system's own interface; nine recurring human–AI collaboration patterns are surfaced from the SQLite usage log.
-- **Writing a Research Paper with an AI Agent** — [PDF](assets/writing_paper.pdf). A nine-day, hundred-task chronicle of KISS Sorcar drafting, citing, compiling, and debugging its own research paper.
-- **HydraKV: Adversarial AI Discovery of a Larger-than-Memory Key-Value Store that Outperforms FASTER on Skewed YCSB-A** — [PDF](assets/hydra_kv.pdf). A larger-than-memory key-value store in dependency-free C++17, designed, implemented, and tested almost entirely by KISS Sorcar, verified by independent audits.
-- **SWEDefend: A Confidence-Gated Intent-Alignment Judge with Capability-Diff Reasoning for Automated-Program-Repair Backdoor Defense** — [PDF](assets/swedefend.pdf). Defends LLM program-repair agents against backdoored patches; evaluated under adaptive attack with an honestly reported partial-defense result.
-- **Cleverest+: A Fixed-Budget Portfolio and Signature-Grounded Oracle for LLM-Based Commit-Directed Test Generation** — [PDF](assets/cleverest_plus.pdf). Improves commit-directed test generation with a fixed-budget three-model portfolio and sanitizer-signature-grounded oracles.
+### Docker
 
-## Blog
+```bash
+./sorcar-docker [PORT] [--rebuild]
+```
 
-- **[The Harness Tax, Audited: A 727-Word Prompt Beats Three Coding Harnesses on Terminal-Bench 2.0](blog/harness-tax-terminal-bench-blog.html)** (29 Sep 2026). KISS Sorcar on the HarnessTax study's 30 Terminal-Bench 2.0 tasks and seven models: 75.6% of attempts solved vs Pi 70.0%, Codex CLI 65.7%, Claude Code 65.1%; paired rerun of Pi on Claude Fable 5 gives +11.1 points [+3.3, +20.0]; 79.1% on the 59 unsampled tasks, and +10.5 points [+2.9, +18.7] over Pi on 57 of them.
-- **[Making LZ4's Multithreaded File Compression Scale](blog/lz4-optimization-blog.html)** (10 Aug 2026). Rewires lz4 v1.10.0's multithreaded file-mode pipeline to 1.88–2.57× stock throughput at level -1, byte-identical output, head-to-head vs pigz/pzstd/zstd -T.
-- **[Optimizing DuckDB Against Its Official and Academic Benchmarks](blog/duckdb-optimization-blog.html)** (10 Aug 2026). Verified 1.152–1.237× geometric-mean speedups per suite on TPC-H, TPC-DS, IMDB/JOB, h2oai, and ClickBench.
-- **[Reaching 99+ on Biomni × TusoAI-Style Biology Benchmarks with AI Discovery](blog/tuso-evolved-blog.html)** (9 Aug 2026). An AI-discovery loop evolves one method scoring ≥99/100 on perturbation-response and enhancer–gene-linking benchmarks.
-- **[Optimizing SQLite Against Its Official and Academic Benchmarks](blog/sqlite-optimization-blog.html)** (8 Aug 2026). Verified 1.59× geometric-mean speedup on speedtest1, kvtest, TATP, and the Star Schema Benchmark.
-- **[Verification of the sqlite-optimized Repository](blog/sqlite-optimized-verification-report.html)** (8 Aug 2026). Independent rebuild-and-reproduce audit of the SQLite optimization work.
+### Configure model access
 
-## Citation
+```bash
+export ANTHROPIC_API_KEY=...
+export OPENAI_API_KEY=...
+export GEMINI_API_KEY=...
+export OPENROUTER_API_KEY=...
+```
+
+Default and fast model priority order: Anthropic (`claude-opus-5-5` / `claude-sonnet-5-5`), OpenAI (`gpt-6.1-sol-medium` / `gpt-6-luna`), Gemini (`gemini-3.8-flash` / `gemini-3.5-flash-lite`), OpenRouter, Amazon Bedrock (`bedrock/*`), Claude Code CLI (`cc/opus` / `cc/haiku`), and Codex CLI (`codex/default`). Also configurable via the Settings panel (API keys, Custom Models in `~/.kiss/MY_MODELS.json`, Bedrock, Claude Code `cc/*` subscription billing, Codex `codex/*` subscription billing). Six bundled router SEAs (`autorouter`, `bestrouter`, `orautorouter`, `orbestrouter`, `ccxbestrouter`, `brbestrouter`) appear under `Router` in the model picker. See [docs/installation.md](docs/installation.md).
+
+## § 03 — Using KISS Sorcar
+
+Three client interfaces backed by the `kiss-web` local daemon:
+
+- **Web and mobile app** (`http://127.0.0.1:8787` or remote `cloudflared` HTTPS tunnel): `@` file mentions, automatic git worktree isolation, `checkpoint(name)`/`rollback(name)`, voice chat ("Hey Sorcar") and composer dictation mic button, live steering and `<task>…</task>` queueing, live Browser tab, and `/cron` schedules.
+- **Python client API (`kiss.server.sorcar.run`)**:
+  ```python
+  from kiss.server import sorcar
+
+  result = sorcar.run("Refactor utils.py for clarity.")
+  sorcar.run("Summarise this codebase.", model="claude-sonnet-5-5", max_budget=2.0)
+  sorcar.run("Now fix the typos you found.", chat_id=result.chat_id)
+  ```
+- **Standalone `sorcar` terminal command**: `sorcar -t "Summarize README.md"` or `sorcar -f task.txt`.
+- **Sorcar Extension Agents (SEAs) & slash commands**: single-file Python agents subclassing `BaseSea`, `WorkerSea`, or `ChannelSea` from `kiss.agents.seas.base.base_sea`, registered via `$KISS_HOME/SEAS.md`, validated with `/<name> check` and `sea lint`, and invoked via `/<name>` or `run_agent()`. Includes bundled commands such as `/ask`, `/sh`, `/sync`, `/discover`, `/gepa`, `/write_paper`, `/review_paper`, `/remember`, `/forget`, `/timeline`, routers, and 44 channel/service commands. See [docs/sea-commands.md](docs/sea-commands.md) and [docs/cli.md](docs/cli.md).
+- **Persistent memory, Skills, MCP servers, and promptlet tricks**: seven `memory_*` tools backed by Markdown files under `~/.kiss/memories` and a SQLite vector index; Agent Skills with `skills.sh` security checks; MCP servers with OAuth and `~/.kiss/mcp.lock`; personal promptlet tricks in `~/.kiss/MY_INJECTION.md`.
+
+## § 04 — Messaging & Third-Party Agents
+
+44 third-party agents (32 messaging-channel agents, 10 service agents, plus `kiss-a2a` and `kiss-oai` infrastructure agents) and a Govee smart-home CLI. Sign-in runs on demand via each connector's `check_<service>_auth`/`authenticate_<service>` tools or the Connectors panel (Composio OAuth for the six Google Workspace agents; public OAuth device-code/PKCE for GitHub, Teams, Slack, and Discord; Browser tab completion). On Linux, credentials for the 18 Muse-covered connectors are isolated behind a local auth daemon (`python -m kiss.agents.third_party_agents.muse_auth`; opt out with `KISS_MUSE_AUTH=0`). See [docs/messaging-agents.md](docs/messaging-agents.md).
+
+## § 05 — Models Supported
+
+**993 models** across **7 provider categories**: OpenAI (99), Anthropic (82), Amazon Bedrock (144), Gemini (61), OpenRouter (515), Claude Code CLI (79), Codex CLI (13). Capability totals: **941** generation, **807** function-calling, **6** embedding, **38** decision models. Supports vendor effort aliases (`-low`/`-medium`/`-high`/`-xhigh`/`-max`) and live cost/budget tracking. See [docs/models.md](docs/models.md).
+
+## § 06 — Contributing
+
+Contributions in the form of issues are welcome, and KISS Sorcar can help implement and review them: <https://github.com/ksenxx/kiss_ai/issues>.
+
+## § 07 — License
+
+Apache-2.0 — <https://github.com/ksenxx/kiss_ai/blob/main/LICENSE>.
+
+## § 08 — Citation
 
 ```bibtex
 @misc{sen2026kisssorcar,
@@ -74,7 +106,3 @@ Then open the web app at <http://127.0.0.1:8787>, or the remote web app URL from
   url           = {https://arxiv.org/abs/2604.23822}
 }
 ```
-
-______________________________________________________________________
-
-KISS Sorcar · Apache 2.0 · [GitHub](https://github.com/ksenxx/kiss_ai) · Named after [P. C. Sorcar](https://en.wikipedia.org/wiki/P._C._Sorcar), the legendary Bengali magician.

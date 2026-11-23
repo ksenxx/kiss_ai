@@ -42,7 +42,7 @@ PRIMARY_MODEL = "claude-fable-5-2-max"
 REVIEW_MODEL = "gpt-6-astra-xhigh"
 """The model that reviews and debugs the primary model's work."""
 
-WRITER_MODEL = "openrouter/google/gemini-4-carbon"
+WRITER_MODEL = "gemini-4-neon-high"
 """The model that writes the documents, papers, reports and results a human reads."""
 
 SYSTEM_PROMPT = f"""\

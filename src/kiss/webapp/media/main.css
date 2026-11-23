@@ -1146,8 +1146,10 @@ body.remote-chat.remote-desktop #output {
 /* The logo is transparent art in two colourings: navy wordmark for
    the light theme, light wordmark for the dark one.  Both are in the
    page; the theme toggle (body.remote-chat.light-theme) shows exactly
-   one. */
-.welcome-logo { display: block; width: min(280px, 80%); height: auto; margin-bottom: 18px; }
+   one.  It is 560px wide where the pane has the room, as wide as the
+   pane where it has not (a phone), and smaller in a short window, so
+   that the greeting under it stays in sight. */
+.welcome-logo { display: block; width: min(560px, 100%, 80vh); height: auto; margin-bottom: 18px; }
 .welcome-logo-dark { display: none; }
 
 body.remote-chat:not(.light-theme) .welcome-logo-light { display: none; }

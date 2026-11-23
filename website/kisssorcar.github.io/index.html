@@ -4,23 +4,24 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>KISS Sorcar — Tell it what to do, in English. It picks the best LLM and ships the work.</title>
-  <meta name="description" content="Open-source AI agent. Tell it what to do in English — it picks the best LLM, runs on your laptop, and ships the work. Apache 2.0, 988 models. Works as a web/mobile app, a Python API, and a terminal command.">
+  <meta name="description" content="Open-source general-purpose recursively self-evolving AI agent for long-horizon tasks and AI discovery and optimization. Apache 2.0, 993 models. Works as a web/mobile app, a Python API, and a terminal command.">
+  <link rel="icon" type="image/svg+xml" href="assets/kiss-sorcar-app-icon-light.svg">
   <link rel="canonical" href="https://kisssorcar.github.io/">
   <link rel="alternate" type="text/markdown" href="https://kisssorcar.github.io/index.html.md" title="This page as Markdown">
   <link rel="llms-txt" type="text/plain" href="https://kisssorcar.github.io/llms.txt" title="LLM-friendly content index">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://kisssorcar.github.io/">
   <meta property="og:title" content="KISS Sorcar — Tell it what to do, in English. It picks the best LLM and ships the work.">
-  <meta property="og:description" content="Open-source AI agent. Tell it what to do in English — it picks the best LLM, runs on your laptop, and ships the work. Apache 2.0, 988 models.">
-  <meta property="og:image" content="https://kisssorcar.github.io/assets/KISS-Sorcar.png">
-  <meta property="og:image:width" content="1200">
-  <meta property="og:image:height" content="630">
+  <meta property="og:description" content="Open-source general-purpose recursively self-evolving AI agent for long-horizon tasks and AI discovery and optimization. Apache 2.0, 993 models.">
+  <meta property="og:image" content="https://kisssorcar.github.io/assets/kiss-sorcar-logo-light.png">
+  <meta property="og:image:width" content="1600">
+  <meta property="og:image:height" content="760">
   <meta property="og:image:alt" content="KISS Sorcar — open-source AI agent. Tell it what to do, in English.">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="KISS Sorcar — Tell it what to do, in English. It picks the best LLM and ships the work.">
-  <meta name="twitter:description" content="Open-source AI agent. Tell it what to do in English — it picks the best LLM, runs on your laptop, and ships the work.">
-  <meta name="twitter:image" content="https://kisssorcar.github.io/assets/KISS-Sorcar.png">
-  <meta name="twitter:image:alt" content="KISS Sorcar — open-source general-purpose AI agent for long-horizon tasks and AI discovery.">
+  <meta name="twitter:description" content="Open-source general-purpose recursively self-evolving AI agent for long-horizon tasks and AI discovery and optimization.">
+  <meta name="twitter:image" content="https://kisssorcar.github.io/assets/kiss-sorcar-logo-light.png">
+  <meta name="twitter:image:alt" content="KISS Sorcar — open-source general-purpose recursively self-evolving AI agent for long-horizon tasks and AI discovery and optimization.">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&family=Roboto+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -166,9 +167,62 @@
        the dark theme. Selected by html[data-theme] (not prefers-color-scheme)
        so the logo follows the site's own theme toggle. */
     .hero-logo {
-      display: block; width: 100%; height: auto;
+      display: block; width: 100%; max-width: 560px; margin: 0 auto; height: auto;
       filter: drop-shadow(0 6px 24px rgba(25,118,210,0.14));
     }
+    .feature-list {
+      margin: 0.55rem 0 0 1.2rem;
+      padding: 0;
+      color: var(--text-dim);
+      font-size: 0.92rem;
+      line-height: 1.65;
+    }
+    .feature-list li { margin-bottom: 0.35rem; }
+    .feature-list li strong { color: var(--text); font-weight: 600; }
+    .readme-details {
+      margin-top: 0.9rem;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 0.75rem 1rem;
+      background: var(--surface);
+    }
+    .readme-details summary {
+      cursor: pointer;
+      font-weight: 600;
+      font-size: 0.92rem;
+      color: var(--text);
+      list-style: none;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .readme-details summary::-webkit-details-marker { display: none; }
+    .readme-details summary::after { content: '▸'; color: var(--primary); transition: transform 0.15s ease; }
+    .readme-details[open] summary::after { transform: rotate(90deg); }
+    .readme-details .details-body { margin-top: 0.75rem; }
+    .ref-links {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem 0.9rem;
+      margin-top: 0.75rem;
+      font-size: 0.88rem;
+    }
+    .cmd-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 0.65rem;
+      margin-top: 0.75rem;
+    }
+    .cmd-item {
+      padding: 0.65rem 0.8rem;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--bg);
+      font-size: 0.86rem;
+      color: var(--text-dim);
+      line-height: 1.5;
+    }
+    .cmd-item code { color: var(--primary-dark); font-weight: 600; }
     .hero-logo-dark { display: none; }
     html[data-theme="dark"] .hero-logo-light { display: none; }
     html[data-theme="dark"] .hero-logo-dark { display: block; }
@@ -780,9 +834,6 @@
     table.compare th.cap { width: 22%; color: var(--text-dim); font-weight: 500; }
     table.compare td.kiss { background: var(--primary-soft); font-weight: 500; color: var(--text); }
     table.compare tr:last-child td { border-bottom: 0; }
-    table.compare .yes { color: var(--accent); font-weight: 600; }
-    table.compare .no  { color: #c62828; font-weight: 600; }
-    table.compare .warn { color: #ef6c00; font-weight: 600; }
     table.compare.bench th.n, table.compare.bench td.n { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
     table.compare.bench th.cap { width: auto; white-space: nowrap; }
     table.compare.bench thead th { text-align: center; }
@@ -978,274 +1029,6 @@
       box-shadow: 0 6px 16px rgba(0,137,123,0.25);
     }
 
-    /* ========================================================== */
-    /* PROMPT DECK — § 03 "All you need is a short prompt".        */
-    /* Each panel: title, 1–2 sentence description, scrollable     */
-    /* prompt area with a fade-out, and a "more …" toggle.         */
-    /* ========================================================== */
-
-    .deck-group-title {
-      display: flex; align-items: center; gap: 0.7rem;
-      font-size: 0.78rem; font-weight: 600;
-      letter-spacing: 0.08em; text-transform: uppercase;
-      color: var(--primary); margin: 1.6rem 0 0.9rem;
-    }
-    .deck-group-title:first-child { margin-top: 0.4rem; }
-    .deck-group-title::before, .deck-group-title::after {
-      content: ""; flex: 1; height: 1px;
-      background: linear-gradient(90deg, transparent, var(--border), transparent);
-    }
-
-    .prompt-deck {
-      display: flex; flex-direction: column; gap: 1rem;
-    }
-
-    .prompt-panel {
-      padding: 1.3rem 1.4rem;
-      background: #e6f1fb;
-      border-color: rgba(25,118,210,0.22);
-    }
-    .prompt-panel .panel-head {
-      display: flex; align-items: flex-start; justify-content: space-between;
-      gap: 0.8rem; flex-wrap: wrap;
-    }
-    .prompt-panel .panel-title {
-      font-size: 1.02rem; font-weight: 600; margin-bottom: 0;
-    }
-    .prompt-panel .panel-badge {
-      flex-shrink: 0;
-      font-family: 'Roboto Mono', monospace;
-      font-size: 0.7rem; font-weight: 600; letter-spacing: 0.04em;
-      text-transform: uppercase;
-      padding: 0.2rem 0.55rem; border-radius: 999px;
-      background: var(--primary-soft); color: var(--primary-dark);
-      white-space: nowrap;
-    }
-    .prompt-panel .panel-badge.trick {
-      background: rgba(0,137,123,0.10); color: var(--accent);
-    }
-    .prompt-panel .panel-desc {
-      color: var(--text-dim); font-size: 0.92rem; line-height: 1.6;
-      margin-top: 0.5rem;
-      /* Fixed-height 3-line summary so every panel lines up uniformly.    */
-      /* Longer summaries are clipped with an ellipsis; shorter summaries  */
-      /* still reserve the full 3-line block.                              */
-      height: calc(3 * 1.6 * 0.92rem);
-      overflow: hidden;
-      display: -webkit-box;
-      -webkit-line-clamp: 3;
-      line-clamp: 3;
-      -webkit-box-orient: vertical;
-      text-overflow: ellipsis;
-    }
-
-    .prompt-body {
-      position: relative;
-      margin-top: 0.85rem;
-      background: var(--code-bg);
-      color: var(--code-text);
-      border-radius: 8px;
-      overflow: hidden;
-      box-shadow: var(--shadow-1);
-    }
-    .prompt-body pre {
-      margin: 0;
-      padding: 0.9rem 1.05rem;
-      font-family: 'Roboto Mono', 'JetBrains Mono', monospace;
-      font-size: 0.95rem; line-height: 1.65;
-      white-space: pre-wrap; word-wrap: break-word;
-      /* Fixed height: exactly 8 lines (8 * 1.65em + vertical padding).  */
-      /* Any overflow becomes a scroller — no more/less expansion.       */
-      height: calc(8 * 1.65 * 0.95rem + 1.8rem);
-      overflow-y: auto;
-      color: inherit;
-      scrollbar-width: thin;
-      scrollbar-color: rgba(255,255,255,0.25) transparent;
-    }
-    .prompt-body pre::-webkit-scrollbar { width: 8px; }
-    .prompt-body pre::-webkit-scrollbar-thumb {
-      background: rgba(255,255,255,0.20); border-radius: 4px;
-    }
-    .prompt-body pre::-webkit-scrollbar-track { background: transparent; }
-
-    /* The fade overlay and "more …" button are no longer used now    */
-    /* that the prompt body has a fixed 5-line height and is always   */
-    /* scrollable for any overflow.                                   */
-    .prompt-fade { display: none; }
-    .prompt-more { display: none; }
-
-    /* ============================================================ */
-    /* Copy-to-clipboard button overlaid on the top-right of each    */
-    /* prompt body. Injected by JS; styled to be unobtrusive but     */
-    /* readable on the dark code background.                         */
-    /* ============================================================ */
-    .prompt-copy {
-      position: absolute;
-      top: 6px;
-      right: 6px;
-      z-index: 2;
-      display: inline-flex; align-items: center; gap: 0.32rem;
-      font-family: 'Roboto Mono', monospace;
-      font-size: 0.72rem; font-weight: 600;
-      letter-spacing: 0.04em; text-transform: uppercase;
-      color: #e8eefc;
-      background: rgba(255,255,255,0.10);
-      border: 1px solid rgba(255,255,255,0.22);
-      border-radius: 6px;
-      padding: 0.28rem 0.55rem;
-      cursor: pointer;
-      backdrop-filter: blur(4px);
-      -webkit-backdrop-filter: blur(4px);
-      transition: background 0.18s ease, color 0.18s ease, border-color 0.18s ease, transform 0.12s ease;
-    }
-    .prompt-copy:hover {
-      background: rgba(255,255,255,0.18);
-      border-color: rgba(255,255,255,0.35);
-    }
-    .prompt-copy:active { transform: translateY(1px); }
-    .prompt-copy:focus-visible {
-      outline: 2px solid var(--primary);
-      outline-offset: 2px;
-    }
-    .prompt-copy.copied {
-      background: rgba(0,137,123,0.85);
-      border-color: rgba(0,137,123,1);
-      color: #fff;
-    }
-    .prompt-copy .copy-icon { width: 13px; height: 13px; }
-
-    /* ========================================================== */
-    /* PROMPT CAROUSEL — show one panel at a time at the same      */
-    /* location with prev/next, dots, counter, and autoplay.       */
-    /* ========================================================== */
-    .prompt-carousel { margin-top: 0.4rem; }
-    .prompt-stage {
-      position: relative;
-      border-radius: 14px;
-      /* Clip panels as they fly in/out horizontally. Small vertical    */
-      /* padding preserves the panel's drop-shadow above/below.         */
-      overflow: hidden;
-      padding: 6px 0;
-      margin: -6px 0;
-    }
-    .prompt-stage > .prompt-panel {
-      position: absolute;
-      inset: 6px 0;
-      opacity: 0;
-      visibility: hidden;
-      pointer-events: none;
-      transform: translateX(100%);
-      transition:
-        transform 0.55s cubic-bezier(0.22, 0.61, 0.36, 1),
-        opacity 0.45s ease;
-      will-change: transform, opacity;
-    }
-    .prompt-stage > .prompt-panel.active {
-      position: relative;
-      inset: auto;
-      opacity: 1;
-      visibility: visible;
-      pointer-events: auto;
-      transform: translateX(0);
-    }
-    /* Pre-position incoming panel just before it slides in.            */
-    .prompt-stage > .prompt-panel.enter-right {
-      transform: translateX(100%);
-      opacity: 0;
-      visibility: visible;
-    }
-    .prompt-stage > .prompt-panel.enter-left {
-      transform: translateX(-100%);
-      opacity: 0;
-      visibility: visible;
-    }
-    /* Outgoing panel flies off to the opposite side.                   */
-    .prompt-stage > .prompt-panel.exit-left {
-      position: absolute;
-      inset: 6px 0;
-      transform: translateX(-100%);
-      opacity: 0;
-      visibility: visible;
-      pointer-events: none;
-    }
-    .prompt-stage > .prompt-panel.exit-right {
-      position: absolute;
-      inset: 6px 0;
-      transform: translateX(100%);
-      opacity: 0;
-      visibility: visible;
-      pointer-events: none;
-    }
-    /* Cancel the section-card stagger animation inside the stage  */
-    /* so its final opacity:1 fill doesn't reveal hidden panels.   */
-    .section-card.in-view .prompt-stage > .prompt-panel { animation: none; }
-
-    .carousel-controls {
-      display: flex; align-items: center; justify-content: space-between;
-      gap: 0.8rem; margin-top: 1.15rem; flex-wrap: wrap;
-    }
-    .carousel-counter {
-      font-family: 'Roboto Mono', monospace;
-      font-size: 0.86rem; color: var(--text-dim);
-      letter-spacing: 0.05em;
-      display: inline-flex; align-items: center; gap: 0.55rem;
-      flex: 1; justify-content: center; min-width: 0;
-    }
-    .carousel-counter strong { color: var(--text); font-weight: 600; }
-    .carousel-counter .kind {
-      display: inline-block;
-      padding: 0.18rem 0.55rem; border-radius: 999px;
-      font-family: 'Roboto Mono', monospace;
-      font-size: 0.70rem; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase;
-      background: var(--primary-soft); color: var(--primary-dark);
-    }
-    .carousel-counter .kind.trick {
-      background: rgba(0,137,123,0.10); color: var(--accent);
-    }
-
-    .carousel-btn {
-      background: transparent; color: var(--primary);
-      border: 1px solid var(--border);
-      font-family: inherit; font-size: 0.86rem; font-weight: 500;
-      padding: 0.45rem 1rem; border-radius: 8px;
-      cursor: pointer; display: inline-flex; align-items: center; gap: 0.4rem;
-      transition: background 0.15s, border-color 0.15s, color 0.15s, transform 0.1s;
-      flex-shrink: 0;
-    }
-    .carousel-btn:hover {
-      background: var(--primary-soft);
-      border-color: var(--primary);
-      color: var(--primary-dark);
-    }
-    .carousel-btn:active { transform: scale(0.97); }
-    .carousel-btn:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
-    .carousel-btn .arrow { font-weight: 600; }
-
-    .carousel-dots {
-      display: flex; flex-wrap: wrap; gap: 0.38rem;
-      margin-top: 1rem; justify-content: center;
-    }
-    .carousel-dot {
-      width: 9px; height: 9px; border-radius: 50%;
-      background: var(--border); border: none; padding: 0;
-      cursor: pointer; transition: background 0.18s, transform 0.18s;
-    }
-    .carousel-dot:hover { background: var(--primary-soft); transform: scale(1.2); }
-    .carousel-dot.active { background: var(--primary); transform: scale(1.4); }
-    .carousel-dot.trick.active { background: var(--accent); }
-    .carousel-dot:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
-
-    @media (prefers-reduced-motion: reduce) {
-      .prompt-stage > .prompt-panel,
-      .prompt-stage > .prompt-panel.enter-right,
-      .prompt-stage > .prompt-panel.enter-left,
-      .prompt-stage > .prompt-panel.exit-left,
-      .prompt-stage > .prompt-panel.exit-right { transition: none; transform: none; }
-    }
-    @media (max-width: 540px) {
-      .carousel-counter { order: 3; flex-basis: 100%; }
-      .carousel-controls { justify-content: space-between; }
-    }
 
     /* Footer */
     footer {
@@ -1602,9 +1385,6 @@
       background: linear-gradient(135deg, rgba(45,212,191,0.10), rgba(167,139,250,0.10));
       color: var(--text);
     }
-    table.compare .yes { color: #2dd4bf; }
-    table.compare .no  { color: #f87171; }
-    table.compare .warn { color: #fbbf24; }
     table.compare small { color: var(--text-dim); }
 
     .opt-table-wrap { border-color: rgba(167,139,250,0.22); }
@@ -1928,13 +1708,10 @@
       </a>
       <ul class="links">
         <li><a href="#">Demo</a></li>
-        <li><a href="#compare">Compare</a></li>
         <li><a href="#benchmarks">Benchmark</a></li>
-        <li><a href="#prompts">Prompts</a></li>
-        <li><a href="#papers">Papers</a></li>
-        <li><a href="#blog">Blog</a></li>
-        <li><a href="#ai-software-engineering">Videos</a></li>
         <li><a href="#install">Install</a></li>
+        <li><a href="#cli">Using</a></li>
+        <li><a href="#agents">Agents</a></li>
         <li><a href="#models">Models</a></li>
       </ul>
       <a href="https://github.com/ksenxx/kiss_ai" class="gh-badge" aria-label="GitHub">
@@ -1957,38 +1734,44 @@
   <div class="hero">
     <canvas id="magic-dust" aria-hidden="true"></canvas>
     <div class="hero-mark">
-      <img src="assets/KISS-Sorcar.png" alt="KISS Sorcar" class="hero-logo hero-logo-light">
-      <img src="assets/KISS-Sorcar-Dark.png" alt="KISS Sorcar" class="hero-logo hero-logo-dark">
+      <img src="assets/kiss-sorcar-logo-light.png" alt="KISS Sorcar" class="hero-logo hero-logo-light">
+      <img src="assets/kiss-sorcar-logo-dark.png" alt="KISS Sorcar" class="hero-logo hero-logo-dark">
       <figure class="hero-quote">
         <blockquote>Everything should be made as simple as possible, but not simpler.</blockquote>
         <figcaption>&mdash; Albert Einstein</figcaption>
       </figure>
     </div>
-    <h1>Tell it what to do, in any language and give it a concrete goal. It picks the best LLMs, runs on your laptop, and ships the work.</h1>
+    <h1>Open-source general-purpose recursively self-evolving AI agent for long-horizon tasks and AI discovery and optimization.</h1>
     <div class="hero-trust" aria-label="At a glance">
-      <span><strong>Apache 2.0</strong> · open source</span>
-      <span><strong>988 models</strong> · 7 providers</span>
-      <span><strong>~3,000 lines</strong> of core agents code</span>
+      <span><strong>Apache 2.0</strong> &middot; open source</span>
+      <span><strong>993 models</strong> &middot; 7 providers</span>
+      <span><strong>v2026.11.15</strong> &middot; Python 3.13+</span>
     </div>
   </div>
 
   <!-- Intro blurb shown directly above the screenshot -->
   <div class="hero" style="padding-top: 0; padding-bottom: 1.5rem;">
-    <p class="lead lead--accent">
-      <strong>KISS Sorcar</strong> is an open-source general-purpose AI agent for long-horizon tasks and AI discovery.
-      It is a simple, local-first, bring-your-own-key AI agent framework. It runs as a browser/mobile
-      web app served by a local daemon, and offers a Python client API. Your prompts and code are sent directly to
-      the model provider or local endpoint you configure &mdash; <em>not through our servers</em>. It supports
-      multi-model workflows just via prompts. Agents run as daemons hosted by the local server (a standalone
-      <code>sorcar</code> terminal command can also run a task without the daemon). Complex AI systems/techniques
-       can be replaced with a paragraph of prompt in KISS Sorcar.
-    </p>
+    <div class="lead lead--accent">
+      <p>
+        <strong>KISS Sorcar is a free, simple, local-first, bring-your-own-key AI agent framework.</strong>
+        It runs as a browser/mobile web app served by a local daemon, and offers a Python client API for scripting tasks.
+        Your prompts and code go directly to the model provider or local endpoint you configure, <em>never through our servers</em>.
+        Multi-model workflows take a paragraph of prompt, not a pipeline: complex AI systems and techniques can be replaced with a paragraph of prompt in KISS Sorcar.
+      </p>
+      <div class="ref-links">
+        <a href="https://github.com/ksenxx/kiss_ai/blob/main/FEATURES.md">FEATURES.md</a>
+        <a href="https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/server/README.md">Server &amp; SEA Guide</a>
+        <a href="https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/agents/third_party_agents/README.md">Messaging &amp; Service Agents</a>
+        <a href="https://github.com/ksenxx/kiss_ai/blob/main/MODELS.md">MODELS.md</a>
+        <a href="docs/index.md">Docs</a>
+      </div>
+    </div>
   </div>
 
   <!-- Hero screenshot -->
   <div class="screenshot">
-    <img src="assets/KISS-Sorcar-UI.png"
-         alt="KISS Sorcar UI screenshot"
+    <img src="assets/ks-ss.png"
+         alt="KISS Sorcar UI"
          loading="eager" decoding="async">
   </div>
 
@@ -2043,119 +1826,10 @@
     </a>
   </div>
 
-  <!-- ================ § 01 — KISS Sorcar vs Claude Code vs Cursor ================ -->
-  <div class="section-wrap">
-  <section id="compare" class="section-card">
-    <span class="num">§ 01 — KISS Sorcar vs Claude Code vs Cursor</span>
-    <h2>How does it compare?<a href="#compare" class="anchor">¶</a></h2>
-    <p class="sub">A side-by-side look at the differences that matter for everyday use.</p>
-    <div class="section-body">
-      <div class="compare-wrap">
-        <table class="compare">
-          <thead>
-            <tr>
-              <th class="cap">Capability</th>
-              <th class="kiss">KISS Sorcar</th>
-              <th>Claude Code</th>
-              <th>Cursor</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr>
-              <th class="cap">Interfaces</th>
-              <td class="kiss">Web/mobile app + Python API + <code>sorcar</code> CLI</td>
-              <td>CLI + mobile app</td>
-              <td>Custom VS Code</td>
-            </tr>
-            <tr>
-              <th class="cap">AI Discovery</th>
-              <td class="kiss"><span class="yes">✓</span> simply via prompt</td>
-              <td><span class="no">✗</span></td>
-              <td><span class="no">✗</span></td>
-            </tr>
-            <tr>
-              <th class="cap">GEPA Prompt Optimization</th>
-              <td class="kiss"><span class="yes">✓</span> simply via prompt</td>
-              <td><span class="no">✗</span></td>
-              <td><span class="no">✗</span></td>
-            </tr>
-            <tr>
-              <th class="cap">Multiple models from multiple vendors in the same task</th>
-              <td class="kiss"><span class="yes">✓</span> Mix OpenAI, Anthropic, Amazon Bedrock, Gemini, OpenRouter, Claude Code CLI, and Codex CLI</td>
-              <td><span class="no">✗</span> Anthropic Claude models only</td>
-              <td><span class="no">✗</span> One model per task</td>
-            </tr>
-            <tr>
-              <th class="cap">Primary focus</th>
-              <td class="kiss"><span class="yes">✓</span> <strong>Quality</strong> &mdash; rigorous review, end-to-end tests</td>
-              <td>Speed and developer ergonomics</td>
-              <td>Speed</td>
-            </tr>
-            <tr>
-              <th class="cap">Core Agents # LoC</th>
-              <td class="kiss"><strong>~3000</strong></td>
-              <td>Unknown</td>
-              <td>Unknown</td>
-            </tr>
-            <tr>
-              <th class="cap">Models in bundled catalog</th>
-              <td class="kiss">988 across 7 provider categories</td>
-              <td>Claude family only</td>
-              <td>Subset chosen by Cursor</td>
-            </tr>
-            <tr>
-              <th class="cap">Bring your own API key / endpoint</th>
-              <td class="kiss"><span class="yes">✓</span> Yes &mdash; keys stay on your machine</td>
-              <td><span class="yes">✓</span> Anthropic key</td>
-              <td><span class="warn">⚠</span> Routed through Cursor backend</td>
-            </tr>
-            <tr>
-              <th class="cap">Open source</th>
-              <td class="kiss"><span class="yes">✓</span> Apache-2.0</td>
-              <td><span class="no">✗</span> Proprietary</td>
-              <td><span class="no">✗</span> Proprietary</td>
-            </tr>
-            <tr>
-              <th class="cap">Price</th>
-              <td class="kiss">Free framework; pay only your chosen model provider</td>
-              <td>Subscription / API usage</td>
-              <td>Subscription</td>
-            </tr>
-            <tr>
-              <th class="cap">Run on top of Claude Code / Codex CLI</th>
-              <td class="kiss"><span class="yes">✓</span> <code>cc/*</code> and <code>codex/*</code> namespaces</td>
-              <td>N/A</td>
-              <td><span class="no">✗</span></td>
-            </tr>
-            <tr>
-              <th class="cap">Messaging and communication channels</th>
-              <td class="kiss"><span class="yes">✓</span> 44 third-party agents: 32 messaging channels (Slack, Gmail, Email (IMAP/SMTP), Phone Control, SMS, WhatsApp, Home Assistant, …) plus service agents for GitHub, Notion, Overleaf, Postgres, Brave Search, Firecrawl, and Google Workspace</td>
-              <td><span class="warn">⚠</span> Slack, mobile Remote Control, and research-preview channels for Telegram, Discord, and iMessage; no documented built-in Gmail, WhatsApp, phone-call, or SMS channel</td>
-              <td><span class="warn">⚠</span> Slack and Microsoft Teams Cloud Agent integrations; no documented built-in Gmail, WhatsApp, phone-call, or SMS channel</td>
-            </tr>
-            <tr>
-              <th class="cap">Scheduled automations</th>
-              <td class="kiss"><span class="yes">✓</span> Natural-language cron agent</td>
-              <td><span class="no">✗</span></td>
-              <td><span class="no">✗</span></td>
-            </tr>
-            <tr>
-              <th class="cap">Wake word for voice interaction</th>
-              <td class="kiss">"Hey Sorcar"</td>
-              <td>N/A</td>
-              <td>N/A</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-    </div>
-  </section>
-  </div>
-
-  <!-- ================ § 02 — Terminal-Bench 2.0 ================ -->
+  <!-- ================ § 01 — Terminal-Bench 2.0 ================ -->
   <div class="section-wrap">
   <section id="benchmarks" class="section-card">
-    <span class="num">§ 02 — Terminal-Bench 2.0: KISS Sorcar vs Pi, Codex CLI and Claude Code</span>
+    <span class="num">§ 01 — Terminal-Bench 2.0: KISS Sorcar vs Pi, Codex CLI and Claude Code</span>
     <h2>📊 Terminal-Bench 2.0.<a href="#benchmarks" class="anchor">¶</a></h2>
     <p class="sub">The <a href="https://harnesstax.github.io/">HarnessTax</a> study (UC Berkeley and Arena Intelligence) held the model fixed, swapped the harness between Claude Code, Codex CLI and Pi, and found that the harness moves cost far more than it moves what gets solved. We added KISS Sorcar to their Terminal-Bench 2.0 table: the same 30 sampled tasks, the same seven models, three attempts per task, graded by the official verifier, with 727 words of coding rules as the system prompt. Averaged over the seven models it solved <strong>75.6%</strong> of attempts; Pi 70.0%, Codex CLI 65.7%, Claude Code 65.1%, with the best point estimate on every model. Full write-up: <a href="blog/harness-tax-terminal-bench-blog.html">The Harness Tax, Audited</a>; Markdown twin: <a href="docs/benchmarks.md">docs/benchmarks.md</a>.</p>
     <div class="section-body">
@@ -2372,614 +2046,174 @@
   </section>
   </div>
 
-  <!-- ================ § 03 — All you need is a short prompt ================ -->
-  <div class="section-wrap">
-  <section id="prompts" class="section-card">
-    <span class="num">§ 03 — All you need is a short prompt in KISS Sorcar to do big complex tasks</span>
-    <h2>All You Need is a Short Prompt in KISS Sorcar to do Big Complex Tasks.<a href="#prompts" class="anchor">¶</a></h2>
-    <p class="sub" style="font-size:0.88rem; line-height:1.55;">KISS Sorcar ships with a curated set of <strong>sample tasks</strong> (long-horizon prompts you can drop straight into the web app) and <strong>promptlet tricks</strong> (short reusable directives that steer Sorcar's behaviour by injecting to the prompt). The tasks live in <a href="https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/SAMPLE_TASKS.md"><code>src/kiss/SAMPLE_TASKS.md</code></a>; the tricks live in <a href="https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/INJECTIONS.md"><code>src/kiss/INJECTIONS.md</code></a>. You can add your own tricks at <code>~/.kiss/MY_INJECTION.md</code>.</p>
-    <div class="section-body">
-
-      <div class="prompt-carousel" id="prompt-carousel" aria-roledescription="carousel" aria-label="Sample tasks and promptlet tricks">
-        <div class="prompt-stage">
-
-        <article class="inner-card prompt-panel" style="--i:0">
-          <div class="panel-head">
-            <h3 class="panel-title">Explain a workflow step-by-step</h3>
-            <span class="panel-badge">Task</span>
-          </div>
-          <p class="panel-desc">Ask Sorcar to walk you through the detailed step-by-step workflow of any algorithm or feature in your codebase, so you can understand it before changing it.</p>
-          <div class="prompt-body">
-            <pre>Can you show me the detailed step-by-step workflow of &lt;&lt;your algorithm or feature&gt;&gt;</pre>
-            <div class="prompt-fade"></div>
-          </div>
-          <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
-        </article>
-
-        <article class="inner-card prompt-panel" style="--i:1">
-          <div class="panel-head">
-            <h3 class="panel-title">Edit a specific step of a workflow</h3>
-            <span class="panel-badge">Task</span>
-          </div>
-          <p class="panel-desc">Modify a specific step of an existing workflow with a precise natural-language instruction — no need to point Sorcar at the file, it will find the right code.</p>
-          <div class="prompt-body">
-            <pre>Can you change the step &lt;&lt;specify step&gt;&gt; as follows: &lt;&lt;whatever way you want to change&gt;&gt;</pre>
-            <div class="prompt-fade"></div>
-          </div>
-          <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
-        </article>
-
-        <article class="inner-card prompt-panel" style="--i:2">
-          <div class="panel-head">
-            <h3 class="panel-title">Authenticate with a Slack workspace</h3>
-            <span class="panel-badge">Task</span>
-          </div>
-          <p class="panel-desc">Have Sorcar log you into a Slack workspace so it can send and receive messages on your behalf.</p>
-          <div class="prompt-body">
-            <pre>Authenticate slack workspace &lt;&lt;workspace name&gt;&gt;.</pre>
-            <div class="prompt-fade"></div>
-          </div>
-          <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
-        </article>
-
-        <article class="inner-card prompt-panel" style="--i:3">
-          <div class="panel-head">
-            <h3 class="panel-title">Turn a Slack channel into a gateway</h3>
-            <span class="panel-badge">Task</span>
-          </div>
-          <p class="panel-desc">Run a recurring gateway tick on a Slack channel so inbound messages become Sorcar tasks — with thread continuity across ticks and a pairing handshake so only approved senders can drive the agent.</p>
-          <div class="prompt-body">
-            <pre>Every 2 minutes, run a gateway tick on the Slack channel sorcar, with pairing.</pre>
-            <div class="prompt-fade"></div>
-          </div>
-          <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
-        </article>
-
-        <article class="inner-card prompt-panel" style="--i:4">
-          <div class="panel-head">
-            <h3 class="panel-title">Authenticate with Gmail</h3>
-            <span class="panel-badge">Task</span>
-          </div>
-          <p class="panel-desc">Connect Sorcar to Gmail — or Google Calendar, Drive, Docs, or Sheets; the browser handles consent and Sorcar stores the token locally.</p>
-          <div class="prompt-body">
-            <pre>Authenticate Gmail [, or gcal, gdrive, gdoc, gsheets]?</pre>
-            <div class="prompt-fade"></div>
-          </div>
-          <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
-        </article>
-
-        <article class="inner-card prompt-panel" style="--i:5">
-          <div class="panel-head">
-            <h3 class="panel-title">Watch Gmail, get pinged on Slack</h3>
-            <span class="panel-badge">Task</span>
-          </div>
-          <p class="panel-desc">A one-sentence scheduled automation: Sorcar checks your Gmail every hour and pings you on Slack whenever an email needs your immediate attention.</p>
-          <div class="prompt-body">
-            <pre>Can you check my Gmail every hour and ping me on Slack if there is any important email that needs my immediate attention?</pre>
-            <div class="prompt-fade"></div>
-          </div>
-          <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
-        </article>
-
-        <article class="inner-card prompt-panel" style="--i:6">
-          <div class="panel-head">
-            <h3 class="panel-title">Authenticate with iMessage</h3>
-            <span class="panel-badge">Task</span>
-          </div>
-          <p class="panel-desc">Connect Sorcar to your iMessage account so it can send and receive texts directly from macOS.</p>
-          <div class="prompt-body">
-            <pre>Authenticate iMessage.</pre>
-            <div class="prompt-fade"></div>
-          </div>
-          <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
-        </article>
-
-        <article class="inner-card prompt-panel" style="--i:7">
-          <div class="panel-head">
-            <h3 class="panel-title">Send an SMS to a phone number</h3>
-            <span class="panel-badge">Task</span>
-          </div>
-          <p class="panel-desc">Dispatch a one-line SMS to any phone number through Sorcar's messaging agents — no scripting required.</p>
-          <div class="prompt-body">
-            <pre>Can you send "Hello from Sorcar!" to 1-800-999-9999?</pre>
-            <div class="prompt-fade"></div>
-          </div>
-          <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
-        </article>
-
-        <article class="inner-card prompt-panel" style="--i:8">
-          <div class="panel-head">
-            <h3 class="panel-title">Audit a paper or repo for fraud</h3>
-            <span class="panel-badge">Task</span>
-          </div>
-          <p class="panel-desc">Have Sorcar fact-check a URL for wrong assumptions, cheating, irreproducibility, fraud, AI slop, and security vulnerabilities — verifying every claim and shipping a report.</p>
-          <div class="prompt-body">
-            <pre>Can you read &lt;&lt;url&gt;&gt;, and thoroughly and precisely check for **wrong assumptions**, **cheating**, **irreproducibility issues**, **fraud**, **potential for cheating in evaluation**, **AI Slop**, and **security vulnerabilities**? Use the internet extensively and do not believe what people say -- verify it yourself. Do not hesitate to download code and run it to validate results. For security vulnerabilities, create a POC and test it. Create a report.</pre>
-            <div class="prompt-fade"></div>
-          </div>
-          <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
-        </article>
-
-        <article class="inner-card prompt-panel" style="--i:9">
-          <div class="panel-head">
-            <h3 class="panel-title">Sorcar for AI Discovery</h3>
-            <span class="panel-badge">Task</span>
-          </div>
-          <p class="panel-desc">Let Sorcar search, train, and benchmark candidate models on your data to find the lightest, fastest, cheapest model that hits your target accuracy, recall, and price-per-query.</p>
-          <div class="prompt-body">
-            <pre>Sorcar for AI Discovery: Can you AI-discover the lightest and fastest AI model that will give the best accuracy and recall on the data at &lt;&lt;/path/to/data&gt;&gt; at the lowest price? Use 'modal' CLI to train your models on GPUs and evaluate if needed. The total budget for Modal.com is $ 1,000. Do not STOP until accuracy/recall reaches 99% and the model's price per query is less than $0.50. Create a report.</pre>
-            <div class="prompt-fade"></div>
-          </div>
-          <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
-        </article>
-
-        <article class="inner-card prompt-panel" style="--i:10">
-          <div class="panel-head">
-            <h3 class="panel-title">Sorcar for Optimization</h3>
-            <span class="panel-badge">Task</span>
-          </div>
-          <p class="panel-desc">Run a command, let Sorcar instrument and monitor its output, then iteratively rewrite the code and apply AI discovery to hit your speed, accuracy, recall, and cost targets.</p>
-          <div class="prompt-body">
-            <pre>Sorcar for Optimization: Can you run the command &lt;&lt;command&gt;&gt; and optimize it with respect to the following metrics: &lt;&lt;speed, accuracy, recall, cost&gt;&gt;. Then use AI discovery to optimize. You can add a diagnostic code that prints metrics, such as running time, at a finer granularity. Do not forget to remove the diagnostic code after the optimization is complete. You MUST NOT STOP until the metrics achieve the following values: &lt;&lt;give_concrete_values_for_metrics&gt;&gt;. Create a report.</pre>
-            <div class="prompt-fade"></div>
-          </div>
-          <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
-        </article>
-
-        <article class="inner-card prompt-panel" style="--i:11">
-          <div class="panel-head">
-            <h3 class="panel-title">Sorcar GEPA Prompt Optimizer</h3>
-            <span class="panel-badge">Task</span>
-          </div>
-          <p class="panel-desc">Run a full GEPA Pareto-frontier prompt-optimization loop over your dataset to evolve the best prompt for a <code>ChatSorcarAgent</code>, with cross-model review and no reward hacking.</p>
-          <div class="prompt-body">
-            <pre>Sorcar GEPA Prompt Optimizer: Can you optimize a prompt for a ChatSorcarAgent of the kiss-agent-framework Python library using the following GEPA algorithm on the data at &lt;&lt;url_or_db_file_of_data&gt;&gt; using claude-fable-5? You can find the trajectory events of an agent execution in ~/.kiss/history.db after the agent has finished its execution. Split the dataset into a 50% dev set and a 50% val set.
-
-RUN_GEPA: Sample 100 data points from the val set and call it the sval set. Maintain a Pareto frontier in the folder ./pareto, with a sub-folder for each node in the frontier. A node contains a prompt file (prompt.md) and a JSON file, say score.json, containing the list of data points (ids) from the sval set that were correctly predicted by the prompt. When you add a node to the Pareto frontier, make sure that the list of correctly predicted data points is not a subset of or equal to an existing list of data points in some node in the frontier. If such a node exists, do not add the new node. After adding a node, remove all nodes whose list of data points is a subset of or equal to the list of data points in the added node. Then run the following algorithm.
-
-1. Pick a node from the Pareto frontier with probability 0.5
-   a. sample a minibatch of 5 data points from the dev set
-   b. run the agent with the prompt from the node on the minibatch
-   c. If the agent incorrectly predicts for some data points, analyze and reflect on the trajectory events of the agent on those data points available at ~/.kiss/history.db and propose a new prompt that will fix the mistakes made by the agent on data points incorrectly predicted
-   d. If the agent predicts correctly on the minibatch, then evaluate it on the sval set and create the list of data points on which the agent with the new prompt predicts correctly.
-   e. Add the new prompt and the list of data points to the Pareto frontier
-
-1. Pick two nodes from the Pareto frontier randomly with the remaining probability.
-   a. Sample a minibatch of 5 data points from the dev set
-   b. Merge the prompts from the two nodes into a new prompt.
-   c. If the agent predicts correctly on the minibatch with the new prompt, then evaluate it on the sval set and create the list of datapoints on which the agent with the new prompt predicts correctly.
-   d. Add the new prompt and the list of data points to the Pareto frontier
-
-1. Repeat steps 1 and 2 until there is no change in the prompt after 3 iterations.
-   END_RUN_GEPA
-   Repeat RUN_GEPA until there is no change in the prompt after 3 iterations.
-
-At each step, keep track of the best prompt, which has the maximum number of successfully predicted data points, in ./pareto/optimal.md. MAKE SURE THAT YOU DO NOT DO REWARD HACKING OR CHEATING IN THE AGENT YOU ARE IMPLEMENTING TO FIT THE DATA. YOUR SOLUTION MUST GENERALIZE BEYOND THE DATA PROVIDED. Use internet search extensively at every step. Do not worry about budget. Create an HTML report with diagrams and illustrations in ./reports and open it in the user's default browser. Do NOT STOP until you cannot improve the accuracy and recall after three consecutive rollouts. Use gpt-5.6-sol model (not codex) for a thorough review of the work done at every step by the other model.</pre>
-            <div class="prompt-fade"></div>
-          </div>
-          <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
-        </article>
-
-        <article class="inner-card prompt-panel" style="--i:0">
-          <div class="panel-head">
-            <h3 class="panel-title">Pair-program with multi-model review</h3>
-            <span class="panel-badge trick">Trick</span>
-          </div>
-          <p class="panel-desc">Use Claude Fable as the implementer and GPT-5.6 Sol as a read-only reviewer/debugger &mdash; capped at 50% of the task budget and told not to invent new problems &mdash; so missed code, missing wirings, and silent bugs are caught before they ship.</p>
-          <div class="prompt-body">
-            <pre>Use 'claude-fable-5' model for all tasks, including software development. Use 'gpt-5.6-sol' (not codex) using `run_parallel` tool for a thorough read-only review and debugging of the other model's work. Thoroughly check whether the other model has missed any code or wiring or introduced any bugs. Use at most 50% of the task budget in gpt-5.6-sol for reviewing and debugging, and ask the model not to invent new problems. Use the model names literally without hallucinating new model names.</pre>
-            <div class="prompt-fade"></div>
-          </div>
-          <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
-        </article>
-
-        <article class="inner-card prompt-panel" style="--i:1">
-          <div class="panel-head">
-            <h3 class="panel-title">Reproduce invariant violations</h3>
-            <span class="panel-badge trick">Trick</span>
-          </div>
-          <p class="panel-desc">Codify suspected invariant breaks as end-to-end tests with 100% coverage first, then let Sorcar fix the offending code so the invariant holds forever.</p>
-          <div class="prompt-body">
-            <pre>Reproduce any violation of the invariant by writing end-to-end tests with 100% coverage. Then fix the issue.</pre>
-            <div class="prompt-fade"></div>
-          </div>
-          <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
-        </article>
-
-        <article class="inner-card prompt-panel" style="--i:2">
-          <div class="panel-head">
-            <h3 class="panel-title">Run a task from an instructions file</h3>
-            <span class="panel-badge trick">Trick</span>
-          </div>
-          <p class="panel-desc">Point Sorcar at a file of instructions and have it follow them to carry out the task &mdash; handy for reusable runbooks and playbooks. Replace <code>@</code> with the path to your file.</p>
-          <div class="prompt-body">
-            <pre>Can you use the instructions in the file @ to perform the task?</pre>
-            <div class="prompt-fade"></div>
-          </div>
-          <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
-        </article>
-
-        <article class="inner-card prompt-panel" style="--i:3">
-          <div class="panel-head">
-            <h3 class="panel-title">Resolve a merge conflict</h3>
-            <span class="panel-badge trick">Trick</span>
-          </div>
-          <p class="panel-desc">Paste the merge-conflict message after this trick and let Sorcar analyse the diff and resolve the conflict for you.</p>
-          <div class="prompt-body">
-            <pre>Can you check the following message for a merge conflict and help me fix it?</pre>
-            <div class="prompt-fade"></div>
-          </div>
-          <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
-        </article>
-
-        <article class="inner-card prompt-panel" style="--i:4">
-          <div class="panel-head">
-            <h3 class="panel-title">Authenticate on the user's behalf</h3>
-            <span class="panel-badge trick">Trick</span>
-          </div>
-          <p class="panel-desc">Have Sorcar drive channel setup pages itself while they load cleanly, and hand off to you — never asking for your password or 2FA code — so you complete login in your own browser and paste back the token or redirect URL.</p>
-          <div class="prompt-body">
-            <pre>Authenticate on my behalf using claude-fable-5-1 as the model. Check the channel's existing credentials first and stop if they are valid. Drive setup pages with browser tools only while they load without a login screen or captcha. Never ask for or type my password or 2FA code. On any login wall, captcha, or failed page load, do not retry or relaunch the browser — ask me (ask_user_question) to complete that step in my OWN browser and paste back the resulting token or redirect URL, then finish the authentication with the channel's tools and verify with its check tool.</pre>
-            <div class="prompt-fade"></div>
-          </div>
-          <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
-        </article>
-
-        <article class="inner-card prompt-panel" style="--i:5">
-          <div class="panel-head">
-            <h3 class="panel-title">Pair-program with GPT-6 Astra review</h3>
-            <span class="panel-badge trick">Trick</span>
-          </div>
-          <p class="panel-desc">The same implement-and-review pattern with Claude Fable writing the code while GPT-6 Astra audits it read-only for missed wiring and silent bugs, within half the task budget.</p>
-          <div class="prompt-body">
-            <pre>Use 'claude-fable-5' model for all tasks, including software development. Use 'gpt-6-astra' (not codex) using `run_parallel` tool for a thorough read-only review and debugging of the other model's work. Thoroughly check whether the other model has missed any code or wiring or introduced any bugs. Use at most 50% of the task budget in gpt-6-astra for reviewing and debugging, and ask the model not to invent new problems. Use the model names literally without hallucinating new model names.</pre>
-            <div class="prompt-fade"></div>
-          </div>
-          <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
-        </article>
-
-        <article class="inner-card prompt-panel" style="--i:6">
-          <div class="panel-head">
-            <h3 class="panel-title">Pair-program with Kimi K3 + review</h3>
-            <span class="panel-badge trick">Trick</span>
-          </div>
-          <p class="panel-desc">The same implement-and-review pattern with Kimi K3 as a lower-cost implementer and GPT-5.6 Sol as the read-only reviewer, capped at 50% of the task budget.</p>
-          <div class="prompt-body">
-            <pre>Use 'openrouter/moonshotai/kimi-k3' model for all tasks, including software development. Use 'gpt-5.6-sol' (not codex) using `run_parallel` tool for a thorough read-only review and debugging of the other model's work. Thoroughly check whether the other model has missed any code or wiring or introduced any bugs. Use at most 50% of the task budget in gpt-5.6-sol for reviewing and debugging, and ask the model not to invent new problems. Use the model names literally without hallucinating new model names.</pre>
-            <div class="prompt-fade"></div>
-          </div>
-          <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
-        </article>
-
-        <article class="inner-card prompt-panel" style="--i:7">
-          <div class="panel-head">
-            <h3 class="panel-title">Self-improving model routing</h3>
-            <span class="panel-badge trick">Trick</span>
-          </div>
-          <p class="panel-desc">Route each subtask to the best cheap model &mdash; following <code>./ROUTING.md</code> when it exists &mdash; and have Sorcar rewrite the routing strategy after every task so token cost falls without degrading quality.</p>
-          <div class="prompt-body">
-            <pre>If ./ROUTING.md exists, use the instructions in the file for model routing. Otherwise, use the best model from ~/.kiss/MODEL_INFO.json for various subtasks. Search the internet extensively to figure out which model is best yet cheap for each subtask. Here are some hints, but the internet has better knowledge: claude-fable-5 and openrouter/moonshotai/kimi-k3 — best for SWE work; gpt-5.6-sol — best for reviewing; openrouter/qwen/qwen3.8-max, openrouter/x-ai/grok-4.6, openrouter/z-ai/glm-5.3, openrouter/deepseek/deepseek-v4-pro-0813 — for SWE tasks when budget is low; and gpt-5.6-luna and openrouter/deepseek/deepseek-v4-pro-0813 for review when budget is low. Irrespective of whether ./ROUTING.md exists or not, after the task completes, based on your experience in completing the task, create or update the model routing strategy (as text) in ./ROUTING.md that reduces token cost while not degrading the quality of the work.</pre>
-            <div class="prompt-fade"></div>
-          </div>
-          <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
-        </article>
-
-        </div>
-
-        <div class="carousel-controls">
-          <button type="button" class="carousel-btn carousel-prev" aria-label="Previous prompt"><span class="arrow" aria-hidden="true">←</span> Prev</button>
-          <div class="carousel-counter" aria-live="polite"></div>
-          <button type="button" class="carousel-btn carousel-next" aria-label="Next prompt">Next <span class="arrow" aria-hidden="true">→</span></button>
-        </div>
-
-        <div class="carousel-dots" id="carousel-dots" role="tablist" aria-label="Prompt navigation"></div>
-      </div>
-    </div>
-  </section>
-  </div>
-
-  <!-- ================ § 04 — Papers ================ -->
-  <div class="section-wrap">
-  <section id="papers" class="section-card">
-    <span class="num">§ 04 — Papers</span>
-    <h2>📑 Papers.<a href="#papers" class="anchor">¶</a></h2>
-    <p class="sub">Read the research behind KISS Sorcar &mdash; the system, how it built itself, how it wrote its own paper, and the systems, defenses, and test generators it produced.</p>
-    <div class="section-body">
-      <div class="papers-grid">
-        <div class="inner-card paper-card" style="--i:0">
-          <div class="k">Main paper</div>
-          <h3>KISS Sorcar: A Stupidly-Simple General-Purpose and Software Engineering AI Assistant</h3>
-          <p>Introduces KISS Sorcar and the underlying KISS Agent Framework: a deliberately minimal, open-source agent runtime designed for long-horizon tasks, rigorous review, multi-model orchestration, and AI discovery.</p>
-          <div class="paper-actions">
-            <a class="paper-pill primary" href="assets/kiss_sorcar.pdf">PDF</a>
-          </div>
-        </div>
-        <div class="inner-card paper-card" style="--i:1">
-          <div class="k">Self-engineering</div>
-          <h3>Software Engineering KISS Sorcar with KISS Sorcar</h3>
-          <p>A case study of building KISS Sorcar with KISS Sorcar itself. Over 44 days the developer issued 3,099 tasks through the system's own interface; we analyze the SQLite usage log and surface nine recurring human&ndash;AI collaboration patterns.</p>
-          <div class="paper-actions">
-            <a class="paper-pill primary" href="assets/se_kiss_sorcar.pdf">PDF</a>
-          </div>
-        </div>
-        <div class="inner-card paper-card" style="--i:2">
-          <div class="k">Meta / process</div>
-          <h3>Writing a Research Paper with an AI Agent: A Chronicle of KISS Sorcar Writing Its Own Paper</h3>
-          <p>A nine-day, hundred-task chronicle of KISS Sorcar drafting, citing, compiling, and debugging its own research paper &mdash; doubling as a stress test of the agent itself.</p>
-          <div class="paper-actions">
-            <a class="paper-pill primary" href="assets/writing_paper.pdf">PDF</a>
-          </div>
-        </div>
-        <div class="inner-card paper-card" style="--i:3">
-          <div class="k">Systems / AI discovery</div>
-          <h3>HydraKV: Adversarial AI Discovery of a Larger-than-Memory Key-Value Store that Outperforms FASTER on Skewed YCSB-A</h3>
-          <p>A larger-than-memory key-value store in dependency-free C++17 that outperforms Microsoft's FASTER on skewed YCSB-A under a hard memory budget &mdash; designed, implemented, and tested almost entirely by KISS Sorcar through natural-language tasks, and verified by independent audits.</p>
-          <div class="paper-actions">
-            <a class="paper-pill primary" href="assets/hydra_kv.pdf">PDF</a>
-          </div>
-        </div>
-        <div class="inner-card paper-card" style="--i:4">
-          <div class="k">Security</div>
-          <h3>SWEDefend: A Confidence-Gated Intent-Alignment Judge with Capability-Diff Reasoning for Automated-Program-Repair Backdoor Defense</h3>
-          <p>A defense against backdoored patches from LLM program-repair agents: a confidence-gated intent-alignment judge with capability-diff reasoning, evaluated on a five-CWE-family corpus and under adaptive attack &mdash; with an honestly reported partial-defense result.</p>
-          <div class="paper-actions">
-            <a class="paper-pill primary" href="assets/swedefend.pdf">PDF</a>
-          </div>
-        </div>
-        <div class="inner-card paper-card" style="--i:5">
-          <div class="k">Testing</div>
-          <h3>Cleverest+: A Fixed-Budget Portfolio and Signature-Grounded Oracle for LLM-Based Commit-Directed Test Generation</h3>
-          <p>Improves LLM-based commit-directed test generation over the Cleverest baseline with a fixed-budget three-model portfolio, sanitizer-signature-grounded oracles, and shell-free execution.</p>
-          <div class="paper-actions">
-            <a class="paper-pill primary" href="assets/cleverest_plus.pdf">PDF</a>
-          </div>
-        </div>
-      </div>
-    </div>
-  </section>
-  </div>
-
-  <!-- ================ § 05 — Blog ================ -->
-  <div class="section-wrap">
-  <section id="blog" class="section-card">
-    <span class="num">§ 05 — Blog</span>
-    <h2>✍️ Blog.<a href="#blog" class="anchor">¶</a></h2>
-    <p class="sub">Write-ups of real optimization and discovery runs performed end-to-end by KISS Sorcar, with reproducible numbers.</p>
-    <div class="section-body">
-      <div class="papers-grid">
-        <div class="inner-card paper-card" style="--i:0">
-          <div class="k">29 Sep 2026 &middot; Benchmarks</div>
-          <h3>The Harness Tax, Audited: A 727-Word Prompt Beats Three Coding Harnesses on Terminal-Bench 2.0</h3>
-          <p>Runs KISS Sorcar on the 30 Terminal-Bench 2.0 tasks and seven models of the HarnessTax study (Pi, Codex CLI, Claude Code). It solves 75.6% of attempts against 70.0%, 65.7% and 65.1%, with the best point estimate on all seven models; a paired rerun of Pi on Claude Fable 5 gives an 11.1-point gap (95% interval +3.3 to +20.0) at five cents more per attempt; the 59 unsampled tasks score 79.1%, and a second paired Pi rerun on 57 of them gives a 10.5-point gap (+2.9 to +18.7).</p>
-          <div class="paper-actions">
-            <a class="paper-pill primary" href="blog/harness-tax-terminal-bench-blog.html">Read post</a>
-          </div>
-        </div>
-        <div class="inner-card paper-card" style="--i:1">
-          <div class="k">10 Aug 2026 &middot; Systems</div>
-          <h3>Making LZ4&rsquo;s Multithreaded File Compression Scale</h3>
-          <p>Rewires the multithreaded file-mode pipeline of lz4 v1.10.0 to reach 1.88&ndash;2.57&times; the throughput of the stock CLI at level -1 (3,810 vs 1,519 MB/s at 32 threads), with compressed output byte-identical to upstream at every tested level. Includes head-to-head runs against pigz, pzstd, and zstd -T. Done in about 7&frac12; hours of agent wall-clock time.</p>
-          <div class="paper-actions">
-            <a class="paper-pill primary" href="blog/lz4-optimization-blog.html">Read post</a>
-          </div>
-        </div>
-        <div class="inner-card paper-card" style="--i:2">
-          <div class="k">10 Aug 2026 &middot; Systems</div>
-          <h3>Optimizing DuckDB Against Its Official and Academic Benchmarks</h3>
-          <p>Makes an upstream DuckDB development tree faster on five suites &mdash; TPC-H sf1, TPC-DS sf1, IMDB/JOB, h2oai group/join, and ClickBench &mdash; with verified geometric-mean speedups of 1.152&ndash;1.237&times; per suite over the stock release build and a largest single-query win of ~1.73&times;. Three of the five suites were held out from all profile training.</p>
-          <div class="paper-actions">
-            <a class="paper-pill primary" href="blog/duckdb-optimization-blog.html">Read post</a>
-          </div>
-        </div>
-        <div class="inner-card paper-card" style="--i:3">
-          <div class="k">9 Aug 2026 &middot; AI Discovery</div>
-          <h3>Reaching 99+ on Biomni &times; TusoAI-Style Biology Benchmarks with AI Discovery</h3>
-          <p>Reconstructs the two benchmark families from Phylo&rsquo;s Biomni &times; TusoAI blog &mdash; perturbation-response prediction (Replogle, Adamson, Norman) and pgBoost-style enhancer&ndash;gene linking &mdash; then runs an AI-discovery loop until one evolved method scores at least 99/100 on every task. Code and full protocol at github.com/ksenxx/biomni_tuso.</p>
-          <div class="paper-actions">
-            <a class="paper-pill primary" href="blog/tuso-evolved-blog.html">Read post</a>
-          </div>
-        </div>
-        <div class="inner-card paper-card" style="--i:4">
-          <div class="k">8 Aug 2026 &middot; Systems</div>
-          <h3>Optimizing SQLite Against Its Official and Academic Benchmarks</h3>
-          <p>Speeds up the SQLite 3.54.0 development trunk on speedtest1, kvtest, TATP (OLTP), and the Star Schema Benchmark (OLAP), reaching a verified geometric-mean speedup of 1.59&times;. Full source published at github.com/ksenxx/sqlite-optimized.</p>
-          <div class="paper-actions">
-            <a class="paper-pill primary" href="blog/sqlite-optimization-blog.html">Read post</a>
-          </div>
-        </div>
-        <div class="inner-card paper-card" style="--i:5">
-          <div class="k">8 Aug 2026 &middot; Audit</div>
-          <h3>Verification of the sqlite-optimized Repository</h3>
-          <p>An independent rebuild-and-reproduce audit of the sqlite-optimized repository: builds cleanly from scratch, no code or wiring missing, and the claimed benchmark results reproduce. A companion piece to the SQLite optimization post.</p>
-          <div class="paper-actions">
-            <a class="paper-pill primary" href="blog/sqlite-optimized-verification-report.html">Read post</a>
-          </div>
-        </div>
-      </div>
-    </div>
-  </section>
-  </div>
-
-  <!-- ================ § 06 — AI Software Engineering ================ -->
-  <div class="section-wrap">
-  <section id="ai-software-engineering" class="section-card">
-    <span class="num">§ 06 — AI Software Engineering</span>
-    <h2>🛠️ AI Software Engineering.<a href="#ai-software-engineering" class="anchor">¶</a></h2>
-    <p class="sub">Talks, demos, and case studies on doing real software engineering with KISS Sorcar.</p>
-    <div class="section-body">
-      <div class="videos-grid">
-        <div class="inner-card video-card" style="--i:0">
-          <div class="video-embed">
-            <iframe src="https://www.youtube-nocookie.com/embed/CVLfQilidLs"
-                    title="AI Software Engineering — Video 1"
-                    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
-                    referrerpolicy="strict-origin-when-cross-origin"
-                    allowfullscreen loading="lazy"></iframe>
-          </div>
-        </div>
-        <div class="inner-card video-card" style="--i:1">
-          <div class="video-embed">
-            <iframe src="https://www.youtube-nocookie.com/embed/iczGI84y6pY"
-                    title="AI Software Engineering — Video 2"
-                    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
-                    referrerpolicy="strict-origin-when-cross-origin"
-                    allowfullscreen loading="lazy"></iframe>
-          </div>
-        </div>
-        <div class="inner-card video-card" style="--i:2">
-          <div class="video-embed">
-            <iframe src="https://www.youtube-nocookie.com/embed/Am83j4oVDLA"
-                    title="AI Software Engineering — Video 3"
-                    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
-                    referrerpolicy="strict-origin-when-cross-origin"
-                    allowfullscreen loading="lazy"></iframe>
-          </div>
-        </div>
-        <div class="inner-card video-card" style="--i:3">
-          <div class="video-embed">
-            <iframe src="https://www.youtube-nocookie.com/embed/hpEmWIxhZ-A"
-                    title="AI Software Engineering — Video 4"
-                    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
-                    referrerpolicy="strict-origin-when-cross-origin"
-                    allowfullscreen loading="lazy"></iframe>
-          </div>
-        </div>
-        <div class="inner-card video-card" style="--i:4">
-          <div class="video-embed">
-            <iframe src="https://www.youtube-nocookie.com/embed/JMLUvx4Je_o"
-                    title="AI Software Engineering — Video 5"
-                    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
-                    referrerpolicy="strict-origin-when-cross-origin"
-                    allowfullscreen loading="lazy"></iframe>
-          </div>
-        </div>
-      </div>
-    </div>
-  </section>
-  </div>
-
-  <!-- ================ § 07 — What is in the Name ================ -->
-  <div class="section-wrap">
-  <section id="name" class="section-card">
-    <span class="num">§ 07 — What is in the Name</span>
-    <h2>What is in the Name?<a href="#name" class="anchor">¶</a></h2>
-    <p class="sub">Two names. One principle. A nod to a Bengali magician.</p>
-    <div class="section-body">
-      <div class="name-grid">
-        <div class="inner-card name-card" style="--i:0">
-          <div class="k">KISS Agent Framework</div>
-          <h3>Keep it Simple, Stupid.</h3>
-          <p><strong>KISS Agent Framework</strong> is a deliberately small agent runtime organized around the <a href="https://en.wikipedia.org/wiki/KISS_principle">KISS principle</a> &mdash; "Keep it Simple, Stupid."</p>
-        </div>
-        <div class="inner-card name-card" style="--i:1">
-          <div class="k">KISS Sorcar</div>
-          <h3>Named after P. C. Sorcar.</h3>
-          <p>KISS Sorcar is named after <a href="https://en.wikipedia.org/wiki/P._C._Sorcar">P. C. Sorcar</a>, the legendary Bengali magician, evoking the idea of an agent that performs feats that appear magical yet are grounded in disciplined engineering. Note: <strong>Sorcar</strong> also means <em>government</em> in Bengali.</p>
-        </div>
-      </div>
-    </div>
-  </section>
-  </div>
-
-  <!-- ================ § 08 — Installation ================ -->
+  <!-- ================ § 02 — Installation ================ -->
   <div class="section-wrap">
   <section id="install" class="section-card">
-    <span class="num">§ 08 — Installation</span>
+    <span class="num">§ 02 — Installation</span>
     <h2>Install in one line.<a href="#install" class="anchor">¶</a></h2>
-    <p class="sub">Pick the install path that fits you &mdash; the one-line installer, a git checkout, Docker, or the Python package. All you need is at least one API key from a major LLM provider. <strong>The one-line install script below is the recommended way to install the full KISS Sorcar stack.</strong></p>
+    <p class="sub">Pick the install path that fits you &mdash; the one-line installer, a git checkout, Docker, or the Python package. All you need is at least one API key (or a Claude Code / Codex subscription or Bedrock credential). <strong>The one-line install script below is the recommended way to install the full KISS Sorcar stack.</strong></p>
     <div class="section-body">
       <div class="grid-2">
         <div class="inner-card inner-card--preferred" style="--i:0">
           <h3>Full install <span class="preferred-badge" aria-label="Recommended install method">★ Recommended</span></h3>
-          <p style="margin-bottom:0.7rem;"><strong>Preferred way to install the full KISS Sorcar stack.</strong> Works on macOS and Linux (<code>x86_64</code>, <code>aarch64</code>, <code>arm64</code>). The script clones or updates <code>~/.kiss/kiss_ai</code> and runs its <code>install.sh</code>, which builds the Python environment, installs Playwright's Chromium and cloudflared, puts the <code>sorcar</code> CLI in <code>~/.local/bin</code>, registers the <code>kiss-web</code> daemon as your user service and opens the web app at <code>http://127.0.0.1:8787</code> &mdash; one command, no extra steps.</p>
+          <p style="margin-bottom:0.7rem;"><strong>Preferred way to install the full KISS Sorcar stack.</strong> Works on macOS and Linux (<code>x86_64</code>, <code>aarch64</code>, <code>arm64</code>). The script clones or updates <code>~/.kiss/kiss_ai</code> and runs its <code>install.sh</code>, which builds the Python environment, installs Playwright&rsquo;s Chromium and <code>cloudflared</code>, puts the <code>sorcar</code> CLI in <code>~/.local/bin</code>, registers the <code>kiss-web</code> daemon as your user service, and opens the web app at <code>http://127.0.0.1:8787</code>. If run from inside <code>~/.kiss</code> or <code>~/.kiss/kiss_ai</code>, it opens your home directory as the working folder instead.</p>
           <div class="code-panel">
             <div class="code-line"><span class="prompt">$</span> <span class="green">curl -fsSL https://raw.githubusercontent.com/ksenxx/kiss_ai/main/scripts/install.sh | bash</span></div>
             <div class="code-line"><span class="x"># or, from a checkout</span></div>
             <div class="code-line"><span class="prompt">$</span> <span class="green">git clone https://github.com/ksenxx/kiss_ai.git &amp;&amp; cd kiss_ai &amp;&amp; ./install.sh</span></div>
           </div>
-          <p style="margin-top:0.7rem;">Updates come from the web app's update toast (<strong>Update</strong> or <strong>Update when idle</strong>). If an update fails, run the one-line command again. It will not delete your history.</p>
+          <p style="margin-top:0.7rem;">Updates come from the web app&rsquo;s update toast (<strong>Update</strong> or <strong>Update when idle</strong>). If an update fails, run the one-line command again &mdash; it will not delete your history.</p>
         </div>
 
         <div class="inner-card" style="--i:1">
-          <h3>Python package install</h3>
-          <p style="margin-bottom:0.7rem;">For just the Python package &mdash; the <code>kiss-web</code> daemon, the Python client API, and the messaging-agent entry points. KISS Sorcar requires <strong>Python 3.13+</strong>.</p>
+          <h3>Python package &amp; Docker</h3>
+          <p style="margin-bottom:0.7rem;">For just the Python package (<strong>Python 3.13+</strong>) &mdash; the <code>kiss-web</code> daemon, the Python client API, and the messaging-agent entry points:</p>
           <div class="code-panel">
             <div class="code-line"><span class="prompt">$</span> <span class="green">pipx install kiss-agent-framework</span></div>
             <div class="code-line"><span class="x"># or</span></div>
             <div class="code-line"><span class="prompt">$</span> <span class="green">uv tool install kiss-agent-framework</span></div>
           </div>
+          <p style="margin-top:0.9rem;margin-bottom:0.6rem;"><strong>Docker:</strong> run KISS Sorcar in a plain Debian container serving the web app on port 8787 (password from <code>KISS_WEB_PASSWORD</code> or printed in <code>docker logs</code>; state persists in <code>kiss-sorcar-web-home</code>):</p>
+          <div class="code-panel">
+            <div class="code-line"><span class="prompt">$</span> <span class="green">./sorcar-docker [PORT] [--rebuild]</span></div>
+          </div>
+          <p style="margin-top:0.6rem;">Open <code>https://localhost:PORT</code> on the host and accept the self-signed certificate once or install <code>/ca.crt</code>.</p>
         </div>
 
         <div class="inner-card" style="--i:2">
           <h3>Configure model access</h3>
-          <p style="margin-bottom:0.7rem;">Provide at least one model backend through environment variables:</p>
+          <p style="margin-bottom:0.7rem;">Provide at least one model backend via environment variables or the web app&rsquo;s <strong>Settings</strong> panel (saved in <code>~/.kiss/config.json</code>):</p>
           <div class="code-panel">
             <div class="code-line"><span class="c">export</span> <span class="f">ANTHROPIC_API_KEY</span>=<span class="s">...</span></div>
             <div class="code-line"><span class="c">export</span> <span class="f">OPENAI_API_KEY</span>=<span class="s">...</span></div>
             <div class="code-line"><span class="c">export</span> <span class="f">GEMINI_API_KEY</span>=<span class="s">...</span></div>
             <div class="code-line"><span class="c">export</span> <span class="f">OPENROUTER_API_KEY</span>=<span class="s">...</span></div>
           </div>
-          <p style="margin-top:0.7rem;">You can also set API keys, a custom model endpoint, and custom HTTP headers in the Settings panel of the web app &mdash; or per task via the Python API&rsquo;s <code>model_config</code> option. You can register your own models (e.g. a local vLLM/Ollama endpoint) in the <strong>Custom Models</strong> section of the Settings panel; entries are stored in <code>~/.kiss/MY_MODELS.json</code> and appear in the model picker alongside the bundled catalog.</p>
+          <p style="margin-top:0.7rem;">With no explicit model set, KISS Sorcar picks the first configured provider in priority order: <strong>Anthropic</strong> (<code>claude-opus-5-5</code> / <code>claude-sonnet-5-5</code>), <strong>OpenAI</strong> (<code>gpt-6.1-sol-medium</code> / <code>gpt-6-luna</code>), <strong>Gemini</strong> (<code>gemini-3.8-flash</code> / <code>gemini-3.5-flash-lite</code>), <strong>OpenRouter</strong>, <strong>Bedrock</strong>, <strong>Claude Code CLI</strong> (<code>cc/opus</code> / <code>cc/haiku</code>), and <strong>Codex CLI</strong> (<code>codex/default</code>).</p>
+          <ul class="feature-list">
+            <li><strong>Custom Models:</strong> Register local vLLM/Ollama endpoints or extra provider models in Settings (stored in <code>~/.kiss/MY_MODELS.json</code>).</li>
+            <li><strong>Amazon Bedrock:</strong> Prefix Bedrock model IDs with <code>bedrock/</code> (e.g., <code>bedrock/global.anthropic.claude-opus-5-5</code>, optional effort suffix <code>-low</code>..<code>-max</code>). Authenticate via <code>AWS_BEARER_TOKEN_BEDROCK</code> or standard AWS credentials + <code>AWS_REGION</code>.</li>
+            <li><strong>Claude Code (<code>cc/*</code>) &amp; Codex (<code>codex/*</code>):</strong> Use existing Claude or ChatGPT subscriptions directly (with Sorcar&rsquo;s prompt and tools, not the CLI&rsquo;s built-ins). Sign in from Settings via <code>claude setup-token</code> or <code>codex login --device-auth</code> / <code>CODEX_ACCESS_TOKEN</code>; CLI billing uses your subscription by default unless you enable API-key billing.</li>
+          </ul>
         </div>
 
         <div class="inner-card" style="--i:3">
-          <h3>Docker</h3>
-          <p style="margin-bottom:0.7rem;">Runs KISS Sorcar in a plain Debian container and serves the web app on port 8787 (host port 8787 by default). The web app password is <code>KISS_WEB_PASSWORD</code> or a generated one printed in <code>docker logs</code>; state persists in the <code>kiss-sorcar-web-home</code> volume.</p>
-          <div class="code-panel">
-            <div class="code-line"><span class="prompt">$</span> <span class="green">./sorcar-docker [PORT] [--rebuild]</span></div>
-          </div>
-          <p style="margin-top:0.7rem;">Open <code>https://localhost:PORT</code> on the host; the certificate is self-signed, so accept it once or install <code>/ca.crt</code>.</p>
+          <h3>Router agents</h3>
+          <p style="margin-bottom:0.65rem;">Six bundled router SEAs appear under the <code>Router</code> group in the model picker (and can also be invoked as slash commands):</p>
+          <ul class="feature-list">
+            <li><code>autorouter</code> &mdash; routes on <code>claude-opus-5-5-medium</code>, splitting tasks into mechanically checkable units across Small (<code>openrouter/z-ai/glm-5.3-flash</code>, <code>gpt-6-luna-xhigh</code>), Medium (<code>openrouter/meta/muse-wonder</code>, <code>gemini-4-argon</code>), and Frontier (<code>gpt-6-astra</code>, <code>claude-fable-5-2-max</code>, <code>claude-opus-5-5-max</code>) tiers.</li>
+            <li><code>bestrouter</code> &mdash; starts on <code>claude-opus-5-5-medium</code>, writes human-facing docs/reports on <code>openrouter/google/gemini-4-carbon</code>, runs engineering/analysis on <code>claude-fable-5-2-max</code>, and reviews read-only with <code>gpt-6-astra-xhigh</code>.</li>
+            <li><code>orautorouter</code> &amp; <code>orbestrouter</code> &mdash; OpenRouter-only equivalents needing only <code>OPENROUTER_API_KEY</code> (<code>orbestrouter</code> uses <code>openrouter/anthropic/claude-opus-5.5-medium</code>, <code>claude-fable-5.2-max</code>, <code>openrouter/google/gemini-4-neon</code>, and <code>openrouter/openai/gpt-6-astra-xhigh</code>).</li>
+            <li><code>ccxbestrouter</code> &mdash; runs on Claude Code and Codex CLI subscriptions (<code>cc/claude-opus-5-5-medium</code>, <code>cc/claude-fable-5-2-max</code>, <code>cc/claude-opus-5-5-max</code>, reviewing with <code>codex/gpt-6-astra-xhigh</code>).</li>
+            <li><code>brbestrouter</code> &mdash; runs on Amazon Bedrock global cross-region profiles (<code>bedrock/global.anthropic.claude-opus-5-5-medium</code>, <code>claude-opus-5-5-max</code>, reviewing with <code>bedrock/global.anthropic.claude-fable-5-1-max</code>).</li>
+          </ul>
         </div>
       </div>
     </div>
   </section>
   </div>
 
-  <!-- ================ § 09 — Python client API (condensed) ================ -->
+  <!-- ================ § 03 — Using KISS Sorcar ================ -->
   <div class="section-wrap">
   <section id="cli" class="section-card">
-    <span class="num">§ 09 — Python API in 30 seconds</span>
-    <h2>The <code style="background:var(--surface);padding:0.05rem 0.45rem;border-radius:6px;font-size:0.85em;color:var(--primary-dark);">sorcar.run</code> Python API.<a href="#cli" class="anchor">¶</a></h2>
+    <span class="num">§ 03 — Using KISS Sorcar</span>
+    <h2>Web app, Python API, terminal CLI, and SEAs.<a href="#cli" class="anchor">¶</a></h2>
     <p class="sub">
-      The <code>kiss-web</code> daemon serves every client — the web/mobile app and your own Python scripts. Call <code>kiss.server.sorcar.run</code> to launch a task on the daemon and block until it finishes: pick any model with <code>model=</code>, cap spend with <code>max_budget=</code>, continue a chat with <code>chat_id=</code>, and hand the agent your own tools with <code>tools=</code>.
+      KISS Sorcar runs through three interfaces backed by one local daemon (<code>kiss-web</code>): a browser/mobile web app, the <code>kiss.server.sorcar.run</code> Python API, and a standalone <code>sorcar</code> terminal command (<code>sorcar -t "..."</code> or <code>sorcar -f prompt.txt</code>).
     </p>
 
     <div class="section-body">
-      <div class="inner-card" style="--i:0;margin-bottom:1.1rem;">
-        <h3>Four calls to get you started</h3>
-        <div class="code-panel">
-          <div class="code-line"><span class="c">from kiss.server import sorcar</span></div>
-          <div class="code-line spacer"></div>
-          <div class="code-line"><span class="x"># 1. Run a task and read the result</span></div>
-          <div class="code-line"><span class="c">result = sorcar.run(</span><span class="s">"Refactor utils.py for clarity."</span><span class="c">)</span></div>
-          <div class="code-line spacer"></div>
-          <div class="code-line"><span class="x"># 2. Any model, with a $2 cap</span></div>
-          <div class="code-line"><span class="c">sorcar.run(</span><span class="s">"Summarise this codebase."</span><span class="c">, </span><span class="f">model=</span><span class="s">"claude-sonnet-4-6"</span><span class="c">, </span><span class="f">max_budget=</span><span class="c">2.0)</span></div>
-          <div class="code-line spacer"></div>
-          <div class="code-line"><span class="x"># 3. Continue the same chat — the agent sees the prior task</span></div>
-          <div class="code-line"><span class="c">sorcar.run(</span><span class="s">"Now fix the typos you found."</span><span class="c">, </span><span class="f">chat_id=</span><span class="c">result.chat_id)</span></div>
-          <div class="code-line spacer"></div>
-          <div class="code-line"><span class="x"># 4. Run a Slack/Gmail/SMS task via a third-party agent</span></div>
-          <div class="code-line"><span class="c">sorcar.run(</span><span class="s">'Send "Hello from Sorcar!" to ksen via the desktop Slack app.'</span><span class="c">)</span></div>
+      <div class="grid-2" style="margin-bottom:1.1rem;">
+        <div class="inner-card" style="--i:0">
+          <h3>Web and mobile app</h3>
+          <p>Runs locally at <code>http://127.0.0.1:8787</code> (or remotely over a password-protected <code>cloudflared</code> HTTPS tunnel with per-machine tab titles and optional <code>ntfy.sh</code> push notifications).</p>
+          <ul class="feature-list">
+            <li><strong>Git worktrees &amp; checkpoints:</strong> Tasks automatically isolate edits in private git worktrees and squash-merge on completion; <code>checkpoint(name)</code> and <code>rollback(name)</code> snapshot the working tree mid-task.</li>
+            <li><strong>Voice &amp; dictation:</strong> Hands-free wake-word chat (&ldquo;Hey Sorcar&rdquo;) and a microphone dictation button in the composer.</li>
+            <li><strong>Live steering &amp; queueing:</strong> Steer a running task mid-flight or queue follow-up tasks (including <code>&lt;task&gt;/command ...&lt;/task&gt;</code> blocks).</li>
+            <li><strong>Files, Browser tab &amp; schedules:</strong> <code>@</code>-mention files/folders, inspect or take over the live Browser tab for logins/CAPTCHAs, and schedule recurring tasks with <code>/cron</code>.</li>
+          </ul>
         </div>
-        <p style="margin-top:1rem;font-size:0.95rem;color:var(--text-dim);">
-          Full reference (the <code>kiss-web</code> daemon, chat-client features, every <code>run()</code> option, skills, and MCP discovery): <a href="https://github.com/ksenxx/kiss_ai/blob/main/README.md#using-kiss-sorcar" target="_blank" rel="noopener"><strong>Full client reference →</strong></a>
-        </p>
+
+        <div class="inner-card" style="--i:1">
+          <h3>Python client API (<code>sorcar.run</code>)</h3>
+          <div class="code-panel">
+            <div class="code-line"><span class="c">from kiss.server import sorcar</span></div>
+            <div class="code-line spacer"></div>
+            <div class="code-line"><span class="x"># 1. Run a task and read the result</span></div>
+            <div class="code-line"><span class="c">result = sorcar.run(</span><span class="s">"Refactor utils.py for clarity."</span><span class="c">)</span></div>
+            <div class="code-line spacer"></div>
+            <div class="code-line"><span class="x"># 2. Pick any model with a $2 budget cap</span></div>
+            <div class="code-line"><span class="c">sorcar.run(</span><span class="s">"Summarise this codebase."</span><span class="c">, </span><span class="f">model=</span><span class="s">"claude-sonnet-5-5"</span><span class="c">, </span><span class="f">max_budget=</span><span class="c">2.0)</span></div>
+            <div class="code-line spacer"></div>
+            <div class="code-line"><span class="x"># 3. Continue the same chat across tasks</span></div>
+            <div class="code-line"><span class="c">sorcar.run(</span><span class="s">"Now fix the typos you found."</span><span class="c">, </span><span class="f">chat_id=</span><span class="c">result.chat_id)</span></div>
+            <div class="code-line spacer"></div>
+            <div class="code-line"><span class="x"># 4. Run a messaging or service task</span></div>
+            <div class="code-line"><span class="c">sorcar.run(</span><span class="s">'Send "Hello from Sorcar!" to #sorcar on Slack.'</span><span class="c">)</span></div>
+          </div>
+          <p style="margin-top:0.75rem;font-size:0.88rem;color:var(--text-dim);">Every call opens a live tab in the web app, auto-reconnects for up to 5 minutes with event replay, and handles <code>is_continue=True</code> session handoffs seamlessly. Key options: <code>model</code>, <code>work_dir</code>, <code>chat_id</code>, <code>max_budget</code>, <code>model_config</code>, <code>use_web_tools</code>, <code>use_memory</code>, <code>compaction</code>, <code>auto_classify</code>, <code>tool_profile</code>, <code>docker_image</code>, <code>timeout</code>, <code>system_prompt</code>, <code>add_to_system_prompt</code>, <code>add_to_prompt</code>, and <code>sea_path</code>.</p>
+        </div>
       </div>
-      <div class="inner-card" style="--i:1">
-        <h3>Persistent agent memory</h3>
-        <p>On by default: standard Sorcar runs get seven <code>memory_*</code> tools (search, pull, read, write, list, refresh, delete) and a memory protocol, so agents recall lessons, preferences, and decisions across tasks (not for Docker runs, <code>cc/*</code>/<code>codex/*</code> models, runs that drop the built-in toolset, or runs whose <code>model_config</code> supplies its own <code>system_instruction</code>). Pages are Markdown files under <code>~/.kiss/memories</code> with a SQLite vector index (OpenAI embeddings when an <code>OPENAI_API_KEY</code> is available, otherwise a fully offline hashed embedder). Toggle it in the Settings panel (a custom directory goes in the <code>memory_dir</code> key of <code>~/.kiss/config.json</code>), set <code>KISS_USE_MEMORY=0</code>, or override per run with <code>sorcar.run(..., use_memory=...)</code>.</p>
+
+      <div class="inner-card" style="--i:2;margin-bottom:1.1rem;">
+        <h3>Sorcar Extension Agents (SEAs) &amp; Slash Commands</h3>
+        <p>A <strong>Sorcar Extension Agent (SEA)</strong> is a single Python file subclassing <code>BaseSea</code>, <code>WorkerSea</code>, or <code>ChannelSea</code> from <code>kiss.agents.seas.base.base_sea</code>. Override <code>settings()</code> (<code>model</code>, <code>tool_profile</code>, <code>max_budget</code>, <code>timeout</code>, etc.) and optional hooks &mdash; <code>description()</code>, <code>prompt()</code>, <code>system_prompt()</code>, <code>tools()</code>, <code>llm_call_hook()</code>, <code>llm_response_hook()</code>, and <code>tool_call_hook()</code> returning <code>Verdict</code> (<code>ALLOW</code>, <code>refuse</code>, <code>allow_with_note</code>, <code>end_run</code>) &mdash; to build custom slash commands or autonomous workflows. Register custom SEA parent folders in <code>$KISS_HOME/SEAS.md</code>, validate with <code>/&lt;name&gt; check</code> or <code>sea lint</code>, and invoke as <code>/&lt;name&gt;</code> in the web app, via <code>sorcar.run(..., sea_path=...)</code>, or as a sub-agent via <code>run_agent()</code>.</p>
+        <div class="code-panel" style="margin-top:0.75rem;">
+          <div class="code-line"><span class="x"># weather/weather_sea.py &mdash; a minimal SEA</span></div>
+          <div class="code-line"><span class="c">from kiss.agents.seas.base.base_sea import WorkerSea</span></div>
+          <div class="code-line spacer"></div>
+          <div class="code-line"><span class="c">class WeatherSea(WorkerSea):</span></div>
+          <div class="code-line">    <span class="c">def description(self) -&gt; str:</span></div>
+          <div class="code-line">        <span class="c">return</span> <span class="s">"Reports the current weather in a city from wttr.in."</span></div>
+          <div class="code-line">    <span class="c">def settings(self, settings):</span></div>
+          <div class="code-line">        <span class="c">return settings | {</span><span class="s">"max_budget"</span>: 0.50, <span class="s">"tool_profile"</span>: <span class="s">"none"</span><span class="c">}</span></div>
+          <div class="code-line">    <span class="c">def prompt(self, task: str) -&gt; str:</span></div>
+          <div class="code-line">        <span class="c">return</span> <span class="s">f"Look up the current weather in {task or 'San Francisco'} and report it."</span></div>
+          <div class="code-line">    <span class="c">def tools(self, tools):</span></div>
+          <div class="code-line">        <span class="c">return tools + [get_weather]</span></div>
+        </div>
+        <details class="readme-details">
+          <summary>Bundled slash commands (click to expand)</summary>
+          <div class="details-body">
+            <div class="cmd-grid">
+              <div class="cmd-item"><strong>Everyday &amp; ops:</strong> <code>/ask</code>, <code>/sh</code>, <code>/sync</code>, <code>/sync_history_and_memory</code>, <code>/install</code>, <code>/good_morning</code>, <code>/recommendations</code>, <code>/machine</code>, <code>/merge</code>, <code>/task_update</code>, <code>/devtools</code>, <code>/cron</code></div>
+              <div class="cmd-item"><strong>Model routers:</strong> <code>/autorouter</code>, <code>/bestrouter</code>, <code>/orautorouter</code>, <code>/orbestrouter</code>, <code>/ccxbestrouter</code>, <code>/brbestrouter</code></div>
+              <div class="cmd-item"><strong>AI discovery &amp; optimization:</strong> <code>/discover</code> (iterative Pareto frontier optimization), <code>/discover_viz</code>, <code>/gepa</code> (prompt evolution), <code>/skillopt</code>, <code>/rsi7d</code></div>
+              <div class="cmd-item"><strong>Writing, papers &amp; patents:</strong> <code>/write</code>, <code>/write_paper</code>, <code>/review_paper</code>, <code>/revise_and_review_paper</code>, <code>/write_patent</code>, <code>/review_patent</code></div>
+              <div class="cmd-item"><strong>Persistent memory:</strong> <code>/remember</code>, <code>/forget</code>, <code>/timeline</code>, <code>/memory_consolidate</code>, <code>/memory_quiz</code>, <code>/git_extract_knowledge</code></div>
+              <div class="cmd-item"><strong>Messaging &amp; services:</strong> 44 bundled channel &amp; service commands (<code>/slack</code>, <code>/gmail</code>, <code>/github</code>, <code>/notion</code>, <code>/telegram</code>, &hellip;)</div>
+            </div>
+            <p style="margin-top:0.75rem;font-size:0.86rem;color:var(--text-dim);">Full SEA authoring guide &amp; live command reference: <a href="docs/sea-commands.md"><code>docs/sea-commands.md</code></a> and <a href="https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/server/README.md"><code>src/kiss/server/README.md</code></a>.</p>
+          </div>
+        </details>
+      </div>
+
+      <div class="grid-2">
+        <div class="inner-card" style="--i:3">
+          <h3>Persistent agent memory</h3>
+          <p>On by default: standard Sorcar runs get seven <code>memory_*</code> tools (<code>search</code>, <code>pull</code>, <code>read</code>, <code>write</code>, <code>list</code>, <code>refresh</code>, <code>delete</code>) so agents remember project architecture, user preferences, and bug root causes across tasks. Pages are Markdown files under <code>~/.kiss/memories</code> (including per-repo domain memories) indexed in SQLite with OpenAI embeddings or an offline hashed fallback. Toggle in Settings, set <code>KISS_USE_MEMORY=0</code>, or pass <code>use_memory=</code> per run.</p>
+        </div>
+
+        <div class="inner-card" style="--i:4">
+          <h3>Skills, MCP servers &amp; promptlet tricks</h3>
+          <ul class="feature-list">
+            <li><strong>Agent Skills:</strong> Auto-discovered from <code>.kiss/skills/</code>, <code>.claude/skills/</code>, and <code>~/.kiss/skills/</code>; install from <code>skills.sh</code> with built-in security &amp; LLM judge checks.</li>
+            <li><strong>MCP Servers:</strong> Configure stdio or HTTP/SSE servers in Settings or <code>~/.kiss/mcp.json</code> (with <code>connect_mcp_server</code> OAuth, <code>~/.kiss/mcp.lock</code> digest pinning, schema normalization, and opt-in deferred loading).</li>
+            <li><strong>Promptlet tricks:</strong> Keep personal directives in <code>~/.kiss/MY_INJECTION.md</code> (alongside bundled <a href="https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/INJECTIONS.md"><code>src/kiss/INJECTIONS.md</code></a>) and insert them from the composer menu.</li>
+          </ul>
+        </div>
       </div>
     </div>
   </section>
   </div>
 
-  <!-- ================ § 10 — Messaging & Third-Party Agents ================ -->
+  <!-- ================ § 04 — Messaging & Third-Party Agents ================ -->
   <div class="section-wrap">
   <section id="agents" class="section-card">
-    <span class="num">§ 10 — Messaging &amp; Third-Party Agents</span>
+    <span class="num">§ 04 — Messaging &amp; Third-Party Agents</span>
     <h2>💬 Reach the agent from anywhere.<a href="#agents" class="anchor">¶</a></h2>
-    <p class="sub">KISS Sorcar includes <strong>44 third-party agents</strong> that act on messaging services, mailboxes, devices, and web services on your behalf &mdash; <strong>32 messaging-channel agents</strong> and <strong>10 service agents</strong> &mdash; plus two infrastructure agents: an <strong>A2A agent</strong> (<code>kiss-a2a</code>) exposing Sorcar over the agent-to-agent protocol and an <strong>OpenAI-compatible server</strong> (<code>kiss-oai</code>) that serves Sorcar behind an OpenAI-style HTTP API. It also ships a <strong>Govee smart-home CLI</strong> for controlling IoT lights (on/off, brightness, color, and color temperature) via the Govee Developer API. Channels also work inbound: a recurring gateway tick turns a messaging channel into a prompt surface of its own, with thread continuity, sender allow-lists, and an optional pairing handshake. These agents live in <code>src/kiss/agents/third_party_agents/</code>.</p>
+    <p class="sub">KISS Sorcar includes <strong>44 third-party agents</strong> that act on messaging services, mailboxes, devices, and web services on your behalf &mdash; <strong>32 messaging-channel agents</strong> and <strong>10 service agents</strong> &mdash; plus two infrastructure agents: an <strong>A2A agent</strong> (<code>kiss-a2a</code>) exposing Sorcar over the agent-to-agent protocol and an <strong>OpenAI-compatible server</strong> (<code>kiss-oai</code>) serving Sorcar behind an OpenAI-style HTTP API. It also ships a <strong>Govee smart-home CLI</strong> for controlling IoT lights via the Govee Developer API. Channels also work inbound: a recurring gateway tick turns any channel into a prompt surface with thread continuity, sender allow-lists, and an optional pairing handshake. Dispatched via <code>run_agent()</code> (<code>ChannelSea</code>, working dir <code>$KISS_HOME/channel_work</code>) or directly via each agent&rsquo;s CLI entry point in <a href="https://github.com/ksenxx/kiss_ai/tree/main/src/kiss/agents/third_party_agents"><code>src/kiss/agents/third_party_agents/</code></a>.</p>
     <div class="section-body">
       <div class="inner-card" style="--i:0;margin-bottom:1.1rem;">
         <h3>32 messaging-channel agents</h3>
@@ -3034,36 +2268,32 @@ At each step, keep track of the best prompt, which has the maximum number of suc
           <span class="chip">PostgreSQL (<code>kiss-postgres</code>)</span>
         </div>
       </div>
-      <div class="inner-card" style="--i:2;margin-bottom:1.1rem;">
-        <h3>Plus: smart-home control</h3>
-        <p>A <strong>Govee smart-home CLI</strong> for controlling IoT lights — on/off, brightness, color, and color temperature — directly via the Govee Developer API.</p>
-      </div>
-      <div class="inner-card" style="--i:3">
-        <h3>Credential isolation (Muse auth)</h3>
-        <p>On Linux, credentials for the 24 Muse-supported connectors (the six Google services — Google Chat's service-account mode excepted — plus Slack, GitHub, Notion, Discord, Home Assistant, Firecrawl, Brave Search, ntfy, Govee, LINE, Mattermost, Nextcloud Talk, Synology Chat, Twitch, Zalo, BlueBubbles, Microsoft Teams, and Telegram) are isolated by default behind a Meta-Muse-style security boundary: legacy tokens auto-migrate into a vault owned by a local auth daemon on first use (a one-time hand-off of the real credential; plaintext copies are then scrubbed on a best-effort basis), after which the agent process holds only opaque surrogate tokens that the daemon swaps for the real ones at the network edge, and every boundary-routed API request is host-allowlisted (credential-free, bodyless <code>GET</code>/<code>HEAD</code> redirect hops are the one permitted off-list exception), classified read vs. write, and checked against an allow/deny/ask policy with an audit log. Reads are allowed by default; writes ask for a grant.</p>
-        <p>Where the provider supports a poll-based grant, connecting works like the Muse app's Connect button — the user signs in and approves in their own browser, nothing is pasted back: GitHub, Twitch, and Microsoft Teams use the OAuth device authorization grant (RFC 8628), Nextcloud Talk uses Login Flow v2, Matrix uses the OAuth 2.0 device grant of MAS-backed homeservers (matrix.org included), and Signal links this computer like Signal Desktop via a <code>signal-cli link</code> QR code. Providers without such a grant get a safe paste-back hand-off instead of browser automation — the agent never asks for a password or 2FA code. Manage it with <code>python -m kiss.agents.third_party_agents.muse_auth</code>; opt out with <code>KISS_MUSE_AUTH=0</code>.</p>
+      <div class="inner-card" style="--i:2">
+        <h3>Sign-in &amp; credential isolation (Muse auth)</h3>
+        <p>Authentication runs on demand via each connector&rsquo;s <code>check_&lt;service&gt;_auth</code> and <code>authenticate_&lt;service&gt;</code> tools or the web app&rsquo;s <strong>Connectors</strong> panel &mdash; the agent never asks for your password or 2FA code. The six Google Workspace agents (Gmail, Calendar, Drive, Docs, Sheets, and Google Chat) support Composio one-click OAuth; GitHub, Microsoft Teams, Slack, and Discord use public OAuth device-code or PKCE flows; and interactive consent screens can be completed directly in the web app&rsquo;s Browser tab.</p>
+        <p style="margin-top:0.65rem;">On Linux, credentials for the <strong>18 Muse-covered connectors</strong> (Slack, GitHub, Notion, Discord, Home Assistant, Firecrawl, Brave Search, ntfy, Govee, LINE, Mattermost, Nextcloud Talk, Synology Chat, Twitch, Zalo, BlueBubbles, Microsoft Teams, and Telegram) are isolated by default behind a Meta-Muse-style security boundary: legacy tokens auto-migrate into a vault owned by a local auth daemon, the agent holds only opaque surrogate tokens swapped at the network edge, and every API request is host-allowlisted, classified read vs. write, and checked against an allow/deny/ask policy with an audit log (reads allowed by default; writes ask for a grant). Manage with <code>python -m kiss.agents.third_party_agents.muse_auth</code> or opt out with <code>KISS_MUSE_AUTH=0</code>.</p>
       </div>
     </div>
   </section>
   </div>
 
-  <!-- ================ § 11 — Models Supported ================ -->
+  <!-- ================ § 05 — Models Supported ================ -->
   <div class="section-wrap">
   <section id="models" class="section-card">
-    <span class="num">§ 11 — Models Supported</span>
-    <h2>🤖 988 models. 7 provider categories.<a href="#models" class="anchor">¶</a></h2>
-    <p class="sub">KISS Sorcar ships a catalog of <strong>988 models</strong> across <strong>7 provider categories</strong>, with built-in prices, context lengths, and capability flags (<code>fc</code> function calling, <code>gen</code> generation, <code>emb</code> embedding, <code>dec</code> typed decisions via OpenRouter&rsquo;s <code>/api/alpha/decisions</code>). The source of truth is <a href="https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/core/models/MODEL_INFO.json">src/kiss/core/models/MODEL_INFO.json</a>. Models are grouped by the provider that routes them (i.e., whose API key or CLI serves the model).</p>
+    <span class="num">§ 05 — Models Supported</span>
+    <h2>🤖 993 models. 7 provider categories.<a href="#models" class="anchor">¶</a></h2>
+    <p class="sub">KISS Sorcar ships a catalog of <strong>993 models</strong> across <strong>7 provider categories</strong>, with built-in prices (including <code>image_output_price_per_1M</code>), context lengths, and capability flags (<code>fc</code> function calling, <code>gen</code> generation, <code>emb</code> embedding, <code>dec</code> typed decisions via OpenRouter&rsquo;s <code>/api/alpha/decisions</code>). The source of truth is <a href="https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/core/models/MODEL_INFO.json"><code>src/kiss/core/models/MODEL_INFO.json</code></a>.</p>
 
     <div class="section-body">
-      <div class="grid-2">
+      <div class="grid-2" style="margin-bottom:1.1rem;">
         <div class="inner-card" style="--i:0">
           <h3>Provider categories</h3>
           <div style="margin-top:0.5rem;">
             <div class="provider-row"><span class="label">OpenAI</span><span class="count">99</span></div>
             <div class="provider-row"><span class="label">Anthropic</span><span class="count">82</span></div>
             <div class="provider-row"><span class="label">Amazon Bedrock (<code>bedrock/*</code>)</span><span class="count">144</span></div>
-            <div class="provider-row"><span class="label">Gemini</span><span class="count">57</span></div>
-            <div class="provider-row"><span class="label">OpenRouter</span><span class="count">514</span></div>
+            <div class="provider-row"><span class="label">Gemini</span><span class="count">61</span></div>
+            <div class="provider-row"><span class="label">OpenRouter</span><span class="count">515</span></div>
             <div class="provider-row"><span class="label">Claude Code CLI (<code>cc/*</code>)</span><span class="count">79</span></div>
             <div class="provider-row"><span class="label">Codex CLI (<code>codex/*</code>)</span><span class="count">13</span></div>
           </div>
@@ -3074,11 +2304,11 @@ At each step, keep track of the best prompt, which has the maximum number of suc
           <p>Across all bundled providers, the catalog currently reports:</p>
           <div class="stat-row">
             <div class="stat-pill">
-              <div class="n">937</div>
+              <div class="n">941</div>
               <div class="l">generation-capable models</div>
             </div>
             <div class="stat-pill">
-              <div class="n">803</div>
+              <div class="n">807</div>
               <div class="l">function-calling-capable models</div>
             </div>
             <div class="stat-pill">
@@ -3086,21 +2316,38 @@ At each step, keep track of the best prompt, which has the maximum number of suc
               <div class="l">embedding models</div>
             </div>
             <div class="stat-pill">
-              <div class="n">37</div>
+              <div class="n">38</div>
               <div class="l">decision models</div>
             </div>
           </div>
-          <p style="margin-top:0.9rem;font-size:0.88rem;">See the <a href="https://github.com/ksenxx/kiss_ai/blob/main/MODELS.md">full per-provider model list</a> in MODELS.md, including the <code>cc/*</code> and <code>codex/*</code> namespaces that let KISS Sorcar run on top of the Claude Code and Codex CLIs.</p>
+          <p style="margin-top:0.9rem;font-size:0.88rem;">See the <a href="https://github.com/ksenxx/kiss_ai/blob/main/MODELS.md">full per-provider model list</a> in <code>MODELS.md</code>, including the <code>cc/*</code> and <code>codex/*</code> namespaces that let KISS Sorcar run on top of the Claude Code and Codex CLIs.</p>
+        </div>
+      </div>
+
+      <div class="grid-2">
+        <div class="inner-card" style="--i:2">
+          <h3>Effort aliases</h3>
+          <p>Reasoning-capable models expose effort aliases directly in the model name &mdash; no extra config needed:</p>
+          <ul class="feature-list">
+            <li><strong>OpenAI &amp; Codex:</strong> <code>-low</code>, <code>-medium</code>, <code>-high</code>, <code>-xhigh</code> (e.g., <code>gpt-6.1-sol-high</code>).</li>
+            <li><strong>Anthropic, Bedrock &amp; Kimi:</strong> <code>-low</code>, <code>-medium</code>, <code>-high</code>, up to <code>-max</code> (and mirrored under <code>cc/claude-*</code>).</li>
+            <li><strong>Gemini:</strong> <code>-low</code>, <code>-medium</code>, <code>-high</code> mapped to <code>thinking_config.thinking_level</code> with <code>include_thoughts</code> enabled automatically.</li>
+          </ul>
+        </div>
+
+        <div class="inner-card" style="--i:3">
+          <h3>Cost and budget tracking</h3>
+          <p>Every task tracks live spend against its <code>max_budget</code> cap. When a provider adapter reports actual billed cost (such as OpenRouter or CLI usage telemetry), Sorcar uses that figure directly; otherwise it computes cost from token counts and the bundled catalog&rsquo;s per-million input, cache, output, and image-output rates scaled by context tier.</p>
         </div>
       </div>
     </div>
   </section>
   </div>
 
-  <!-- ================ § 12 — Contributing ================ -->
+  <!-- ================ § 06 — Contributing ================ -->
   <div class="section-wrap">
   <section id="contributing" class="section-card">
-    <span class="num">§ 12 — Contributing</span>
+    <span class="num">§ 06 — Contributing</span>
     <h2>🤗 Contributing.<a href="#contributing" class="anchor">¶</a></h2>
     <p class="sub">Contributions in the form of issues are welcome. KISS Sorcar should be able to help implement and review them.</p>
     <div class="section-body">
@@ -3120,10 +2367,10 @@ At each step, keep track of the best prompt, which has the maximum number of suc
   </section>
   </div>
 
-  <!-- ================ § 13 — License ================ -->
+  <!-- ================ § 07 — License ================ -->
   <div class="section-wrap">
   <section id="license" class="section-card">
-    <span class="num">§ 13 — License</span>
+    <span class="num">§ 07 — License</span>
     <h2>📄 License.<a href="#license" class="anchor">¶</a></h2>
     <p class="sub">KISS Sorcar is released under a permissive open-source license.</p>
     <div class="section-body">
@@ -3136,10 +2383,10 @@ At each step, keep track of the best prompt, which has the maximum number of suc
   </section>
   </div>
 
-  <!-- ================ § 14 — Citation ================ -->
+  <!-- ================ § 08 — Citation ================ -->
   <div class="section-wrap">
   <section id="citation" class="section-card">
-    <span class="num">§ 14 — Citation</span>
+    <span class="num">§ 08 — Citation</span>
     <h2>📚 Cite the paper.<a href="#citation" class="anchor">¶</a></h2>
     <p class="sub">If you use KISS Sorcar in your research, please cite:</p>
     <div class="section-body">
@@ -3167,17 +2414,11 @@ At each step, keep track of the best prompt, which has the maximum number of suc
     <p>
       KISS Sorcar &middot; Apache 2.0 &middot;
       <a href="https://github.com/ksenxx/kiss_ai">GitHub</a> &middot;
-      <a href="#papers">Papers</a> &middot;
-      <a href="#blog">Blog</a> &middot;
-      <a href="assets/kiss_sorcar.pdf">Main paper</a> &middot;
-      <a href="assets/se_kiss_sorcar.pdf">SE paper</a> &middot;
-      <a href="assets/writing_paper.pdf">Writing paper</a> &middot;
       <a href="https://arxiv.org/abs/2604.23822">arXiv</a> &middot;
       <a href="docs/index.md">Docs</a> &middot;
       <a href="llms.txt">llms.txt</a> &middot;
       <a href="privacy.html">Privacy</a>
     </p>
-    <p style="margin-top:0.4rem;">Named after <a href="https://en.wikipedia.org/wiki/P._C._Sorcar">P. C. Sorcar</a>, the legendary Bengali magician.</p>
   </footer>
 
   <script>
@@ -3424,330 +2665,6 @@ At each step, keep track of the best prompt, which has the maximum number of suc
     })();
 
     // ---------------------------------------------------------------
-    // Prompt-deck "more …" toggle. Expands a .prompt-panel to make
-    // the entire prompt scrollable instead of clipped to 5 lines.
-    // Also tags panels whose prompt fits in 5 lines with .fits so
-    // the "more" button + fade gradient can be hidden via CSS.
-    // ---------------------------------------------------------------
-    (function () {
-      document.querySelectorAll('.prompt-panel').forEach((panel) => {
-        const btn = panel.querySelector('.prompt-more');
-        if (!btn) return;
-        const label = btn.firstChild;
-        btn.addEventListener('click', () => {
-          const expanded = panel.classList.toggle('expanded');
-          if (label) label.nodeValue = expanded ? 'less ' : 'more ';
-          btn.setAttribute('aria-expanded', expanded ? 'true' : 'false');
-        });
-        btn.setAttribute('aria-expanded', 'false');
-      });
-
-      // Measure whether each prompt's collapsed view already shows
-      // the whole text. If so, mark the panel .fits.
-      function measureFits() {
-        document.querySelectorAll('.prompt-panel').forEach((panel) => {
-          const pre = panel.querySelector('.prompt-body pre');
-          if (!pre) return;
-          const wasExpanded = panel.classList.contains('expanded');
-          // Measure against the collapsed sizing.
-          if (wasExpanded) panel.classList.remove('expanded');
-          const fits = pre.scrollHeight <= pre.clientHeight + 1;
-          panel.classList.toggle('fits', fits);
-          if (wasExpanded) panel.classList.add('expanded');
-        });
-      }
-      if (document.readyState === 'complete') measureFits();
-      else window.addEventListener('load', measureFits);
-      // Fonts can change the line box, so re-measure once they load.
-      if (document.fonts && document.fonts.ready) {
-        document.fonts.ready.then(measureFits).catch(() => {});
-      }
-      window.addEventListener('resize', measureFits);
-      // Expose so the carousel can re-measure after navigation if it
-      // ever needs to (panel widths can change between active states
-      // when the stage resizes).
-      window.__measurePromptFits = measureFits;
-    })();
-
-    // ---------------------------------------------------------------
-    // Copy-to-clipboard buttons — inject one into every .prompt-body
-    // and copy the panel's <pre> text on click. Uses the async
-    // Clipboard API where available with a textarea fallback for
-    // older browsers / non-secure contexts.
-    // ---------------------------------------------------------------
-    (function () {
-      const ICON_COPY =
-        '<svg class="copy-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
-        'stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
-        '<rect x="9" y="9" width="11" height="11" rx="2"></rect>' +
-        '<path d="M5 15V6a2 2 0 0 1 2-2h9"></path></svg>';
-      const ICON_CHECK =
-        '<svg class="copy-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
-        'stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
-        '<path d="M5 12.5l4.5 4.5L19 7"></path></svg>';
-
-      function fallbackCopy(text) {
-        const ta = document.createElement('textarea');
-        ta.value = text;
-        ta.setAttribute('readonly', '');
-        ta.style.position = 'fixed';
-        ta.style.top = '-1000px';
-        ta.style.left = '-1000px';
-        document.body.appendChild(ta);
-        ta.select();
-        let ok = false;
-        try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
-        document.body.removeChild(ta);
-        return ok;
-      }
-
-      async function copyText(text) {
-        if (navigator.clipboard && window.isSecureContext) {
-          try { await navigator.clipboard.writeText(text); return true; }
-          catch (e) { /* fall through */ }
-        }
-        return fallbackCopy(text);
-      }
-
-      function flashCopied(btn, ok) {
-        const labelSpan = btn.querySelector('.copy-label');
-        const original = btn.dataset.originalLabel || 'Copy';
-        btn.classList.add('copied');
-        if (labelSpan) labelSpan.textContent = ok ? 'Copied!' : 'Failed';
-        btn.innerHTML = (ok ? ICON_CHECK : ICON_COPY) +
-          '<span class="copy-label">' + (ok ? 'Copied!' : 'Failed') + '</span>';
-        btn.setAttribute('aria-label',
-          ok ? 'Prompt copied to clipboard' : 'Copy failed');
-        clearTimeout(btn._copyTimer);
-        btn._copyTimer = setTimeout(() => {
-          btn.classList.remove('copied');
-          btn.innerHTML = ICON_COPY +
-            '<span class="copy-label">' + original + '</span>';
-          btn.setAttribute('aria-label', 'Copy prompt to clipboard');
-        }, 1600);
-      }
-
-      document.querySelectorAll('.prompt-panel .prompt-body').forEach((body) => {
-        if (body.querySelector('.prompt-copy')) return; // idempotent
-        const pre = body.querySelector('pre');
-        if (!pre) return;
-        const btn = document.createElement('button');
-        btn.type = 'button';
-        btn.className = 'prompt-copy';
-        btn.dataset.originalLabel = 'Copy';
-        btn.setAttribute('aria-label', 'Copy prompt to clipboard');
-        btn.innerHTML = ICON_COPY + '<span class="copy-label">Copy</span>';
-        btn.addEventListener('click', async (e) => {
-          e.stopPropagation();
-          const text = pre.innerText;
-          const ok = await copyText(text);
-          flashCopied(btn, ok);
-        });
-        body.appendChild(btn);
-      });
-    })();
-
-    // ---------------------------------------------------------------
-    // Prompt carousel — shows one panel at a time at the same        
-    // location with prev/next buttons, dot navigation, a live        
-    // counter, keyboard arrows, and autoplay that pauses on hover,   
-    // when a panel is expanded, or when the section is off-screen.   
-    // ---------------------------------------------------------------
-    (function () {
-      const carousel = document.getElementById('prompt-carousel');
-      if (!carousel) return;
-      const stage    = carousel.querySelector('.prompt-stage');
-      const panels   = Array.from(stage.querySelectorAll(':scope > .prompt-panel'));
-      const prevBtn  = carousel.querySelector('.carousel-prev');
-      const nextBtn  = carousel.querySelector('.carousel-next');
-      const counter  = carousel.querySelector('.carousel-counter');
-      const dotsEl   = carousel.querySelector('#carousel-dots');
-      const total    = panels.length;
-      if (!total) return;
-
-      // Shuffle the panel order once per page load (Fisher–Yates) so
-      // the carousel presents Tasks and Tricks in a random sequence.
-      for (let i = panels.length - 1; i > 0; i--) {
-        const j = Math.floor(Math.random() * (i + 1));
-        [panels[i], panels[j]] = [panels[j], panels[i]];
-      }
-      // Reflect the shuffled order in the DOM so tab-order, dots, and
-      // counter all stay in sync with what is visually shown.
-      panels.forEach((p) => stage.appendChild(p));
-
-      let index = 0;
-      let autoplayTimer = null;
-      let transitioning = false;
-      const AUTOPLAY_MS = 5000;
-      const TRANSITION_MS = 550;
-
-      // Build dots, one per panel; mark trick dots with a class so   
-      // they can use the accent colour when active.                  
-      panels.forEach((p, i) => {
-        const dot = document.createElement('button');
-        dot.type = 'button';
-        dot.className = 'carousel-dot';
-        if (p.querySelector('.panel-badge.trick')) dot.classList.add('trick');
-        dot.setAttribute('role', 'tab');
-        dot.setAttribute('aria-label', `Show prompt ${i + 1} of ${total}`);
-        dot.addEventListener('click', () => {
-          const dir = (i >= index) ? 'next' : 'prev';
-          goTo(i, true, dir);
-        });
-        dotsEl.appendChild(dot);
-      });
-      const dots = Array.from(dotsEl.children);
-
-      function updateMeta() {
-        dots.forEach((d, i) => {
-          const active = (i === index);
-          d.classList.toggle('active', active);
-          d.setAttribute('aria-selected', active ? 'true' : 'false');
-        });
-        const badge = panels[index].querySelector('.panel-badge');
-        const kind  = badge ? badge.textContent.trim() : '';
-        const kindClass = (badge && badge.classList.contains('trick')) ? 'kind trick' : 'kind';
-        counter.innerHTML =
-          `<strong>${String(index + 1).padStart(2, '0')}</strong> / ${String(total).padStart(2, '0')}` +
-          (kind ? ` <span class="${kindClass}">${kind}</span>` : '');
-      }
-
-      // Initial render: just mark the first panel active, no animation.
-      function initialRender() {
-        panels.forEach((p, i) => {
-          p.classList.remove('active', 'enter-right', 'enter-left',
-                             'exit-right', 'exit-left');
-          if (i === index) {
-            p.classList.add('active');
-            p.setAttribute('aria-hidden', 'false');
-          } else {
-            p.setAttribute('aria-hidden', 'true');
-          }
-        });
-        updateMeta();
-      }
-
-      function goTo(i, userInitiated, direction) {
-        const newIndex = ((i % total) + total) % total;
-        if (newIndex === index) return;
-        if (transitioning) return;          // ignore rapid clicks mid-flight
-        if (direction === undefined) direction = 'next';
-
-        const oldIndex = index;
-        index = newIndex;
-
-        // Collapse any expanded panel when navigating away (legacy:
-        // current build hides .prompt-more, but this keeps the state
-        // machine clean if that ever changes).
-        panels.forEach((p, j) => {
-          if (j !== index && p.classList.contains('expanded')) {
-            p.classList.remove('expanded');
-            const btn = p.querySelector('.prompt-more');
-            if (btn) {
-              btn.setAttribute('aria-expanded', 'false');
-              if (btn.firstChild) btn.firstChild.nodeValue = 'more ';
-            }
-          }
-        });
-
-        const outgoing = panels[oldIndex];
-        const incoming = panels[newIndex];
-
-        // 1) Pre-position the incoming panel off-screen on the side it
-        //    will fly in from. 'next' -> enters from the right.
-        incoming.classList.remove('active', 'exit-left', 'exit-right',
-                                  'enter-right', 'enter-left');
-        incoming.classList.add(direction === 'next' ? 'enter-right' : 'enter-left');
-        incoming.setAttribute('aria-hidden', 'false');
-
-        // 2) Force a reflow so the browser registers the starting
-        //    transform before we change classes.
-        void incoming.offsetWidth;
-
-        // 3) Slide the incoming panel into place and the outgoing one
-        //    out toward the opposite side.
-        transitioning = true;
-        incoming.classList.remove('enter-right', 'enter-left');
-        incoming.classList.add('active');
-
-        outgoing.classList.remove('active');
-        outgoing.classList.add(direction === 'next' ? 'exit-left' : 'exit-right');
-        outgoing.setAttribute('aria-hidden', 'true');
-
-        // 4) After the transition, drop the exit class so the panel
-        //    sits at its default off-stage position (translateX 100%).
-        window.setTimeout(() => {
-          outgoing.classList.remove('exit-left', 'exit-right');
-          transitioning = false;
-        }, TRANSITION_MS + 30);
-
-        updateMeta();
-        if (userInitiated) restartAutoplay();
-      }
-      const next = (u) => goTo(index + 1, u, 'next');
-      const prev = (u) => goTo(index - 1, u, 'prev');
-
-      prevBtn.addEventListener('click', () => prev(true));
-      nextBtn.addEventListener('click', () => next(true));
-
-      // Keyboard navigation: ArrowLeft/ArrowRight when the carousel  
-      // is visible on screen and the user is not typing in a field.  
-      document.addEventListener('keydown', (e) => {
-        const t = e.target;
-        if (t && t.matches && t.matches('input, textarea, select, [contenteditable="true"]')) return;
-        const r = carousel.getBoundingClientRect();
-        const visible = r.top < window.innerHeight - 80 && r.bottom > 80;
-        if (!visible) return;
-        if (e.key === 'ArrowLeft')  { e.preventDefault(); prev(true); }
-        else if (e.key === 'ArrowRight') { e.preventDefault(); next(true); }
-      });
-
-      // Basic touch swipe support for mobile.                        
-      let touchStartX = null;
-      stage.addEventListener('touchstart', (e) => {
-        if (e.touches.length === 1) touchStartX = e.touches[0].clientX;
-      }, { passive: true });
-      stage.addEventListener('touchend', (e) => {
-        if (touchStartX == null) return;
-        const dx = e.changedTouches[0].clientX - touchStartX;
-        touchStartX = null;
-        if (Math.abs(dx) > 40) (dx < 0 ? next : prev)(true);
-      });
-
-      function tick() {
-        if (carousel.querySelector('.prompt-panel.expanded')) return; // pause while reading
-        if (carousel.matches(':hover')) return;                        // pause on hover
-        if (document.hidden) return;                                   // pause when tab hidden
-        next(false);
-      }
-      function startAutoplay() {
-        stopAutoplay();
-        autoplayTimer = setInterval(tick, AUTOPLAY_MS);
-      }
-      function stopAutoplay() {
-        if (autoplayTimer) { clearInterval(autoplayTimer); autoplayTimer = null; }
-      }
-      function restartAutoplay() {
-        if (autoplayTimer) startAutoplay();
-      }
-
-      // Only autoplay while the carousel is in view.                  
-      if ('IntersectionObserver' in window) {
-        const io = new IntersectionObserver((entries) => {
-          for (const entry of entries) {
-            if (entry.isIntersecting) startAutoplay();
-            else stopAutoplay();
-          }
-        }, { threshold: 0.15 });
-        io.observe(carousel);
-      } else {
-        startAutoplay();
-      }
-
-      initialRender();
-    })();
-
-    // ---------------------------------------------------------------
     // Magic-dust hero canvas. Tiny floating particles, thematic for
     // P. C. Sorcar the magician. Pauses when tab is hidden.
     // ---------------------------------------------------------------
@@ -3866,7 +2783,7 @@ At each step, keep track of the best prompt, which has the maximum number of suc
     (function () {
       if (!('IntersectionObserver' in window)) return;
       const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-      // Find hero-trust strong elements containing numeric content (e.g. "988 models").
+      // Find hero-trust strong elements containing numeric content (e.g. "993 models").
       const strongs = document.querySelectorAll('.hero-trust strong');
       const items = [];
       strongs.forEach(el => {

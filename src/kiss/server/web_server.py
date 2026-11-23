@@ -6183,6 +6183,9 @@ class RemoteAccessServer:
         self._version_check_task: asyncio.Task[None] | None = None
         self._machines_watch_task: asyncio.Task[None] | None = None
         self._shutdown_initiated = False
+        # Tasks whose worker the shutdown sweep could not stop, and that
+        # worker; see :meth:`_force_exit_if_worker_stuck`.
+        self._stuck_workers: list[tuple[str, threading.Thread]] = []
         # True once this instance's listener was bound: from then on it
         # may have admitted agent tasks; see :meth:`start_async`.
         self._listened = False
@@ -12709,6 +12712,7 @@ class RemoteAccessServer:
         for tab_id, thread in started:
             thread.join(timeout=max(0.0, deadline - time.monotonic()))
             if thread.is_alive():
+                self._stuck_workers.append((tab_id, thread))
                 logger.warning(
                     "Shutdown: agent task %s did not stop within timeout; "
                     "it may be persisted as a process-killed task",
@@ -12804,6 +12808,41 @@ class RemoteAccessServer:
             if stall_watchdog is not None:
                 stall_watchdog.stop()
             logger.info("Server stopped: pid=%d", pid)
+            self._force_exit_if_worker_stuck()
+
+    def _force_exit_if_worker_stuck(self) -> None:
+        """Force-exit when an agent worker outlived the shutdown sweep; :meth:`start`'s last step.
+
+        The sweep (:meth:`_stop_active_agent_tasks`) cannot end a worker
+        that waits outside Python: an injected interrupt is raised only
+        once the thread runs bytecode again, and a wait on a lock, a
+        child process or a socket runs none.  Returning from
+        :meth:`start` with such a worker began the interpreter's exit,
+        which joins every non-daemon thread with no bound (the pool
+        threads the worker waits for among them) while every further
+        SIGTERM is ignored (:attr:`_shutdown_initiated`).  On 2026-11-22
+        a sync blocked on ssh left the daemon like that, neither serving
+        nor exiting, its supervisor unable to respawn it, until the
+        machine was rebooted.
+
+        Everything :meth:`start` cleans up is done by now; the exit
+        skips the interpreter's exit hooks, as the failsafe of
+        :meth:`_shutdown_on_sigterm` does.  A worker that ended after
+        the sweep gave up on it forces nothing.  Only on the main
+        thread, where :meth:`start` is the process's last call: on any
+        other (a test, an embedding) the process is the caller's to end.
+        """
+        stuck = [tab_id for tab_id, thread in self._stuck_workers if thread.is_alive()]
+        if not stuck or threading.current_thread() is not threading.main_thread():
+            return
+        logger.error(
+            "Shutdown: the worker thread of agent task(s) %s is still running; "
+            "forcing exit so the supervisor can respawn: pid=%d",
+            ", ".join(stuck),
+            os.getpid(),
+        )
+        logging.shutdown()
+        os._exit(0)
 
     def _shutdown_children(self) -> None:
         """Stop everything the daemon owns besides its listeners and tunnel.

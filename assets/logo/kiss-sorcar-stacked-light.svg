@@ -1,0 +1,80 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 380" width="1600" height="760" role="img" aria-label="KISS Sorcar stacked hero logo (light)">
+  <defs>
+      <linearGradient id="ks_st_light_ks" gradientUnits="userSpaceOnUse" x1="19" y1="12" x2="21" y2="88">
+        <stop offset="0%" stop-color="#0A2E63"/>
+        <stop offset="52%" stop-color="#1976D2"/>
+        <stop offset="100%" stop-color="#0EA5E9"/>
+      </linearGradient>
+      <linearGradient id="ks_st_light_ku" gradientUnits="userSpaceOnUse" x1="25" y1="56" x2="72" y2="12">
+        <stop offset="0%" stop-color="#0369A1"/>
+        <stop offset="50%" stop-color="#0EA5E9"/>
+        <stop offset="100%" stop-color="#38BDF8"/>
+      </linearGradient>
+      <linearGradient id="ks_st_light_kd" gradientUnits="userSpaceOnUse" x1="28" y1="50" x2="66" y2="88">
+        <stop offset="0%" stop-color="#0F766E"/>
+        <stop offset="56%" stop-color="#14B8A6"/>
+        <stop offset="100%" stop-color="#2DD4BF"/>
+      </linearGradient>
+      <linearGradient id="ks_st_light_s" gradientUnits="userSpaceOnUse" x1="34" y1="16" x2="82" y2="84">
+        <stop offset="0%" stop-color="#B45309"/>
+        <stop offset="36%" stop-color="#D97706"/>
+        <stop offset="72%" stop-color="#F59E0B"/>
+        <stop offset="100%" stop-color="#FCD34D"/>
+      </linearGradient>
+      <linearGradient id="ks_st_light_fold" gradientUnits="userSpaceOnUse" x1="24.26" y1="50" x2="34.26" y2="50">
+        <stop offset="0%" stop-color="#000000" stop-opacity="0.18"/>
+        <stop offset="100%" stop-color="#000000" stop-opacity="0"/>
+      </linearGradient>
+      <filter id="ks_st_light_ao_soft" filterUnits="userSpaceOnUse" x="0" y="0" width="100" height="100">
+        <feGaussianBlur stdDeviation="3.2"/>
+      </filter>
+      <filter id="ks_st_light_ao_tight" filterUnits="userSpaceOnUse" x="0" y="0" width="100" height="100">
+        <feGaussianBlur stdDeviation="1.3"/>
+      </filter>
+      <clipPath id="ks_st_light_k_clip">
+        <path d="M 13.66 15.67 L 24.26 12.27 L 24.26 51.63 L 65.85 12.27 L 81.27 12.27 L 38.37 52.86 L 70.79 87.73 L 56.32 87.73 L 30.68 60.15 L 24.26 66.23 L 24.26 87.73 L 13.66 84.33 Z"/>
+      </clipPath>
+      <mask id="ks_st_light_s_self" maskUnits="userSpaceOnUse" x="0" y="0" width="100" height="100">
+        <rect width="100" height="100" fill="black"/>
+        <path d="M 81.16 32.15 C 78.76 20.75, 66.56 16.95, 52.56 17.65 C 39.16 18.35, 32.76 25.55, 35.16 35.75 C 37.56 45.55, 48.96 48.35, 60.96 52.35 C 72.76 56.35, 80.76 62.55, 79.36 71.75 C 77.96 80.75, 67.36 83.55, 55.36 82.05 C 45.16 81.15, 36.96 79.15, 32.36 75.35" stroke="white" stroke-width="10.60" stroke-linecap="butt" fill="none"/>
+      </mask>
+      <mask id="ks_st_light_mk" maskUnits="userSpaceOnUse" x="0" y="0" width="100" height="100">
+        <rect width="100" height="100" fill="white"/>
+        <path d="M 34.83 29.49 C 34.53 31.41, 34.63 33.50, 35.16 35.75 C 37.20 44.08, 45.74 47.35, 55.63 50.60" stroke="black" stroke-width="15.60" stroke-linecap="butt" fill="none"/>
+      </mask>
+      <mask id="ks_st_light_ms" maskUnits="userSpaceOnUse" x="0" y="0" width="100" height="100">
+        <rect width="100" height="100" fill="white"/>
+        <path d="M 52.85 31.87 L 80.82 5.39" stroke="black" stroke-width="15.60" stroke-linecap="butt" fill="none"/>
+        <path d="M 40.91 63.38 L 70.37 95.05" stroke="black" stroke-width="15.60" stroke-linecap="butt" fill="none"/>
+      </mask>
+  </defs>
+  <g transform="translate(300 12) scale(2.00)">
+    <!-- K (KISS disciplined engineering): cobalt pillar with convex mitered cyan & teal blades -->
+    <g mask="url(#ks_st_light_mk)">
+      <path d="M 13.66 15.67 L 24.26 12.27 L 24.26 51.63 L 65.85 12.27 L 81.27 12.27 L 38.37 52.86 L 70.79 87.73 L 56.32 87.73 L 30.68 60.15 L 24.26 66.23 L 24.26 87.73 L 13.66 84.33 Z" fill="#1976D2"/>
+      <polygon points="24.26,51.63 65.85,12.27 81.27,12.27 38.37,52.86 30.68,60.15 24.26,66.23" fill="url(#ks_st_light_ku)"/>
+      <polygon points="30.68,60.15 38.37,52.86 70.79,87.73 56.32,87.73" fill="url(#ks_st_light_kd)"/>
+      <polygon points="24.26,51.63 65.85,12.27 81.27,12.27 38.37,52.86 30.68,60.15 24.26,66.23" fill="url(#ks_st_light_fold)"/>
+      <polygon points="30.68,60.15 38.37,52.86 70.79,87.73 56.32,87.73" fill="url(#ks_st_light_fold)"/>
+      <polygon points="13.66,15.67 24.26,12.27 24.26,87.73 13.66,84.33" fill="url(#ks_st_light_ks)"/>
+      <g clip-path="url(#ks_st_light_k_clip)">
+        <path d="M 34.83 29.49 C 34.53 31.41, 34.63 33.50, 35.16 35.75 C 37.20 44.08, 45.74 47.35, 55.63 50.60" stroke="#000000" stroke-width="16.80" stroke-opacity="0.28" stroke-linecap="butt" fill="none" filter="url(#ks_st_light_ao_soft)"/>
+        <path d="M 34.83 29.49 C 34.53 31.41, 34.63 33.50, 35.16 35.75 C 37.20 44.08, 45.74 47.35, 55.63 50.60" stroke="#000000" stroke-width="15.80" stroke-opacity="0.22" stroke-linecap="butt" fill="none" filter="url(#ks_st_light_ao_tight)"/>
+      </g>
+    </g>
+    <!-- S (Sorcar engineered magic): silky golden ribbon woven smoothly through K -->
+    <g mask="url(#ks_st_light_ms)">
+      <path d="M 81.16 32.15 C 78.76 20.75, 66.56 16.95, 52.56 17.65 C 39.16 18.35, 32.76 25.55, 35.16 35.75 C 37.56 45.55, 48.96 48.35, 60.96 52.35 C 72.76 56.35, 80.76 62.55, 79.36 71.75 C 77.96 80.75, 67.36 83.55, 55.36 82.05 C 45.16 81.15, 36.96 79.15, 32.36 75.35" stroke="url(#ks_st_light_s)" stroke-width="10.60" stroke-linecap="butt" fill="none"/>
+      <g mask="url(#ks_st_light_s_self)">
+        <path d="M 52.85 31.87 L 80.82 5.39" stroke="#000000" stroke-width="16.80" stroke-opacity="0.28" stroke-linecap="butt" fill="none" filter="url(#ks_st_light_ao_soft)"/>
+        <path d="M 52.85 31.87 L 80.82 5.39" stroke="#000000" stroke-width="15.80" stroke-opacity="0.22" stroke-linecap="butt" fill="none" filter="url(#ks_st_light_ao_tight)"/>
+        <path d="M 40.91 63.38 L 70.37 95.05" stroke="#000000" stroke-width="16.80" stroke-opacity="0.28" stroke-linecap="butt" fill="none" filter="url(#ks_st_light_ao_soft)"/>
+        <path d="M 40.91 63.38 L 70.37 95.05" stroke="#000000" stroke-width="15.80" stroke-opacity="0.22" stroke-linecap="butt" fill="none" filter="url(#ks_st_light_ao_tight)"/>
+      </g>
+    </g>
+  </g>
+  <text x="400" y="286" text-anchor="middle" font-family="'Avenir Next', 'Inter', 'SF Pro Display', 'Segoe UI', 'Helvetica Neue', Arial, sans-serif" font-size="76" letter-spacing="-2.0">
+    <tspan font-weight="800" fill="#0F172A">KISS</tspan><tspan font-weight="500" fill="#334155" dx="16">Sorcar</tspan>
+  </text>
+  <text x="400" y="330" text-anchor="middle" font-family="'Avenir Next', 'Inter', 'SF Pro Display', 'Segoe UI', 'Helvetica Neue', Arial, sans-serif" font-size="18.5" font-weight="600" letter-spacing="4.2" fill="#64748B">WHEN SIMPLICITY BECOMES YOUR SUPERPOWER</text>
+</svg>

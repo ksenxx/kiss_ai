@@ -35,6 +35,7 @@ from typing import Any, cast
 from kiss.agents.sorcar import persistence as _persistence
 from kiss.agents.sorcar import sea_commands
 from kiss.agents.sorcar.machines import (
+    HISTORY_MAX_PAGE,
     HISTORY_PAGE,
     LOCAL_MACHINE,
     HistoryPage,
@@ -1635,9 +1636,15 @@ class AgentServer(
         machine: str = "",
         work_dir: str = "",
         project: str = "",
-        project_limit: int = 0,
+        limit: int = 0,
     ) -> None:
         """Send conversation history with pagination support.
+
+        ``limit`` is how many rows the page holds: ``HISTORY_PAGE``
+        when 0, and ``HISTORY_MAX_PAGE`` at most.  The CHATS panel asks
+        for as many rows as fill it, and at a refresh for as many as it
+        holds, in one request.  The reply echoes the number as
+        ``limit``; a page of fewer rows is the last.
 
         ``tag`` (the history panel's tag dropdown) restricts the page to
         tasks carrying that classification tag; ``""`` means every task.
@@ -1661,10 +1668,10 @@ class AgentServer(
         restricts the page to the tasks of the chats in that project
         that ran on this machine (a row another machine's history
         brought reaches the panel in the pages of everything), in pages
-        of ``project_limit`` rows (``HISTORY_PROJECT_PAGE`` when 0): a
-        panel that has loaded several pages asks for all its rows again
-        in one.  The reply echoes the two as ``project`` and ``limit``;
-        a page of fewer rows than ``limit`` is the project's last.
+        of ``limit`` rows (``HISTORY_PROJECT_PAGE`` when 0, and as many
+        as asked for): a panel that has loaded several pages asks for
+        all its rows again in one.  The reply echoes the project as
+        ``project``.
 
         The reply is stamped with the requesting connection's
         ``conn_id`` (when non-empty) so it reaches only the browser
@@ -1684,13 +1691,16 @@ class AgentServer(
         # With remote machines in the page it is cut from the union of
         # every machine's rows (``merged_history``), which needs the
         # local rows before the page too, not just the page itself.
-        page_size = (project_limit or HISTORY_PROJECT_PAGE) if project else HISTORY_PAGE
-        limit, local_offset = (offset + HISTORY_PAGE, 0) if machines else (page_size, offset)
+        if project:
+            page_size = limit or HISTORY_PROJECT_PAGE
+        else:
+            page_size = min(limit or HISTORY_PAGE, HISTORY_MAX_PAGE)
+        local_limit, local_offset = (offset + page_size, 0) if machines else (page_size, offset)
         entries = (
             []
             if remote_only
             else _load_history(
-                limit=limit,
+                limit=local_limit,
                 offset=local_offset,
                 tag=tag,
                 query=query or "",
@@ -1821,7 +1831,7 @@ class AgentServer(
                 query or "",
                 tag,
                 offset,
-                HISTORY_PAGE,
+                page_size,
                 late=self._history_landed_late,
             )
             sessions, min_ts, max_ts = page.rows, page.date_min, page.date_max
@@ -1833,6 +1843,7 @@ class AgentServer(
             "type": "history",
             "sessions": sessions,
             "offset": offset,
+            "limit": page_size,
             "generation": generation,
             "dateRange": {"min": min_ts, "max": max_ts},
             "machines": [m.name for m in registered],
@@ -1843,7 +1854,6 @@ class AgentServer(
         }
         if project:
             event["project"] = project
-            event["limit"] = page_size
         # The WORKDIR dropdown's options, sent with page one of a view
         # only; the later pages of a scroll change nothing.
         if offset == 0:

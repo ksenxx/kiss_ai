@@ -48,7 +48,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import Browser, BrowserContext, Page, sync_playwright
 
 from kiss.agents.sorcar import persistence as th
 from kiss.server.server import AgentServer
@@ -201,6 +201,29 @@ def _open_history_page(_browser, width: int = 480, height: int = 900):
     iife_err = page.evaluate("() => window.__iifeError")
     if iife_err:
         pytest.fail(f"main.js IIFE setup raised: {iife_err}")
+    return context, page
+
+
+def _open_remote_page(browser: Browser, width: int, height: int) -> tuple[BrowserContext, Page]:
+    """Open the page as the daemon serves it, laid out in a *width* x *height* window.
+
+    The shipped body with ``main.css``, ``remote-codex.css`` and
+    ``main.js``, revealed as it is once its daemon has answered (there
+    is none here).  At a desktop width the page docks its CHATS panel
+    and asks for its first rows.  Returns ``(context, page)``.
+    """
+    remote_css = (_MEDIA_DIR / "remote-codex.css").read_text(encoding="utf-8")
+    context = browser.new_context(viewport={"width": width, "height": height})
+    page = context.new_page()
+    page.set_content(
+        _build_test_page().replace("</head>", f"<style>{remote_css}</style></head>", 1),
+        wait_until="load",
+    )
+    page.evaluate(
+        "() => { document.getElementById('app').style.display = '';"
+        " document.getElementById('kiss-server-loading').style.display = 'none'; }"
+    )
+    assert page.evaluate("() => window.__iifeError") is None
     return context, page
 
 

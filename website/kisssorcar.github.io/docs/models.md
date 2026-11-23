@@ -1,6 +1,6 @@
 # Models Supported by KISS Sorcar
 
-> KISS Sorcar ships a catalog of **988 models** across **7 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`).
+> KISS Sorcar ships a catalog of **993 models** across **7 provider categories**, with built-in prices (including `image_output_price_per_1M`), context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`).
 
 The machine-readable source of truth is [`src/kiss/core/models/MODEL_INFO.json`](https://raw.githubusercontent.com/ksenxx/kiss_ai/main/src/kiss/core/models/MODEL_INFO.json) in the source repository. Models are grouped by the provider that routes them (i.e., whose API key or CLI serves the model).
 
@@ -11,17 +11,17 @@ The machine-readable source of truth is [`src/kiss/core/models/MODEL_INFO.json`]
 | OpenAI | 99 |
 | Anthropic | 82 |
 | Amazon Bedrock (`bedrock/*`) | 144 |
-| Gemini | 57 |
-| OpenRouter | 514 |
+| Gemini | 61 |
+| OpenRouter | 515 |
 | Claude Code CLI (`cc/*`) | 79 |
 | Codex CLI (`codex/*`) | 13 |
 
 ## Capability Totals
 
-- **937** generation-capable models
-- **803** function-calling-capable models
+- **941** generation-capable models
+- **807** function-calling-capable models
 - **6** embedding models
-- **37** decision models
+- **38** decision models
 
 ## Configuring Model Access
 
@@ -40,8 +40,8 @@ Or point at any OpenAI-compatible local/self-hosted endpoint by setting a custom
 
 ## Model Namespaces
 
-- Plain names (e.g. `claude-sonnet-4-6`, `gpt-4.1`) map to the native provider APIs.
-- `openrouter/...` routes through OpenRouter (514 entries, including `openrouter/~vendor/model-latest` aliases that always track the newest model).
+- Plain names (e.g. `claude-sonnet-5-5`, `gpt-6.1-sol-medium`) map to the native provider APIs.
+- `openrouter/...` routes through OpenRouter (515 entries, including `openrouter/~vendor/model-latest` aliases that always track the newest model).
 - `cc/haiku`, `cc/sonnet`, `cc/opus` run on top of the Claude Code CLI.
 - `codex/...` (e.g. `codex/gpt-5.6-sol`) run on top of the Codex CLI.
 
@@ -57,8 +57,20 @@ done by the other model.
 
 A running agent can also switch its own model mid-task with the `set_model` tool, and you can steer running agents by injecting messages on the fly.
 
+## Effort Aliases
+
+Reasoning-capable models are listed once per accepted level on each vendor's effort ladder:
+
+- **OpenAI & Codex:** `-low`, `-medium`, `-high`, `-xhigh`.
+- **Claude (direct, Bedrock, `cc/claude-*`) & Moonshot/Kimi:** up to `-max` (`cc/opus`, `cc/sonnet`, and `cc/haiku` carry no effort aliases).
+- **Gemini (`gemini-*`):** `-low`, `-medium`, `-high` mapped to `thinking_config.thinking_level` with `include_thoughts` enabled unless disabled in `model_config`.
+
+## Cost and Budget Tracking
+
+A call whose adapter reports a billed cost (such as OpenRouter or API-key-billed `cc/*`/`codex/*` turns) is billed that amount directly; every other call is priced from the catalog's input, cache, output, and image-output rates scaled by context tier.
+
 ## Choosing a Default
 
-When no model is selected, KISS Sorcar defaults to the best available model for the API keys you have configured.
+When no model is selected, KISS Sorcar defaults to the first configured provider in priority order: Anthropic (`claude-opus-5-5`/`claude-sonnet-5-5`), OpenAI (`gpt-6.1-sol-medium`/`gpt-6-luna`), Gemini (`gemini-3.8-flash`/`gemini-3.5-flash-lite`), OpenRouter, Bedrock, Claude Code CLI (`cc/opus`/`cc/haiku`), and Codex CLI (`codex/default`).
 
 The full per-model list is in [MODELS.md](https://github.com/ksenxx/kiss_ai/blob/main/MODELS.md) in the repository.

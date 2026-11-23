@@ -30,7 +30,7 @@ BRAND_FILE = _MEDIA_DIR / "brand.json"
 DEFAULT_BRAND: dict[str, str] = {
     "product_name": "KISS Sorcar",
     "short_name": "KISS",
-    "tagline": "Your AI assistant. Ask me anything!",
+    "tagline": "Your SI assistant. Ask me anything!",
     # The whole brand-specific part of the prompt's identity line: who the
     # agent is and where its code and website live.  A white-label brand
     # replaces the sentence wholesale, so none of the stock URLs leak into

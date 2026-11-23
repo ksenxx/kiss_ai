@@ -1101,9 +1101,24 @@
 
   let historyOffset = 0;
   let historyLoading = false;
-  // The daemon's page size (HISTORY_PAGE, machines.py): a shorter page
-  // is the last one.
+  // The rows of one page (HISTORY_PAGE, machines.py): what a first
+  // visit, a new view and a scroll to the list's end ask for.  A
+  // refresh asks for as many rows as the list has asked for so far,
+  // and a list that does not fill its panel for as many again as it
+  // holds (requestHistoryFromStart, loadMoreHistory).  A reply with
+  // fewer rows than the daemon granted (the `limit` it names, a page
+  // when it names none) is the last one.
   const HISTORY_PAGE = 50;
+  // Where the list's last request ends in its stream: the rows it
+  // holds once that request is answered in full.
+  let historyAsked = 0;
+  // The refresh whose rows are coming in: `want` of them were asked
+  // for, and `rows` are in so far.  A daemon may send them in several
+  // pages (it grants fewer than were asked for: its most for a page,
+  // or the one page of an older daemon); the list is built from them
+  // all when the last is in, not emptied and filled again in sight
+  // (gatherHistoryRefresh).  Null when no refresh awaits rows.
+  let historyGathering = null;
   let historyHasMore = true;
   let historyGeneration = 0;
   // refreshHistory coalescing: when the page-one request in flight was
@@ -1113,8 +1128,11 @@
   // The plain view's page one as the last reply left it, kept across
   // page loads so the next one paints rows before its first reply
   // (paintCachedHistory); painted once per page, and never a source
-  // of a page-two fetch.
+  // of a page-two fetch.  Its first HISTORY_CACHE_ROWS rows are kept:
+  // more than a panel shows, and not the whole of a long list at every
+  // refresh.
   const HISTORY_CACHE_KEY = 'sorcar-history-page1';
+  const HISTORY_CACHE_ROWS = 200;
   let historyCachePainted = false;
   let historyCachePainting = false;
   let historyRefreshWanted = false;
@@ -9874,6 +9892,29 @@
       if (install.status === 'checking') skillInstalls.delete(id);
     }
     paintSkillsFound();
+  }
+
+  // What the subpanel says of a daemon that knows no Skills command.
+  const SKILLS_NEED_RESTART =
+    'This server runs an older version, without Skills. ' +
+    'Restart it to finish the update.';
+
+  /**
+   * Take *text*, an `error` event's, for the subpanel's answer when it
+   * is a daemon saying it does not know a Skills command.  Such a
+   * daemon is older than this page (one updated on disk and not yet
+   * restarted keeps serving the new page) and has no skill to list,
+   * find or add: the line says what to do about it, and the reload,
+   * the search and the checks under way are let go of, as no reply
+   * will end them.
+   *
+   * @param {string} text The event's text.
+   */
+  function noteSkillsRefusal(text) {
+    const commands = ['getSkills', 'searchSkills', 'installSkill'];
+    if (!commands.some(cmd => text === 'Unknown command: ' + cmd)) return;
+    renderSkills({skills: [], error: SKILLS_NEED_RESTART});
+    releaseSkillsWaits();
   }
 
   /**
@@ -24076,9 +24117,15 @@
 
   // The reads the page issues on its own, with nothing the user did:
   // the projects at every (re)connect (sendReady), the composer's saved
-  // draft (syncSavedInput) and the tags of the task on show
-  // (requestMetaTags).
-  const OWN_READS = ['getProjects', 'getInputDraft', 'getTaskTags'];
+  // draft (syncSavedInput), the tags of the task on show
+  // (requestMetaTags) and the Skills subpanel's list, at every
+  // connect and poll (requestSkills).
+  const OWN_READS = [
+    'getProjects',
+    'getInputDraft',
+    'getTaskTags',
+    'getSkills',
+  ];
 
   /**
    * Whether *text*, an `error` event's, is a daemon saying it does not
@@ -24925,6 +24972,8 @@
     // A fresh generation makes the old in-flight reply stale; a
     // refresh folded into it goes out again after THIS reply instead.
     historyRefreshWanted = false;
+    // And the rows a refresh has gathered are the old generation's.
+    historyGathering = null;
   }
 
   /**
@@ -24939,18 +24988,24 @@
   }
 
   /**
-   * Ask the daemon for one page of history under the current search
-   * text and tag, machine and WORKDIR filters.  `offset` 0 (the
-   * default) is the first page of a fresh view; callers reset
-   * pagination before requesting it.
+   * Ask the daemon for *limit* rows of history from row *offset* on,
+   * under the current search text and tag, machine and WORKDIR
+   * filters.  `offset` 0 (the default) is the first page of a fresh
+   * view; callers reset pagination before requesting it.
+   *
+   * @param {number=} offset How many rows of the stream come before.
+   * @param {number=} limit How many rows are asked for: one page,
+   *     unless the caller knows how many the list needs.
    */
-  function requestHistory(offset = 0) {
+  function requestHistory(offset = 0, limit = HISTORY_PAGE) {
+    historyAsked = offset + limit;
     api.getHistory({
       query: historySearch ? historySearch.value : '',
       tag: historyFilter('hf-tag'),
       machine: historyFilter('hf-machine'),
       workDir: historyFilter('hf-workdir'),
       offset,
+      limit,
       generation: historyGeneration,
     });
     // A fresh first page: the rows of the unfolded projects, which the
@@ -24958,10 +25013,59 @@
     if (offset === 0) requestHistoryProjectPages();
   }
 
-  /** Fetch page one of the history list afresh. */
+  /**
+   * Fetch the list afresh, in one request where the daemon grants
+   * it: as many rows as the list has asked for so far (those that
+   * fill its panel, loadMoreHistory saw to that, and those the user
+   * scrolled to), and one page at least.
+   * The rows of a page still on its way are among them: its reply is
+   * of no use once the list starts over, and task news that comes
+   * faster than pages would otherwise keep the list from ever filling.
+   * A list that holds every row has asked for more than it holds (its
+   * last reply was short), so a row that joins them is not missed.
+   * The rows painted from the last visit were asked for by no request
+   * of this page.  The list stays as it is until all the rows are in
+   * (gatherHistoryRefresh).
+   */
   function requestHistoryFromStart() {
+    const rows = Math.max(
+      HISTORY_PAGE,
+      historyAsked,
+      historyStreamSessions.length,
+    );
     resetHistoryPagination();
-    requestHistory();
+    historyGathering = {rows: [], want: rows};
+    requestHistory(0, rows);
+  }
+
+  /**
+   * Take a page of the refresh whose rows are coming in, and return
+   * all its rows once none is awaited any more: as many as were asked
+   * for are in, or the stream ended.  Until then the rows still
+   * missing are asked for and null is returned: the list stays as it
+   * is.  A page that does not continue the rows that are in (one sent
+   * twice, or one the list asked for as it was) is not the refresh's.
+   *
+   * @param {Array<Object>} sessions The page's rows.
+   * @param {number} offset How many rows of the stream come before.
+   * @param {boolean} more Whether rows may follow these in the stream.
+   * @returns {Array<Object>|null} The refresh's rows, or null while
+   *     some are awaited.
+   */
+  function gatherHistoryRefresh(sessions, offset, more) {
+    const gathering = historyGathering;
+    if (offset !== gathering.rows.length) return null;
+    gathering.rows = gathering.rows.concat(sessions);
+    const missing = gathering.want - gathering.rows.length;
+    if (more && missing > 0) {
+      // The refresh is on its way still: task news waits for it
+      // (refreshHistory), unless this request goes unanswered too.
+      historyPageOneSentAt = Date.now();
+      requestHistory(gathering.rows.length, missing);
+      return null;
+    }
+    historyGathering = null;
+    return gathering.rows;
   }
 
   /**
@@ -25006,7 +25110,13 @@
     adoptMachineLabels(cached.machineLabels || {});
     historyCachePainting = true;
     try {
-      renderHistory(cached.sessions, 0, historyGeneration);
+      renderHistory(
+        cached.sessions,
+        0,
+        historyGeneration,
+        false,
+        cached.sessions.length >= HISTORY_PAGE,
+      );
     } finally {
       historyCachePainting = false;
     }
@@ -25014,8 +25124,9 @@
 
   /**
    * Keep the plain view's page one for the next page load
-   * (paintCachedHistory).  An empty page is kept too, so a list the
-   * user emptied is not painted back from an older visit.
+   * (paintCachedHistory), which paints it and asks for as many rows
+   * as it held.  An empty page is kept too, so a list the user emptied
+   * is not painted back from an older visit.
    * @param {Array<Object>} sessions The rows of the reply.
    * @param {Object} machineLabels The reply's machine labels.
    */
@@ -25024,7 +25135,10 @@
     try {
       window.localStorage.setItem(
         HISTORY_CACHE_KEY,
-        JSON.stringify({sessions, machineLabels}),
+        JSON.stringify({
+          sessions: sessions.slice(0, HISTORY_CACHE_ROWS),
+          machineLabels,
+        }),
       );
     } catch (_e) {
       /* private browsing or a full store: the next load paints nothing early */
@@ -25046,21 +25160,26 @@
   }
 
   /**
-   * Fetch the next history page, with a "Loading..." row at the end of
-   * the list, unless one is in flight or the last page was short.
-   * Taken by the list's scroll handler near its bottom, and by
-   * applyHistoryFilterVisibility when the rows the filters leave do
-   * not fill the list (a first page of nothing but cron rows): no
-   * scroll event would ever ask for the page then.
+   * Fetch the stream's next *limit* rows, with a "Loading..." row at
+   * the end of the list, unless a page is in flight or the last one
+   * ended the stream.  The list's scroll handler asks for a page near
+   * the list's bottom.  applyHistoryFilterVisibility asks when the
+   * rows the filters leave do not fill the list (a first page of
+   * mostly cron rows), as no scroll event would ever ask then: for as
+   * many rows again as the list holds, since a page that left the
+   * panel short is seldom followed by one that fills it.  It keeps
+   * the row out of sight while the list has tasks to show.
+   *
+   * @param {number=} limit How many rows are asked for.
    */
-  function loadMoreHistory() {
+  function loadMoreHistory(limit = HISTORY_PAGE) {
     if (historyLoading || !historyHasMore || historyCachePainting) return;
     historyLoading = true;
     const loader = mkEl('div', 'sidebar-loading');
     loader.id = 'history-loader';
     loader.textContent = 'Loading...';
     historyList.appendChild(loader);
-    requestHistory(historyOffset);
+    requestHistory(historyOffset, limit);
   }
 
   /**
@@ -26735,7 +26854,7 @@
       case 'recommendations':
         if (panelReplyShown(ev)) renderRecommendations(ev);
         break;
-      case 'history':
+      case 'history': {
         // The labels and this daemon's name first: the rows' machine
         // chips are built with them.
         adoptMachineLabels(ev.machineLabels || {});
@@ -26755,9 +26874,24 @@
           }
           break;
         }
-        renderHistory(ev.sessions || [], ev.offset || 0, ev.generation || 0);
-        if ((ev.generation || 0) === historyGeneration && !(ev.offset || 0)) {
-          rememberHistoryPage(ev.sessions || [], ev.machineLabels || {});
+        let sessions = ev.sessions || [];
+        let offset = ev.offset || 0;
+        // The reply names how many rows it was to hold; an older
+        // daemon's names nothing and holds a page at most.
+        const more = sessions.length >= (ev.limit || HISTORY_PAGE);
+        // A refresh's rows are shown together: there is nothing to
+        // show until the last page of them is in, and then it is page
+        // one, whole.
+        if (historyGathering && (ev.generation || 0) === historyGeneration) {
+          sessions = gatherHistoryRefresh(sessions, offset, more);
+          offset = 0;
+        }
+        if (sessions) {
+          renderHistory(sessions, offset, ev.generation || 0, false, more);
+        }
+        const pageOne = !!sessions && offset === 0;
+        if (pageOne && (ev.generation || 0) === historyGeneration) {
+          rememberHistoryPage(sessions, ev.machineLabels || {});
         }
         // A stale reply (an older generation, dropped by renderHistory)
         // must not rebuild the filters either: its date range is the
@@ -26773,11 +26907,12 @@
         // the refresh folded into its flight (refreshHistory) goes out
         // now.  Not after a filter rebuild that refetched: that opened
         // a newer generation, which fetches afresh anyway.
-        if ((ev.generation || 0) === historyGeneration && !(ev.offset || 0)) {
+        if (pageOne && (ev.generation || 0) === historyGeneration) {
           historyPageOneSentAt = 0;
           flushHistoryRefresh();
         }
         break;
+      }
       case 'files': {
         // tableak-coverage:start
         if (!isForActiveTab(ev)) break;
@@ -26935,6 +27070,9 @@
         // A remote chat the daemon could not fetch (the machine is
         // unreachable, say) is not on its way any more.
         if (isAddressed(ev)) removeRemoteChatLoader(findTabByEvt(ev));
+        // An older daemon's "no such command" to a Skills command is
+        // the Skills subpanel's answer.
+        noteSkillsRefusal(ev.text);
         // An older daemon's "no such read" to one of the page's own
         // reads is neither shown nor taken for the answer to an
         // operation that awaits one (below).
@@ -34576,7 +34714,6 @@
       return;
     }
     const loading = historyLoading && !parked;
-    const more = historyHasMore;
     renderHistory(
       // Copies of the rows held: the merge gives a row past the bound
       // of its flag's toggle the daemon's value back
@@ -34586,9 +34723,9 @@
       0,
       historyGeneration,
       true,
+      parked ? historyPendingRender.more : historyHasMore,
     );
     historyLoading = historyLoading || loading;
-    if (!parked) historyHasMore = more;
   }
 
   /**
@@ -34854,7 +34991,13 @@
     clearHistoryParkSafety();
     if (!pending) return;
     if (pending.sessions) {
-      renderHistory(pending.sessions, 0, pending.generation, true);
+      renderHistory(
+        pending.sessions,
+        0,
+        pending.generation,
+        true,
+        pending.more,
+      );
     } else {
       rerenderHistory();
     }
@@ -35151,11 +35294,13 @@
    * @param {number} offset How many rows of the stream come before.
    * @param {number} generation The request's stamp; a page of an older
    *     one is dropped.
-   * @param {boolean=} held Whether the page held these rows already
+   * @param {boolean} held Whether the page held these rows already
    *     (the list built again, a parked page landing) rather than got
    *     them from the daemon just now (mergePendingFlags).
+   * @param {boolean} more Whether rows may follow these in the stream:
+   *     the daemon sent as many as it granted.
    */
-  function renderHistory(sessions, offset, generation, held) {
+  function renderHistory(sessions, offset, generation, held, more) {
     if (generation !== historyGeneration) return;
 
     mergePendingFlags(sessions, held);
@@ -35192,11 +35337,10 @@
       // wiping and rebuilding identical rows would swallow an in-flight
       // click (mousedown lands on the old row, mouseup on its
       // replacement, so the click fires on a handler-less ancestor) and
-      // drop keyboard focus.  The fast path only applies while a single
-      // page is on
-      // screen (a refetch cannot vouch for loaded later pages) and never
-      // across a time-zone change (row times are localized at build
-      // time).  Everything else rebuilds as before.
+      // drop keyboard focus.  The reply is compared with every row the
+      // list holds (a refresh asks for as many, requestHistoryFromStart)
+      // and never across a time-zone change (row times are localized at
+      // build time).  Everything else rebuilds as before.
       const tzNow = historyTzIdentity();
       const labelsNow = JSON.stringify(Array.from(machineLabels));
       if (
@@ -35228,7 +35372,7 @@
         historyPendingRender = null;
         clearHistoryParkSafety();
         historyOffset = sessions.length;
-        historyHasMore = sessions.length >= HISTORY_PAGE;
+        historyHasMore = more;
         applyHistoryFilterVisibility();
         // The rows did not change, but the collapse DEFAULT may have:
         // a search whose results equal the loaded page (and the later
@@ -35239,7 +35383,7 @@
         return;
       }
       if (historyPressHeld()) {
-        historyPendingRender = {sessions, generation};
+        historyPendingRender = {sessions, generation, more};
         // Keep pagination parked with the page: a scroll must not
         // refetch (with the pre-refresh offset state) while the rebuild
         // this reply asked for has not landed yet.
@@ -35323,7 +35467,7 @@
       if (sessions.length === 0 && historyProjectPanels.size === 0) {
         historyList.innerHTML =
           '<div class="sidebar-empty">No conversations yet</div>';
-        historyHasMore = false;
+        historyHasMore = more;
         refreshHistorySeaOptions();
         return;
       }
@@ -35442,9 +35586,7 @@
     });
 
     historyOffset += sessions.length;
-    if (sessions.length < HISTORY_PAGE) {
-      historyHasMore = false;
-    }
+    historyHasMore = more;
     refreshHistorySeaOptions();
     relabelHistoryDaySeparators();
     syncHistoryActiveTask();
@@ -36288,20 +36430,23 @@
     });
     if (daySep) daySep.style.display = dayShown ? '' : 'none';
     // Hidden rows take no room: when what is left does not fill the
-    // list, the next page is asked for now (see loadMoreHistory).  A
+    // list, more rows are asked for now (see loadMoreHistory).  A
     // list that is not laid out (the panel closed) has no height and
     // must not page the whole database in.
-    if (
+    const short =
       historyList.clientHeight > 0 &&
-      historyList.scrollHeight <= historyList.clientHeight
-    ) {
-      loadMoreHistory();
-    }
+      historyList.scrollHeight <= historyList.clientHeight;
+    if (short) loadMoreHistory(Math.max(HISTORY_PAGE, historyOffset));
+    // The "Loading..." row is for a user who waits for rows: at the
+    // end of a list scrolled through, or in a list with no task to
+    // show.  Rows on their way to the room under the tasks on show need
+    // no announcing: the row would come and go with every page of them.
+    const loader = historyList.querySelector('#history-loader');
+    if (loader) loader.style.display = short && visible > 0 ? 'none' : '';
     let placeholder = historyList.querySelector('.sidebar-empty-filter');
-    // Not under a "Loading..." row: the page it announces may well
+    // Not while a page is on its way, announced or not: it may well
     // hold matching tasks.
-    const loading = !!historyList.querySelector('#history-loader');
-    if (rows.length > 0 && visible === 0 && !loading) {
+    if (rows.length > 0 && visible === 0 && !loader) {
       if (!placeholder) {
         placeholder = document.createElement('div');
         placeholder.className = 'sidebar-empty sidebar-empty-filter';

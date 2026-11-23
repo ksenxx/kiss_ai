@@ -26,6 +26,11 @@ Assertions:
   2. the agent worker STOPS running (heartbeat file goes quiet);
   3. the task row is persisted as interrupted-by-restart, not left
      running or at the "Agent Failed Abruptly" sentinel.
+
+A worker that no stop reaches (it waits outside Python) must not keep
+the daemon from exiting either: the interpreter's exit joins the pool
+threads such a worker waits for, with no bound and with SIGTERM ignored
+by then, so ``start()`` force-exits once its cleanup is done.
 """
 
 from __future__ import annotations
@@ -33,6 +38,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import signal
 import sqlite3
 import subprocess
 import sys
@@ -49,9 +55,12 @@ from kiss.tests.server.conftest import find_free_port
 
 _CHILD_SCRIPT = r"""
 import os
+import subprocess
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from pathlib import Path
 
 tmp = Path(sys.argv[1])
@@ -63,6 +72,12 @@ os.environ.setdefault("KISS_WORKDIR", "/tmp")
 # handler lands inside frames whose broad except/finally clauses swallow
 # it, so the shutdown never begins and later SIGTERMs are ignored.
 BUSY_LOOP = len(sys.argv) > 3 and sys.argv[3] == "busy"
+# "wedged": the agent's worker waits for a pool thread that waits for a
+# child process (2026-11-22: a sync whose ssh never returned).  Neither
+# wait runs Python, so neither the stop event nor an injected interrupt
+# ends the worker, and the interpreter's exit joins the pool thread for
+# as long as the child lives.
+WEDGED = len(sys.argv) > 3 and sys.argv[3] == "wedged"
 
 import kiss.agents.sorcar.persistence as th
 
@@ -134,6 +149,11 @@ def fake_run(**kwargs):
     if st is not None:
         agent_state.rekey(st, str(task_id))
     task_id_file.write_text(str(task_id), encoding="utf-8")
+    if WEDGED:
+        heartbeat.write_text(repr(time.time()), encoding="utf-8")
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"])
+        (tmp / "wedge_pid.txt").write_text(str(child.pid), encoding="utf-8")
+        ThreadPoolExecutor(max_workers=1).submit(child.wait).result()
     try:
         deadline = time.monotonic() + 120.0
         while time.monotonic() < deadline:
@@ -146,6 +166,9 @@ def fake_run(**kwargs):
 
 
 agent.run = fake_run
+if WEDGED:
+    # The sweep gives the workers 12 s, and one it cannot stop takes them all.
+    server._stop_active_agent_tasks = partial(server._stop_active_agent_tasks, timeout=2.0)
 
 # _resolve_run_state finds the pre-registered state via find_by_tab and
 # installs stop_event / user_answer_queue / task_thread itself.
@@ -214,6 +237,13 @@ class TestServerResetStopsRunningAgents(TestCase):
         if self.proc is not None and self.proc.poll() is None:
             self.proc.kill()
             self.proc.wait(timeout=10)
+        wedge_pid = self.tmpdir / "wedge_pid.txt"
+        if wedge_pid.exists():
+            # The child a wedged worker waited for outlives the daemon.
+            try:
+                os.kill(int(wedge_pid.read_text(encoding="utf-8")), signal.SIGTERM)
+            except ProcessLookupError:
+                pass
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def _wait_for(self, cond, timeout: float, what: str) -> None:
@@ -227,21 +257,24 @@ class TestServerResetStopsRunningAgents(TestCase):
             log = self.child_log.read_text(encoding="utf-8", errors="replace")
         raise AssertionError(f"timed out waiting for {what}\nchild log:\n{log}")
 
-    def _launch_child(self, busy_loop: bool) -> None:
+    def _launch_child(self, mode: str = "") -> None:
         """Start the child daemon and wait for the agent to be in flight.
 
         Args:
-            busy_loop: When True the child also schedules an event-loop
+            mode: ``"busy"``: the child also schedules an event-loop
                 task that swallows every exception (including
                 CancelledError), reproducing the busy-daemon state in
                 which the production reset failed to stop agents.
+                ``"wedged"``: the agent's worker waits where no stop
+                reaches it, for a pool thread that waits for a child
+                process.
         """
         port = find_free_port()
         argv = [
             sys.executable, str(self.child_script), str(self.tmpdir), str(port),
         ]
-        if busy_loop:
-            argv.append("busy")
+        if mode:
+            argv.append(mode)
         with self.child_log.open("wb") as log:
             self.proc = subprocess.Popen(
                 argv,
@@ -329,9 +362,28 @@ class TestServerResetStopsRunningAgents(TestCase):
 
     def test_server_reset_stops_running_agent(self) -> None:
         """serverReset (the OK click) stops the agent and exits the daemon."""
-        self._launch_child(busy_loop=False)
+        self._launch_child()
         self._send_server_reset()
         self._assert_agent_stopped_and_daemon_exited()
+
+    def test_server_reset_exits_when_the_agent_worker_cannot_be_stopped(self) -> None:
+        """A worker no stop reaches must not keep the daemon from exiting.
+
+        Production repro (``kiss-web-stderr.log`` pid=29121, 2026-11-22):
+        a sync's worker waited for a pool thread that waited for an ssh
+        that never returned.  The sweep gave up on it ("did not stop
+        within timeout"), the cleanup ran to ``Server stopped``, and the
+        interpreter's exit then joined that pool thread for good while
+        every further SIGTERM was ignored: the daemon neither served
+        nor exited, its supervisor could not respawn it, and the
+        machine was rebooted.
+        """
+        self._launch_child("wedged")
+        self._send_server_reset()
+        self._assert_agent_stopped_and_daemon_exited()
+        log = self.child_log.read_text(encoding="utf-8", errors="replace")
+        self.assertIn("did not stop within timeout", log)
+        self.assertIn("is still running; forcing exit", log)
 
     @pytest.mark.slow
     def test_server_reset_stops_agent_when_loop_swallows_interrupts(
@@ -353,6 +405,6 @@ class TestServerResetStopsRunningAgents(TestCase):
         stop the in-flight agent, persist the interrupted result, and
         exit the process.
         """
-        self._launch_child(busy_loop=True)
+        self._launch_child("busy")
         self._send_server_reset()
         self._assert_agent_stopped_and_daemon_exited()

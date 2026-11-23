@@ -203,6 +203,16 @@ class TestShutdownPersistsUninterruptibleWorker(TestCase):
                 f"would perceive the agent as killed; got {result!r}"
             )
 
+            # The sweep keeps the worker it could not stop on record for
+            # ``start()``, which force-exits on the main thread only,
+            # where the process is the daemon's.  Called on any other
+            # thread (the main one here is pytest's) it returns.
+            assert [thread.is_alive() for _, thread in remote._stuck_workers] == [True]
+            caller = threading.Thread(target=remote._force_exit_if_worker_stuck)
+            caller.start()
+            caller.join(5)
+            assert not caller.is_alive()
+
     def test_stuck_history_writer_does_not_hold_the_shutdown(self) -> None:
         """Another history writer keeps the write lock: the sweep still
         returns within its timeout, and the rewrite, which goes on

@@ -1537,23 +1537,42 @@ class Runner:
             if inp:
                 in_file = streams.enter_context(open(inp, "rb"))
             try:
-                done = subprocess.run(
-                    command,
-                    stdin=in_file,
-                    stdout=out_file,
-                    stderr=subprocess.PIPE,
-                    check=False,
-                )
+                returncode, errors = self.run_ssh(command, in_file, out_file)
             except OSError as exc:
                 raise SyncError(f"cannot run ssh: {exc}") from exc
-        stderr = done.stderr.decode("utf-8", "replace").strip()
-        if done.returncode != 0:
+        stderr = errors.decode("utf-8", "replace").strip()
+        if returncode != 0:
             raise SyncError(
-                f"{phase} failed on {location.host} (exit {done.returncode})"
+                f"{phase} failed on {location.host} (exit {returncode})"
                 + (f": {stderr}" if stderr else "")
             )
         if stderr:
             print(f"[{location.host}] {stderr}", file=sys.stderr)
+
+    def run_ssh(self, command: list[str], in_file: Any, out_file: Any) -> tuple[int, bytes]:
+        """Run the ssh *command* of a remote phase to its end.
+
+        The wait has no deadline but ssh's own (``SSH_DEADLINES``), which
+        end a connection that cannot be made or has died, not a phase that
+        hangs on a live one.  From a terminal, Ctrl-C ends ssh along with
+        this script.  A caller without one overrides this method with a
+        wait it can end (the sync agent does, ``ssh_peer.PeerRunner``).
+
+        Args:
+            command: The ssh command line.
+            in_file: What ssh reads, as ``subprocess.run`` takes ``stdin``.
+            out_file: The open file ssh writes the phase's output to.
+
+        Returns:
+            ssh's exit status and what it wrote to stderr.
+
+        Raises:
+            OSError: If ssh cannot be started.
+        """
+        done = subprocess.run(
+            command, stdin=in_file, stdout=out_file, stderr=subprocess.PIPE, check=False
+        )
+        return done.returncode, done.stderr
 
     def _remote_shell_command(
         self, location: Location, phase: str, args: list[str]

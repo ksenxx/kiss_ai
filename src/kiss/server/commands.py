@@ -605,7 +605,7 @@ class _CommandsMixin:
             machine: str = "",
             work_dir: str = "",
             project: str = "",
-            project_limit: int = 0,
+            limit: int = 0,
         ) -> None: ...
         def _get_files(
             self,
@@ -1498,7 +1498,7 @@ class _CommandsMixin:
             machine if isinstance(machine, str) else "",
             work_dir if isinstance(work_dir, str) else "",
             _opt_str(cmd.get("project")) or "",
-            # The rows of a project's page; none asked for is the default.
+            # The rows of the page; none asked for is the default.
             0 if limit is None else max(0, min(limit, 2**62)),
         )
 

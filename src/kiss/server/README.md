@@ -691,7 +691,13 @@ daemon-link peer, which gets the list only as the reply to its own
 `getProjects` (`web_server.OWN_PAGES_EVENT_TYPES`).  `getHistory`
 with `project` (and `limit`, default `HISTORY_PROJECT_PAGE`, 200)
 returns the task rows of that project's chats that ran on this
-machine and echoes `project` and `limit`.
+machine and echoes `project` and `limit`.  A page of everything takes
+`limit` too (default `HISTORY_PAGE`, 50, and `HISTORY_MAX_PAGE`, 500,
+at most) and echoes it: a CHATS list that does not fill its panel asks
+for as many rows again as it holds, and a refresh asks in one request
+for as many rows as the list has asked for so far.  A page that is
+granted fewer rows than its refresh asked for asks for the rest and
+builds the list when all are in.
 
 Inheritance (`agent_dispatch.inherit_from_parent`) applies to every
 dispatched script that is not a channel, unless the call's `inherit`

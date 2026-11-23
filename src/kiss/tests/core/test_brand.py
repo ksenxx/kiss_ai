@@ -57,6 +57,7 @@ def test_brand_module_reads_the_media_brand_file() -> None:
     assert PRODUCT_NAME == BRAND["product_name"]
     assert set(json.loads(BRAND_FILE.read_text(encoding="utf-8"))) <= set(DEFAULT_BRAND)
     assert DEFAULT_BRAND["product_name"] == "KISS Sorcar"
+    assert DEFAULT_BRAND["tagline"] == "Your SI assistant. Ask me anything!"
 
 
 def test_load_brand_custom_partial_and_broken_files(tmp_path: Path) -> None:
@@ -143,6 +144,9 @@ def test_remote_webapp_page_is_branded() -> None:
     assert f"{PRODUCT_NAME} Server is starting ..." in page
     assert f"<h2>Welcome to {PRODUCT_NAME}</h2>" in page
     assert f"<p>{html.escape(BRAND['tagline'])}</p>" in page
+    if PRODUCT_NAME == DEFAULT_BRAND["product_name"]:
+        # The stock brand's welcome line, as the shipped brand file words it.
+        assert "<p>Your SI assistant. Ask me anything!</p>" in page
     assert re.search(r'<link href="/media/brand\.css\?v=[0-9a-f]+" rel="stylesheet">', page)
     brand_json = re.search(r"window\.__BRAND__ = (\{.*?\});</script>", page)
     assert brand_json is not None

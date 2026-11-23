@@ -67,6 +67,22 @@ You can also set API keys, a custom model endpoint, and custom HTTP headers in t
 
 You can register your own models (e.g. a local vLLM/Ollama endpoint or a provider model not in the bundled catalog) in the **Custom Models** section of the Settings panel; entries are stored in `~/.kiss/MY_MODELS.json` and appear in the model picker alongside the bundled catalog.
 
+### Default and Fast Model Order
+
+With no explicit model configured, KISS Sorcar picks the first provider with configured credentials in priority order:
+
+1. **Anthropic**: `claude-opus-5-5` (default) and `claude-sonnet-5-5` (fast).
+2. **OpenAI**: `gpt-6.1-sol-medium` (default) and `gpt-6-luna` (fast).
+3. **Gemini**: `gemini-3.8-flash` (default) and `gemini-3.5-flash-lite` (fast).
+4. **OpenRouter**: `openrouter/anthropic/claude-opus-5.5` (default) and `openrouter/anthropic/claude-sonnet-5.5` (fast).
+5. **Bedrock**: `bedrock/global.anthropic.claude-opus-5-5` / `bedrock/global.anthropic.claude-sonnet-5-5` (or registered `bedrock/*` profiles via `AWS_BEARER_TOKEN_BEDROCK` or AWS credentials + `AWS_REGION`).
+6. **Claude Code CLI (`cc/*`)**: `cc/opus` (default) and `cc/haiku` (fast); bills your Claude subscription by default (`claude setup-token` supported in Settings).
+7. **Codex CLI (`codex/*`)**: `codex/default`; bills your ChatGPT subscription by default (`codex login --device-auth` or `CODEX_ACCESS_TOKEN` supported in Settings).
+
+### Router Agents
+
+Six bundled router SEAs appear under the `Router` group in the model picker: `autorouter`, `bestrouter`, `orautorouter`, `orbestrouter`, `ccxbestrouter`, and `brbestrouter`.
+
 ## Next Steps
 
 - [Client Interfaces](cli.md) — the `kiss-web` daemon, the web app, and Python API

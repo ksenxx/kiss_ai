@@ -19,6 +19,7 @@ import hashlib
 import json
 import os
 import re
+import struct
 import subprocess
 import sys
 from pathlib import Path
@@ -125,6 +126,12 @@ def test_manifest_names_the_brand_and_asks_for_a_standalone_window() -> None:
         assert (
             icon_body == (web_server.MEDIA_DIR / Path(icon["src"].split("?")[0]).name).read_bytes()
         )
+        if icon["type"] == "image/png":
+            assert icon_body[1:4] == b"PNG"
+            assert struct.unpack(">II", icon_body[16:24]) == (512, 512)
+            assert icon_body[25] == 6
+        else:
+            assert b"<svg" in icon_body and b"</svg>" in icon_body
 
 
 def test_branded_install_serves_its_own_name_and_icon(tmp_path: Path) -> None:

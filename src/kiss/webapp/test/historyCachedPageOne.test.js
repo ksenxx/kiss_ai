@@ -158,6 +158,33 @@ function testAReplyEqualToTheCacheKeepsTheRows() {
   console.log('  ok - a reply equal to the cache keeps the rows');
 }
 
+function testTheFirstRequestAsksForAsManyRowsAsTheLastVisitHeld() {
+  const rows = (first, count) =>
+    Array.from({length: count}, (_, i) => session(first - i, 'task ' + (first - i)));
+  const {win, posted} = openDesktopPage({
+    sessions: rows(900, 200),
+    machineLabels: {},
+  });
+  // The rows that filled the panel last time are asked for at once.
+  const boot = ofType(posted, 'getHistory');
+  assert.deepStrictEqual(boot.map(r => [r.offset, r.limit]), [[0, 200]]);
+  send(win, reply(boot[0].generation, rows(900, 200), {limit: 200}));
+  // The user scrolled a page further: a refresh asks for all the rows
+  // held, and the first 200 of them are kept for the next load.
+  send(win, reply(boot[0].generation, rows(700, 50), {offset: 200, limit: 50}));
+  send(win, {type: 'tasks_updated'});
+  const refresh = lastGetHistory(posted);
+  assert.deepStrictEqual([refresh.offset, refresh.limit], [0, 250]);
+  send(win, reply(refresh.generation, rows(900, 250), {limit: 250}));
+  const kept = JSON.parse(win.localStorage.getItem(CACHE_KEY)).sessions;
+  assert.deepStrictEqual(
+    [kept.length, kept[0].title, kept[199].title],
+    [200, 'task 900', 'task 701'],
+  );
+  win.close();
+  console.log('  ok - the first request asks for as many rows as the last visit held');
+}
+
 function testNothingIsPaintedWithoutACacheOrOverAFilteredView() {
   const {win, posted} = openDesktopPage(null);
   assert.deepStrictEqual(rowTitles(win), [], 'no cache, no rows');
@@ -265,6 +292,7 @@ function testARelabelDuringTheFlightDoesNotDiscardTheReply() {
 testCachedRowsPaintBeforeTheFirstReply();
 testTheDaemonsNameReachesTheCachedRows();
 testAReplyEqualToTheCacheKeepsTheRows();
+testTheFirstRequestAsksForAsManyRowsAsTheLastVisitHeld();
 testNothingIsPaintedWithoutACacheOrOverAFilteredView();
 testACacheIsNotPaintedOverRowsOrIntoAFilteredView();
 testARelabelDuringTheFlightDoesNotDiscardTheReply();

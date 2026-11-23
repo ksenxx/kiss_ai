@@ -19,6 +19,7 @@ const {
   visibleTitles,
   sendHistory,
   sendHistoryPage,
+  layOutHistoryList,
   finishedSession: session,
   filterOptions,
   tickedFilterOptions,
@@ -102,22 +103,6 @@ function testSwitchingTheChipShowsAndHidesCronRows() {
   ]);
   win.close();
   console.log('  ok - the Cron tasks filter shows and hides the cron rows');
-}
-
-/**
- * Give the history list a layout: JSDOM has none, so clientHeight and
- * scrollHeight are 0.  The list is `height` tall and its content as
- * tall as its visible rows.
- */
-function layOutHistoryList(win, height) {
-  const list = win.document.getElementById('history-list');
-  Object.defineProperty(list, 'clientHeight', {get: () => height});
-  Object.defineProperty(list, 'scrollHeight', {
-    get: () =>
-      Array.from(list.querySelectorAll('.sidebar-item')).filter(
-        r => r.style.display !== 'none',
-      ).length * 40,
-  });
 }
 
 function testAFirstPageOfOnlyCronRowsFetchesTheNextPage() {

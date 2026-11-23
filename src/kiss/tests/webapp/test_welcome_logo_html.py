@@ -12,6 +12,11 @@ every template placeholder is filled, and both highlight sheets are
 handed to ``main.js`` through ``window.__HLJS_THEME_CSS__`` so the code
 blocks follow the page theme.  The live page half (logo survives a new
 chat, the toggle swaps the sheet) is ``webapp/test/welcomeLogo.test.js``.
+
+The size the logo is drawn at is measured in a real Chromium, with the
+real stylesheets: 560px wide where the chat pane has the room (twice the
+280px it used to be), the pane's own width on a phone, and smaller in a
+short window, so that the greeting under it stays in sight.
 """
 
 from __future__ import annotations
@@ -19,11 +24,33 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import struct
 import unittest
 from html.parser import HTMLParser
 from urllib.parse import parse_qs, urlparse
 
+from playwright.sync_api import Browser, sync_playwright
+
 from kiss.server import web_server
+from kiss.tests.webapp.test_history_failed_red_cross import _open_remote_page
+
+# The shown logo's box, and the width the welcome block has for it.
+_LOGO_BOX_JS = """() => {
+  const welcome = document.getElementById('welcome');
+  const style = getComputedStyle(welcome);
+  const shown = Array.from(welcome.querySelectorAll('.welcome-logo'))
+    .filter(logo => getComputedStyle(logo).display !== 'none');
+  const box = shown[0].getBoundingClientRect();
+  return {
+    shown: shown.length,
+    width: box.width,
+    height: box.height,
+    room: welcome.clientWidth - parseFloat(style.paddingLeft)
+      - parseFloat(style.paddingRight),
+    pageOverflows: document.documentElement.scrollWidth > window.innerWidth,
+    scrolls: welcome.parentElement.scrollHeight > welcome.parentElement.clientHeight,
+  };
+}"""
 
 
 def _asset_hash(name: str) -> str:
@@ -83,6 +110,12 @@ class TestWelcomeLogoHtml(unittest.TestCase):
             # Colour type 6 in the IHDR chunk: RGBA, so the art is
             # transparent and sits directly on the theme background.
             self.assertEqual(data[25], 6, f"media/{name} is an RGBA PNG")
+            png_width, png_height = struct.unpack(">II", data[16:24])
+            self.assertEqual(
+                (tag[1].get("width"), tag[1].get("height")),
+                (str(png_width), str(png_height)),
+                f"#{element_id} width/height attributes match media/{name} dimensions",
+            )
 
     def test_greeting_without_chips_or_config_block(self) -> None:
         heading = re.search(
@@ -120,6 +153,46 @@ class TestWelcomeLogoHtml(unittest.TestCase):
                 [_asset_hash(f"highlight-{theme}.css")],
             )
         self.assertNotIn("highlight-github", self.html, "the github sheets are gone")
+
+
+def _logo_box(browser: Browser, width: int, height: int) -> dict[str, float]:
+    """Lay the chat page out in a *width* x *height* window and measure the welcome logo.
+
+    The logo's box comes from its ``width`` / ``height`` attributes, so
+    the picture itself need not load.
+    """
+    context, page = _open_remote_page(browser, width, height)
+    try:
+        box: dict[str, float] = page.evaluate(_LOGO_BOX_JS)
+        return box
+    finally:
+        context.close()
+
+
+def test_the_logo_is_twice_its_former_width_where_the_pane_has_room() -> None:
+    """A desktop chat pane draws the logo 560px wide; a phone, as wide as its pane."""
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        try:
+            desktop = _logo_box(browser, 1440, 900)
+            phone = _logo_box(browser, 390, 844)
+            short = _logo_box(browser, 1200, 520)
+        finally:
+            browser.close()
+    # One of the two colourings is on show; the art is 1600 x 760.
+    assert desktop["shown"] == 1
+    assert (desktop["width"], desktop["height"]) == (560, 266)
+    assert desktop["width"] <= desktop["room"]
+    assert not desktop["scrolls"]
+    # A phone has no room for 560px: the logo fills its pane and no more.
+    assert phone["shown"] == 1
+    assert 280 < phone["width"] < 560
+    assert abs(phone["width"] - phone["room"]) < 0.5
+    assert not phone["pageOverflows"]
+    # A short window draws it smaller (four fifths of the window's height
+    # wide): the greeting under it is in sight without scrolling.
+    assert short["width"] == 416
+    assert not short["scrolls"]
 
 
 if __name__ == "__main__":

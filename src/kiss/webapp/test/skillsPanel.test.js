@@ -420,6 +420,54 @@ async function main() {
     assert.ok(!refresh.disabled && !refresh.classList.contains('spinning'));
   });
 
+  await test('a server older than the page, which knows no Skills command, is no error in the chat: the subpanel says to restart it and nothing is left waiting', () => {
+    const {win, posted} = makePage();
+    const errors = () =>
+      Array.from(
+        win.document.querySelectorAll('#output div.ev.tr.err'),
+        banner => banner.textContent,
+      );
+    const status = el(win, 'meta-skills-status');
+    const refresh = el(win, 'meta-skills-refresh');
+    const button = el(win, 'meta-skills-search-btn');
+    const restart =
+      'This server runs an older version, without Skills. ' +
+      'Restart it to finish the update.';
+    // The list the page asks for on its own (at connect, at every
+    // poll) and the one the refresh button asks for are refused: a
+    // server updated on disk and not yet restarted serves this page.
+    click(win, refresh);
+    assert.ok(refresh.disabled && refresh.classList.contains('spinning'));
+    send(win, {type: 'error', text: 'Unknown command: getSkills'});
+    eq(errors(), []);
+    eq(skillRows(win), []);
+    assert.strictEqual(status.textContent, restart);
+    assert.ok(status.classList.contains('is-error'));
+    assert.ok(!refresh.disabled && !refresh.classList.contains('spinning'));
+    // A search made all the same is refused too.  The user asked for
+    // it, so the chat that is open shows the refusal, and the search
+    // button works again.
+    search(win, 'pdf');
+    assert.ok(button.disabled, 'the search awaits its answer');
+    send(win, {type: 'error', text: 'Unknown command: searchSkills'});
+    eq(errors(), ['Error: Unknown command: searchSkills']);
+    assert.ok(!button.disabled);
+    assert.strictEqual(status.textContent, restart);
+    const from = posted.length;
+    search(win, 'pdf');
+    eq(
+      skillPosts(posted, from).map(m => m.type),
+      ['searchSkills'],
+    );
+    // The restarted server lists its skills; an error of anything else
+    // is shown in the chat and leaves the subpanel as it is.
+    send(win, {type: 'skills', skills: SKILLS, error: ''});
+    send(win, {type: 'error', text: 'getSkills: the disk is full'});
+    eq(errors().length, 2);
+    assert.strictEqual(status.textContent, '3 skills available');
+    assert.ok(button.disabled, 'the second search still awaits its answer');
+  });
+
   await test('Enter in the field searches with the trimmed text; the reply lists what was found in the order received', () => {
     const {win, posted} = makePage();
     const from = posted.length;

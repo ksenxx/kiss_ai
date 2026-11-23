@@ -317,6 +317,22 @@ function sendHistoryPage(win, posted, offset, sessions) {
 }
 
 /**
+ * Give the history list a layout: JSDOM has none, so clientHeight and
+ * scrollHeight are 0.  The list is `height` tall and its content as
+ * tall as its visible rows.
+ */
+function layOutHistoryList(win, height) {
+  const list = win.document.getElementById('history-list');
+  Object.defineProperty(list, 'clientHeight', {get: () => height});
+  Object.defineProperty(list, 'scrollHeight', {
+    get: () =>
+      Array.from(list.querySelectorAll('.sidebar-item')).filter(
+        r => r.style.display !== 'none',
+      ).length * 40,
+  });
+}
+
+/**
  * The visible top-level children of #history-list, described:
  * `sep:<label>` for a day separator, `chat:<id>[<visible row titles>]`
  * for a chat panel, `row:<title>` for a flat-list row, else the class.
@@ -446,6 +462,7 @@ module.exports = {
   dayLabel,
   groupedSession,
   sendHistoryPage,
+  layOutHistoryList,
   listShape,
   finishedSession,
   makeConnectedRemotePage,

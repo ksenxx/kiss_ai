@@ -145,6 +145,41 @@ class TestMachineHistory(IsolatedAsyncioTestCase):
         self.assertLessEqual(reply["dateRange"]["min"], min(timestamps))
         self.assertGreaterEqual(reply["dateRange"]["max"], max(timestamps))
 
+    async def test_a_page_holds_as_many_rows_as_it_asks_for(self) -> None:
+        """A page of ``limit`` rows is cut from the union of both histories.
+
+        The CHATS panel asks for the rows that fill it in one request, so the
+        machine is asked for as many in one request too.  No reply holds more
+        than ``HISTORY_MAX_PAGE`` rows: a longer list of a machine's rows takes
+        several.  (A machine too old to grant a ``limit`` sends ``HISTORY_PAGE``
+        rows and names none; that reading of its reply needs such a daemon and
+        is not exercised here.)
+        """
+        old = mach.HISTORY_MAX_PAGE + 20
+        remote_db = sqlite3.connect(self.remote.home / "history.db")
+        self.addCleanup(remote_db.close)
+        remote_db.executemany(
+            "INSERT INTO task_history (id, timestamp, task, chat_id) VALUES (?, ?, ?, ?)",
+            [(f"{i:032x}", 1_000.0 + i, f"old {i}", f"chat-old-{i}") for i in range(old)],
+        )
+        remote_db.commit()
+
+        reply = await self._history(limit=120)
+        titles = [s["title"] for s in reply["sessions"]]
+        self.assertEqual((reply["limit"], len(titles)), (120, 120))
+        self.assertEqual(titles[3:5], [f"old {old - 1}", f"old {old - 2}"])
+        reply = await self._history(offset=120, limit=120)
+        self.assertEqual(reply["sessions"][0]["title"], f"old {old - 118}")
+        reply = await self._history(limit=10**6)
+        self.assertEqual(
+            (reply["limit"], len(reply["sessions"])), (mach.HISTORY_MAX_PAGE,) * 2,
+        )
+
+        machine = next(m for m in mach.load_machines() if m.name == "box")
+        for wanted, got in ((mach.HISTORY_MAX_PAGE + 10,) * 2, (10**4, old + 2)):
+            page = await asyncio.to_thread(mach.fetch_history, machine, "", "", wanted)
+            self.assertEqual(len({s["task_id"] for s in page.rows}), got)
+
     async def test_machine_filter_selects_one_source(self) -> None:
         """``machine`` narrows the page to one machine or to this daemon."""
         reply = await self._history(machine="box")
