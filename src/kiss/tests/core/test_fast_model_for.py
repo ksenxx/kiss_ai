@@ -36,28 +36,28 @@ class TestFastModelFor:
 
     def test_openrouter_key_returns_openrouter_model(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self._set_key(monkeypatch, "OPENROUTER_API_KEY")
-        assert get_fast_model() == "openrouter/anthropic/claude-sonnet-5.5"
+        assert get_fast_model() == "openrouter/anthropic/claude-haiku-5.5-medium"
         assert get_fast_model() in MODEL_INFO
 
     def test_openai_key_returns_luna(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self._set_key(monkeypatch, "OPENAI_API_KEY")
-        assert get_fast_model() == "gpt-6-luna"
+        assert get_fast_model() == "gpt-6-luna-medium"
         assert get_fast_model() in MODEL_INFO
 
-    def test_gemini_key_returns_flash_lite(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_gemini_key_returns_hydrogen(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self._set_key(monkeypatch, "GEMINI_API_KEY")
-        assert get_fast_model() == "gemini-3.5-flash-lite"
+        assert get_fast_model() == "gemini-4-hydrogen-medium"
         assert get_fast_model() in MODEL_INFO
 
-    def test_anthropic_key_returns_sonnet(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_anthropic_key_returns_haiku(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self._set_key(monkeypatch, "ANTHROPIC_API_KEY")
-        assert get_fast_model() == "claude-sonnet-5-5"
+        assert get_fast_model() == "claude-haiku-5-5"
         assert get_fast_model() in MODEL_INFO
 
     def test_no_keys_returns_cli_or_no_model_fallback(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """When no API keys are set, falls back to cc/haiku, codex/default, or 'No model'."""
+        """When no API keys are set, falls back to cc/haiku, codex/gpt-6-luna, or 'No model'."""
         import shutil
 
         from kiss.core.models.codex_model import find_codex_executable
@@ -65,7 +65,7 @@ class TestFastModelFor:
         if shutil.which("claude") is not None:
             assert get_fast_model() == "cc/haiku"
         elif find_codex_executable() is not None:
-            assert get_fast_model() == "codex/default"
+            assert get_fast_model() == "codex/gpt-6-luna"
         else:
             assert get_fast_model() == "No model"
 
@@ -76,4 +76,4 @@ class TestFastModelFor:
         from kiss.core import config as _cfg
 
         monkeypatch.setattr(_cfg, "DEFAULT_CONFIG", _cfg.Config())
-        assert get_fast_model() == "gpt-6-luna"
+        assert get_fast_model() == "gpt-6-luna-medium"

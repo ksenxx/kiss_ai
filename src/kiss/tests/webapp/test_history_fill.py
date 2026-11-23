@@ -9,8 +9,10 @@ its panel fills; JSDOM has no layout, so the heights there are stand-ins.
 Here the shipped page runs in a headless Chromium with the real
 stylesheets: a first page whose tasks do not fill the docked panel pulls
 in more rows with no "Loading..." row in sight, a refresh asks once
-for every row the list holds, and the rows of a refresh that come in two
-pages replace the list's when both are in.
+for every row the list holds, the rows of a refresh that come in two
+pages replace the list's when both are in, and a list the user scrolls
+asks for its next rows while less than a panel's height of tasks is left
+under the view.
 """
 
 from __future__ import annotations
@@ -21,8 +23,9 @@ from playwright.sync_api import Page, sync_playwright
 
 from kiss.tests.webapp.test_history_failed_red_cross import _open_remote_page, _sample_sessions
 
-# What the list shows and holds, and every getHistory the page has sent.
-# The "Loading..." row counts when it is drawn: it has a box.
+# What the list shows and holds, every getHistory the page has sent, and
+# how many panels' heights of rows lie under the view.  The "Loading..."
+# row counts when it is drawn: it has a box.
 _STATE_JS = """() => {
   const list = document.getElementById('history-list');
   const loader = document.getElementById('history-loader');
@@ -35,7 +38,17 @@ _STATE_JS = """() => {
     top: list.querySelector('.sidebar-item')?.dataset.tooltip,
     loader: !!loader && loader.getClientRects().length > 0,
     filled: list.scrollHeight > list.clientHeight,
+    under: (list.scrollHeight - list.scrollTop - list.clientHeight) / list.clientHeight,
   };
+}"""
+
+# Scroll the list until half a panel's height of rows is left under the
+# view, and wait until the page has heard of it.
+_SCROLL_JS = """async () => {
+  const list = document.getElementById('history-list');
+  const heard = new Promise(resolve => list.addEventListener('scroll', resolve, {once: true}));
+  list.scrollTop = list.scrollHeight - 1.5 * list.clientHeight;
+  await heard;
 }"""
 
 
@@ -98,5 +111,28 @@ def test_a_docked_panel_fills_without_a_loading_row_and_refreshes_in_one_request
             assert (state["rows"], state["filled"], state["loader"]) == (100, True, False)
             assert state["top"] == "new task"
             assert len(state["asks"]) == 5
+
+            # The user scrolls.  With half a panel's height of tasks left under the view,
+            # well before the list's end, the next rows are asked for under a "Loading..."
+            # row: a page at least.  A page that shows no task (cron tasks only) is followed
+            # by the next, and the asking stops with a panel's height of tasks under the view.
+            assert state["under"] > 1
+            page.evaluate(_SCROLL_JS)
+            state = page.evaluate(_STATE_JS)
+            offset, limit = state["asks"][-1]
+            assert (len(state["asks"]), offset, state["loader"]) == (6, 100, True)
+            assert limit >= 50 and 0.4 < state["under"] < 0.7, state
+            page_of = {"type": "history", "generation": state["generation"]}
+            state = _deliver(page, {
+                **page_of, "sessions": _rows(100, limit, cron=True), "offset": 100, "limit": limit,
+            })
+            offset, more = state["asks"][-1]
+            assert (len(state["asks"]), offset, state["loader"]) == (7, 100 + limit, True)
+            state = _deliver(page, {
+                **page_of, "sessions": _rows(offset, more, cron=False), "offset": offset,
+                "limit": more,
+            })
+            assert (state["rows"], state["loader"]) == (100 + limit + more, False)
+            assert len(state["asks"]) == 7 and state["under"] >= 1, state
         finally:
             browser.close()

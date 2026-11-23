@@ -65,8 +65,19 @@ def test_check_auth_unauthenticated(class_name: str, module_path: str) -> None:
 
 
 @pytest.mark.parametrize("class_name,module_path", ALL_CHANNEL_AGENTS, ids=AGENT_IDS)
-def test_clear_auth_when_not_authenticated(class_name: str, module_path: str) -> None:
-    """clear_*_auth() works without error even when not authenticated."""
+def test_clear_auth_when_not_authenticated(
+    class_name: str, module_path: str, refusing_port: int
+) -> None:
+    """clear_*_auth() works without error even when not authenticated.
+
+    WhatsApp's clear refuses while a bridge it did not start answers on its
+    port, and the default port (8080) may be the developer's own running
+    bridge, so the agent is pointed at a port nobody listens on.
+    """
+    if class_name == "WhatsAppAgent":
+        from kiss.agents.third_party_agents.whatsapp.whatsapp_sea import _config
+
+        _config.save({"bridge_port": str(refusing_port)})
     result = _auth_tool(class_name, module_path, "clear_")()
     assert "cleared" in result.lower() or "removed" in result.lower(), (
         f"Expected cleared message, got: {result[:200]}"

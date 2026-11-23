@@ -6,7 +6,7 @@
   <img alt="KISS Sorcar" src="https://raw.githubusercontent.com/ksenxx/kiss_ai/main/assets/logo/kiss-sorcar-logo-light.png" width="520">
 </picture>
 
-[![Version](https://img.shields.io/badge/version-2026.11.16-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
+[![Version](https://img.shields.io/badge/version-2026.11.17-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green?style=flat-square)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.13-blue?style=flat-square)](https://www.python.org/)
 [![Website](https://img.shields.io/badge/website-kisssorcar.github.io-1976d2?style=flat-square)](https://kisssorcar.github.io/)
@@ -288,7 +288,7 @@ Open the web app in a browser and type or speak your task. The chat interface pr
 - **Agent questions**
   - When an agent asks a question, every connected surface brings its tab forward and turns the composer into the answer box.
 - **Browser tab**
-  - Streams a real browser running alongside the daemon to every connected surface, selecting the browser executable in fallback order:
+  - Streams a real browser running alongside the daemon to every connected surface, selecting the browser executable in fallback order: `KISS_BROWSER` when set, the machine's default browser when it is Chromium-based, the first installed Chromium-family browser, then Playwright's bundled Chromium.
 - **Scheduled automations**
   - Plain-language scheduling and UI controls:
 

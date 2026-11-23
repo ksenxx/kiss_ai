@@ -216,8 +216,8 @@ function testSettingsControlIsAccessibleButton() {
   const settingsBtn = win.document.getElementById('settings-btn');
   assert.ok(settingsBtn, 'settings control missing');
   assert.ok(
-    win.document.getElementById('sidebar-footer').contains(settingsBtn),
-    'the settings control must live on the strip under the Chats list',
+    win.document.getElementById('meta-footer').contains(settingsBtn),
+    'the settings control must live on the strip under the task-info panel',
   );
   assert.strictEqual(
     settingsBtn.tagName,

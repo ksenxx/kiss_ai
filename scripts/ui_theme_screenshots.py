@@ -189,6 +189,18 @@ def shoot(page: Page, path: Path) -> None:
     print("saved", path)
 
 
+def open_settings(page: Page) -> None:
+    """Open the settings sheet with its button on the strip under the right sidebar.
+
+    On a narrow page that sidebar is a drawer: its button under the composer
+    opens it first, and the click on Settings closes it again.
+    """
+    if not page.evaluate("() => document.body.classList.contains('remote-desktop')"):
+        page.click("#meta-drawer-btn")
+    page.click("#settings-btn")
+    page.wait_for_timeout(300)
+
+
 def chat_scenes(page: Page, out: Path, prefix: str) -> str:
     """Capture welcome, transcript and overlay scenes of one chat page.
 
@@ -226,12 +238,7 @@ def chat_scenes(page: Page, out: Path, prefix: str) -> str:
     page.wait_for_timeout(200)
     shoot(page, out / f"{prefix}-5-more-menu.png")
     page.keyboard.press("Escape")
-    # Settings is a button of the strip under the Chats list.
-    page.evaluate(
-        "() => document.getElementById('sidebar').classList.add('open')"
-    )
-    page.click("#settings-btn")
-    page.wait_for_timeout(300)
+    open_settings(page)
     shoot(page, out / f"{prefix}-6-settings.png")
     return transcript
 

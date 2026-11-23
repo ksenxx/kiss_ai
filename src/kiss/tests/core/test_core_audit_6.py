@@ -15,7 +15,7 @@ import tempfile
 from pathlib import Path
 from unittest import TestCase
 
-from kiss.core.models.model_info import get_fast_model
+from kiss.core.models.model_info import MODEL_INFO, get_default_model, get_fast_model
 from kiss.core.user_config import CONFIG_PATH, load_config, save_config
 
 
@@ -25,8 +25,8 @@ class TestFastModelForReturnsActuallyFastModels(TestCase):
     ``gemini-2.5-pro`` which is one of the most expensive models.
     """
 
-    def test_gemini_model_is_flash_not_pro(self) -> None:
-        """The Gemini fast model should be a flash variant, not pro."""
+    def test_gemini_fast_model_is_cheaper_than_the_default(self) -> None:
+        """The Gemini fast model is a cheap one, not pro: it costs less than the default."""
         from kiss.core import config as config_module
 
         orig = config_module.DEFAULT_CONFIG
@@ -38,11 +38,15 @@ class TestFastModelForReturnsActuallyFastModels(TestCase):
             config_module.DEFAULT_CONFIG.OPENAI_API_KEY = ""
 
             result = get_fast_model()
-            assert "flash" in result.lower() or "2.0" in result, (
-                f"B3 FIX: Gemini fast model should be a flash variant, "
-                f"got '{result}'"
+            default = get_default_model()
+            assert (
+                MODEL_INFO[result].output_price_per_1M
+                < MODEL_INFO[default].output_price_per_1M
+            ), (
+                f"B3 FIX: Gemini fast model should cost less than the default "
+                f"'{default}', got '{result}'"
             )
-            assert "pro" not in result.lower() or "flash" in result.lower(), (
+            assert "pro" not in result.lower(), (
                 f"B3 FIX: Gemini fast model should not be a pro model, "
                 f"got '{result}'"
             )

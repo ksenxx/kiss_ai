@@ -1490,7 +1490,7 @@ def test_bedrock_only_configuration_has_default_and_fast_models(monkeypatch, tmp
 
     The bundled catalog lists the Bedrock ids of the updater's region; the
     default and fast models are the ``global.`` profiles of the Anthropic
-    default and fast models (``claude-opus-5-5``, ``claude-sonnet-5-5``).
+    default and fast models (``claude-opus-5-5-medium``, ``claude-haiku-5-5``).
     A catalog without those twins (the user registered a few ids by hand)
     falls back to ranking the entries by output price.
     """
@@ -1517,11 +1517,11 @@ def test_bedrock_only_configuration_has_default_and_fast_models(monkeypatch, tmp
     available = model_info.get_available_models()
     assert _OPUS in available and haiku in available
     assert all(name.startswith("bedrock/") for name in available)
-    assert model_info.get_default_model() == "bedrock/global.anthropic.claude-opus-5-5"
-    assert model_info.get_fast_model() == "bedrock/global.anthropic.claude-sonnet-5-5"
+    assert model_info.get_default_model() == "bedrock/global.anthropic.claude-opus-5-5-medium"
+    assert model_info.get_fast_model() == "bedrock/global.anthropic.claude-haiku-5-5"
     # A configured first-party key still takes precedence over Bedrock.
     monkeypatch.setattr(config_module.DEFAULT_CONFIG, "GEMINI_API_KEY", "g")
-    assert model_info.get_default_model() == "gemini-3.8-flash"
+    assert model_info.get_default_model() == "gemini-4-neon-medium"
     monkeypatch.setattr(config_module.DEFAULT_CONFIG, "GEMINI_API_KEY", "")
 
     # Only hand-registered ids, none of them a twin of the Anthropic defaults.

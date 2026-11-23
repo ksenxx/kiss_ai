@@ -16,9 +16,9 @@ A REAL browser (Playwright Chromium) drives a REAL
   order and end at the right, and a panel too narrow for them wraps
   them instead of clipping them;
 * the task-info strip lies along the bottom of its panel in the same
-  way, its buttons start at the left, and the buttons of both strips
-  have one size; on a phone a strip's space under its buttons is a
-  fifth of the desktop's 8px;
+  way, its buttons start at the left with Settings, wrap in a narrow
+  panel too, and the buttons of both strips have one size; on a phone
+  a strip's space under its buttons is a fifth of the desktop's 8px;
 * the font buttons move the root font size, which every CSS size is a
   rem or em of, and the size survives a reload; the Monaco editors (a
   file's and a diff's, open or opened later; the jsdom suite has no
@@ -26,8 +26,8 @@ A REAL browser (Playwright Chromium) drives a REAL
   right-click menu; the jsdom suite has no Monaco), the xterm.js
   terminal, the menu inside a preview and the text of a rendered
   Markdown file take it, the page of an ``.html`` file does not;
-* on a phone, Settings leaves the Chats screen and Terminal the task
-  info screen for what they open.
+* on a phone, Settings and Terminal leave the task info screen for
+  what they open.
 
 Monaco and xterm.js come from the real ``cdn.jsdelivr.net``; when it is
 unreachable the test that needs them skips.
@@ -68,9 +68,11 @@ from kiss.tests.webapp.test_workspace_sections import (
 
 _ORDER = [
     "theme-btn", "contrast-btn", "theme-auto-btn",
-    "font-step -1", "font-step 1", "settings-btn",
+    "font-step -1", "font-step 1",
 ]
-_INFO_ORDER = ["terminal-btn", "browser-btn", "autocommit-btn", "create-pr-btn"]
+_INFO_ORDER = [
+    "settings-btn", "terminal-btn", "browser-btn", "autocommit-btn", "create-pr-btn",
+]
 
 # The boxes [left, top, right, bottom] of the Chats panel, the strip,
 # the name and the list, each button as [id, left, top, right, bottom]
@@ -180,8 +182,9 @@ def _strip(page, size: int, name_inset: int = 0) -> dict:
     its left (its text *name_inset* px in from the strip's padding) and
     the *size* px buttons in order up to its right end, none of them
     clipped, and that the task-info strip lies along the bottom of its
-    panel with one row of buttons of that same size from its left end;
-    ``rows`` is the number of rows the Chats buttons take."""
+    panel with its buttons of that same size in order from its left end;
+    ``rows`` is the number of rows the Chats buttons take, ``infoRows``
+    the number the task-info buttons take."""
     lay: dict = page.evaluate(_LAYOUT_JS)
     height = page.viewport_size["height"]
     assert lay["footer"][3] == lay["sidebar"][3] == height
@@ -192,7 +195,7 @@ def _strip(page, size: int, name_inset: int = 0) -> dict:
     assert lay["userText"] == lay["footerRoom"][0] + name_inset
     assert lay["buttons"][-1][3] == lay["footerRoom"][1], "the buttons end at the right"
     assert lay["infoFooter"][3] == lay["info"][3] == height
-    assert len({b[2] for b in lay["infoButtons"]}) == 1
+    lay["infoRows"] = len({b[2] for b in lay["infoButtons"]})
     _in_order_and_inside(lay["infoButtons"], lay["infoFooter"], _INFO_ORDER, size)
     assert lay["infoButtons"][0][1] == lay["infoRoom"][0], "the buttons start at the left"
     assert lay["infoButtons"][-1][3] < lay["infoRoom"][1], "and leave the right end free"
@@ -230,27 +233,29 @@ def test_strip_stays_under_the_scrolling_list_on_the_desktop(browser, harness, c
         lay = _strip(page, 32)
         assert page.evaluate(_STRIP_BOTTOM_PADS) == ["8px", "8px"]
         assert lay["overflow"] > 0, "the list is longer than the panel"
-        assert lay["rows"] == 1
+        assert (lay["rows"], lay["infoRows"]) == (1, 1)
         first = lay["buttons"][0]
         assert lay["user"][2] <= first[1] and lay["user"][1] < first[4]
         page.evaluate("document.getElementById('history-list').scrollTop = 1e6")
         assert page.evaluate("document.getElementById('history-list').scrollTop") > 0
         assert _strip(page, 32)["footer"] == lay["footer"], "the strip did not scroll"
 
-        # The docked panel is a fifth of the window.  At 1366px a short
-        # name still shares the row with the six buttons (202px) and a
-        # long one has the row above them; at 1000px the buttons wrap.
+        # A docked panel is a fifth of the window.  At 1366px a short
+        # name still shares the row with the five buttons (168px) and a
+        # long one has the row above them; at 940px (156px of room) the
+        # buttons of both strips wrap.
         page.set_viewport_size({"width": 1366, "height": 900})
         beside = {}
         for name in ("ab", "a-user-with-a-long-name"):
             page.evaluate(_SET_NAME_JS, name)
             lay = _strip(page, 32)
-            assert lay["rows"] == 1
+            assert (lay["rows"], lay["infoRows"]) == (1, 1)
             beside[name] = lay["user"][2] <= lay["buttons"][0][1]
             assert beside[name] or lay["user"][3] <= lay["buttons"][0][2], "beside or above"
         assert beside == {"ab": True, "a-user-with-a-long-name": False}
-        page.set_viewport_size({"width": 1000, "height": 900})
-        assert _strip(page, 32)["rows"] == 2
+        page.set_viewport_size({"width": 940, "height": 900})
+        lay = _strip(page, 32)
+        assert (lay["rows"], lay["infoRows"]) == (2, 2)
 
         # A button names what its press does next.
         page.click("#theme-btn")
@@ -386,7 +391,7 @@ def test_strip_on_a_phone(browser, harness, chats):
         assert page.evaluate(_STRIP_BOTTOM_PADS) == ["1.6px", "1.6px"]
         assert lay["userText"] - lay["sidebar"][0] == 26, lay
         assert lay["overflow"] > 0, "the list is longer than the screen"
-        assert lay["rows"] == 1
+        assert (lay["rows"], lay["infoRows"]) == (1, 1)
         first = lay["buttons"][0]
         assert lay["user"][2] <= first[1] and lay["user"][1] < first[4]
         page.evaluate("document.getElementById('history-list').scrollTop = 1e6")
@@ -396,13 +401,19 @@ def test_strip_on_a_phone(browser, harness, chats):
         page.tap('[data-font-step="1"]')
         assert page.evaluate(_ROOT_PX) == "14px"
 
-        # Settings leaves the Chats screen for its sheet.  Closing the
-        # sheet focuses the New chat button, not the composer, whose
-        # keyboard would cover half the screen.
+        # Settings, the first button of the task-info screen's strip,
+        # leaves that screen for its sheet.  Closing the sheet focuses
+        # the New chat button, not the composer, whose keyboard would
+        # cover half the screen.
+        _swipe_left(cdp, rest=True)
+        _wait_screen(page, "chat")
+        _swipe_left(cdp, rest=True)
+        _wait_screen(page, "info")
+        expect(page.locator("#settings-btn")).to_be_in_viewport()
         page.tap("#settings-btn")
         _wait_screen(page, "chat")
         expect(page.locator("#settings-panel")).to_be_visible()
-        expect(page.locator("#sidebar")).to_be_hidden()
+        expect(page.locator("#meta-panel")).not_to_be_in_viewport()
         page.tap("#settings-panel-close")
         expect(page.locator("#settings-panel")).to_be_hidden()
         expect(page.locator("#new-chat-btn")).to_be_focused()

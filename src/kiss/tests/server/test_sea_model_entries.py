@@ -122,23 +122,23 @@ def test_bestrouter_protocol_names_its_models_literally() -> None:
     }
     assert bestrouter_sea.SIMPLE_MODEL == "claude-opus-5-5-medium"
     assert bestrouter_sea.PRIMARY_MODEL == "claude-fable-5-2-max"
-    assert bestrouter_sea.WRITER_MODEL == "openrouter/google/gemini-4-carbon"
+    assert bestrouter_sea.WRITER_MODEL == "gemini-4-neon-high"
     protocol = bestrouter_sea.SYSTEM_PROMPT
     assert sea.system_prompt("BASE") == "BASE\n\n" + protocol
     assert protocol.startswith(BESTROUTER_MARKER)
     flat = " ".join(protocol.split())
     for phrase in (
         "Use 'claude-opus-5-5-medium' for simple questions and queries.",
-        "Use 'openrouter/google/gemini-4-carbon' for writing any documents, papers, reports, "
+        "Use 'gemini-4-neon-high' for writing any documents, papers, reports, "
         "results which will be read by a human.",
         "Use 'claude-fable-5-2-max' model for all other tasks, including software development "
         "and analysis.",
-        "Call `set_model(\"openrouter/google/gemini-4-carbon\")` before you write the final "
+        "Call `set_model(\"gemini-4-neon-high\")` before you write the final "
         "summary.",
         "Use gpt-6-astra-xhigh through `run_agent(model=\"gpt-6-astra-xhigh\", "
         "tool_profile=\"review\", wait=\"false\")` for a thorough read-only review and "
         "debugging of the work of 'claude-fable-5-2-max' and "
-        "'openrouter/google/gemini-4-carbon',",
+        "'gemini-4-neon-high',",
         'on one line: {"file": "src/x.py", "line": 12,',
         "Use at most 75% of the task budget in gpt-6-astra-xhigh,",
         "ask the model not to invent new problems",
@@ -156,7 +156,7 @@ def test_bestrouter_protocol_names_its_models_literally() -> None:
         assert MODEL_INFO[name].output_price_per_1M > 0, name
     assert "codex" not in bestrouter_sea.REVIEW_MODEL
     assert "bestrouter" in sea.description()
-    assert ", writes on openrouter/google/gemini-4-carbon, " in sea.description()
+    assert ", writes on gemini-4-neon-high, " in sea.description()
     # The protocol relies on run_parallel, so the SEA must not withhold it:
     # it appends to the system prompt, pins no tool profile, keeps every
     # tool and leaves the prompt untouched.

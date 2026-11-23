@@ -347,7 +347,7 @@
         </div>
       </div>
       <!-- The strip under the Chats list: the user name at the left,
-           the appearance and settings buttons at the right.
+           the appearance buttons at the right.
            #theme-btn flips between the light and dark palettes (its
            icon and name say which one it switches TO), #contrast-btn
            flips between the low- and high-contrast variants the same
@@ -356,16 +356,16 @@
            the first and the names of the first two.  A button with
            data-font-step moves the size of all text by that many px.
            The strip under the task-info panel (#meta-footer) holds the
-           buttons that act on the chat's machine and folder. -->
+           Settings button and the buttons that act on the chat's
+           machine and folder. -->
       <div id="sidebar-footer">
         <span id="sidebar-user"></span>
-        <div class="strip-tools" role="group" aria-label="Appearance and settings">
+        <div class="strip-tools" role="group" aria-label="Appearance">
           <button type="button" id="theme-btn" class="sidebar-tool-btn" aria-label="Dark mode"></button>
           <button type="button" id="contrast-btn" class="sidebar-tool-btn" aria-label="High contrast"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 2a10 10 0 0 1 0 20z" fill="currentColor" stroke="none"/></svg></button>
           <button type="button" id="theme-auto-btn" class="sidebar-tool-btn" aria-pressed="false" data-tooltip="Auto mode: light by day, dark by night (7 pm to 7 am on this device's clock)" aria-label="Auto mode"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></button>
           <button type="button" class="sidebar-tool-btn" data-font-step="-1" data-tooltip="Decrease font size" aria-label="Decrease font size"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m2 19 5.5-13 5.5 13"/><path d="M4 14.5h7"/><path d="M16 8h6"/></svg></button>
           <button type="button" class="sidebar-tool-btn" data-font-step="1" data-tooltip="Increase font size" aria-label="Increase font size"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m2 19 5.5-13 5.5 13"/><path d="M4 14.5h7"/><path d="M16 8h6"/><path d="M19 5v6"/></svg></button>
-          <button type="button" id="settings-btn" class="sidebar-tool-btn" data-tooltip="Settings" aria-label="Settings"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
         </div>
       </div>
       <div id="sidebar-resizer" role="separator" aria-orientation="vertical" aria-label="Resize history panel" aria-controls="sidebar" tabindex="0"></div>
@@ -386,12 +386,12 @@
            expanded, drags the boundary between them.  By default
            every expanded section gets an equal share of the height;
            the last expanded section fills whatever height the others
-           leave.  A section with no .meta-section-toggle is PINNED
-           open (Recommendations, a bare card): it never folds, and its
-           body is as tall as its content, at most an equal share,
-           instead of taking one.  Every section starts expanded,
-           except on the first load after an install or an update,
-           which folds every section that can fold
+           leave.  A .meta-section-pinned section (Recommendations)
+           sits on the bottom strip: its body is as tall as its
+           content, at most an equal share, instead of taking one,
+           and only its own chevron folds or opens it.  Every section
+           starts expanded, except on the first load after an install
+           or an update, which folds every section but the pinned one
            (resetMetaSectionsForVersion).  To add a panel, put one
            more <section class="meta-section"> (a unique id, a header
            with a .meta-section-toggle, a .meta-section-body) followed
@@ -583,28 +583,39 @@
         </div>
       </section>
       <div class="meta-section-resizer" role="separator" aria-orientation="horizontal" aria-label="Resize the Spend section" aria-controls="meta-spend-body" tabindex="0"></div>
-      <!-- Recommendations section: global too, and pinned open (it has
-           no header, so no toggle): one card and nothing else.  The
-           sidebarpanels block of main.js shows the next tasks the
-           6-hourly /recommendations cron job suggested from the last
-           day's task history (the daemon's recommendations reply) one
-           at a time, the next one sliding in every 30 seconds.  The
-           card sits on the bottom strip, the panel's free height
-           above it.  Activating the task on show opens a new chat
-           with it in the composer.  The section is hidden while there
-           is no task to show. -->
-      <section class="meta-section" id="meta-recommendations" aria-label="Recommendations" hidden>
-        <ul id="meta-recommendations-list" class="meta-section-body sidebar-panel-list"></ul>
+      <!-- Recommendations section: global too, and pinned to the
+           bottom strip (.meta-section-pinned), the panel's free
+           height above it.  The sidebarpanels block of main.js shows
+           the next tasks the 6-hourly /recommendations cron job
+           suggested from the last day's task history (the daemon's
+           recommendations reply) one at a time, the next one sliding
+           in every 30 seconds; the < and > buttons beside the card
+           step to the task before and after the one on show.
+           Activating the task on show opens a new chat with it in the
+           composer.  The chevron of the header folds the card away
+           and brings it back.  The section is hidden while there is
+           no task to show. -->
+      <section class="meta-section meta-section-pinned" id="meta-recommendations" aria-label="Recommendations" hidden>
+        <div class="sidebar-hdr meta-section-hdr">
+          <button type="button" class="meta-section-toggle" aria-expanded="true" aria-controls="meta-recommendations-body"><svg class="meta-section-chevron" viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg><span>Recommendations</span></button>
+        </div>
+        <div id="meta-recommendations-body" class="meta-section-body">
+          <button type="button" class="recommendation-step" data-step="-1" data-tooltip="Previous recommendation" aria-label="Previous recommendation"><svg viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 18 9 12 15 6"/></svg></button>
+          <ul id="meta-recommendations-list" class="sidebar-panel-list"></ul>
+          <button type="button" class="recommendation-step" data-step="1" data-tooltip="Next recommendation" aria-label="Next recommendation"><svg viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg></button>
+        </div>
       </section>
-      <div class="meta-section-resizer" role="separator" aria-orientation="horizontal" aria-label="Resize the Recommendations section" aria-controls="meta-recommendations-list" tabindex="0"></div>
+      <div class="meta-section-resizer" role="separator" aria-orientation="horizontal" aria-label="Resize the Recommendations section" aria-controls="meta-recommendations-body" tabindex="0"></div>
       <!-- The strip under the sections, the twin of the Chats strip
-           (#sidebar-footer): the buttons that act on the machine and
-           the folder of the chat on screen.  #terminal-btn and
+           (#sidebar-footer): #settings-btn opens the settings sheet,
+           then come the buttons that act on the machine and the
+           folder of the chat on screen.  #terminal-btn and
            #browser-btn open a tab there; #autocommit-btn commits the
            folder's changes and #create-pr-btn pushes its branch and
            opens a pull request, each disabled while its request runs. -->
       <div id="meta-footer">
-        <div id="meta-tools" class="strip-tools" role="group" aria-label="Machine and repository actions">
+        <div id="meta-tools" class="strip-tools" role="group" aria-label="Settings, machine and repository actions">
+          <button type="button" id="settings-btn" class="sidebar-tool-btn" data-tooltip="Settings" aria-label="Settings"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
           <button type="button" id="terminal-btn" class="sidebar-tool-btn" data-tooltip="Open a terminal on the machine running {{PRODUCT_NAME}} as a tab" aria-label="Open terminal"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg></button>
           <button type="button" id="browser-btn" class="sidebar-tool-btn" data-tooltip="Open the browser of the machine running {{PRODUCT_NAME}} as a tab" aria-label="Open browser"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg></button>
           <button type="button" id="autocommit-btn" class="sidebar-tool-btn" data-tooltip="Git commit" aria-label="Git commit"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><line x1="1.05" y1="12" x2="7" y2="12"/><line x1="17.01" y1="12" x2="22.96" y2="12"/><line x1="12" y1="1.05" x2="12" y2="7"/><line x1="12" y1="17.01" x2="12" y2="22.96"/></svg></button>

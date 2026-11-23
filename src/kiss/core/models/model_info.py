@@ -2876,7 +2876,7 @@ def get_fast_model() -> str:
     return _model_for_first_configured_provider(
         {
             "Anthropic": _ANTHROPIC_FAST_MODEL,
-            "OpenAI": "gpt-6.2-luna-medium",
+            "OpenAI": "gpt-6-luna-medium",
             "Gemini": "gemini-4-hydrogen-medium",
             "OpenRouter": "openrouter/anthropic/claude-haiku-5.5-medium",
             "Bedrock": registered_bedrock_model(cheapest=True) or "",

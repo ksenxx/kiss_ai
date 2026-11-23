@@ -1071,7 +1071,13 @@ def test_parse_scope_reads_leading_names_and_the_seas_dir_option(
     }
     for text in ("--seas-dir", "alpha --seas-dir", "--seas-dir=", "--seas-dir\nalpha"):
         assert sea.parse_scope(text) == sea.Scope(error="--seas-dir needs a folder"), text
-    unusable = sea.parse_scope("--seas-dir ~no_such_user_rsi7d/seas alpha")
+    # ``~name`` is another user's home.  ntpath invents one beside USERPROFILE, but only
+    # where that folder is named after USERNAME (else it gives up, as POSIX does for a
+    # name the password database lacks), so both are the test's own for this one call.
+    with pytest.MonkeyPatch.context() as home:
+        home.setenv("USERPROFILE", str(tmp_path))
+        home.setenv("USERNAME", tmp_path.name)
+        unusable = sea.parse_scope("--seas-dir ~no_such_user_rsi7d/seas alpha")
     nul = sea.parse_scope("--seas-dir /bad\x00dir")
     if os.name == "nt":
         # ntpath invents a home for any user name and resolves a NUL byte

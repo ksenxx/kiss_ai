@@ -191,4 +191,4 @@ Click the burger menu button in the bottom-left corner to see all agents in {{PR
 
 ## Settings
 
-Click on the settings button in the "..." menu. Use the Settings interface to get the URL for the remote web/mobile app, set the budget limit per task, set the working directory, and set various API keys and a custom model endpoint.
+Click the Settings button (the gear icon) at the bottom of the right sidebar, to the left of the Terminal button. Use the Settings interface to get the URL for the remote web/mobile app, set the budget limit per task, set the working directory, and set various API keys and a custom model endpoint.

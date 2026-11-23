@@ -273,6 +273,7 @@ Version 2026.11.7 · HEAD `d522176885` (6,001 commits) · compiled 2026-11-10 ·
 - **Task Info** (11-20): The Chat id, Task id and Parent task values are buttons that insert the id into the composer, and the gap between the rows was halved.
 - **Task Info tags** (11-21): A Tags row lists a finished task's tags and edits them (remove with ×, add a name of the vocabulary, at least one kept). An edited set is stored with `tags_edited` set, so later derivations and `--refresh` keep it.
 - **Sidebar and composer changes** (11-21): Recommendations is a single card with no header, position button, refresh button or status line, never folded and hidden when empty, pinned to the bottom of the sidebar, showing one of twenty suggestions at a time for 30 s with the next one sliding in, and scrolling a suggestion taller than a third of the window. Schedule and Machines show a clickable example command. A skill review offers **Cancel** next to **Add anyway**. The right strip's buttons are left-aligned, and the user name sits further right on phones. A Save button in the composer keeps its text in `saved_input.txt`. A link to a file no tab can show opens in the default application on the daemon's machine and as a download elsewhere.
+- **Sidebar changes** (11-23): Recommendations has a header with a chevron at its top left that folds the card away and brings it back, plus `<` and `>` buttons beside the card to step to the suggestion before or after the one on show. The Settings button moved from the strip under the Chats list to the first position on the strip under the right sidebar, directly left of Terminal. While the user scrolls the Chats list, it loads a full panel's height of rows at a time, ahead of the view.
 - **UI additions**: Swipe between screens on phones, Auto mode (dark from 7 pm to 7 am) and High contrast, refresh and Reload from disk buttons with a page reload after a daemon restart, and the commit hash next to the version in Settings. Details in sections 14 and 16.
 - **Commits**: `4691d3a0d6` `29cd0b5525` `d655783f6d` `7e3e85ee9c` `c94088ebb8` `a185d2a96f` `90bde13051`
 
@@ -3270,7 +3271,7 @@ One dispatcher (`src/kiss/agents/sorcar/agent_dispatch.py`, 3,422 lines, with th
   - `getSpendReport`: Spend (total, per day, per model from persisted `cost`/`tokens`, sub-agent rows excluded).
   - `getRecommendations` **NEW**: twenty suggested tasks from the last `/recommendations` run, a default 6-hourly cron job.
   - `getMachines` with `machineAction` **NEW** (section 15).
-  - `getHistory` **CHANGED** (11-22): Chats, in pages of `limit` rows (50 when none is named, 500 at most), which the reply echoes. A list that does not fill its panel asks for as many rows again as it holds, and a refresh asks in one request for as many rows as the list has asked for so far. When the daemon grants fewer than a refresh asked for (more than 500 rows, or a daemon that sends 50 whatever it is asked for), the page asks for the rest and builds the list once all are in, so the list is never emptied and filled again in sight. The "Loading..." row shows only at the end of a list the user scrolled through and in a list that has no task to show yet.
+  - `getHistory` **CHANGED** (11-22): Chats, in pages of `limit` rows (50 when none is named, 500 at most), which the reply echoes. A list that does not fill its panel asks for as many rows again as it holds, and a refresh asks in one request for as many rows as the list has asked for so far. **CHANGED** (11-23): once the user has scrolled the list, it asks for its next rows as soon as less than one panel's height of rows is left under the visible part (before: within 50 px of the list's end, 50 rows at a time); each request asks for as many rows as fill the panel, estimated from the room the rows already held take (50 at least, 500 at most from the daemon), and when a reply still leaves less than a panel's height under the view (rows hidden by a filter or folded into a chat or project), the next request follows at once until a full panel's height lies under the view or the list ends. When the daemon grants fewer than a refresh asked for (more than 500 rows, or a daemon that sends 50 whatever it is asked for), the page asks for the rest and builds the list once all are in, so the list is never emptied and filled again in sight. The "Loading..." row shows only at the end of a list the user scrolled through and in a list that has no task to show yet.
   - `getTaskUpdate` **CHANGED** 10-03, **CHANGED** 11-19, **CHANGED** 11-20:
     - **Task Progress** (formerly Task update) is the `/ask` agent's answer to "What has this task done so far, and what are its partial results?".
     - First asked when the task is 60 s old and again once the answer is 600 s old, sooner when it estimated the time left (below), or on Refresh; only a poll starts a run.
@@ -3710,7 +3711,7 @@ A daemon keeps a registry of other computers' daemons and drives them from its o
     - **New chat** (a chat-bubble icon with a `+` inside its top right, **CHANGED** 11-19; an untouched new chat is reused).
     - Inject.
     - The model picker.
-    - **...**, whose 4 entries are Voice trigger, Save chat, Attach files and iPhone Home Screen **CHANGED** (11-20, down from 11: Git Commit, Browser and Terminal are buttons of the strip under the right sidebar; Dark mode or Light mode, High contrast, Auto mode and Settings are buttons of the strip under the Chats list).
+    - **...**, whose 4 entries are Voice trigger, Save chat, Attach files and iPhone Home Screen **CHANGED** (11-20, down from 11: Git Commit, Browser and Terminal are buttons of the strip under the right sidebar; Dark mode or Light mode, High contrast and Auto mode are buttons of the strip under the Chats list; Settings, one of them until 11-23, is now the first button of the strip under the right sidebar).
   - **Menu actions**:
     - **Save chat** (Share chat until 10-19):
       - Writes the whole chat as one standalone page, `reports/chat-<title-slug>-<chatId>.html` in the working directory.
@@ -3744,7 +3745,7 @@ The left sidebar, a drawer on a phone:
   - While a filter narrows the list the button wears a dot and its name says how many are on.
   - The menu works from the keyboard: ArrowDown on the button opens it, the arrows move, Right opens a submenu on its first option, and Left or Escape closes it.
 - **Querying and filtering**:
-  - Search, tag, machine and working directory are answered by the daemon, 50 tasks a page with more loaded on scroll; the other filters act on the rows already loaded.
+  - Search, tag, machine and working directory are answered by the daemon, 50 tasks on the first page and on scroll a full panel's height of rows at a time (**CHANGED** 11-23; see `getHistory`); the other filters act on the rows already loaded.
   - A Work dir pick is a folder of this computer and lists this daemon's tasks only, so while one is picked the Machine row is reset to All and disabled.
 - **Sorting and date sections**:
   - Chats sort by completion time **CHANGED** (10-14) under sections in order:
@@ -3781,8 +3782,9 @@ The left sidebar, a drawer on a phone:
   - The chat header has a Project drop-down listing "Default" first **CHANGED** (11-21; was "No project") and then every project to put the chat on screen into a project or take it out (chats of this machine only; a chat on a registered remote machine is in no project).
   - On a page served by an older daemon process started before Projects existed and still running after an in-place upgrade of the page files, the page ignores an "Unknown command" answer to the four reads it issues on its own (`getProjects`, `getInputDraft`, `getTaskTags` and, since 11-22, the Skills subpanel's `getSkills`), showing every other error as before **NEW** (11-21). The Skills subpanel of such a page says that the server runs an older version and is to be restarted.
 - **Bottom strip** **NEW** (11-19):
-  - Sits below the scrolling Chats list with the daemon's OS username on the left and buttons on the right: Dark/Light mode, High/Low contrast, Auto mode, Decrease font size, Increase font size and Settings.
+  - Sits below the scrolling Chats list with the daemon's OS username on the left and buttons on the right: Dark/Light mode, High/Low contrast, Auto mode, Decrease font size and Increase font size.
   - **CHANGED** (11-20): the buttons are 32 px with 18 px icons (24 px and 16 px before) and are the only place for these actions, which left the `...` menu; Terminal and Browser moved to the strip under the right sidebar.
+  - **CHANGED** (11-23): Settings moved to the strip under the right sidebar.
 
 ### Right sidebar
 
@@ -3793,14 +3795,15 @@ The left sidebar, a drawer on a phone:
   - A row is a chat row's box: its corner and a fill under the pointer that ends 8px from the panel's edges, with a list's scrollbar at the panel's edge.
   - A recommendation keeps its border and a form's field its box, both now the Chats search field's.
 - **Bottom strip** **NEW** (11-20): below the sections, buttons of the same size as those under the Chats list:
+  - **Settings** opens the settings sheet; it is the strip's first button, directly left of Terminal (**CHANGED** 11-23; before, the last button of the strip under the Chats list). On a phone or in a narrow window it closes the task-info drawer first.
   - **Terminal** and **Browser** open their tabs on the chat header's machine (moved from the `...` menu and the Chats strip).
   - **Git Commit** (moved from the `...` menu) commits the folder and machine of the chat header (10-18) and reports "Staging changes…", "Generating commit message…" and "Committing…" on one line; the flow is section 12.
   - **Create pull request** pushes the chat's branch and opens its pull request; the outcome is a notification with a button that opens the pull request or the page that finishes it; the flow is section 12.
   - While a commit or a pull request is under way its button is disabled, pulses and says why.
 - **Folding behaviour**:
-  - The first page load after an install or update, once per browser, leaves only Recommendations open **NEW** (10-12).
-  - A click on the header of a folded section opens it and folds every other section, while a click on an open section folds only that one **CHANGED** (10-11; before, a click toggled its own section alone).
-  - A task that starts in the chat on screen opens Task Info and Task Progress and folds the other sections **NEW** (10-09); in the split layout it folds the content pane away too.
+  - The first page load after an install or update, once per browser, leaves only Recommendations open **NEW** (10-12), opening it again if it was folded.
+  - A click on the header of a folded section opens it and folds every other section, while a click on an open section folds only that one **CHANGED** (10-11; before, a click toggled its own section alone). Recommendations is apart from this since 11-23: only its own header folds or opens it, alone.
+  - A task that starts in the chat on screen opens Task Info and Task Progress and folds the other sections **NEW** (10-09), leaving Recommendations as it is; in the split layout it folds the content pane away too.
 - **Machine routing and polling**:
   - Schedule, Machines, Skills, Connectors, Spend and Recommendations show the machine picked in the chat header **NEW** (10-18) and are re-read every 30 s while the page is visible.
   - A re-read replaces the rows in place when its answer arrives. A change of the chat's machine or folder keeps the old rows on screen, out of reach, until the new answer replaces them; "Loading…" shows only in a view that has shown nothing yet **CHANGED** (11-20; before, a folder broadcast from another window or a machine binding that dropped out and came back blanked the views).
@@ -3853,9 +3856,9 @@ The left sidebar, a drawer on a phone:
   - **Spend**:
     - **Shows**: An all-time total, a heatmap with one cell per day (at least 98 days, weeks as columns) and one bar per model.
     - **Actions**: Arrows page through earlier weeks; refresh reloads the figures.
-  - **Recommendations** **NEW** (10-12), **CHANGED** (11-21):
-    - **Shows**: A single card and nothing else, pinned to the bottom of the sidebar over the strip of buttons, advancing every 30 s through the twenty tasks the last `/recommendations` run stored (`RECOMMENDATION_COUNT`; section 9), the next card sliding in from the right as the previous one slides out to the left, and waiting while the pointer or keyboard focus is on the card; the card is no taller than a third of the window (nor than an equal share of the sidebar), and a longer suggestion scrolls; it has no header or title, no position button, no refresh button and no status line, never folds, and is hidden while there is no suggestion (none stored yet, or the machine's answer is an error).
-    - **Actions**: A click on the card opens a new chat with the task in the composer, unsent.
+  - **Recommendations** **NEW** (10-12), **CHANGED** (11-21), **CHANGED** (11-23):
+    - **Shows**: A header with a collapse chevron at its top left ("Recommendations") and a card beneath it between `<` ("Previous recommendation") and `>` ("Next recommendation") buttons, pinned to the bottom of the sidebar over the strip of buttons. It advances every 30 s through the twenty tasks the last `/recommendations` run stored (`RECOMMENDATION_COUNT`; section 9), the next card sliding in from the right as the previous one slides out to the left, and waiting while the pointer or keyboard focus is on the card or either step button; while folded the rotation rests, and it starts over when unfolded. The step buttons stand in the panel's side padding (16 px wide on desktop, 32 px on a phone or tablet), as tall as the card, and are hidden while keeping their room when only one suggestion is present. The card is no taller than a third of the window (nor than an equal share of the sidebar), and a longer suggestion scrolls; it has no position button, no refresh button and no status line, and is hidden while there is no suggestion (none stored yet, or the machine's answer is an error).
+    - **Actions**: A click on the header folds the card and its step buttons away (leaving only the header over the strip) and a second click brings them back, with the fold state kept in the browser across reloads. Clicking `>` shows the next suggestion (wrapping from last to first) and slides left like the rotation; clicking `<` shows the previous suggestion (wrapping from first to last) and slides the other way (in from the left, out to the right); either click gives the card on show a full 30 s before rotation resumes. A click on the card opens a new chat with the task in the composer, unsent.
 
 ### Explorer, Source Control and content tabs
 
@@ -4491,7 +4494,8 @@ The left sidebar, a drawer on a phone:
   - The wheel's only packages are `src/kiss` and `projects/swedefend`, and the sdist ships those two trees plus `pyproject.toml`, `README.md`, `LICENSE`, `.gitignore` and a generated `PKG-INFO`.
 - **iPhone Home Screen icon** **NEW** (11-03):
   - `python -m kiss.scripts.webclip` (361 lines, 8 options) writes an iOS Web Clip profile (`.mobileconfig`, payload `com.apple.webClip.managed` with `FullScreen`) that opens the web app without browser controls.
-  - The profile is signed with a certificate issued by the daemon's local CA, so a phone that installed `/ca.crt` shows it as Verified.
+  - Its options: `--url` is the address to open (default: the daemon's tunnel URL, else its first LAN URL, from `remote-url.json`); `--label`, `--icon` and `--icon-background` replace the brand's name and icon (a PNG, JPEG or GIF is centre-cropped and flattened onto that colour as an opaque 400x400 PNG); `--organization` names the profile's organization; `--out` is the file written (default: the label plus `.mobileconfig`); `--tls-dir` is the signing CA's directory (default: `$KISS_HOME/tls`); `--unsigned` writes the plain XML profile.
+  - The profile is signed with a certificate issued by the daemon's local CA (`profile-signer.pem` and `profile-signer-key.pem`, kept beside the CA), so a phone that installed `/ca.crt` shows it as Verified.
   - The daemon serves the same profile for its tunnel URL, else its LAN URL, at `GET /webclip.mobileconfig` (the "..." menu's "iPhone Home Screen" item).
   - On an iPhone with rounded display corners that the page knows (the Face ID models from the iPhone X on, told apart by screen size and pixel ratio), held upright in the Home Screen web app, the composer keeps one 8px gap to the left, right and bottom edge of the screen and rounds its bottom corners by the display's corner radius less that gap so the two curves run parallel, keeping what is in the composer above the home indicator; nothing changes in a Safari tab, with the phone held sideways, or on a phone not in the list (`media/displayCorners.js`, inlined in the page head, and the `.display-corners` rules of `media/remote-codex.css`) **NEW** (11-21).
 - **Windows**:

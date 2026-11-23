@@ -1102,10 +1102,11 @@
   let historyOffset = 0;
   let historyLoading = false;
   // The rows of one page (HISTORY_PAGE, machines.py): what a first
-  // visit, a new view and a scroll to the list's end ask for.  A
-  // refresh asks for as many rows as the list has asked for so far,
-  // and a list that does not fill its panel for as many again as it
-  // holds (requestHistoryFromStart, loadMoreHistory).  A reply with
+  // visit and a new view ask for, and the least a list asks for.  A
+  // refresh asks for as many rows as the list has asked for so far, a
+  // list that does not fill its panel for as many again as it holds,
+  // and a scrolled list for as many as fill its panel
+  // (requestHistoryFromStart, historyRowsPerPanel).  A reply with
   // fewer rows than the daemon granted (the `limit` it names, a page
   // when it names none) is the last one.
   const HISTORY_PAGE = 50;
@@ -2466,12 +2467,12 @@
   }
 
   // The buttons of the two strips: the one under the Chats list
-  // (#sidebar-footer: appearance, text size, settings) and the one
-  // under the task-info panel (#meta-footer: terminal, browser, git
+  // (#sidebar-footer: appearance, text size) and the one under the
+  // task-info panel (#meta-footer: settings, terminal, browser, git
   // commit, pull request).  One that opens a tab or a sheet first
   // leaves the drawer its strip is in on a phone or a narrow window,
   // which would cover what it opens; a docked panel stays
-  // (closeSidebar, closeMetaDrawer).
+  // (closeMetaDrawer).
 
   /** Close the task-info drawer of a phone or a narrow window. */
   function closeMetaDrawer() {
@@ -2497,7 +2498,7 @@
    * @param {Event} e The click.
    */
   function onSettingsClick(e) {
-    closeSidebar();
+    closeMetaDrawer();
     openSettingsPanel(e.currentTarget);
   }
 
@@ -7345,6 +7346,7 @@
     '#settings-btn',
     '#theme-btn',
     '#autocommit-btn',
+    '.recommendation-step',
     '.chat-tab-close',
     '#input-clear-btn',
     '.search-clear-btn',
@@ -8338,12 +8340,14 @@
   // equal share as --meta-body-share on the panel.  Collapse state
   // and dragged heights persist in localStorage; every section starts
   // expanded, except on the first load after an install or an update
-  // (resetMetaSectionsForVersion folds all of them).  A section with
-  // no toggle is PINNED open (metaSectionPinned): nothing
-  // folds it, and its body is as tall as its content (main.css, at
-  // most an equal share) instead of taking a share, so the last body
-  // that SHARES fills the leftover height and a separator is a handle
-  // only between bodies that share.  Adding a
+  // (resetMetaSectionsForVersion folds the stack).  A
+  // .meta-section-pinned section (Recommendations) sits on the bottom
+  // strip (metaSectionPinned): its body is as tall as its content
+  // (main.css, at most an equal share) instead of taking a share, so
+  // the last body that SHARES fills the leftover height and a
+  // separator is a handle only between bodies that share; and only
+  // its own chevron folds it, whatever happens to the other sections
+  // (stackedMetaSections).  Adding a
   // panel is one more <section> plus its resizer in chat.html: nothing
   // else here names a particular section.
   const META_SECTION_COLLAPSED_KEY = 'kiss-meta-section-collapsed:';
@@ -8384,9 +8388,18 @@
     );
   }
 
-  /** Whether a section is pinned open: it has no toggle. */
+  /** Whether a section is pinned to the bottom strip (Recommendations). */
   function metaSectionPinned(section) {
-    return !section.querySelector('.meta-section-toggle');
+    return section.classList.contains('meta-section-pinned');
+  }
+
+  /**
+   * The sections that fold and open together (a click on a header, a
+   * task start): every one but a pinned one, which stays as its own
+   * chevron left it.
+   */
+  function stackedMetaSections() {
+    return metaSections().filter(section => !metaSectionPinned(section));
   }
 
   /** Whether a section's body takes a share of the panel: expanded, not pinned. */
@@ -8431,10 +8444,10 @@
   /**
    * Pin a shown pinned section (Recommendations) to the bottom strip:
    * the separator over it (the one after the shown section above it;
-   * its own body when no section shows above it) gets the
+   * its own header when no section shows above it) gets the
    * `meta-pin-start` class, whose auto top margin (main.css) takes the
    * free height the strip's own auto margin holds otherwise, so the
-   * empty room opens above the card, not under it.
+   * empty room opens above the section, not under it.
    *
    * @param {Element[]} sections The panel's sections.
    */
@@ -8446,7 +8459,7 @@
     if (!pinned) return;
     const above = shown[shown.indexOf(pinned) - 1];
     const start =
-      (above && metaSectionResizer(above)) || metaSectionBody(pinned);
+      (above && metaSectionResizer(above)) || pinned.firstElementChild;
     start.classList.add('meta-pin-start');
   }
 
@@ -8500,19 +8513,16 @@
   }
 
   /**
-   * setMetaSectionCollapsed without the layout, for a loop over every
-   * section that lays out once at its end.  A pinned section is never
-   * collapsed.
+   * setMetaSectionCollapsed without the layout, for a loop over
+   * several sections that lays out once at its end.
    */
   function markMetaSectionCollapsed(section, collapsed) {
+    section.classList.toggle('collapsed', collapsed);
     const toggle = section.querySelector('.meta-section-toggle');
-    // A pinned section stays open whatever is asked, and keeps no
-    // stored choice (an earlier version, in which it folded, left one).
-    const fold = collapsed && Boolean(toggle);
-    section.classList.toggle('collapsed', fold);
-    if (toggle) toggle.setAttribute('aria-expanded', fold ? 'false' : 'true');
+    if (toggle)
+      toggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
     try {
-      if (fold)
+      if (collapsed)
         localStorage.setItem(META_SECTION_COLLAPSED_KEY + section.id, '1');
       else localStorage.removeItem(META_SECTION_COLLAPSED_KEY + section.id);
     } catch (_e) {
@@ -8525,12 +8535,12 @@
 
   /**
    * A task just started: expand Task Info and Task update and collapse
-   * every other section that folds, so the panel shows the run's
+   * every other section of the stack, so the panel shows the run's
    * figures and its report.  The choice persists like a click on the
    * chevrons; the user folds or unfolds sections again as they like.
    */
   function showMetaSectionsForRun() {
-    for (const section of metaSections())
+    for (const section of stackedMetaSections())
       markMetaSectionCollapsed(
         section,
         !RUN_START_SECTIONS.includes(section.id),
@@ -8543,9 +8553,9 @@
 
   /**
    * The first page load after an install or an update: fold every
-   * section that folds, whatever collapse state this browser profile
-   * stored before, so the panel shows its pinned section
-   * (Recommendations) alone.  *version* is the
+   * section of the stack and open the pinned one, whatever collapse
+   * state this browser profile stored before, so the panel shows its
+   * pinned section (Recommendations) alone.  *version* is the
    * daemon's running version, the same stamp tips.js keys its
    * once-per-version guard on (the page embeds it in window.__TIPS__
    * and the daemon re-sends it with `tipsData`); the version is
@@ -8567,7 +8577,7 @@
     }
     if (seen === version) return;
     for (const section of metaSections())
-      markMetaSectionCollapsed(section, true);
+      markMetaSectionCollapsed(section, !metaSectionPinned(section));
     applyMetaSectionLayout();
     try {
       localStorage.setItem(META_SECTIONS_VERSION_KEY, version);
@@ -8709,19 +8719,21 @@
   }
 
   /**
-   * A click on a section's header: a collapsed section opens and every
-   * other section that folds does (the panel shows one section at a
-   * time, as much of it as fits, over its pinned one); an open section
-   * just folds.
+   * A click on a section's header: a collapsed section of the stack
+   * opens and every other one of the stack folds (the panel shows one
+   * section at a time, as much of it as fits, over its pinned one); an
+   * open section just folds.  The pinned section folds and opens
+   * alone.
    *
    * @param {Element} section The .meta-section element clicked.
    */
   function onMetaSectionToggle(section) {
-    if (!section.classList.contains('collapsed')) {
-      setMetaSectionCollapsed(section, true);
+    const collapsed = section.classList.contains('collapsed');
+    if (!collapsed || metaSectionPinned(section)) {
+      setMetaSectionCollapsed(section, !collapsed);
       return;
     }
-    for (const other of metaSections())
+    for (const other of stackedMetaSections())
       markMetaSectionCollapsed(other, other !== section);
     applyMetaSectionLayout();
   }
@@ -9987,8 +9999,17 @@
   const spendGraph = document.getElementById('meta-spend-graph');
   const spendStatus = document.getElementById('meta-spend-status');
   const spendRefreshBtn = document.getElementById('meta-spend-refresh');
+  const recommendationsSection = document.getElementById(
+    'meta-recommendations',
+  );
+  const recommendationsBody = document.getElementById(
+    'meta-recommendations-body',
+  );
   const recommendationsList = document.getElementById(
     'meta-recommendations-list',
+  );
+  const recommendationSteps = recommendationsBody.querySelectorAll(
+    '.recommendation-step',
   );
   const SIDEBAR_PANELS_POLL_MS = 30000;
   // Apps with a connect task launched from this page, on the machine
@@ -10203,8 +10224,9 @@
     holdPanel(appsList, appsStatusLine, 'Checking\u2026');
     holdSkillsPanel();
     holdPanel(spendGraph, spendStatus, 'Loading\u2026');
-    // The Recommendations card has no status line to say it waits.
-    if (recommendationsList.childElementCount) holdView(recommendationsList);
+    // The Recommendations card has no status line to say it waits; its
+    // step buttons wait with it.
+    if (recommendationsList.childElementCount) holdView(recommendationsBody);
     applyMetaSectionLayout();
   }
 
@@ -10267,14 +10289,21 @@
       'keydown',
       onRecommendationRowActivate,
     );
-    recommendationsList.addEventListener(
+    recommendationsBody.addEventListener(
       'pointerenter',
       onRecommendationsHover,
     );
-    recommendationsList.addEventListener(
+    recommendationsBody.addEventListener(
       'pointerleave',
       onRecommendationsHover,
     );
+    for (const btn of recommendationSteps)
+      btn.addEventListener('click', onRecommendationStepClick);
+    // The chevron folded or opened the section (the metasections
+    // block): a card that is back has its 30 seconds.
+    recommendationsSection
+      .querySelector('.meta-section-toggle')
+      .addEventListener('click', restartRecommendationsCycle);
     // The command of an example line (the first line of the Schedule
     // and Machines bodies) inserts itself into the message box, as an
     // id of the Task Info list does.
@@ -11784,17 +11813,20 @@
   // show is inert.  The next row comes on show every
   // RECOMMENDATIONS_CYCLE_MS, the first after the last, unless someone
   // is at the row on show: it slides in from the right as the one
-  // before slides out to the left (main.css).  Activating the row on
-  // show puts its task in a new chat's composer, where the user reads
-  // it before sending.  The card is all the subpanel shows: it has no
-  // header, and without a task (none suggested yet, or the machine's
+  // before slides out to the left (main.css).  The < and > buttons
+  // beside the list (.recommendation-step) step to the row before and
+  // after the one on show at any time.  Activating the row on show
+  // puts its task in a new chat's composer, where the user reads it
+  // before sending.  The chevron of the section's header folds the
+  // body away (the metasections block), and the rotation rests until
+  // it is back.  Without a task (none suggested yet, or the machine's
   // reply is an error) the section is hidden.
   const RECOMMENDATIONS_CYCLE_MS = 30000;
   /** The index of the row on show. */
   let recommendationShown = 0;
   /** The interval that shows the next row (0 with fewer than two rows). */
   let recommendationsTimer = 0;
-  /** Whether the pointer is over the list. */
+  /** Whether the pointer is over the body. */
   let recommendationsHovered = false;
 
   /**
@@ -11804,7 +11836,7 @@
    */
   function renderRecommendations(ev) {
     ensureSidebarPanelsPoll();
-    releaseView(recommendationsList);
+    releaseView(recommendationsBody);
     const tasks = (Array.isArray(ev.tasks) ? ev.tasks : [])
       .map(task => String(task || '').trim())
       .filter(Boolean);
@@ -11837,7 +11869,9 @@
       li.appendChild(sidebarPanelSpan('sidebar-panel-name', task));
       recommendationsList.appendChild(li);
     }
-    recommendationsList.parentNode.hidden = !tasks.length;
+    recommendationsSection.hidden = !tasks.length;
+    // A lone task has none before or after it.
+    for (const btn of recommendationSteps) btn.disabled = tasks.length < 2;
     if (tasks.length) showRecommendation(0);
     restartRecommendationsCycle();
   }
@@ -11859,13 +11893,21 @@
   }
 
   /**
-   * Show the task after the one on show, the first after the last:
-   * the new row slides in as the old one slides out.
+   * Show the task one *step* from the one on show: the next one (1,
+   * the first after the last) or the one before (-1, the last before
+   * the first).  The new row slides in as the old one slides out, to
+   * the left for a step forward and to the right for a step back
+   * (main.css, .recommendation-back).
+   *
+   * @param {number} step 1 or -1.
    */
-  function showNextRecommendation() {
+  function stepRecommendation(step) {
     const rows = recommendationsList.children;
     const leaving = rows[recommendationShown];
-    showRecommendation((recommendationShown + 1) % rows.length);
+    showRecommendation(
+      (recommendationShown + step + rows.length) % rows.length,
+    );
+    recommendationsList.classList.toggle('recommendation-back', step < 0);
     leaving.classList.add('recommendation-out');
     rows[recommendationShown].classList.add('recommendation-in');
   }
@@ -11883,17 +11925,31 @@
   }
 
   /**
-   * The rotation's tick: the next task, unless someone is at the one
-   * on show (the pointer is over the body, or the keyboard focus is in
-   * it), who is left to read or open it.
+   * The rotation's tick: the next task, unless the body is folded
+   * away (whoever folded it: the fold is read here, not kept in the
+   * timer) or someone is at the task on show (the pointer is over the
+   * body, or the keyboard focus is in it), who is left to read it,
+   * open it or step on.
    */
   function onRecommendationsCycle() {
     if (
+      recommendationsSection.classList.contains('collapsed') ||
       recommendationsHovered ||
-      recommendationsList.contains(document.activeElement)
+      recommendationsBody.contains(document.activeElement)
     )
       return;
-    showNextRecommendation();
+    stepRecommendation(1);
+  }
+
+  /**
+   * A click on the < or > button: the task before or after the one on
+   * show, which then has its 30 seconds.
+   *
+   * @param {Event} e The click.
+   */
+  function onRecommendationStepClick(e) {
+    stepRecommendation(Number(e.currentTarget.dataset.step));
+    restartRecommendationsCycle();
   }
 
   /**
@@ -25160,21 +25216,50 @@
   }
 
   /**
-   * Fetch the stream's next *limit* rows, with a "Loading..." row at
-   * the end of the list, unless a page is in flight or the last one
-   * ended the stream.  The list's scroll handler asks for a page near
-   * the list's bottom.  applyHistoryFilterVisibility asks when the
-   * rows the filters leave do not fill the list (a first page of
-   * mostly cron rows), as no scroll event would ever ask then: for as
-   * many rows again as the list holds, since a page that left the
-   * panel short is seldom followed by one that fills it.  It keeps
-   * the row out of sight while the list has tasks to show.
-   *
-   * @param {number=} limit How many rows are asked for.
+   * Whether the list is to ask for its next rows now: its rows end
+   * within its panel or, once the user has scrolled it, less than a
+   * panel's height of them is left under the view.  The rows asked for
+   * at a scroll thus come to a whole panel's, however many of them the
+   * list hides or folds into a chat: a page that brings fewer is
+   * followed by the next (applyHistoryFilterVisibility asks again).
    */
-  function loadMoreHistory(limit = HISTORY_PAGE) {
+  function historyWantsRows() {
+    const {scrollTop, clientHeight, scrollHeight} = historyList;
+    const below = scrollHeight - scrollTop - clientHeight;
+    return scrollTop > 0 ? below < clientHeight : below <= 0;
+  }
+
+  /**
+   * How many rows of the stream fill the list's panel, going by the
+   * room the rows held take: a page at least.  A list that does not
+   * fill its panel yet has no measure, and takes as many rows again as
+   * it holds, since a page that left the panel short is seldom
+   * followed by one that fills it.
+   */
+  function historyRowsPerPanel() {
+    const {clientHeight, scrollHeight} = historyList;
+    const rows =
+      scrollHeight > clientHeight
+        ? Math.ceil((historyOffset * clientHeight) / scrollHeight)
+        : historyOffset;
+    return Math.max(HISTORY_PAGE, rows);
+  }
+
+  /**
+   * Fetch the stream's next rows, as many as fill the list's panel,
+   * with a "Loading..." row at the end of the list, unless a page is
+   * in flight or the last one ended the stream.  The callers ask while
+   * the list wants rows (historyWantsRows): the list's scroll handler
+   * as the user scrolls, and applyHistoryFilterVisibility after every
+   * page and filter change, as no scroll event would ever ask in a
+   * list the filters left short (a first page of mostly cron rows).
+   * It keeps the row out of sight while the rows end within the panel
+   * and the list has tasks to show.
+   */
+  function loadMoreHistory() {
     if (historyLoading || !historyHasMore || historyCachePainting) return;
     historyLoading = true;
+    const limit = historyRowsPerPanel();
     const loader = mkEl('div', 'sidebar-loading');
     loader.id = 'history-loader';
     loader.textContent = 'Loading...';
@@ -31039,12 +31124,7 @@
       });
     }
     historyList.addEventListener('scroll', () => {
-      if (
-        historyList.scrollTop + historyList.clientHeight >=
-        historyList.scrollHeight - 50
-      ) {
-        loadMoreHistory();
-      }
+      if (historyWantsRows()) loadMoreHistory();
     });
     // A click on a file link of a transcript (a span promoteFileLink
     // stamped) opens the file.  Only those: the folder picker's rows
@@ -36430,13 +36510,15 @@
     });
     if (daySep) daySep.style.display = dayShown ? '' : 'none';
     // Hidden rows take no room: when what is left does not fill the
-    // list, more rows are asked for now (see loadMoreHistory).  A
-    // list that is not laid out (the panel closed) has no height and
-    // must not page the whole database in.
+    // list, or leaves a scrolled list less than a panel's height of
+    // rows under its view, more rows are asked for now (see
+    // historyWantsRows).  A list that is not laid out (the panel
+    // closed) has no height and must not page the whole database in.
+    const laidOut = historyList.clientHeight > 0;
+    // Read before the "Loading..." row joins the list's height.
     const short =
-      historyList.clientHeight > 0 &&
-      historyList.scrollHeight <= historyList.clientHeight;
-    if (short) loadMoreHistory(Math.max(HISTORY_PAGE, historyOffset));
+      laidOut && historyList.scrollHeight <= historyList.clientHeight;
+    if (laidOut && historyWantsRows()) loadMoreHistory();
     // The "Loading..." row is for a user who waits for rows: at the
     // end of a list scrolled through, or in a list with no task to
     // show.  Rows on their way to the room under the tasks on show need
@@ -36638,14 +36720,28 @@
   }
 
   /**
+   * The control that stands in for one of the task-info panel while
+   * the panel is out of reach (inert): the tab that brings back a
+   * docked panel slid off the window (setMetaPanelHidden), else the
+   * closed drawer's toggle or, on a phone, which hides the toggle, the
+   * footer button beside its place (setMetaDrawerOpen).
+   */
+  function metaPanelStandIn() {
+    if (document.body.classList.contains('meta-hidden'))
+      return document.getElementById('meta-drawer');
+    return isMobileRemote
+      ? document.getElementById('new-chat-btn')
+      : metaDrawerBtn;
+  }
+
+  /**
    * Hand focus back to the control that opened a sheet, when the close
    * would otherwise strand it (focus inside the closing sheet, or on
    * <body>).  Focus already somewhere else is left alone.  An opener
-   * in the Chats drawer that its click closed (Settings, on the
-   * drawer's strip) is off screen: the drawer's toggle gets the focus,
-   * or on a phone, which hides the toggle, the footer button beside
-   * its place, as for the task-info drawer (setMetaDrawerOpen).
-   * Anything else falls back to the composer.
+   * in the task-info panel (Settings, on its strip) is off screen once
+   * its click closed the drawer, or a content tab slid the docked
+   * panel away: the panel's stand-in gets the focus
+   * (metaPanelStandIn).  Anything else falls back to the composer.
    */
   function focusSheetOpener(panel, opener) {
     const active = document.activeElement;
@@ -36660,10 +36756,8 @@
       target = null;
     } else if (panel && panel.contains(target)) {
       target = null;
-    } else if (target.closest('#sidebar:not(.open)')) {
-      target = isMobileRemote
-        ? document.getElementById('new-chat-btn')
-        : menuBtn;
+    } else if (target.closest('#meta-panel[inert]')) {
+      target = metaPanelStandIn();
     }
     if (!target) target = inp;
     try {

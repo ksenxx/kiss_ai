@@ -7,10 +7,11 @@
 
 The Settings control used to be a gear pill that ``renderTabBar()``
 appended to ``#tab-bar`` (and once regressed into rendering as a tiny
-dot there), then an item of the input footer's "..." overflow menu.  It
-now is an icon button of the strip under the Chats list
-(``#sidebar-footer`` / ``#settings-btn`` in ``chat.html``); the menu
-(``#more-btn`` / ``#more-menu``) keeps mic, share, attach and the
+dot there), then an item of the input footer's "..." overflow menu, then
+a button of the strip under the Chats list.  It now is the first icon
+button of the strip under the task-info panel (``#meta-footer`` /
+``#settings-btn`` in ``chat.html``), left of the Terminal button; the
+menu (``#more-btn`` / ``#more-menu``) keeps mic, share, attach and the
 Home Screen item.
 
 Static tests pin the CSS wiring (the menu surface and item rules exist
@@ -145,7 +146,8 @@ _MEASURE_JS = r"""
     hasItem: true,
     hasSvg: true,
     menuOpen: menu.classList.contains('open'),
-    onStrip: !!item.closest('#sidebar-footer'),
+    onStrip: !!item.closest('#meta-footer'),
+    nextId: item.nextElementSibling ? item.nextElementSibling.id : '',
     inMenu: menu.contains(item),
     reachable: !!hit && item.contains(hit),
     itemWidth: itemRect.width,
@@ -159,12 +161,13 @@ _MEASURE_JS = r"""
 
 
 @pytest.mark.timeout(180)
-def test_live_settings_button_on_the_chats_strip(
+def test_live_settings_button_on_the_task_info_strip(
     tmp_path: Path,
 ) -> None:
-    """On the live remote page the Settings button of the Chats strip is
-    a real clickable icon button with a visible gear; clicking it opens
-    the settings panel and closes the "..." menu left open."""
+    """On the live remote page the Settings button of the task-info strip
+    is a real clickable icon button with a visible gear, left of the
+    Terminal button; clicking it opens the settings panel and closes the
+    "..." menu left open."""
     ready = threading.Event()
     done = threading.Event()
     state: dict[str, object] = {}
@@ -231,16 +234,14 @@ def test_live_settings_button_on_the_chats_strip(
         "settings gear SVG must render at ~16x16; got: " + repr(measured)
     )
     assert measured["onStrip"] and not measured["inMenu"], (
-        "Settings lives on the strip under the Chats list; " + repr(measured)
+        "Settings lives on the strip under the task-info panel; " + repr(measured)
     )
-    # The strip's icons stand close together, so a button is narrower
-    # than it is tall.
-    assert measured["itemHeight"] >= 28, (
-        "settings button must be a clickable icon button; got: "
+    assert measured["nextId"] == "terminal-btn", (
+        "Settings stands left of the Terminal button; " + repr(measured)
+    )
+    assert measured["itemWidth"] == measured["itemHeight"] >= 28, (
+        "settings button must be a square, clickable icon button; got: "
         + repr(measured)
-    )
-    assert measured["svgWidth"] <= measured["itemWidth"] < measured["itemHeight"], (
-        "settings button must hold its whole icon; got: " + repr(measured)
     )
     assert measured["reachable"], (
         "nothing may cover the settings button; " + repr(measured)

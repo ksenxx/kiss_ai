@@ -163,7 +163,12 @@ def test_ghost_suggestion_starts_where_the_typed_text_ends(tmp_path: Path) -> No
         with sync_playwright() as p:
             browser = p.chromium.launch(args=["--ignore-certificate-errors"])
             try:
-                desktop = _measure(browser, state["port"], 1280, _ONE_LINE)
+                # Wide enough for the line to stay one line in a wide system
+                # font too: DejaVu Sans, which a Linux machine draws
+                # ``system-ui`` with, sets it 669px wide, and the composer of
+                # a 1280px window has 662px for text beside its save and
+                # clear buttons.
+                desktop = _measure(browser, state["port"], 1600, _ONE_LINE)
                 phone = _measure(browser, state["port"], 390, _WRAPPED)
             finally:
                 browser.close()

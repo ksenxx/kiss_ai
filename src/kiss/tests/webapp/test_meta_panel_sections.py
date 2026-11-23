@@ -398,28 +398,44 @@ def _toggle(page: Page, section_id: str) -> None:
 
 
 # The ids of the sections that are open, what the pinned Recommendations
-# section shows, where its body lies between the separator over it
-# (the one after the section with the given id) and the bottom strip,
-# the free height over that separator, and how far that separator's
-# end is under its section's header (next to the same of the folded
-# Skills section, whose separator holds no free height).
+# section shows (its buttons by name, its text), where its header lies
+# under the separator over it (the one after the section with the
+# given id) and over the bottom strip, where its body (the cards) lies
+# between that header and the strip and between the two step buttons
+# (each as [how far it ends from the cards' side, its height]), the
+# free height over that separator, and how far that separator's end is
+# under its section's header (next to the same of the folded Skills
+# section, whose separator holds no free height).  A folded body has
+# no box: its figures are 0.
 _OPEN_SECTIONS_JS = """
 above => {
   const rect = sel => document.querySelector(sel).getBoundingClientRect();
   const panel = document.getElementById('meta-panel');
+  const section = document.getElementById('meta-recommendations');
   const body = rect('#meta-recommendations-list');
+  const header = rect('#meta-recommendations .meta-section-hdr');
   const separator = rect('#' + above + ' + .meta-section-resizer');
+  const [prev, next] = Array.from(
+    section.querySelectorAll('.recommendation-step'), s => s.getBoundingClientRect());
   const under = id => rect('#' + id + ' + .meta-section-resizer').bottom
     - rect('#' + id + ' .meta-section-hdr').bottom;
   return {
     open: Array.from(document.querySelectorAll('#meta-panel > .meta-section:not(.collapsed)'),
                      s => s.id),
-    toggles: document.querySelectorAll('#meta-recommendations .meta-section-toggle').length,
-    text: document.getElementById('meta-recommendations').innerText.trim(),
+    buttons: Array.from(section.querySelectorAll('button'),
+                        b => b.getAttribute('aria-label') || b.textContent),
+    text: section.innerText.trim().split(/\\s*\\n\\s*/),
     stored: localStorage.getItem('kiss-meta-section-collapsed:meta-recommendations'),
+    headerGap: header.top - separator.bottom,
+    headerOverStrip: rect('#meta-footer').top - header.bottom,
+    toggleLeft: rect('#meta-recommendations .meta-section-toggle').left - header.left,
+    column: [body.left - header.left, body.right - header.right],
+    steps: [[body.left - prev.right, prev.height], [next.left - body.right, next.height]],
+    stepsInPanel: prev.left >= panel.getBoundingClientRect().left
+      && next.right <= panel.getBoundingClientRect().right,
     bodyHeight: body.height,
     cardHeight: rect('.recommendation-row:not([inert])').height,
-    gapAbove: body.top - separator.bottom,
+    gapAbove: body.top - header.bottom,
     gapBelow: rect('#meta-footer').top - body.bottom,
     freeAbove: separator.top - rect('#' + above + ' .meta-section-hdr').bottom,
     separatorUnder: [under(above), under('meta-skills')],
@@ -439,13 +455,15 @@ def test_a_fresh_profile_shows_only_the_pinned_recommendations(
     browser: Browser, remote_url: str
 ) -> None:
     """The first load after an install or an update folds every section
-    that folds, whatever the profile stored: Recommendations, pinned open
-    (its card alone: no header, no toggle) and hidden until it has a
-    task, is alone with the folded headers, as tall as its card and
-    pinned to the bottom strip, the free height over it and over the
-    separator of the section shown above it.  It stays there when
-    another section opens, and the next load of the same version keeps
-    the user's choice."""
+    of the stack and opens Recommendations, whatever the profile
+    stored: Recommendations (its header, whose chevron at the top left
+    folds it, over its card between the < and > buttons; hidden until
+    it has a task) is alone with the folded headers, as tall as its
+    card and pinned to the bottom strip, the free height over it and
+    over the separator of the section shown above it.  It stays there
+    when another section opens; its chevron folds it down to its header
+    over the strip, and the next load of the same version keeps the
+    user's choices."""
     page = _open_page(
         browser, remote_url, 1200, global_sections=True, fresh_profile=True,
         storage={"kiss-meta-section-collapsed:meta-recommendations": "1"},
@@ -457,20 +475,30 @@ def test_a_fresh_profile_shows_only_the_pinned_recommendations(
         _deliver(page, _TWO_TASKS)
         fresh = page.evaluate(_OPEN_SECTIONS_JS, "meta-spend")
         assert fresh["open"] == ["meta-recommendations"], fresh
-        # The task on show is all the section's text: no title, no
-        # position counter, no status line.
-        assert [fresh["toggles"], fresh["text"], fresh["stored"]] == [
-            0, "Fix the parser", None,
+        # The section's name, on the chevron that folds it, and the task
+        # on show are all its text, and its controls are that chevron
+        # and the two step buttons: no position counter, no status line.
+        assert [fresh["buttons"], fresh["text"], fresh["stored"]] == [
+            ["Recommendations", "Previous recommendation", "Next recommendation"],
+            ["Recommendations", "Fix the parser"], None,
         ], fresh
-        assert page.locator("#meta-recommendations button").count() == 0
         assert page.evaluate("localStorage.getItem('kiss-meta-sections-version')")
-        # The body is its card, right under the separator (whose 2px
-        # margin and the card's own 4px part them) and 8px over the
-        # strip; the panel is empty from the folded headers down to
-        # the separator, and that counts as free height.
+        # The header is right under the separator (whose 2px margin
+        # parts them), its chevron at its left end: the top left of the
+        # section.  The body is its card, 4px under the header and 8px
+        # over the strip, in the panel's column: the step buttons stand
+        # in the panel's padding beside it, as tall as the card.  The
+        # panel is empty from the folded headers down to the separator,
+        # and that counts as free height.
+        assert [fresh["headerGap"], fresh["toggleLeft"]] == pytest.approx([2, 0], abs=0.5), fresh
+        assert fresh["column"] == pytest.approx([0, 0], abs=0.5), fresh
+        assert [*fresh["steps"][0], *fresh["steps"][1]] == pytest.approx(
+            [0, fresh["cardHeight"]] * 2, abs=0.5,
+        ), fresh
+        assert fresh["stepsInPanel"], fresh
         assert fresh["bodyHeight"] == pytest.approx(fresh["cardHeight"], abs=0.5), fresh
         assert 20 < fresh["cardHeight"] < 60, fresh
-        assert fresh["gapAbove"] == pytest.approx(6, abs=0.5), fresh
+        assert fresh["gapAbove"] == pytest.approx(4, abs=0.5), fresh
         assert fresh["gapBelow"] == pytest.approx(8, abs=0.5), fresh
         assert fresh["freeAbove"] > 300, fresh
         assert fresh["share"] == pytest.approx(fresh["bodyHeight"] + fresh["freeAbove"], abs=0.5)
@@ -479,7 +507,7 @@ def test_a_fresh_profile_shows_only_the_pinned_recommendations(
         page.evaluate("document.getElementById('meta-spend').hidden = true")
         _deliver(page, _TWO_TASKS)
         moved = page.evaluate(_OPEN_SECTIONS_JS, "meta-apps")
-        assert [moved["gapAbove"], moved["gapBelow"]] == pytest.approx([6, 8], abs=0.5), moved
+        assert [moved["headerGap"], moved["gapBelow"]] == pytest.approx([2, 8], abs=0.5), moved
         assert moved["freeAbove"] > 300, moved
         page.evaluate("document.getElementById('meta-spend').hidden = false")
         _deliver(page, _TWO_TASKS)
@@ -490,17 +518,38 @@ def test_a_fresh_profile_shows_only_the_pinned_recommendations(
         opened = page.evaluate(_OPEN_SECTIONS_JS, "meta-spend")
         assert opened["open"] == ["meta-section-info", "meta-recommendations"], opened
         assert opened["bodyHeight"] == pytest.approx(fresh["bodyHeight"], abs=0.5), opened
-        assert [opened["gapAbove"], opened["gapBelow"]] == pytest.approx([6, 8], abs=0.5), opened
+        assert [opened["headerGap"], opened["gapBelow"]] == pytest.approx([2, 8], abs=0.5), opened
         assert opened["freeAbove"] == pytest.approx(0, abs=0.5), opened
         assert opened["separatorUnder"] == pytest.approx([11, 11], abs=0.5), opened
         assert opened["infoHeight"] > 300 and not opened["panelOverflows"], opened
-        reload_retrying_network_change(page)
-        page.wait_for_selector("body.remote-chat", state="attached")
-        # ... and a reload of the same version keeps that.
-        assert page.evaluate(
+        # The chevron of Recommendations folds it alone: its header
+        # stays, as far over the strip's line (6px) as a folded header
+        # is over a separator's, and Task Info takes the card's room.
+        _toggle(page, "meta-recommendations")
+        folded = page.evaluate(_OPEN_SECTIONS_JS, "meta-spend")
+        assert [folded["open"], folded["stored"]] == [["meta-section-info"], "1"], folded
+        assert [folded["bodyHeight"], folded["text"]] == [0, ["Recommendations"]], folded
+        assert folded["headerOverStrip"] == pytest.approx(6, abs=0.5), folded
+        assert folded["infoHeight"] == pytest.approx(
+            opened["infoHeight"] + opened["bodyHeight"] + 6, abs=1,
+        ), folded
+        assert not folded["panelOverflows"], folded
+        open_ids = (
             "() => Array.from(document.querySelectorAll("
             "'#meta-panel > .meta-section:not(.collapsed)'), s => s.id)"
-        ) == ["meta-section-info", "meta-recommendations"]
+        )
+        reload_retrying_network_change(page)
+        page.wait_for_selector("body.remote-chat", state="attached")
+        # ... and a reload of the same version keeps both choices: the
+        # tasks that arrive find the section folded, until its chevron
+        # opens it again.
+        page.evaluate(_PREPARE_JS)
+        _deliver(page, _TWO_TASKS)
+        assert page.evaluate(open_ids) == ["meta-section-info"]
+        assert page.locator("#meta-recommendations-list").is_hidden()
+        _toggle(page, "meta-recommendations")
+        assert page.evaluate(open_ids) == ["meta-section-info", "meta-recommendations"]
+        assert page.locator(".recommendation-row:not([inert])").is_visible()
     finally:
         page.close()
 
@@ -529,7 +578,8 @@ _RECOMMENDATIONS_JS = """
     share: parseFloat(panel.style.getPropertyValue('--meta-body-share')),
     infoHeight: document.getElementById('meta-list').getBoundingClientRect().height,
     panelOverflows: panel.scrollHeight > panel.clientHeight,
-    focused: document.activeElement.dataset.task || document.activeElement.id,
+    focused: document.activeElement.dataset.task || document.activeElement.id
+      || document.activeElement.getAttribute('aria-label'),
     composer: document.getElementById('task-input').value,
   };
 }
@@ -573,12 +623,13 @@ def test_recommendations_show_one_card_at_a_time_and_the_next_every_30_seconds(
     """Every task's card fills the one cell of the Recommendations body,
     as tall as the longest task needs, and one of them shows: the next
     slides in every 30 seconds as the one before slides out, unless
-    the pointer is over the card or the keyboard focus in it.  The
-    body clips the sliding cards at its sides, and under
-    prefers-reduced-motion the slide takes no time.  A card off show
-    takes neither the focus nor a click.  A task taller than a third
-    of the window, or than an equal share of the panel when that is
-    less, is cut there and scrolls."""
+    the pointer is over the card or a step button, or the keyboard
+    focus on one of them.  The < button brings the task before back,
+    sliding the other way, and > the next.  The list clips the sliding
+    cards at its sides, and under prefers-reduced-motion the slide
+    takes no time.  A card off show takes neither the focus nor a
+    click.  A task taller than a third of the window, or than an equal
+    share of the panel when that is less, is cut there and scrolls."""
     short, long = "Fix the parser", ("Review the open pull requests and " * 6).strip()
     words, more = ("word " * 900).strip(), ("more " * 900).strip()
     page = _open_page(browser, remote_url, 1400, global_sections=True, fresh_profile=True)
@@ -622,8 +673,25 @@ def test_recommendations_show_one_card_at_a_time_and_the_next_every_30_seconds(
         assert leaving["visible"] and leaving["shift"] < -10, leaving
         assert coming["visible"] and coming["shift"] > 10, coming
         assert page.evaluate(_END_SLIDES_JS) == {"visible": [long], "moved": 0}
-        # The pointer over the card keeps it; so does the keyboard focus,
-        # which Tab takes out of the list, not to the card off show.
+        # The < button brings the task before back: it comes from the
+        # left as the one on show leaves to the right.  The > button
+        # steps forward the way the rotation does.
+        page.locator(".recommendation-step[data-step='-1']").click()
+        assert look()["shown"] == [short]
+        back, gone = page.evaluate(_HOLD_SLIDE_JS, short), page.evaluate(_HOLD_SLIDE_JS, long)
+        assert back["visible"] and back["shift"] < -10, back
+        assert gone["visible"] and gone["shift"] > 10, gone
+        assert page.evaluate(_END_SLIDES_JS) == {"visible": [short], "moved": 0}
+        page.locator(".recommendation-step[data-step='1']").click()
+        assert look()["shown"] == [long]
+        assert page.evaluate(_HOLD_SLIDE_JS, long)["shift"] > 10
+        assert page.evaluate(_END_SLIDES_JS) == {"visible": [long], "moved": 0}
+        # The pointer over the body (it is on the > button, then on the
+        # card) keeps the task; so does the keyboard focus, which Tab
+        # takes from the card to the > button, not to the card off
+        # show, and then out of the body, to the strip's Settings.
+        page.clock.run_for(30_000)
+        assert look()["shown"] == [long]
         page.mouse.move(*first["middle"])
         page.clock.run_for(30_000)
         assert look()["shown"] == [long]
@@ -633,7 +701,11 @@ def test_recommendations_show_one_card_at_a_time_and_the_next_every_30_seconds(
         held = look()
         assert [held["shown"], held["focused"]] == [[long], long], held
         page.keyboard.press("Tab")
-        assert look()["focused"] not in (short, long)
+        page.clock.run_for(30_000)
+        held = look()
+        assert [held["shown"], held["focused"]] == [[long], "Next recommendation"], held
+        page.keyboard.press("Tab")
+        assert look()["focused"] == "settings-btn"
         page.clock.run_for(30_000)
         assert look()["shown"] == [short]
         # Once the slide is over the long card lies over the short one,
@@ -1551,10 +1623,11 @@ def test_schedule_and_apps_sections_fill_scroll_and_launch_a_connect_task(
         _deliver(page, _TWO_TASKS)
         geo = page.evaluate(_GLOBAL_GEOMETRY_JS)
         # No running task: Task Info, Schedule, Machines, Skills,
-        # Connectors (the Apps section's header) and Spend are on
-        # screen under their headers; Recommendations, last, has none.
+        # Connectors (the Apps section's header), Spend and, last, the
+        # pinned Recommendations are on screen under their headers.
         assert geo["headers"] == [
             "Task Info", "Schedule", "Machines", "Skills", "Connectors", "Spend",
+            "Recommendations",
         ], geo
         # The six bodies that share are equally tall and Apps scrolls;
         # the pinned Recommendations body, last, is its card (cut at an

@@ -8,15 +8,15 @@
 // (#sidebar-footer) and the one under the task-info panel
 // (#meta-footer):
 // * the Chats strip holds the user's name, the three appearance
-//   buttons, the two text size buttons and Settings; the appearance
-//   buttons say what a press switches to and show their state;
-// * the task-info strip holds Terminal, Browser, Git commit and Create
-//   pull request;
-// * a button leaves the drawer that would cover what it opens (Settings
-//   the Chats drawer; Terminal, Browser and Git commit the task-info
-//   drawer), while a docked desktop panel stays; closing the Settings
-//   sheet hands the focus to the button that opened it, or to the
-//   drawer's way back when that button went off screen with its drawer;
+//   buttons and the two text size buttons; the appearance buttons say
+//   what a press switches to and show their state;
+// * the task-info strip holds Settings, Terminal, Browser, Git commit
+//   and Create pull request;
+// * a button leaves the task-info drawer that would cover what it
+//   opens (Settings, Terminal, Browser and Git commit), while a docked
+//   desktop panel stays; closing the Settings sheet hands the focus to
+//   the button that opened it, or to the panel's way back when that
+//   button went off screen with its panel;
 // * the two font buttons move the size of all text 1px at a time from
 //   10px to 20px, remembered in localStorage, and the Monaco editors
 //   and the terminals take it;
@@ -52,9 +52,9 @@ const CHATS_STRIP = [
   'theme-auto-btn',
   'font-step -1',
   'font-step 1',
-  'settings-btn',
 ];
 const INFO_STRIP = [
+  'settings-btn',
   'terminal-btn',
   'browser-btn',
   'autocommit-btn',
@@ -150,7 +150,7 @@ async function openFile(win, name) {
 }
 
 async function main() {
-  await test('the Chats strip: user, appearance, text size, Settings', async () => {
+  await test('the Chats strip: user, appearance, text size', async () => {
     const errors = [];
     const virtualConsole = new VirtualConsole();
     virtualConsole.on('jsdomError', err => errors.push(String(err)));
@@ -214,7 +214,6 @@ async function main() {
 
   await test('a button leaves the drawer that would cover what it opens', async () => {
     const {win, posted, xterm} = makeStripPage();
-    const sidebar = byId(win, 'sidebar');
     const info = byId(win, 'meta-panel');
     const sheet = byId(win, 'settings-panel');
     assert.deepStrictEqual(
@@ -264,39 +263,43 @@ async function main() {
     assert.ok(!info.classList.contains('open'), 'Git commit closed it');
     assert.strictEqual(ofType(posted, 'autocommitAction').length, 1);
 
-    // Settings leaves the Chats drawer.  Its button goes off screen
-    // with the drawer, so closing the sheet hands the focus to the
-    // drawer's toggle.
-    click(win, byId(win, 'menu-btn'));
-    assert.ok(sidebar.classList.contains('open'), 'the drawer is open');
+    // Settings leaves the drawer too.  Its button goes off screen with
+    // the drawer, so closing the sheet hands the focus to the drawer's
+    // toggle.
+    click(win, byId(win, 'meta-drawer-btn'));
+    assert.ok(info.classList.contains('open'), 'the drawer is open');
     const asked = ofType(posted, 'getConfig').length;
     press(win, byId(win, 'settings-btn'));
-    assert.ok(!sidebar.classList.contains('open'), 'Settings closed it');
+    assert.ok(!info.classList.contains('open'), 'Settings closed it');
     assert.ok(sheet.classList.contains('open'), 'the sheet is open');
     assert.strictEqual(ofType(posted, 'getConfig').length, asked + 1);
     press(win, byId(win, 'settings-panel-close'));
     assert.ok(!sheet.classList.contains('open'));
-    assert.strictEqual(win.document.activeElement, byId(win, 'menu-btn'));
+    assert.strictEqual(
+      win.document.activeElement,
+      byId(win, 'meta-drawer-btn'),
+    );
   });
 
   await test('a phone has no drawer toggle: the closed sheet focuses New chat', async () => {
     const {win} = makeStripPage({userAgent: PHONE_UA});
     assert.ok(win.document.body.classList.contains('remote-mobile'));
-    // A phone shows the Chats by a swipe; the toggle stands in for it
-    // here (the stylesheet hides it on a phone).
-    click(win, byId(win, 'menu-btn'));
+    // A phone shows the task info by a swipe; the toggle stands in for
+    // it here (the stylesheet hides it on a phone).
+    click(win, byId(win, 'meta-drawer-btn'));
+    assert.ok(byId(win, 'meta-panel').classList.contains('open'));
     press(win, byId(win, 'settings-btn'));
-    assert.ok(!byId(win, 'sidebar').classList.contains('open'));
+    assert.ok(!byId(win, 'meta-panel').classList.contains('open'));
     press(win, byId(win, 'settings-panel-close'));
     assert.strictEqual(win.document.activeElement, byId(win, 'new-chat-btn'));
   });
 
   await test('the docked desktop panels stay open', async () => {
     const {win, posted, xterm} = makeStripPage({desktop: true});
-    const sidebar = byId(win, 'sidebar');
+    const body = win.document.body;
     const info = byId(win, 'meta-panel');
     const settings = byId(win, 'settings-btn');
-    assert.ok(win.document.body.classList.contains('remote-desktop'));
+    assert.ok(body.classList.contains('remote-desktop'));
     const docked = info.classList.contains('open');
     click(win, byId(win, 'browser-btn'));
     assert.strictEqual(ofType(posted, 'browserOpen').length, 1);
@@ -307,12 +310,25 @@ async function main() {
     click(win, byId(win, 'autocommit-btn'));
     assert.strictEqual(ofType(posted, 'autocommitAction').length, 1);
     assert.strictEqual(info.classList.contains('open'), docked, 'unchanged');
+    // The content tabs slid the panel off the window: its tab brings
+    // it back, the strip and its Settings button with it.
+    assert.ok(body.classList.contains('meta-hidden'));
+    click(win, byId(win, 'meta-drawer'));
+    assert.ok(!body.classList.contains('meta-hidden'));
     press(win, settings);
     assert.ok(byId(win, 'settings-panel').classList.contains('open'));
-    assert.ok(sidebar.classList.contains('open'), 'still docked');
-    // Closing the sheet hands the focus back to the button that opened it.
+    assert.ok(!body.classList.contains('meta-hidden'), 'still on show');
+    assert.strictEqual(info.classList.contains('open'), docked, 'unchanged');
+    // Closing the sheet hands the focus back to the button that opened it,
     press(win, byId(win, 'settings-panel-close'));
     assert.strictEqual(win.document.activeElement, settings);
+    // or, when a file opening meanwhile slid the panel away, to the tab
+    // that brings the panel back.
+    press(win, settings);
+    await openFile(win, 'notes.txt');
+    assert.ok(body.classList.contains('meta-hidden'));
+    press(win, byId(win, 'settings-panel-close'));
+    assert.strictEqual(win.document.activeElement, byId(win, 'meta-drawer'));
   });
 
   await test('the font buttons resize all text from 10px to 20px', async () => {

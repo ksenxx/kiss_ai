@@ -70,9 +70,9 @@ function testTheOtherActionsLiveOnTheStrips(win) {
       'theme-btn',
       'contrast-btn',
       'theme-auto-btn',
-      'settings-btn',
     ],
     'meta-footer': [
+      'settings-btn',
       'terminal-btn',
       'browser-btn',
       'autocommit-btn',

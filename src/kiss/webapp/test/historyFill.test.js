@@ -17,7 +17,10 @@
 // as many rows as the list has asked for so far, those of a page on
 // its way included; a list that does not fill its panel asks for as
 // many rows again, and shows its "Loading..." row only while it has
-// no task to show; and the rows of a refresh that a daemon sends in
+// no task to show; a list the user scrolls asks, as soon as less than
+// a panel's height of rows is left under the view, for as many rows as
+// fill a panel, and again while a page leaves it short of that; and
+// the rows of a refresh that a daemon sends in
 // several pages (it grants fewer than were asked for: its most for a
 // page, or the 50 of an older one, whose reply names no `limit`) are
 // shown when the last is in, the list staying as it is until then.
@@ -110,12 +113,13 @@ function testARefreshAsksOnceForTheRowsThatFillThePanel() {
   assert.notStrictEqual(historyRows(win)[0], before[0]);
   assert.deepStrictEqual(asks(posted, from), [[0, 200], [0, 200]]);
   assert.strictEqual(loader(win), null);
-  // Scrolled to its end, the list asks for the next page, and says so.
+  // Scrolled to its end, the list asks for the rows that fill a panel
+  // (41 of its 200 rows show: 122 more bring 25), and says so.
   from = posted.length;
   const list = win.document.getElementById('history-list');
   list.scrollTop = 600;
   list.dispatchEvent(new win.Event('scroll'));
-  assert.deepStrictEqual(asks(posted, from), [[200, 50]]);
+  assert.deepStrictEqual(asks(posted, from), [[200, 122]]);
   assert.strictEqual(loader(win).textContent, 'Loading...');
   // The row stays there while the list is as full: with the cron
   // tasks on show too.
@@ -128,6 +132,62 @@ function testARefreshAsksOnceForTheRowsThatFillThePanel() {
   assert.deepStrictEqual(asks(posted, from).pop(), [0, 50]);
   win.close();
   console.log('  ok - a refresh asks once for the rows that fill the panel');
+}
+
+function testAScrollAsksForTheRowsThatFillAPanel() {
+  const {win, posted} = openPage();
+  const list = win.document.getElementById('history-list');
+  const scrollTo = top => {
+    list.scrollTop = top;
+    list.dispatchEvent(new win.Event('scroll'));
+  };
+  const cronRows = (offset, count) =>
+    Array.from({length: count}, (_, i) =>
+      session(10_000 - offset - i, 'task ' + (offset + i), {is_cron: true}),
+    );
+  answer(win, posted, stream(0, 50));
+  answer(win, posted, stream(50, 50));
+  answer(win, posted, stream(100, 100));
+  // 200 rows, 40 of them on show: 1600px of rows in a panel of 1000px.
+  // At its top the list has what fills the panel, and asks for nothing.
+  let from = posted.length;
+  scrollTo(0);
+  assert.deepStrictEqual(asks(posted, from), []);
+  // The first scroll, far from the end: 500px of rows are left under
+  // the view, less than a panel's, so the rows that fill one are asked
+  // for (one row in five shows: 125 bring 25), under a "Loading..." row.
+  scrollTo(100);
+  assert.deepStrictEqual(asks(posted, from), [[200, 125]]);
+  assert.strictEqual(loader(win).textContent, 'Loading...');
+  // Scrolling on while they are on their way asks for nothing more.
+  scrollTo(300);
+  assert.strictEqual(asks(posted, from).length, 1);
+  // They are in: 2600px of rows, 1300px of them under the view.
+  answer(win, posted, stream(200, 125));
+  assert.strictEqual(historyRows(win).length, 325);
+  assert.strictEqual(asks(posted, from).length, 1);
+  assert.strictEqual(loader(win), null);
+  // A page with no task to show (cron tasks only) leaves the view as
+  // short of a panel as it was: the next rows are asked for at once.
+  from = posted.length;
+  scrollTo(700);
+  assert.deepStrictEqual(asks(posted, from), [[325, 125]]);
+  answer(win, posted, cronRows(325, 125));
+  assert.deepStrictEqual(asks(posted, from), [[325, 125], [450, 174]]);
+  assert.strictEqual(loader(win).textContent, 'Loading...');
+  answer(win, posted, stream(450, 174));
+  assert.strictEqual(asks(posted, from).length, 2, 'a panel of rows is under the view');
+  assert.strictEqual(loader(win), null);
+  // The stream ends with a short page: no scroll asks after it.
+  from = posted.length;
+  scrollTo(2500);
+  assert.deepStrictEqual(asks(posted, from), [[624, 156]]);
+  answer(win, posted, stream(624, 10));
+  scrollTo(3000);
+  assert.strictEqual(asks(posted, from).length, 1);
+  assert.strictEqual(loader(win), null);
+  win.close();
+  console.log('  ok - a scroll asks for the rows that fill a panel');
 }
 
 function testARefreshKeepsTheRowsOfAPageOnItsWay() {
@@ -310,6 +370,7 @@ function testAnOlderDaemonsRefreshIsShownWhenItsLastPageIsIn() {
 }
 
 testARefreshAsksOnceForTheRowsThatFillThePanel();
+testAScrollAsksForTheRowsThatFillAPanel();
 testARefreshKeepsTheRowsOfAPageOnItsWay();
 testAListThatHoldsEveryRowAsksForMoreThanItHolds();
 testTheLoadingRowIsOnShowWhileNoTaskIs();

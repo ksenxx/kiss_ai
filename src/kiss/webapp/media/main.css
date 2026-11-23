@@ -2204,8 +2204,9 @@ body.remote-chat #dictate-btn.active.dictate-hearing { color: var(--red); animat
    after a section is the separator line between it and the next
    shown section; it drags the boundary while both sides are expanded
    (`static` otherwise: still a separator, no longer a handle).  A
-   section with no toggle is PINNED open (Recommendations, a bare card):
-   it never folds and takes no share (see its body's rule below). */
+   .meta-section-pinned section (Recommendations) sits on the bottom
+   strip and takes no share (see its body's rule below); only its own
+   chevron folds or opens it. */
 .meta-section { display: contents; }
 
 .meta-section[hidden],
@@ -2238,6 +2239,11 @@ body.remote-chat #dictate-btn.active.dictate-hearing { color: var(--red); animat
 .sidebar-hdr.meta-section-hdr { margin-bottom: var(--space-1); }
 
 .meta-section.collapsed > .meta-section-hdr { margin-bottom: 0; }
+
+/* A folded pinned section is its header over the bottom strip, whose
+   top border is the line under it: as far under the header as a
+   separator's line is under any other folded one. */
+.meta-section-pinned.collapsed > .meta-section-hdr { margin-bottom: var(--space-1-5); }
 
 .meta-section-toggle {
   display: flex;
@@ -2302,7 +2308,7 @@ body.remote-chat #dictate-btn.active.dictate-hearing { color: var(--red); animat
    pushes a section out of the panel.  It neither grows nor gives way
    (the bodies that share do both), and keeps no minimum: with nothing
    to show it takes no room. */
-.meta-section:not(:has(.meta-section-toggle)) > .meta-section-body {
+.meta-section-pinned > .meta-section-body {
   flex: 0 0 auto;
   min-height: 0;
   max-height: var(--meta-body-share, none);
@@ -2569,25 +2575,69 @@ body.meta-section-resizing {
   box-shadow: none;
 }
 
-/* The Recommendations body shows ONE task at a time (main.js puts the
-   next one on show every 30 seconds): every task's card fills the
-   same grid cell, so each is as tall as the longest task needs and
-   nothing moves when the card changes.  The body is no taller than a
-   third of the window (nor than an equal share, the cap of a pinned
-   body above), so a long task never makes the pinned card a tall
-   one: it scrolls up and down.  The cards sliding in and out are
-   clipped at the body's sides. */
+/* The Recommendations body is a row: the list of cards between the <
+   and > buttons that step through them.  The buttons stand in the
+   panel's padding, which the body spans, so the cards keep the
+   panel's column; the body keeps off the strip under its section,
+   the panel's last.  It does not scroll: its list does. */
+#meta-panel #meta-recommendations-body {
+  display: flex;
+  align-items: stretch;
+  margin-bottom: var(--space-2);
+  padding-inline: 0;
+  overflow: visible;
+}
+
+/* A step button fills the padding beside the cards, as tall as they
+   are.  With a single task there is nothing to step to (main.js
+   disables the buttons), and they go, keeping their room. */
+.recommendation-step {
+  flex: 0 0 var(--meta-pad-x);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-md);
+  background: none;
+  color: var(--dim);
+  font-size: var(--fs-lg);
+  cursor: pointer;
+  transition: color var(--dur-base);
+}
+
+.recommendation-step:hover,
+.recommendation-step:focus-visible { color: var(--fg); }
+
+.recommendation-step:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.recommendation-step:disabled { visibility: hidden; }
+
+/* The list shows ONE task at a time (main.js puts the next one on
+   show every 30 seconds, and the step buttons the one before or
+   after): every task's card fills the same grid cell, so each is as
+   tall as the longest task needs and nothing moves when the card
+   changes.  The list is no taller than a third of the window (nor
+   than an equal share, the cap of a pinned body above), so a long
+   task never makes the pinned card a tall one: it scrolls up and
+   down.  The cards sliding in and out are clipped at the list's
+   sides; --recommendation-from is the side a card slides in from
+   (the keyframes below). */
 #meta-recommendations-list {
+  --recommendation-from: 100%;
+
+  flex: 1 1 0px;
+  min-width: 0;
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   max-height: min(var(--meta-body-share, 33vh), 33vh);
   overflow-x: hidden;
 }
-
-/* The card is its section's only child (no header): it keeps off the
-   separator over it and off the strip under its section, the panel's
-   last. */
-#meta-recommendations-list:not(:empty) { margin-block: var(--space-1) var(--space-2); }
 
 /* A Recommendations row is a click target (it opens a new chat with
    the task in the composer); the whole sentence shows, wrapped, inside
@@ -2617,7 +2667,12 @@ body.meta-section-resizing {
 
 /* When the rotation moves on, the next card slides in from the right
    while the one it replaces slides out to the left and hides (at once
-   under prefers-reduced-motion: --dur-slide is 0 there). */
+   under prefers-reduced-motion: --dur-slide is 0 there).  A step back
+   (main.js marks the list .recommendation-back) runs the other way:
+   the card before comes in from the left as the one on show leaves
+   to the right. */
+#meta-recommendations-list.recommendation-back { --recommendation-from: -100%; }
+
 .recommendation-row.recommendation-in {
   animation: recommendation-slide-in var(--dur-slide) var(--ease);
 }
@@ -2629,20 +2684,25 @@ body.meta-section-resizing {
 }
 
 @keyframes recommendation-slide-in {
-  from { transform: translateX(100%); opacity: 0; }
+  from { transform: translateX(var(--recommendation-from)); opacity: 0; }
 }
 
 @keyframes recommendation-slide-out {
   from { visibility: visible; }
-  to { visibility: hidden; transform: translateX(-100%); opacity: 0; }
+
+  to {
+    visibility: hidden;
+    transform: translateX(calc(-1 * var(--recommendation-from)));
+    opacity: 0;
+  }
 }
 
-/* The Recommendations card is pinned to the bottom strip: main.js
-   (pinMetaSectionsToBottom) marks the separator over it, or its body
-   when no section shows above it, and that element's auto top margin
-   takes the free height the strip's would, so the empty room opens
-   above the card.  The separator's own top margin becomes a border
-   as high, which stays when there is no free height left. */
+/* The Recommendations section is pinned to the bottom strip: main.js
+   (pinMetaSectionsToBottom) marks the separator over it, or its
+   header when no section shows above it, and that element's auto top
+   margin takes the free height the strip's would, so the empty room
+   opens above the section.  The separator's own top margin becomes a
+   border as high, which stays when there is no free height left. */
 #meta-panel .meta-pin-start { margin-top: auto; }
 
 #meta-panel .meta-section-resizer.meta-pin-start {

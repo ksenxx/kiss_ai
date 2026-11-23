@@ -20,10 +20,11 @@
 //   expanded bodies above the boundary it moves; the resizer after a
 //   section is hidden while nothing shown follows it, `static` unless
 //   both sides are expanded, and a real handle otherwise;
-// * a section with no toggle is PINNED open (Recommendations, its
-//   card alone, hidden while it has no task): nothing folds it or
-//   stores a choice for it, its body takes no share, and no separator
-//   beside it is a handle;
+// * a .meta-section-pinned section (Recommendations, hidden while it
+//   has no task) sits on the bottom strip: its body takes no share, no
+//   separator beside it is a handle, and only its own chevron folds or
+//   opens it, whatever the other sections do (the first load of a
+//   version opens it);
 // * the Task update section joins the stack only once it has content
 //   (the `visible` class), and leaves it again when emptied;
 // * the resizer's keyboard, double-click and pointer paths, and a
@@ -159,9 +160,11 @@ function sections(win) {
   );
 }
 
-/** The sections that fold: every one but the pinned Recommendations. */
+/** The sections that fold together: every one but the pinned Recommendations. */
 function foldable(win) {
-  return sections(win).filter(toggleOf);
+  return sections(win).filter(
+    s => !s.classList.contains('meta-section-pinned'),
+  );
 }
 
 /** A section's state: its class and, where it has a toggle, what that says. */
@@ -305,13 +308,22 @@ async function main() {
       'Resize the Connectors section',
     );
     assert.strictEqual(toggleOf(spend).textContent, 'Spend');
-    // Recommendations is pinned open: it has no toggle, nor any other
-    // header, and is hidden until it has a task to show.
-    assert.strictEqual(toggleOf(recommendations), null);
+    // Recommendations is pinned to the strip: its chevron is the first
+    // control of the section (its top left) and names the body it
+    // folds.  The section is hidden until it has a task to show.
+    assert.strictEqual(toggleOf(recommendations).textContent, 'Recommendations');
     assert.strictEqual(
-      recommendations.querySelector('.meta-section-hdr'),
-      null,
+      recommendations.firstElementChild.firstElementChild,
+      toggleOf(recommendations),
     );
+    for (const control of [
+      toggleOf(recommendations),
+      resizerAfter(recommendations),
+    ])
+      assert.strictEqual(
+        control.getAttribute('aria-controls'),
+        'meta-recommendations-body',
+      );
     assert.strictEqual(recommendations.hidden, true, 'no task: hidden');
     assert.deepStrictEqual(foldable(win), sections(win).slice(0, -1));
     for (const section of sections(win)) assertExpanded(section, true);
@@ -343,7 +355,7 @@ async function main() {
     assert.strictEqual(bodyLayout(el(win, 'meta-skills-body')), 'equal');
     assert.strictEqual(bodyLayout(el(win, 'meta-apps-list')), 'equal');
     assert.strictEqual(bodyLayout(el(win, 'meta-spend-body')), 'equal');
-    assert.strictEqual(el(win, 'meta-recommendations-list').style.flex, '');
+    assert.strictEqual(el(win, 'meta-recommendations-body').style.flex, '');
     assertResizer(resizerAfter(info), 'handle');
     assertResizer(resizerAfter(update), 'hidden');
     assertResizer(resizerAfter(schedule), 'handle');
@@ -362,7 +374,7 @@ async function main() {
       tasks: ['Fix the parser'],
     });
     assert.strictEqual(recommendations.hidden, false);
-    assert.strictEqual(el(win, 'meta-recommendations-list').style.flex, '');
+    assert.strictEqual(el(win, 'meta-recommendations-body').style.flex, '');
     assertResizer(resizerAfter(spend), 'static');
     assertResizer(resizerAfter(recommendations), 'hidden');
     // Bodies are the scrolling parts.
@@ -402,7 +414,7 @@ async function main() {
       assertExpanded(section, false);
       assert.strictEqual(stored(section.id), '1', section.id + ' folded');
     }
-    // ... but for the pinned section, which keeps no choice.
+    // ... but for the pinned section, which only its own chevron folds.
     assertExpanded(pinned, true);
     assert.strictEqual(stored(pinned.id), null);
     // Nothing that shares follows Task Info: its separator is static.
@@ -422,6 +434,22 @@ async function main() {
     assert.strictEqual(stored('meta-apps'), '1');
     for (const section of foldable(win)) assertExpanded(section, false);
     assertExpanded(pinned, true);
+    // The pinned section's chevron folds it and opens it again, alone:
+    // the open Task Info stays open through both.
+    click(win, toggleOf(info));
+    click(win, toggleOf(pinned));
+    assertExpanded(pinned, false);
+    assert.strictEqual(stored(pinned.id), '1');
+    assertExpanded(info, true);
+    // Another section opening, or a task starting, leaves it folded.
+    click(win, toggleOf(apps));
+    startOnChat(win, 'a1');
+    assertExpanded(pinned, false);
+    assertExpanded(info, true);
+    click(win, toggleOf(pinned));
+    assertExpanded(pinned, true);
+    assert.strictEqual(stored(pinned.id), null);
+    assertExpanded(info, true);
   });
 
   await test('remote webapp: a stored collapse state and height are restored at boot', () => {
@@ -821,8 +849,8 @@ async function main() {
   }
 
   await test('remote webapp: the first load of a version folds every section but the pinned Recommendations, whatever was stored', () => {
-    // A profile from a version in which Recommendations still folded,
-    // and was folded; Task Info was open.
+    // A profile in which Recommendations was folded and Task Info
+    // open.
     let win = makePage({
       storage: {[CK + RECS]: '1', [CK + 'meta-info']: '1'},
       tips: {tips: [], show: false, version: '2026.10.1'},
@@ -849,7 +877,9 @@ async function main() {
     }).win;
     assertExpanded(el(win, 'meta-section-info'), true);
     assertExpanded(el(win, 'meta-spend'), false);
-    // An update: the fresh layout again, once.
+    // An update: the fresh layout again, once, a Recommendations the
+    // user folded meanwhile open again.
+    kept[CK + RECS] = '1';
     win = makePage({
       storage: kept,
       tips: {tips: [], show: false, version: '2026.10.2'},
@@ -859,9 +889,8 @@ async function main() {
   });
 
   await test('no version (an empty bootstrap version, or none at all): nothing is reset', () => {
-    // A folded Spend, and a fold of Recommendations that an earlier
-    // version (in which it folded) stored: Spend's is kept, the pinned
-    // section's is dropped at boot.
+    // A folded Spend and a folded Recommendations: both are the
+    // user's choices, and both are kept.
     const storage = {[CK + 'meta-spend']: '1', [CK + RECS]: '1'};
     let win = makePage({
       storage,
@@ -869,8 +898,8 @@ async function main() {
     }).win;
     assertExpanded(el(win, 'meta-spend'), false);
     assertExpanded(el(win, 'meta-section-info'), true);
-    assertExpanded(el(win, RECS), true);
-    assert.strictEqual(win.localStorage.getItem(CK + RECS), null);
+    assertExpanded(el(win, RECS), false);
+    assert.strictEqual(win.localStorage.getItem(CK + RECS), '1');
     assert.strictEqual(win.localStorage.getItem(VK), null);
     win = makePage({storage}).win;
     assertExpanded(el(win, 'meta-spend'), false);

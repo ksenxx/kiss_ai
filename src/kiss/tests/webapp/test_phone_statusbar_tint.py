@@ -147,16 +147,20 @@ def test_strip_is_on_top_at_the_sampled_point_whatever_is_on_screen(browser, har
         assert _top_band(page) == with_strip, "the strip paints over the page"
         page.evaluate(_SET_STRIP_VISIBILITY_JS, "")
 
-        # A sheet over its scrim, then the task-info drawer.
+        # The task-info drawer, then the sheet its Settings button opens,
+        # over its scrim.  The last swipe rests before it lifts: a tap
+        # follows it.
+        _swipe_left(cdp)
+        _wait_screen(page, "chat")
+        _swipe_left(cdp, rest=True)
+        _wait_screen(page, "info")
+        _sampled(page)
         page.tap("#settings-btn")
         _wait_screen(page, "chat")
         expect(page.locator("#settings-panel")).to_be_visible()
         _sampled(page)
         page.tap("#settings-panel-close")
         expect(page.locator("#settings-panel")).to_be_hidden()
-        _swipe_left(cdp)
-        _wait_screen(page, "info")
-        _sampled(page)
     finally:
         context.close()
 
@@ -165,7 +169,8 @@ def test_strip_and_theme_color_follow_the_palette(browser, harness):
     context, page, _frames = _open_phone_page(browser, harness, PHONE_UA)
     try:
         _dismiss_toasts(page)
-        _swipe_right(_touch_session(page))
+        # The swipe rests before it lifts: taps follow it.
+        _swipe_right(_touch_session(page), rest=True)
         _wait_screen(page, "chats")
         seen = [_sampled(page)]
         for button in ("#theme-btn", "#contrast-btn", "#theme-btn", "#contrast-btn"):

@@ -486,9 +486,10 @@ def test_drags_that_are_not_swipes_keep_the_screen(browser, harness):
         _swipe_right(cdp)
         _wait_screen(page, "chat")
         # A settings sheet over the page keeps the gesture.  Settings is
-        # on the Chats screen's strip and leaves that screen for its sheet.
-        _swipe_right(cdp)
-        _wait_screen(page, "chats")
+        # on the task-info screen's strip and leaves that screen for its
+        # sheet.
+        _swipe_left(cdp)
+        _wait_screen(page, "info")
         page.click("#settings-btn")
         page.wait_for_selector("#settings-panel.open", timeout=10000)
         _wait_screen(page, "chat")

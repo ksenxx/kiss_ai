@@ -308,6 +308,11 @@ body.remote-chat.remote-mobile .sidebar-tool-btn {
   height: 36px;
 }
 
+/* The < and > buttons beside the Recommendations card (main.css
+   .recommendation-step) are as wide as the panel's padding for a
+   mouse; a finger gets twice that, which the card gives up. */
+body.remote-chat.remote-mobile .recommendation-step { flex-basis: var(--space-8); }
+
 /* On a phone or tablet the two strips sit a fifth as far above the
    bottom edge of the screen as main.css puts them (its 8px plus the
    bottom safe-area inset). */

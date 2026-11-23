@@ -237,6 +237,27 @@ function recommendationsShown(win) {
     .filter(i => i >= 0);
 }
 
+/** The rows' slide classes, '' for a row that does not slide. */
+function recommendationSlides(win) {
+  return recommendationRows(win).map(r =>
+    r.classList.contains('recommendation-in')
+      ? 'in'
+      : r.classList.contains('recommendation-out')
+        ? 'out'
+        : '',
+  );
+}
+
+/**
+ * The running timers of the Recommendations rotation among the page's
+ * *intervals* (the panels' poll has the same 30 seconds).
+ */
+function recommendationCycles(intervals) {
+  return intervals.filter(
+    i => i.ms === 30000 && i.cb.name === 'onRecommendationsCycle',
+  );
+}
+
 const FIVE_TASKS = [
   'Fix the failing parser test in parser.py',
   'Add a changelog entry for /recommendations',
@@ -2540,7 +2561,7 @@ async function main() {
     const pinStarts = () =>
       Array.from(
         el(win, 'meta-panel').querySelectorAll('.meta-pin-start'),
-        e => e.id || e.previousElementSibling.id,
+        e => (e.previousElementSibling || e.parentElement).id,
       );
     const above = Array.from(
       el(win, 'meta-panel').querySelectorAll('.meta-section:not([hidden])'),
@@ -2549,21 +2570,34 @@ async function main() {
     el(win, 'meta-spend').hidden = true;
     send(win, {type: 'recommendations', tasks: FIVE_TASKS.slice(1)});
     eq(pinStarts(), ['meta-apps']);
-    // ... and the card's own body when no section shows above it.
+    // ... and the section's own header when no section shows above it.
     for (const s of above) s.hidden = true;
     send(win, {type: 'recommendations', tasks: FIVE_TASKS.slice(2)});
-    eq(pinStarts(), ['meta-recommendations-list']);
+    eq(pinStarts(), ['meta-recommendations']);
+    assert.ok(section.firstElementChild.classList.contains('meta-pin-start'));
     for (const s of above) s.hidden = false;
     send(win, {type: 'recommendations', tasks: FIVE_TASKS});
     eq(pinStarts(), ['meta-spend']);
-    // The card is all the section holds: no title, no position
+    // The section holds its header (the chevron that folds it) and its
+    // body, the cards between the two step buttons: no position
     // counter, no refresh button, no status line.
+    const body = el(win, 'meta-recommendations-body');
     eq(
-      Array.from(section.children, child => child.id),
-      ['meta-recommendations-list'],
+      Array.from(section.children, child => child.id || child.className),
+      ['sidebar-hdr meta-section-hdr', 'meta-recommendations-body'],
     );
-    assert.strictEqual(section.querySelector('button'), null);
-    assert.strictEqual(section.textContent.trim(), FIVE_TASKS.join(''));
+    eq(
+      Array.from(body.children, child => child.id || child.dataset.step),
+      ['-1', 'meta-recommendations-list', '1'],
+    );
+    eq(
+      Array.from(
+        section.querySelectorAll('button'),
+        btn => btn.getAttribute('aria-label') || btn.textContent,
+      ),
+      ['Recommendations', 'Previous recommendation', 'Next recommendation'],
+    );
+    assert.strictEqual(body.textContent.trim(), FIVE_TASKS.join(''));
     const rows = recommendationRows(win);
     eq(
       rows.map(r => r.textContent),
@@ -2656,21 +2690,9 @@ async function main() {
 
   await test('Recommendations: one task is on show; the next slides in every 30 seconds, the first after the last', () => {
     const {win, intervals, tick} = makePage();
-    const list = el(win, 'meta-recommendations-list');
-    // The panels' 30-second poll runs too: pick the rotation by its callback.
-    const cycles = () =>
-      intervals.filter(
-        i => i.ms === 30000 && i.cb.name === 'onRecommendationsCycle',
-      );
-    /** The rows' slide classes, '' for a row that does not slide. */
-    const slides = () =>
-      recommendationRows(win).map(r =>
-        r.classList.contains('recommendation-in')
-          ? 'in'
-          : r.classList.contains('recommendation-out')
-            ? 'out'
-            : '',
-      );
+    const body = el(win, 'meta-recommendations-body');
+    const cycles = () => recommendationCycles(intervals);
+    const slides = () => recommendationSlides(win);
     const reply = tasks =>
       send(win, {type: 'recommendations', generatedAt: NOW, tasks});
     // One task has no next: no timer.
@@ -2699,12 +2721,12 @@ async function main() {
     assert.ok(recommendationRows(win).every((row, i) => row === rows[i]));
     tick(10000);
     eq(recommendationsShown(win), [3]);
-    // The pointer over the task on show, or the keyboard focus in it,
-    // keeps it there.
-    list.dispatchEvent(new win.Event('pointerenter'));
+    // The pointer over the body (the task on show, a step button), or
+    // the keyboard focus in it, keeps the task there.
+    body.dispatchEvent(new win.Event('pointerenter'));
     tick(30000);
     eq(recommendationsShown(win), [3]);
-    list.dispatchEvent(new win.Event('pointerleave'));
+    body.dispatchEvent(new win.Event('pointerleave'));
     rows[3].focus();
     assert.strictEqual(win.document.activeElement, rows[3]);
     tick(30000);
@@ -2721,6 +2743,115 @@ async function main() {
     eq(recommendationsShown(win), [1]);
     reply([]);
     assert.strictEqual(cycles().length, 0);
+  });
+
+  await test('Recommendations: the < and > buttons step to the task before and after, which then has its 30 seconds', () => {
+    const {win, intervals, tick} = makePage();
+    const body = el(win, 'meta-recommendations-body');
+    const list = el(win, 'meta-recommendations-list');
+    const [prev, next] = body.querySelectorAll('.recommendation-step');
+    const slides = () => recommendationSlides(win);
+    const back = () => list.classList.contains('recommendation-back');
+    const reply = tasks =>
+      send(win, {type: 'recommendations', generatedAt: NOW, tasks});
+    // The buttons stand left and right of the cards and say what they do.
+    assert.deepStrictEqual(Array.from(body.children), [prev, list, next]);
+    for (const [btn, name] of [
+      [prev, 'Previous recommendation'],
+      [next, 'Next recommendation'],
+    ]) {
+      assert.strictEqual(btn.getAttribute('aria-label'), name);
+      assert.strictEqual(btn.dataset.tooltip, name);
+      assert.ok(btn.querySelector('svg'), name + ' shows an icon');
+    }
+    // A lone task has none before or after it.
+    reply(FIVE_TASKS.slice(0, 1));
+    assert.ok(prev.disabled && next.disabled);
+    reply(FIVE_TASKS);
+    assert.ok(!prev.disabled && !next.disabled);
+    // > shows the next task, which slides in as the rotation's does.
+    next.click();
+    eq(recommendationsShown(win), [1]);
+    eq(slides(), ['out', 'in', '', '', '']);
+    assert.ok(!back());
+    // < shows the one before, sliding the other way; before the first
+    // comes the last, and after the last the first.
+    prev.click();
+    eq(recommendationsShown(win), [0]);
+    eq(slides(), ['in', 'out', '', '', '']);
+    assert.ok(back());
+    prev.click();
+    eq(recommendationsShown(win), [4]);
+    eq(slides(), ['out', '', '', '', 'in']);
+    next.click();
+    eq(recommendationsShown(win), [0]);
+    eq(slides(), ['in', '', '', '', 'out']);
+    assert.ok(!back());
+    // The task a step shows has its 30 seconds: the rotation's time
+    // starts over, and its next step slides forward whatever the last
+    // one did.
+    tick(20000);
+    prev.click();
+    eq(recommendationsShown(win), [4]);
+    tick(29999);
+    eq(recommendationsShown(win), [4]);
+    tick(1);
+    eq(recommendationsShown(win), [0]);
+    assert.ok(!back());
+    assert.strictEqual(recommendationCycles(intervals).length, 1);
+    // A press with the mouse leaves no focus on the button, so the
+    // rotation goes on once the pointer is gone; a press from the
+    // keyboard keeps the focus, and the task, where they are.
+    next.focus();
+    next.dispatchEvent(
+      new win.MouseEvent('click', {bubbles: true, cancelable: true, detail: 1}),
+    );
+    eq(recommendationsShown(win), [1]);
+    assert.notStrictEqual(win.document.activeElement, next);
+    tick(30000);
+    eq(recommendationsShown(win), [2]);
+    next.focus();
+    next.click();
+    assert.strictEqual(win.document.activeElement, next);
+    tick(60000);
+    eq(recommendationsShown(win), [3]);
+  });
+
+  await test('Recommendations: the chevron folds the card away and the rotation rests until it is back', () => {
+    const {win, intervals, tick} = makePage();
+    const section = el(win, 'meta-recommendations');
+    const toggle = section.querySelector('.meta-section-toggle');
+    const cycles = () => recommendationCycles(intervals);
+    const reply = tasks =>
+      send(win, {type: 'recommendations', generatedAt: NOW, tasks});
+    reply(FIVE_TASKS);
+    tick(30000);
+    eq(recommendationsShown(win), [1]);
+    toggle.click();
+    assert.ok(section.classList.contains('collapsed'));
+    assert.strictEqual(toggle.getAttribute('aria-expanded'), 'false');
+    tick(90000);
+    eq(recommendationsShown(win), [1], 'the task on show waits');
+    // Other tasks arriving meanwhile wait at their first as well.
+    reply(FIVE_TASKS.slice(1));
+    tick(110000);
+    eq(recommendationsShown(win), [0]);
+    // Unfolded, the task on show has its 30 seconds.
+    toggle.click();
+    assert.ok(!section.classList.contains('collapsed'));
+    assert.strictEqual(toggle.getAttribute('aria-expanded'), 'true');
+    assert.strictEqual(cycles().length, 1, 'one timer at a time');
+    tick(29999);
+    eq(recommendationsShown(win), [0]);
+    tick(1);
+    eq(recommendationsShown(win), [1]);
+    // The first load of a new version opens the section its user had
+    // folded (the metasections block), and the rotation goes on.
+    toggle.click();
+    send(win, {type: 'tipsData', tips: [], show: false, version: '2026.11.23'});
+    assert.ok(!section.classList.contains('collapsed'));
+    tick(30000);
+    eq(recommendationsShown(win), [2]);
   });
 
   await test('Schedule and Machines: the example over the list inserts its command into the message box', () => {
@@ -2884,8 +3015,9 @@ async function main() {
       ),
     ).map(n => n.textContent);
 
-  // The six subpanels: each one's body and, for all but
-  // Recommendations (its card alone), the line under its header.
+  // The six subpanels: each one's view that is held (its list, the
+  // graph of Spend, the body of Recommendations with its step buttons)
+  // and, for all but Recommendations, the line under its header.
   const PANELS = [
     'schedule',
     'machines',
@@ -2894,8 +3026,12 @@ async function main() {
     'spend',
     'recommendations',
   ];
+  const HELD_VIEWS = {
+    spend: 'meta-spend-graph',
+    recommendations: 'meta-recommendations-body',
+  };
   const panelBody = (win, name) =>
-    el(win, name === 'spend' ? 'meta-spend-graph' : `meta-${name}-list`);
+    el(win, HELD_VIEWS[name] || `meta-${name}-list`);
 
   /**
    * Whether subpanel *name* keeps the rows of the machine the chat

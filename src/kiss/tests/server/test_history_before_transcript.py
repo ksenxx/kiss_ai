@@ -115,6 +115,16 @@ class TestHistoryBeforeTranscript(IsolatedAsyncioTestCase):
     async def test_a_page_that_asked_for_no_rows_gets_its_transcript_at_once(self) -> None:
         task_id, chat_id = persistence._add_task("a chat opened from a phone")
         persistence._save_task_result("done", task_id=task_id)
+        # A ``ready`` answers ``getModels`` first, and a process's first
+        # model list loads every SEA script to ask whether it is a model
+        # (``sea_commands.model_seas``: 1.8 s on Windows, most of the bound
+        # below).  Listed here, so the time is the transcript's alone.
+        await self._send({"type": "getModels"})
+        while True:
+            line = await self.reader.readline()
+            assert line, "local connection closed"
+            if json.loads(line.decode("utf-8")).get("type") == "models":
+                break
         started = time.monotonic()
         await self._send({
             "type": "ready", "tabId": "shown", "restoredTabs": [
