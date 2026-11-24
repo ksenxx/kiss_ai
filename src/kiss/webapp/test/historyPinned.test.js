@@ -9,8 +9,12 @@
 // `chat_is_pinned` on the rows), a press flips it at once and sends
 // `setPinned` / `setChatPinned` to the machine that holds the row, the
 // flip is shielded from the refetches that predate the write as a star
-// is, and the pinned tasks and chats are listed in a "Pinned" section
-// between "Running" and the days.
+// is, and what is pinned is listed itself in a "Pinned" section between
+// "Running" and the days: a pinned chat's panel, and the row of a
+// pinned task on its own (out of its chat's panel, unless that chat is
+// pinned too), so that the menu of every item listed there reads
+// "Unpin ...".  Unpinned, an item is back in its place.
+// historyProjects.test.js covers the chats and tasks of a project.
 //
 // jsdom has no Popover API, so the menu cannot be opened here;
 // tests/webapp/test_history_pinned.py pins through the open menu in a
@@ -179,44 +183,69 @@ function testThePinsShowWhatTheDaemonSays() {
 function testPinnedItemsAreListedBetweenRunningAndTheDays() {
   const {win, posted} = openPage();
   sendHistory(win, posted, [
-    // A pinned chat whose task runs stays under Running.
+    row('U', 'u1', 4, {is_running: true, endTs: 0}),
+    // A pinned chat is under Pinned, also while a task of it runs.
     row('R', 'r1', 5, {chat_is_pinned: true, is_running: true, endTs: 0}),
     row('P', 'p1', 9, {chat_is_pinned: true}),
     // Chat T is not pinned; one of its tasks is.
     row('T', 't2', 7),
     row('T', 't1', 8, {is_pinned: true}),
+    // The one task of chat S is pinned: nothing is left under its day.
+    row('S', 's1', 6, {is_pinned: true}),
+    // Chat Q is pinned, and so is one of its tasks, which stays in it.
+    row('Q', 'q2', 10, {chat_is_pinned: true}),
+    row('Q', 'q1', 11, {chat_is_pinned: true, is_pinned: true}),
     row('N', 'n1', 1),
     row('O', 'o1', 3 * DAY_MIN),
   ]);
-  // A chat is pinned when it is, or when one of its tasks is; the
-  // newest first, as everywhere.
+  // What is pinned is listed itself -- a chat's panel, a task's row --
+  // the newest first, as everywhere.
   assert.deepStrictEqual(shape(win), [
     'sep:Running',
-    'chat:R[r1]',
+    'chat:U[u1]',
     'sep:Pinned',
-    'chat:T[t2,t1]',
+    'chat:R[r1]',
+    'row:s1',
+    'row:t1',
     'chat:P[p1]',
+    'chat:Q[q2,q1]',
     'sep:day',
     'chat:N[n1]',
+    'chat:T[t2]',
     'sep:day',
     'chat:O[o1]',
   ]);
+  // So the menu of every item listed there unpins it.
+  assert.deepStrictEqual(
+    [
+      chatPin(win, 'R'),
+      taskPin(win, 's1'),
+      taskPin(win, 't1'),
+      chatPin(win, 'P'),
+      chatPin(win, 'Q'),
+    ].map(pin => pin.getAttribute('aria-label')),
+    ['Unpin chat', 'Unpin task', 'Unpin task', 'Unpin chat', 'Unpin chat'],
+  );
   const sep = win.document.querySelector(
     '#history-list > .history-day-sep[data-day="pinned"]',
   );
   assert.strictEqual(sep.textContent, 'Pinned');
   assert.strictEqual(sep.getAttribute('role'), 'separator');
-  // The flat list: a task is pinned when it is, or when its chat is.
+  // The flat list has no chat to unpin: the pinned tasks are listed.
   pressFilterOption(win, 'group', 'None');
   assert.deepStrictEqual(shape(win), [
     'sep:Running',
+    'row:u1',
     'row:r1',
     'sep:Pinned',
+    'row:s1',
     'row:t1',
-    'row:p1',
+    'row:q1',
     'sep:day',
     'row:n1',
     'row:t2',
+    'row:p1',
+    'row:q2',
     'sep:day',
     'row:o1',
   ]);
@@ -288,9 +317,36 @@ function testAPressPinsATask() {
   ]);
   assert.strictEqual(taskPin(win, 'a1').getAttribute('aria-label'), 'Unpin task');
   assert.deepStrictEqual(flags(win, ['a2', 'a1', 'b1']), ['0/0', '1/0', '0/0']);
-  // Its chat is listed under Pinned, whole, and is not pinned itself.
-  assert.deepStrictEqual(shape(win), A_PINNED);
+  // The task is listed under Pinned on its own: its chat, which is
+  // not pinned, keeps its other task under its day.
+  const a1Pinned = ['sep:Pinned', 'row:a1', 'sep:day', 'chat:B[b1]', 'chat:A[a2]'];
+  assert.deepStrictEqual(shape(win), a1Pinned);
   assert.strictEqual(chatPin(win, 'A').getAttribute('aria-pressed'), 'false');
+  // A refetch from before the write, whose changed rows rebuild the
+  // list, finds the pin shielded.
+  refresh(win, posted, page(false, {steps: 3}));
+  assert.deepStrictEqual(shape(win), a1Pinned);
+  // Its chat pinned too: the chat is listed with every task of it,
+  // and the task is on its own again once the chat's pin is lifted.
+  click(win, chatPin(win, 'A'));
+  assert.deepStrictEqual(shape(win), A_PINNED);
+  assert.strictEqual(taskPin(win, 'a1').getAttribute('aria-label'), 'Unpin task');
+  click(win, chatPin(win, 'A'));
+  assert.deepStrictEqual(shape(win), a1Pinned);
+  // The chat's other task pinned as well: nothing of the chat is left
+  // under its day.  Unpinned, each is back in the chat's panel.
+  click(win, taskPin(win, 'a2'));
+  assert.deepStrictEqual(shape(win), [
+    'sep:Pinned',
+    'row:a2',
+    'row:a1',
+    'sep:day',
+    'chat:B[b1]',
+  ]);
+  click(win, taskPin(win, 'a1'));
+  click(win, taskPin(win, 'a2'));
+  assert.deepStrictEqual(shape(win), PLAIN);
+  click(win, taskPin(win, 'a1'));
   // The flat list has the pinned task alone under Pinned.
   pressFilterOption(win, 'group', 'None');
   const flat = ['sep:Pinned', 'row:a1', 'sep:day', 'row:b1', 'row:a2'];
@@ -311,7 +367,7 @@ function testAPressPinsATask() {
     'row:a1',
   ]);
   assert.deepStrictEqual(
-    writes(posted).slice(1),
+    writes(posted).slice(-2),
     [
       {type: 'setPinned', taskId: 'b1', isPinned: true},
       {type: 'setPinned', taskId: 'a1', isPinned: false},
@@ -409,8 +465,24 @@ function testTheKeyboardStaysOnThePin() {
   click(win, pin);
   assert.deepStrictEqual(shape(win), A_PINNED);
   assert.strictEqual(win.document.activeElement, pin, 'the moved chat keeps the keyboard');
+  // So it does on the pin of a task whose row leaves its chat's panel.
+  // Back in the panel the row is out of sight while the panel is
+  // folded: the chat's header takes the keyboard.  In an unfolded
+  // panel the pin keeps it.
+  const rowPin = taskPin(win, 'b1');
+  const header = chatHeader(win, 'B');
+  for (const back of [header, rowPin]) {
+    for (const [listed, holder] of [['row:b1', rowPin], ['chat:B[b1]', back]]) {
+      rowPin.focus();
+      click(win, rowPin);
+      assert.ok(shape(win).includes(listed), listed);
+      assert.strictEqual(win.document.activeElement, holder, listed);
+    }
+    click(win, header.querySelector('.history-chat-collapse'));
+  }
   // Changed data rebuilds the list: the pin of the same chat's fresh
   // header takes the focus over, so Space/Enter keeps doing what it did.
+  pin.focus();
   refresh(win, posted, page(true, {steps: 2}));
   const rebuilt = chatPin(win, 'A');
   assert.notStrictEqual(rebuilt, pin, 'the list was rebuilt');

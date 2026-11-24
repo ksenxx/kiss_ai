@@ -8,11 +8,12 @@
 //
 // * the Bedrock settings subpanel (after Custom Models, collapsed on
 //   every open, holding the five AWS inputs that left API Keys);
-// * the appearance buttons of the strip under the Chats list, each
-//   named for what a press does: "Dark mode" / "Light mode",
-//   "High contrast" / "Low contrast" (low by default) and "Auto mode"
-//   (dark from 7 pm to 7 am on this device's clock, re-checked every
-//   minute), all persisted in localStorage;
+// * the appearance buttons of the strip under the Chats list: the
+//   theme button, named for what a press does ("Dark mode" / "Light
+//   mode"), and two on/off buttons that are pressed while on, "High
+//   contrast" (off by default) and "Auto mode" (dark from 7 pm to
+//   7 am on this device's clock, re-checked every minute; switching it
+//   off keeps the palette on screen), all persisted in localStorage;
 // * the settings sheet opening for the machine the chat header shows:
 //   its loads and saves carry `machine`, only that machine's forwarded
 //   replies fill the form, and closing the sheet repaints this
@@ -34,6 +35,11 @@ const {openSettings, typeInto, MACHINES} = require('./settings_helpers');
 /** What the icon button `id` says a press does (its tooltip). */
 function label(win, id) {
   return byId(win, id).dataset.tooltip;
+}
+
+/** 'true' while the on/off button `id` is on, 'false' while it is off. */
+function pressed(win, id) {
+  return byId(win, id).getAttribute('aria-pressed');
 }
 
 /** A page whose chat header lists `laptop` (this daemon) and `gpu-box`. */
@@ -152,6 +158,7 @@ function testThemeAndContrastItems() {
     'Dark mode',
   );
   assert.strictEqual(label(win, 'contrast-btn'), 'High contrast');
+  assert.strictEqual(pressed(win, 'contrast-btn'), 'false');
   assert.ok(
     !body.classList.contains('high-contrast'),
     'low contrast by default',
@@ -169,7 +176,11 @@ function testThemeAndContrastItems() {
   click(win, byId(win, 'contrast-btn'));
   assert.ok(body.classList.contains('high-contrast'), 'High contrast turns on');
   assert.ok(!body.classList.contains('light-theme'), 'the theme is unchanged');
-  assert.strictEqual(label(win, 'contrast-btn'), 'Low contrast');
+  // The button is pressed, under the one name it has.
+  const contrast = byId(win, 'contrast-btn');
+  assert.strictEqual(pressed(win, 'contrast-btn'), 'true');
+  assert.strictEqual(label(win, 'contrast-btn'), 'High contrast');
+  assert.strictEqual(contrast.getAttribute('aria-label'), 'High contrast');
   assert.strictEqual(win.localStorage.getItem('kissRemoteContrast'), 'high');
 
   click(win, byId(win, 'theme-btn'));
@@ -182,9 +193,9 @@ function testThemeAndContrastItems() {
   click(win, byId(win, 'contrast-btn'));
   assert.ok(
     !body.classList.contains('high-contrast'),
-    'Low contrast turns it off',
+    'a second press turns it off',
   );
-  assert.strictEqual(label(win, 'contrast-btn'), 'High contrast');
+  assert.strictEqual(pressed(win, 'contrast-btn'), 'false');
   assert.strictEqual(win.localStorage.getItem('kissRemoteContrast'), 'low');
   win.close();
 
@@ -197,9 +208,9 @@ function testThemeAndContrastItems() {
   });
   assert.ok(!again.win.document.body.classList.contains('light-theme'));
   assert.ok(again.win.document.body.classList.contains('high-contrast'));
-  assert.strictEqual(label(again.win, 'contrast-btn'), 'Low contrast');
+  assert.strictEqual(pressed(again.win, 'contrast-btn'), 'true');
   again.win.close();
-  console.log('  ok - Dark/Light mode and High/Low contrast flip and persist');
+  console.log('  ok - Dark/Light mode and High contrast flip and persist');
 }
 
 function testAutoMode() {
@@ -238,6 +249,28 @@ function testAutoMode() {
     'true',
     'auto stays on across the flips',
   );
+
+  // A second press switches auto mode off and keeps the palette on
+  // screen, whatever the hour by now; the check then does nothing.
+  hour.value = 8;
+  click(win, byId(win, 'theme-auto-btn'));
+  assert.strictEqual(pressed(win, 'theme-auto-btn'), 'false');
+  assert.strictEqual(win.localStorage.getItem('kissRemoteTheme'), 'dark');
+  check.fn();
+  assert.ok(!body.classList.contains('light-theme'), 'dark stays at 8 am');
+
+  // A third press switches it on again, at the palette of the hour and
+  // with a new minute check; off keeps a light page light as well.
+  click(win, byId(win, 'theme-auto-btn'));
+  assert.strictEqual(pressed(win, 'theme-auto-btn'), 'true');
+  assert.ok(body.classList.contains('light-theme'), 'light at 8 am');
+  assert.strictEqual(intervals.filter(i => i.ms === 60 * 1000).length, 2);
+  hour.value = 20;
+  click(win, byId(win, 'theme-auto-btn'));
+  assert.strictEqual(win.localStorage.getItem('kissRemoteTheme'), 'light');
+  assert.ok(body.classList.contains('light-theme'), 'light stays at 8 pm');
+  click(win, byId(win, 'theme-auto-btn'));
+  assert.ok(!body.classList.contains('light-theme'), 'dark at 8 pm');
 
   // Pinning a palette leaves auto mode; the check then does nothing.
   click(win, byId(win, 'theme-btn'));
@@ -553,7 +586,7 @@ function testAppearanceSurvivesRefusedStorage() {
     body.classList.contains('high-contrast'),
     'contrast switches without storage',
   );
-  assert.strictEqual(label(win, 'contrast-btn'), 'Low contrast');
+  assert.strictEqual(pressed(win, 'contrast-btn'), 'true');
   click(win, byId(win, 'theme-auto-btn'));
   assert.strictEqual(
     byId(win, 'theme-auto-btn').getAttribute('aria-pressed'),
@@ -564,6 +597,8 @@ function testAppearanceSurvivesRefusedStorage() {
     body.classList.contains('high-contrast'),
     'contrast survives the mode change',
   );
+  click(win, byId(win, 'theme-auto-btn'));
+  assert.strictEqual(pressed(win, 'theme-auto-btn'), 'false', 'and off again');
   win.close();
   console.log(
     '  ok - appearance choices work for the session when storage refuses writes',

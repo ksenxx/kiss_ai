@@ -8,8 +8,9 @@
 // (#sidebar-footer) and the one under the task-info panel
 // (#meta-footer):
 // * the Chats strip holds the user's name, the three appearance
-//   buttons and the two text size buttons; the appearance buttons say
-//   what a press switches to and show their state;
+//   buttons and the two text size buttons; the theme button says what
+//   a press switches to, the contrast and auto buttons are pressed
+//   while on;
 // * the task-info strip holds Settings, Terminal, Browser, Git commit
 //   and Create pull request;
 // * a button leaves the task-info drawer that would cover what it
@@ -188,15 +189,15 @@ async function main() {
       assert.notStrictEqual(theme.innerHTML, icon, 'sun and moon swap');
     }
 
-    // So does the contrast button.
-    assert.strictEqual(contrast.getAttribute('aria-label'), 'High contrast');
+    // The contrast button keeps its name and is pressed while on.
+    assert.strictEqual(contrast.getAttribute('aria-pressed'), 'false');
     click(win, contrast);
     assert.ok(body.classList.contains('high-contrast'));
-    assert.strictEqual(contrast.getAttribute('aria-label'), 'Low contrast');
-    assert.strictEqual(contrast.dataset.tooltip, 'Low contrast');
+    assert.strictEqual(contrast.getAttribute('aria-pressed'), 'true');
+    assert.strictEqual(contrast.dataset.tooltip, 'High contrast');
     click(win, contrast);
     assert.ok(!body.classList.contains('high-contrast'));
-    assert.strictEqual(contrast.dataset.tooltip, 'High contrast');
+    assert.strictEqual(contrast.getAttribute('aria-pressed'), 'false');
 
     // Auto mode is pressed while on; a manual pick leaves it.
     assert.strictEqual(auto.getAttribute('aria-pressed'), 'false');

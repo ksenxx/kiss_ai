@@ -7,10 +7,11 @@
 * The Chats strip's High contrast button paints the dark palette at
   full contrast on the dark theme (black canvas, white text, white
   primary button) and the light palette at full contrast on the light
-  theme (white canvas, black text, black primary button); Low contrast
-  restores the standard palettes (``#fafafa`` canvas with a ``#191919``
-  button, ``#0b0b0b`` canvas with an ``#efefef`` button).  The page
-  inlines the palette block once.
+  theme (white canvas, black text, black primary button); a second
+  press restores the standard palettes (``#fafafa`` canvas with a
+  ``#191919`` button, ``#0b0b0b`` canvas with an ``#efefef`` button),
+  and the button keeps its name.  The page inlines the palette block
+  once.
 * In each of the four palettes the coloured text of a tool card (a
   diff's changed words, the path link, the argument text and its faint
   label) and the faint label of a side-panel section keep 4.5:1
@@ -295,7 +296,7 @@ def test_live_contrast_toggle_and_phone_header(tmp_path: Path) -> None:
 
     # Light high contrast: white canvas, black text, black button.
     assert high_light["light"] and high_light["high"], high_light
-    assert high_light["contrastLabel"] == "Low contrast", high_light
+    assert high_light["contrastLabel"] == "High contrast", high_light
     assert high_light["bodyBg"] == "rgb(255, 255, 255)", high_light
     assert high_light["bodyFg"] == "rgb(0, 0, 0)", high_light
     assert high_light["send"] == "rgb(0, 0, 0)", high_light

@@ -2120,11 +2120,10 @@
 
   // The theme button names the palette it switches TO: "Dark mode"
   // with a moon while the page is light, "Light mode" with a sun while
-  // it is dark.  The contrast button does the same ("High contrast"
-  // while low, "Low contrast" while high), and the auto button is
-  // pressed while auto mode is on.  All three are icon buttons of the
-  // strip under the Chats list, so the name is the button's tooltip
-  // and its accessible name.
+  // it is dark.  The contrast and auto buttons are on/off buttons: each
+  // keeps its name and is pressed while high contrast, or auto mode,
+  // is on.  All three are icon buttons of the strip under the Chats
+  // list, so the name is the button's tooltip and its accessible name.
   function updateThemeButton(btn) {
     const light = document.body.classList.contains('light-theme');
     const label = light ? 'Dark mode' : 'Light mode';
@@ -2134,10 +2133,10 @@
   }
 
   function updateContrastButton(btn) {
-    const high = document.body.classList.contains('high-contrast');
-    const label = high ? 'Low contrast' : 'High contrast';
-    btn.dataset.tooltip = label;
-    btn.setAttribute('aria-label', label);
+    btn.setAttribute(
+      'aria-pressed',
+      document.body.classList.contains('high-contrast') ? 'true' : 'false',
+    );
   }
 
   function updateAutoThemeButton(btn) {
@@ -2300,10 +2299,18 @@
     applyRemoteTheme(appearance.theme);
   }
 
-  /** Follow the time of day: light from 7 am, dark from 7 pm. */
-  function enableAutoRemoteTheme() {
-    saveAppearance(REMOTE_THEME_KEY, 'auto');
-    applyRemoteTheme('auto');
+  /**
+   * Switch auto mode (light from 7 am, dark from 7 pm) on, or off when
+   * it is on: off pins the palette on screen, so the page looks the
+   * same.
+   */
+  function toggleAutoRemoteTheme() {
+    let next = 'auto';
+    if (appearance.theme === 'auto') {
+      next = document.body.classList.contains('light-theme') ? 'light' : 'dark';
+    }
+    saveAppearance(REMOTE_THEME_KEY, next);
+    applyRemoteTheme(next);
   }
 
   /**
@@ -30401,7 +30408,7 @@
     // panel.
     bindStripButton('theme-btn', toggleRemoteTheme);
     bindStripButton('contrast-btn', toggleRemoteContrast);
-    bindStripButton('theme-auto-btn', enableAutoRemoteTheme);
+    bindStripButton('theme-auto-btn', toggleAutoRemoteTheme);
     document
       .querySelectorAll('.sidebar-tool-btn[data-font-step]')
       .forEach(btn => btn.addEventListener('click', onFontStepClick));
@@ -33009,8 +33016,9 @@
   // the history row that carries each: the star and the pin of a task
   // (on its own row) and of a chat (`chat`: on every row of the chat,
   // set from the chat's header).  `data` is the data attribute of the
-  // row's element with the same value ('1' or '0'), which the
-  // Favorites filter and the Pinned section read; `cls` is the menu
+  // row's element with the same value ('1' or '0'): the Favorites
+  // filter reads the stars, and the Pinned section the task's own pin
+  // (historyItemPinned); `cls` is the menu
   // button's class, `on` the class it carries while the flag is set,
   // `icons` and `names` its icon and name while the flag is off and
   // on; `command` writes the flag, its value in `arg`.
@@ -33108,7 +33116,9 @@
    * the user asked.  The new value shows at once: on the button, on
    * every listed row that carries the flag (a chat's flag is on each
    * of the chat's rows on that machine) and in what the list derives
-   * from the rows (the Favorites filter, the Pinned section).  The
+   * from the rows (the Favorites filter, the Pinned section: a pin
+   * moves the task's row or the chat's panel there, and lifting it
+   * moves it back, placeHistoryPinnedItems).  The
    * command goes to the row's machine, whose history.db holds the
    * flag, and has no acknowledgement: the value is shielded from the
    * refetches that predate the write (mergePendingFlags), and the
@@ -33141,7 +33151,9 @@
     const ts = Date.now();
     historyPendingFlags.set(key, {value: next, ts});
     scheduleHistoryFlagExpiry(ts + 10000 + 100, ts);
-    paintHistoryFlagButton(btn, session);
+    // A chat's flag is its panel's too (syncHistoryGroupFlags).
+    if (flag.chat) syncHistoryGroupFlags(btn.closest('.history-chat-group'));
+    else paintHistoryFlagButton(btn, session);
     relabelHistoryDaySeparators();
     api[flag.command](
       historyWrite(
@@ -33698,6 +33710,21 @@
   }
 
   /**
+   * What stands on screen for *el*, a task's row or a control of a
+   * row: *el* itself, or the header of the folded panel -- its
+   * project's, else its chat's -- whose body holds it.
+   *
+   * @param {HTMLElement} el An element of the list.
+   * @returns {HTMLElement}
+   */
+  function historyShownFor(el) {
+    const body =
+      el.closest('.history-project.collapsed > .history-project-body') ||
+      el.closest('.history-chat-group.collapsed > .history-chat-body');
+    return body ? body.previousElementSibling : el;
+  }
+
+  /**
    * Paint the highlight on the row of the task the user is looking at
    * and on its chat's panel, and, when a scroll is pending (the task
    * changed, or the list was rebuilt — a rebuild lands at the top),
@@ -33730,16 +33757,7 @@
     // scroll waits for the filter change that shows it again.
     if (target.style.display === 'none') return;
     historyActiveScrollPending = false;
-    // A row out of sight in a folded panel: the header of its project,
-    // or of its chat, stands for it.
-    const folded =
-      target.closest('.history-project.collapsed') ||
-      target.closest('.history-chat-group.collapsed');
-    const el = folded
-      ? folded.querySelector(
-          ':scope > .history-chat-header, :scope > .history-project-header',
-        ) || folded
-      : target;
+    const el = historyShownFor(target);
     // jsdom has no scrollIntoView.
     if (typeof el.scrollIntoView === 'function') {
       el.scrollIntoView({block: 'center'});
@@ -34024,10 +34042,14 @@
    * every row with its chat's flags (`chat_is_favorite`,
    * `chat_is_pinned`, from `chat_summaries`); the header shows those
    * of the row it opens, whose machine's history.db holds them
-   * (historyGroupMachine).
+   * (historyGroupMachine).  The chat's pin is stamped on the panel
+   * (`data-pinned`), which the Pinned section lists by it
+   * (historyItemPinned): the panel is under Pinned exactly while its
+   * header's menu reads "Unpin chat".
    */
   function syncHistoryGroupFlags(group) {
     const session = group._kissLastLocalSession || group._kissLastSession;
+    group.dataset.pinned = session.chat_is_pinned ? '1' : '0';
     // Two short queries: the one selector for both,
     // `:scope > .history-chat-header [data-flag]`, takes jsdom about
     // 2 ms, for every row of every list a test suite builds.
@@ -34318,20 +34340,9 @@
     updateHistoryGroupHeader(group, session);
     applyHistoryGroupCollapsed(group);
     // Under its project's panel while the list groups by project,
-    // ahead of the panel's "Show more chats".  The panel ends with its
-    // body, and the body with that button when it has one
-    // (makeHistoryProjectPanel): no search through the chats listed.
-    const panel = historySessionPanel(session);
-    if (panel) {
-      const projectBody = panel.lastElementChild;
-      const last = projectBody.lastElementChild;
-      projectBody.insertBefore(
-        group,
-        last.classList.contains('history-project-more-rows') ? last : null,
-      );
-    } else {
-      historyList.appendChild(group);
-    }
+    // until a pin of the chat takes it out (placeHistoryPinnedItems).
+    group._kissPanel = historySessionPanel(session) || null;
+    putHistoryGroupHome(group);
     if (chatId) historyChatGroups.set(chatId, group);
     return group;
   }
@@ -34339,12 +34350,15 @@
   // ---- The project panels of the list ----------------------------------
   // projects-coverage:start
   // With Group by: Project, every project is a foldable panel (under
-  // Running while a task of one of its chats runs, under Pinned when it
-  // is pinned, else under Projects), and a chat that is in a project is
-  // listed in that panel instead of under its day.  A panel's chats
-  // come from pages of their own, the first asked for when the panel
-  // is unfolded and each later one by its "Show more chats": the
-  // list's stream is paged, so it may hold only some of them.
+  // Pinned when it is pinned, else under Running while a task of one
+  // of its chats runs, else under Projects), and a chat that is in a
+  // project is listed in that panel instead of under its day, unless
+  // the chat is pinned: a pinned chat, like a pinned task of a chat
+  // that is not, is listed under Pinned (placeHistoryPinnedItems).  A
+  // panel's chats come from pages of their own, the first asked for
+  // when the panel is unfolded and each later one by its "Show more
+  // chats": the list's stream is paged, so it may hold only some of
+  // them.
 
   /**
    * Whether the list groups its chats by project right now: Group by
@@ -34414,7 +34428,11 @@
    * panel, and the rows of the unfolded projects follow the stream's
    * first page.  A project's page holds the tasks that ran on this
    * machine, so a row of such a chat that another machine's history
-   * brought is shown from the stream, with its chat.
+   * brought is shown from the stream, with its chat.  So is a row
+   * that is pinned, or whose chat is: it is listed under Pinned
+   * whether its project's panel is unfolded or not
+   * (placeHistoryPinnedItems), unless the project's page holds the
+   * row already.
    *
    * @param {Array<Object>} sessions A page of the stream.
    * @param {number} offset The page's offset in the stream.
@@ -34422,11 +34440,20 @@
    */
   function historyShownRows(sessions, offset) {
     if (historyProjectPanels.size === 0) return sessions;
+    // The rows the pages of the unfolded projects list (below).
+    const paged = new Set();
+    for (const [id, page] of historyProjectPages) {
+      for (const s of page.rows) {
+        if (chatProjects.get(s.id) === id) paged.add(historySessionKey(s));
+      }
+    }
     const shown = [];
     for (const s of sessions) {
       const panel = historySessionPanel(s);
       if (panel) noteHistoryProjectRow(panel, s);
-      if (!panel || sessionMachine(s)) shown.push(s);
+      const pinned =
+        (s.is_pinned || s.chat_is_pinned) && !paged.has(historySessionKey(s));
+      if (!panel || sessionMachine(s) || pinned) shown.push(s);
     }
     if (offset !== 0) return shown;
     for (const [id, page] of historyProjectPages) {
@@ -34467,9 +34494,22 @@
     toggleHistoryProject(historyProjectIdOf(e.currentTarget));
   }
 
-  /** The "…" of a project's header: the project's settings. */
-  function onHistoryProjectMoreClick(e) {
-    e.stopPropagation();
+  /**
+   * "Pin project" / "Unpin project" of a project's menu.  The daemon
+   * stores the pin and lists the projects anew for every page
+   * (handleProjectsEvent), which moves the panel under Pinned or back
+   * under Projects.
+   */
+  function onHistoryProjectPinClick(e) {
+    const panel = e.currentTarget.closest('.history-project');
+    api.setProjectPinned({
+      projectId: panel.dataset.projectId,
+      pinned: !historyItemPinned(panel),
+    });
+  }
+
+  /** "Project settings" of a project's menu. */
+  function onHistoryProjectSettingsClick(e) {
     openProjectSettings(historyProjectIdOf(e.currentTarget));
     closeSidebar();
   }
@@ -34514,23 +34554,29 @@
     return historyFilter('hf-workdir') ? 'No matching chats' : 'No chats yet';
   }
 
+  // The gear of "Project settings" in a project's menu: the shapes of
+  // the sidebar's Settings button (chat.html).
+  const HISTORY_PROJECT_SETTINGS_SVG =
+    '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>';
+
   /**
    * Build the panel of *project*, folded or unfolded as the user left
    * it: a header laid out as a chat's (the Projects icon, the name,
-   * the fold button and "…", which opens the project's settings) over
-   * the body its chats are listed in, which ends with "Show more
-   * chats" while the daemon may hold more of them.  A click on the
-   * header starts a new chat in the project.
+   * the fold button and "…", whose menu pins or unpins the project
+   * and opens its settings) over the body its chats are listed in,
+   * which ends with "Show more chats" while the daemon may hold more
+   * of them.  A click on the header starts a new chat in the project.
    *
    * @param {Object} project A project of the daemon's list.
    * @returns {HTMLElement} The panel.
    */
   function makeHistoryProjectPanel(project) {
+    const pinned = !!project.isPinned;
     const panel = document.createElement('div');
     panel.className = 'history-project';
     panel.setAttribute('role', 'group');
     panel.dataset.projectId = project.id;
-    panel.dataset.pinned = project.isPinned ? '1' : '0';
+    panel.dataset.pinned = pinned ? '1' : '0';
     // Listed by its newest row (noteHistoryProjectRow); a project
     // without one by its own age.
     panel.dataset.ts = String(project.createdAt);
@@ -34557,14 +34603,30 @@
         onHistoryProjectFoldClick,
       ),
     );
-    const more = historyProjectButton(
-      'sidebar-item-more history-project-more',
-      SIDEBAR_MORE_SVG,
-      onHistoryProjectMoreClick,
+    // The menu of "…", as a chat's (makeSidebarRowMenu): the pin, which
+    // reads what a press does, then the settings.
+    const actions = document.createElement('div');
+    actions.className = 'sidebar-item-actions history-project-actions';
+    const pin = historyProjectButton(
+      'sidebar-item-pin history-project-pin',
+      HISTORY_PIN_ICONS[Number(pinned)],
+      onHistoryProjectPinClick,
     );
-    more.dataset.tooltip = 'Project settings';
-    more.setAttribute('aria-label', 'Settings of project ' + project.name);
+    pin.classList.toggle('pinned', pinned);
+    pin.setAttribute('aria-label', pinned ? 'Unpin project' : 'Pin project');
+    pin.setAttribute('aria-pressed', String(pinned));
+    actions.appendChild(pin);
+    const settings = historyProjectButton(
+      'sidebar-item-edit history-project-settings',
+      HISTORY_PROJECT_SETTINGS_SVG,
+      onHistoryProjectSettingsClick,
+    );
+    settings.setAttribute('aria-label', 'Project settings');
+    actions.appendChild(settings);
+    const more = makeSidebarRowMenu(actions, 'Project actions');
+    more.classList.add('history-project-more');
     header.appendChild(more);
+    header.appendChild(actions);
     panel.appendChild(header);
     const body = document.createElement('div');
     body.className = 'history-project-body';
@@ -34844,26 +34906,119 @@
     );
   }
 
-  // A task row that is pinned on its own or through its chat.
-  const HISTORY_PINNED_ROW =
-    '.sidebar-item[data-pinned="1"], .sidebar-item[data-chat-pinned="1"]';
-
+  // ---- What is pinned, and where it is listed --------------------------
+  // projects-coverage:start
   /**
-   * Whether a flat row or an entire chat belongs in the Pinned
-   * section: a row that is pinned (HISTORY_PINNED_ROW), a chat with
-   * such a row.
+   * Whether *item* -- a task's row, a chat's panel or a project's --
+   * is pinned: the item itself (its `data-pinned`, which its own menu
+   * shows as "Unpin ..."), never through what it holds or what holds
+   * it.  A chat with a pinned task is not a pinned chat, and the task
+   * of a pinned chat is not a pinned task.
+   *
+   * @param {HTMLElement} item A row, a chat panel or a project panel.
+   * @returns {boolean}
    */
   function historyItemPinned(item) {
-    // A project is pinned on its own (the pin of its settings panel),
-    // not through a pinned chat or task listed in it.
-    if (item.classList.contains('history-project')) {
-      return item.dataset.pinned === '1';
+    return item.dataset.pinned === '1';
+  }
+
+  /**
+   * List chat panel *group* in its place: under the panel of its
+   * project, ahead of that panel's "Show more chats", else in the list
+   * itself.  A project's panel ends with its body, and the body with
+   * that button when it has one (makeHistoryProjectPanel): no search
+   * through the chats listed.
+   *
+   * @param {HTMLElement} group A chat panel of historyGroupFor.
+   */
+  function putHistoryGroupHome(group) {
+    if (!group._kissPanel) {
+      historyList.appendChild(group);
+      return;
     }
-    return (
-      item.matches(HISTORY_PINNED_ROW) ||
-      !!item.querySelector(HISTORY_PINNED_ROW)
+    const projectBody = group._kissPanel.lastElementChild;
+    const last = projectBody.lastElementChild;
+    projectBody.insertBefore(
+      group,
+      last.classList.contains('history-project-more-rows') ? last : null,
     );
   }
+
+  /**
+   * List task row *row* in its place: in the body of its chat's panel,
+   * the newest first, the rows of one instant (or of none) in the
+   * order they were built in.
+   *
+   * @param {HTMLElement} row A task row of a list grouped by chat.
+   */
+  function putHistoryRowHome(row) {
+    // The chat panel's body, where its task rows live.
+    const body = row._kissGroup.querySelector(':scope > .history-chat-body');
+    const before = Array.from(body.children).find(other => {
+      const order = historyNewestFirst(row, other);
+      return order < 0 || (!(order > 0) && row._kissIndex < other._kissIndex);
+    });
+    body.insertBefore(row, before || null);
+  }
+
+  /**
+   * List what is pinned on its own, and everything else in its place,
+   * in a list grouped by chat.  The Pinned section lists the items of
+   * the list itself that are pinned (historyItemSection), so a pinned
+   * chat's panel is taken out of its project's into the list, and a
+   * pinned task's row out of its chat's panel -- unless that chat is
+   * pinned, and so there with every task of it.  An item whose pin was
+   * lifted goes back: the chat's panel under its project's, the row
+   * into its chat's panel.
+   */
+  function placeHistoryPinnedItems() {
+    historyChatGroups.forEach(group => {
+      // A chat in no project is an item of the list already.
+      if (!group._kissPanel) return;
+      const out = historyItemPinned(group);
+      if (out === (group.parentNode === historyList)) return;
+      if (out) historyList.appendChild(group);
+      else putHistoryGroupHome(group);
+    });
+    historyRenderedRows.forEach(row => {
+      const group = row._kissGroup;
+      // A row of the flat list is an item of the list already.
+      if (!group) return;
+      const out = historyItemPinned(row) && !historyItemPinned(group);
+      if (out === (row.parentNode === historyList)) return;
+      if (out) historyList.appendChild(row);
+      else putHistoryRowHome(row);
+    });
+  }
+
+  /**
+   * Write, in every project's panel, what the panel reads while it is
+   * unfolded and lists no task (main.css shows the note then):
+   * "Listed under Pinned" while a pinned chat of the project, or a
+   * pinned task of one, is shown there (placeHistoryPinnedItems);
+   * nothing while the filters hide every one of them, as a project
+   * whose chats the filters hide reads nothing; else what a project
+   * without a chat reads (historyProjectNoteText).
+   */
+  function paintHistoryProjectNotes() {
+    // A project's panel -> whether an item taken out of it is shown.
+    const takenOut = new Map();
+    for (const item of historyList.children) {
+      const panel = (item._kissGroup || item)._kissPanel;
+      if (!panel) continue;
+      takenOut.set(panel, takenOut.get(panel) || item.style.display !== 'none');
+    }
+    historyProjectPanels.forEach((panel, id) => {
+      const page = historyProjectPages.get(id);
+      const shown = takenOut.get(panel);
+      let text = historyProjectNoteText(page);
+      if (page && shown !== undefined) {
+        text = shown ? 'Listed under Pinned' : '';
+      }
+      panel.querySelector('.history-project-note').textContent = text;
+    });
+  }
+  // projects-coverage:end
 
   // The sections ahead of the days, in the order they are listed, as
   // [the separator's `data-day`, its text].
@@ -34874,14 +35029,15 @@
   ];
 
   /**
-   * Where a flat row, an entire chat or a project's panel is listed,
-   * as an index in HISTORY_SECTIONS: under Running while a task of it
-   * runs, else under Pinned when it is pinned, else -- a project --
-   * under Projects, else past them all, under its day.
+   * Where a task's row, an entire chat or a project's panel is listed,
+   * as an index in HISTORY_SECTIONS: under Pinned when it is pinned,
+   * running or not (its status mark turns while it runs), else under
+   * Running while a task of it runs, else -- a project -- under
+   * Projects, else past them all, under its day.
    */
   function historyItemSection(item) {
-    if (historyItemRunning(item)) return 0;
     if (historyItemPinned(item)) return 1;
+    if (historyItemRunning(item)) return 0;
     return item.classList.contains('history-project') ? 2 : 3;
   }
 
@@ -34902,12 +35058,13 @@
     historyList.querySelectorAll('.history-day-sep').forEach(sep => {
       sep.remove();
     });
+    const focused = document.activeElement;
+    placeHistoryPinnedItems();
     const items = Array.from(
       historyList.querySelectorAll(
         ':scope > .history-chat-group, :scope > .sidebar-item, :scope > .history-project',
       ),
     ).sort(historySectionOrder);
-    const focused = document.activeElement;
     // The chats of a project, in the list's own order (no labels).
     historyProjectPanels.forEach(panel => {
       const body = panel.querySelector(':scope > .history-project-body');
@@ -34937,12 +35094,14 @@
         historyList.insertBefore(sep, item);
       }
     });
-    // An item that moved took the keyboard focus out of the control
-    // that held it.
-    if (focused !== document.activeElement && historyList.contains(focused)) {
-      focused.focus({preventScroll: true});
-    }
     if (items.length) applyHistoryFilterVisibility();
+    // An item that moved took the keyboard focus out of the control
+    // that held it.  The control has it back once what holds it is
+    // shown again (a chat that was left without a task is, above);
+    // out of sight in a folded panel, the panel's header takes it.
+    if (focused !== document.activeElement && historyList.contains(focused)) {
+      historyShownFor(focused).focus({preventScroll: true});
+    }
     scheduleHistoryMidnightRelabel(items.length > 0);
   }
 
@@ -35579,7 +35738,8 @@
       div.dataset.ts = String(ts);
       // The task's and its chat's star and pin: the Favorites filter
       // keeps the tasks of a starred chat as it keeps a starred task,
-      // and the Pinned section lists those of a pinned chat likewise.
+      // and the Pinned section lists a pinned task on its own
+      // (historyItemPinned).
       Object.keys(HISTORY_FLAGS).forEach(field => {
         stampHistoryRowFlag(div, field, s);
       });
@@ -35651,12 +35811,11 @@
         historyList.appendChild(div);
       } else {
         const group = historyGroupFor(s);
-        // The chat panel's body, where its task rows live.
-        const body = group.querySelector(':scope > .history-chat-body');
-        const before = Array.from(body.children).find(
-          row => historyNewestFirst(div, row) < 0,
-        );
-        body.insertBefore(div, before || null);
+        // In its chat's panel, until a pin of the task takes it out
+        // (placeHistoryPinnedItems).
+        div._kissGroup = group;
+        div._kissIndex = historyRenderedRows.length;
+        putHistoryRowHome(div);
         updateHistoryGroupLastTask(group, s);
         // A running task puts its chat in the Running section
         // (historyItemRunning); it does not unfold the chat's panel.
@@ -36509,6 +36668,7 @@
       }
     });
     if (daySep) daySep.style.display = dayShown ? '' : 'none';
+    paintHistoryProjectNotes();
     // Hidden rows take no room: when what is left does not fill the
     // list, or leaves a scrolled list less than a panel's height of
     // rows under its view, more rows are asked for now (see

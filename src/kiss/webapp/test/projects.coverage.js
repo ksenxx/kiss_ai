@@ -7,9 +7,10 @@
 // byte of every code line of media/projects.js (the Projects page) and
 // of the regions of media/main.js fenced by `// projects-coverage:start`
 // / `// projects-coverage:end` (the "Default working directory"
-// drop-downs, the chat header's project drop-down, the Projects tab, and
-// the project panels of the Chats list) must have run, so an untaken arm
-// of a `?:`, `||` or `&&` fails the gate as an untested line does.
+// drop-downs, the chat header's project drop-down, the Projects tab, the
+// project panels of the Chats list, and where the list puts a pinned
+// chat or task) must have run, so an untaken arm of a `?:`, `||` or `&&`
+// fails the gate as an untested line does.
 //
 // The three functional jsdom suites are run in turn and their coverage
 // is added up: test/projectsPage.test.js (the page and the header),
@@ -30,7 +31,7 @@ gateRegions({
   label: 'projects',
   everyByte: true,
   targets: [
-    {file: 'main.js', sourceUrl: 'projects-main.js', regions: 3},
+    {file: 'main.js', sourceUrl: 'projects-main.js', regions: 4},
     {file: 'projects.js', sourceUrl: 'projects-page.js', wholeFile: true},
   ],
 });

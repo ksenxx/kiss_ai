@@ -8,13 +8,18 @@
 //
 // With Group by: Project (the default) and at least one project:
 //
-// * every project is a foldable panel, under Running while a task of
-//   one of its chats runs, under Pinned when it is pinned, else under
-//   Projects; the chats that are in no project stay under their days;
+// * every project is a foldable panel, under Pinned when it is pinned,
+//   else under Running while a task of one of its chats runs, else
+//   under Projects; the chats that are in no project stay under their
+//   days;
 // * the panel's header is the Projects icon, the name, the fold button
 //   and "…": unfolding lists every chat of the project (a page of its
-//   own, asked from the daemon), "…" opens the project's settings and
-//   a click on the header starts a new chat in the project;
+//   own, asked from the daemon), the menu of "…" pins or unpins the
+//   project and opens its settings, and a click on the header starts a
+//   new chat in the project;
+// * a pinned chat of a project, and a pinned task of a chat that is
+//   not pinned, are listed under Pinned, out of the project's panel
+//   and of the chat's, and go back when the pin is lifted;
 // * a panel whose page was a full one ends with "Show more chats";
 // * Group by: Chat or None, a search, a tag and the list of another
 //   machine's tasks show no panel.
@@ -284,7 +289,7 @@ function shape(win) {
     });
 }
 
-test('a project is a foldable panel of the list: unfolding lists its chats, "\u2026" opens its settings and its header starts a new chat in it', () => {
+test('a project is a foldable panel of the list: unfolding lists its chats, its menu opens its settings and its header starts a new chat in it', () => {
   const {win, posted} = openList([PAPER, SITE], CHAT_PROJECTS);
   // The pinned project, the other one, then the chat that is in none.
   assert.deepStrictEqual(shape(win), [
@@ -303,6 +308,7 @@ test('a project is a foldable panel of the list: unfolding lists its chats, "\u2
       'history-project-title',
       'history-project-collapse',
       'history-project-more',
+      'history-project-actions',
     ],
   );
   assert.strictEqual(header.querySelector('.history-project-title').textContent, 'Paper');
@@ -374,13 +380,25 @@ test('a project is a foldable panel of the list: unfolding lists its chats, "\u2
   press(win, 'p2', 'history-project-collapse');
   assert.strictEqual(shape(win)[1], 'project:p2{No chats yet}');
 
-  // "…" opens the Projects page at the project's settings.
-  press(win, 'p1', 'history-project-more');
+  // "…" is the button of the project's menu, which reads as a chat's:
+  // the pin, then the settings (jsdom has no popover to open: the
+  // menu's buttons are pressed where they are).
+  const menu = header.querySelector('.history-project-actions');
+  assert.strictEqual(header.querySelector('.history-project-more').popoverTargetElement, menu);
+  assert.strictEqual(menu.getAttribute('popover'), 'auto');
+  assert.deepStrictEqual(
+    Array.from(menu.children, b => b.getAttribute('aria-label')),
+    ['Pin project', 'Project settings'],
+  );
+  // "Project settings" opens the Projects page at the project's
+  // settings; a press in the menu is not a click on the header.
+  press(win, 'p1', 'history-project-settings');
   const settings = win.document.querySelector(
     '.projects-tab-view .project-panel[data-project-id="p1"]',
   );
   assert.strictEqual(win.document.activeElement, settings.querySelector('.project-name'));
   assert.ok(!byId(win, 'sidebar').classList.contains('open'), 'in front of the drawer');
+  assert.strictEqual(byId(win, 'chat-project').value, '', 'no new chat in the project');
 
   // A click on the header: a new chat, in the project.
   click(win, panelOf(win, 'p1').querySelector('.history-project-header'));
@@ -410,6 +428,168 @@ test('a project is a foldable panel of the list: unfolding lists its chats, "\u2
   assert.deepStrictEqual(marked(), ['p2']);
   selectFilter(win, 'chat-project', '');
   assert.deepStrictEqual(marked(), []);
+});
+
+test('"Pin project" and "Unpin project" of a project\u2019s menu tell the daemon, whose list of the projects moves the panel', () => {
+  const {win, posted} = openList([PAPER, SITE], CHAT_PROJECTS);
+  // What the pin of project `id` reads: its name, whether it is
+  // pressed and lit, and whether its glyph is the filled one.
+  const reads = id => {
+    const pin = panelOf(win, id).querySelector('.history-project-pin');
+    return [
+      pin.getAttribute('aria-label'),
+      pin.getAttribute('aria-pressed'),
+      pin.classList.contains('pinned'),
+      pin.innerHTML.includes('fill="currentColor"'),
+    ];
+  };
+  assert.deepStrictEqual(reads('p1'), ['Pin project', 'false', false, false]);
+  assert.deepStrictEqual(reads('p2'), ['Unpin project', 'true', true, true]);
+
+  // A press tells the daemon, which stores the pin; the panel moves
+  // when the daemon lists the projects anew.
+  press(win, 'p1', 'history-project-pin');
+  press(win, 'p2', 'history-project-pin');
+  assert.deepStrictEqual(plain(ofType(posted, 'setProjectPinned')), [
+    {type: 'setProjectPinned', projectId: 'p1', pinned: true},
+    {type: 'setProjectPinned', projectId: 'p2', pinned: false},
+  ]);
+  assert.strictEqual(byId(win, 'chat-project').value, '', 'a press in the menu starts no chat');
+  send(win, {
+    type: 'projects',
+    projects: [project('p1', 'Paper', {isPinned: true}), project('p2', 'Site')],
+    chatProjects: CHAT_PROJECTS,
+  });
+  assert.deepStrictEqual(shape(win), [
+    'sep:Pinned',
+    'project:p1',
+    'sep:Projects',
+    'project:p2',
+    'sep:Today',
+    'chat:c4[task 14]',
+  ]);
+  assert.deepStrictEqual(reads('p1'), ['Unpin project', 'true', true, true]);
+  assert.deepStrictEqual(reads('p2'), ['Pin project', 'false', false, false]);
+});
+
+test('a pinned chat of a project and a pinned task are listed under Pinned on their own, and go back when unpinned', () => {
+  // Chat c1 of Paper is pinned, and its task 10 too; so is task 12 of
+  // Paper's chat c2, which is not.  Chat c5 is in no project: its two
+  // tasks ran at the same instant.
+  const pins = s =>
+    Object.assign(
+      {},
+      s,
+      s.id === 'c1' && {chat_is_pinned: true},
+      (s.task_id === 10 || s.task_id === 12) && {is_pinned: true},
+    );
+  const twins = [groupedSession('c5', 21, T - 70), groupedSession('c5', 20, T - 70)];
+  const older = groupedSession('c2', 9, T - 60);
+  const {win, posted} = openList(
+    [PAPER, SITE],
+    CHAT_PROJECTS,
+    STREAM.map(pins).concat(twins),
+  );
+  const pin = title => rowByTitle(win, title).querySelector('.sidebar-item-pin');
+  const chatPin = () => chatHeader(win, 'c1').querySelector('.history-chat-pin');
+
+  // Paper is folded, and what is pinned in it is listed all the same:
+  // the chat's panel with every task of it, and the task's row.
+  const top = [
+    'sep:Pinned',
+    'chat:c1[task 11,task 10]',
+    'project:p2',
+    'row:task 12',
+    'sep:Projects',
+  ];
+  const days = ['sep:Today', 'chat:c4[task 14]', 'chat:c5[task 21,task 20]'];
+  assert.deepStrictEqual(shape(win), top.concat('project:p1', days));
+  assert.deepStrictEqual(
+    [chatPin(), pin('task 12'), pin('task 10')].map(p => p.getAttribute('aria-label')),
+    ['Unpin chat', 'Unpin task', 'Unpin task'],
+  );
+
+  // Unfolded, Paper lists what is left of its chats, and says where
+  // they are when nothing is.  Its page holds the pinned rows too:
+  // each is listed once.
+  press(win, 'p1', 'history-project-collapse');
+  assert.strictEqual(shape(win)[5], 'project:p1{Loading...}');
+  sendProjectPage(win, posted, 'p1', PAPER_ROWS.map(pins));
+  assert.strictEqual(shape(win)[5], 'project:p1{Listed under Pinned}');
+  // While a filter hides everything pinned of Paper, nothing of it is
+  // listed under Pinned: Paper says nothing, as a project whose chats
+  // a filter hides.
+  pressFilterOption(win, 'favorites', 'Only favorites');
+  assert.deepStrictEqual(bodyShape(panelOf(win, 'p1')), ['']);
+  pressFilterOption(win, 'favorites', 'All');
+  assert.strictEqual(shape(win)[5], 'project:p1{Listed under Pinned}');
+  sendProjectPage(win, posted, 'p1', PAPER_ROWS.map(pins).concat(older));
+  assert.deepStrictEqual(shape(win), top.concat('project:p1{chat:c2[task 9]}', days));
+  assert.deepStrictEqual(
+    Array.from(
+      byId(win, 'history-list').querySelectorAll('.sidebar-item-text'),
+      text => text.textContent,
+    ).sort(),
+    ['task 10', 'task 11', 'task 12', 'task 14', 'task 20', 'task 21', 'task 9'],
+  );
+
+  // The chat's pin lifted: its panel is back under Paper, and its
+  // pinned task, no longer in a pinned chat, is listed on its own.
+  click(win, chatPin());
+  assert.deepStrictEqual(
+    shape(win),
+    [
+      'sep:Pinned',
+      'project:p2',
+      'row:task 12',
+      'row:task 10',
+      'sep:Projects',
+      'project:p1{chat:c1[task 11] chat:c2[task 9]}',
+    ].concat(days),
+  );
+  // A task's pin lifted: its row is back in its chat's panel, the
+  // newest first.
+  click(win, pin('task 12'));
+  click(win, pin('task 10'));
+  assert.deepStrictEqual(
+    shape(win),
+    [
+      'sep:Pinned',
+      'project:p2',
+      'sep:Projects',
+      'project:p1{chat:c1[task 11,task 10] chat:c2[task 12,task 9]}',
+    ].concat(days),
+  );
+  assert.deepStrictEqual(
+    plain(posted.filter(m => /^set(Chat)?Pinned$/.test(m.type))),
+    [
+      {type: 'setChatPinned', chatId: 'c1', isPinned: false},
+      {type: 'setPinned', taskId: 12, isPinned: false},
+      {type: 'setPinned', taskId: 10, isPinned: false},
+    ],
+  );
+  // Of two tasks of one instant, the one pinned and unpinned is back
+  // where it was.
+  click(win, pin('task 21'));
+  assert.deepStrictEqual(shape(win).slice(1, 3), ['project:p2', 'row:task 21']);
+  assert.strictEqual(shape(win).pop(), 'chat:c5[task 20]');
+  click(win, pin('task 21'));
+  assert.deepStrictEqual(shape(win).slice(-3), days);
+
+  // A chat that goes back under a project whose panel ends with "Show
+  // more chats" is listed ahead of that button.
+  const full = pageOf('a', 1000);
+  const inPaper = {};
+  for (const row of full) inPaper[row.id] = 'p1';
+  full[3] = Object.assign({}, full[3], {chat_is_pinned: true});
+  const long = openList([PAPER], inPaper, []);
+  press(long.win, 'p1', 'history-project-collapse');
+  sendProjectPage(long.win, long.posted, 'p1', full);
+  assert.deepStrictEqual(shape(long.win).slice(0, 2), ['sep:Pinned', 'chat:a-3[task 997]']);
+  click(long.win, chatHeader(long.win, 'a-3').querySelector('.history-chat-pin'));
+  const body = panelOf(long.win, 'p1').querySelector('.history-project-body');
+  assert.ok(body.contains(chatHeader(long.win, 'a-3')));
+  assert.strictEqual(body.lastElementChild, moreRows(long.win, 'p1'));
 });
 
 test('a panel whose page was a full one ends with "Show more chats"; a refresh asks for every row it holds', () => {

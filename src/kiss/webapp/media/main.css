@@ -3853,10 +3853,25 @@ body.remote-chat .tricks-item.editing:hover { background: none; filter: none; }
 }
 .sidebar-tool-btn[hidden] { display: none; }
 .sidebar-tool-btn svg { width: 18px; height: 18px; }
-.sidebar-tool-btn:hover:enabled { color: var(--fg); background: var(--hover-strong); }
 
-/* Pressed (auto mode is on): the selected fill. */
-.sidebar-tool-btn[aria-pressed="true"] { color: var(--fg-strong); background: var(--selected); }
+/* Under a pointer that hovers.  A finger does not: there the hover of
+   a tap stays on the button until the next tap, and a button just
+   switched off would keep the fill. */
+@media (hover: hover) {
+  .sidebar-tool-btn:hover:enabled { color: var(--fg); background: var(--hover-strong); }
+}
+
+/* Pressed (high contrast or auto mode is on): the accent icon on the
+   selected fill inside a line, a hairline that the high-contrast
+   palettes make solid.  The pointer over the button changes none of
+   it: a hovered button's fill is about as strong as the selected one,
+   so the icon's colour and the line are what tell on from off. */
+.sidebar-tool-btn[aria-pressed="true"],
+.sidebar-tool-btn[aria-pressed="true"]:hover:enabled {
+  color: var(--accent);
+  background: var(--selected);
+  box-shadow: inset 0 0 0 1px var(--border-hover);
+}
 
 /* A font button at its limit. */
 .sidebar-tool-btn:disabled { opacity: 0.5; cursor: not-allowed; }
@@ -5198,6 +5213,7 @@ a.content-binary-note:hover { text-decoration: underline; }
 }
 
 /* The fill stays while the row's menu is open, as under the pointer. */
+.history-project-header:has(> .sidebar-item-actions:popover-open),
 .history-chat-header:has(> .sidebar-item-actions:popover-open) {
   background-color: var(--hover);
 }
@@ -5302,14 +5318,18 @@ a.content-binary-note:hover { text-decoration: underline; }
 .history-project.collapsed > .history-project-body { display: none; }
 
 /* What an unfolded panel says while it lists no chat ("Loading...",
-   "No chats yet"): gone once a chat is listed beside it. */
+   "No chats yet", "Listed under Pinned"): gone once a chat with a
+   task is listed beside it (a chat whose tasks are all pinned on
+   their own has none left in its panel), and while it has nothing to
+   say (the filters hide what is pinned of the project). */
 .history-project-note {
   padding: var(--space-1) var(--space-2-5) var(--space-1-5);
   font-size: var(--fs-md);
   color: var(--faint);
 }
 
-.history-project-body:has(> .history-chat-group) > .history-project-note { display: none; }
+.history-project-note:empty,
+.history-project-body:has(> .history-chat-group .sidebar-item) > .history-project-note { display: none; }
 
 /* "Show more chats", the last row of a panel whose newest page of
    rows was a full one: a quiet text button, set as the note is. */

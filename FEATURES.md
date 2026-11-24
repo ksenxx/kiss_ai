@@ -3750,7 +3750,7 @@ The left sidebar, a drawer on a phone:
 - **Sorting and date sections**:
   - Chats sort by completion time **CHANGED** (10-14) under sections in order:
     1. A Running section **NEW** (10-07).
-    2. A Pinned section **NEW** (11-20) with the pinned chats and tasks that are not running, and pinned projects (11-21); grouped by chat, a chat with a pinned task is listed here too.
+    2. A Pinned section **NEW** (11-20) that lists each pinned item itself, running or not **CHANGED** (11-23): a pinned task as a row of its own, a pinned chat as its panel with all its tasks, and a pinned project as its panel (11-21).
     3. A Projects section **NEW** (11-21) with the projects that are not pinned, shown when Group by is Project; chats in no project stay under the day sections.
     4. Today.
     5. Yesterday.
@@ -3773,18 +3773,23 @@ The left sidebar, a drawer on a phone:
 - **Pins** **NEW** (11-20):
   - A pin is stored by the daemon (`is_pinned` on the task's row and on the chat's summary row), so every client shows it; it survives a deploy as a star does.
   - The daemon lists pinned rows right after the running ones and ahead of every other task, most recent first, so an old pinned task is loaded before newer tasks that are not pinned.
+  - The **...** menu of every item under Pinned reads **Unpin ...** **CHANGED** (11-23), also after the daemon restarts and with every chat folded: a pinned task's row is taken out of its chat's panel (unless that chat is pinned too), and a pinned chat's panel out of its project's panel. Until 11-23 a pinned task listed its whole chat, whose menu read **Pin chat**, a pinned chat or task of a project stayed inside the project's panel, and a pinned item that was running was listed under Running only.
+  - **Unpin ...** puts the item back: the task into its chat's panel, the chat under its project or its day, the project under Projects. A chat left without a task is not listed, and an unfolded project left with nothing to list reads "Listed under Pinned" (nothing while a filter hides what is pinned of it).
+  - The keyboard focus stays with an item that a pin moved, on its **...** button; when the item goes back into a folded chat or project, the header of that chat or project takes the focus.
+  - With Group by set to None the list has tasks only, so the Pinned section lists the pinned tasks.
 - **Projects** **NEW** (11-21):
   - A **Projects** row between the top refresh-button row and the search box opens a Projects page in a tab (`src/kiss/webapp/media/projects.js`): a **New project** button, then one settings panel per project (storage and overrides in section 11).
   - A panel holds the project's name, description, default working directory with a **New folder** button, max budget, the seven check boxes of the Settings sheet and its API key groups, then **Cancel** and **Save**; a new panel is pre-filled with the app's current settings, and saving a new project or pressing its **Cancel** closes the Projects tab and takes the content window off screen (in the split desktop layout the content pane folds away with its other tabs still open in it; in the stacked phone layout the chat comes back), while saving or cancelling an existing project's panel leaves the page open.
   - A pin button ("Pin project" or "Unpin project") in a panel's top right corner pins the project in the sidebar and is drawn like the pin of a project page in Claude Code Desktop (a borderless icon button with a pushpin tilted 45 degrees, an outline while not pinned and solid while pinned, with a soft fill under the pointer), and a saved project's panel has a **Delete** button (asking "Delete this project? Its chats are kept.").
-  - With Group by set to Project, a project is a foldable row with the same fold button as a chat row and a **...** button that opens its settings; unfolding it lists its chats (200 at a time, with **Show more chats**), each of which unfolds to its tasks, while a chat with a running task stays in the Running section at the top.
+  - With Group by set to Project, a project is a foldable row with the same fold button as a chat row and a **...** button whose popover menu lists **Pin project** or **Unpin project** and **Project settings** **CHANGED** (11-23; the button used to open the settings); unfolding it lists its chats (200 at a time, with **Show more chats**), each of which unfolds to its tasks, while a chat with a running task stays in the Running section at the top.
   - Clicking a project's name starts a new chat in it.
   - The chat header has a Project drop-down listing "Default" first **CHANGED** (11-21; was "No project") and then every project to put the chat on screen into a project or take it out (chats of this machine only; a chat on a registered remote machine is in no project).
   - On a page served by an older daemon process started before Projects existed and still running after an in-place upgrade of the page files, the page ignores an "Unknown command" answer to the four reads it issues on its own (`getProjects`, `getInputDraft`, `getTaskTags` and, since 11-22, the Skills subpanel's `getSkills`), showing every other error as before **NEW** (11-21). The Skills subpanel of such a page says that the server runs an older version and is to be restarted.
 - **Bottom strip** **NEW** (11-19):
-  - Sits below the scrolling Chats list with the daemon's OS username on the left and buttons on the right: Dark/Light mode, High/Low contrast, Auto mode, Decrease font size and Increase font size.
+  - Sits below the scrolling Chats list with the daemon's OS username on the left and buttons on the right: Dark/Light mode, High contrast, Auto mode, Decrease font size and Increase font size.
   - **CHANGED** (11-20): the buttons are 32 px with 18 px icons (24 px and 16 px before) and are the only place for these actions, which left the `...` menu; Terminal and Browser moved to the strip under the right sidebar.
   - **CHANGED** (11-23): Settings moved to the strip under the right sidebar.
+  - **CHANGED** (11-23): High contrast and Auto mode are on/off buttons. Each keeps its name and, while on, shows its icon in the accent colour on a filled chip with a line around it, also under the pointer. A second press of Auto mode switches it off and keeps the palette on screen (before, only Dark/Light mode left it); the High contrast button was renamed Low contrast while on and looked the same in both states. On a touch screen a tapped button no longer keeps the hover fill.
 
 ### Right sidebar
 

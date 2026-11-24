@@ -350,10 +350,10 @@
            the appearance buttons at the right.
            #theme-btn flips between the light and dark palettes (its
            icon and name say which one it switches TO), #contrast-btn
-           flips between the low- and high-contrast variants the same
-           way, #theme-auto-btn picks the palette by the time of day on
-           this device (pressed while on); main.js fills the icon of
-           the first and the names of the first two.  A button with
+           switches the high-contrast variant of the palette on and off,
+           #theme-auto-btn the choice of the palette by the time of day
+           on this device (each pressed while on); main.js fills the
+           icon and the name of the first.  A button with
            data-font-step moves the size of all text by that many px.
            The strip under the task-info panel (#meta-footer) holds the
            Settings button and the buttons that act on the chat's
@@ -362,7 +362,7 @@
         <span id="sidebar-user"></span>
         <div class="strip-tools" role="group" aria-label="Appearance">
           <button type="button" id="theme-btn" class="sidebar-tool-btn" aria-label="Dark mode"></button>
-          <button type="button" id="contrast-btn" class="sidebar-tool-btn" aria-label="High contrast"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 2a10 10 0 0 1 0 20z" fill="currentColor" stroke="none"/></svg></button>
+          <button type="button" id="contrast-btn" class="sidebar-tool-btn" aria-pressed="false" data-tooltip="High contrast" aria-label="High contrast"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 2a10 10 0 0 1 0 20z" fill="currentColor" stroke="none"/></svg></button>
           <button type="button" id="theme-auto-btn" class="sidebar-tool-btn" aria-pressed="false" data-tooltip="Auto mode: light by day, dark by night (7 pm to 7 am on this device's clock)" aria-label="Auto mode"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></button>
           <button type="button" class="sidebar-tool-btn" data-font-step="-1" data-tooltip="Decrease font size" aria-label="Decrease font size"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m2 19 5.5-13 5.5 13"/><path d="M4 14.5h7"/><path d="M16 8h6"/></svg></button>
           <button type="button" class="sidebar-tool-btn" data-font-step="1" data-tooltip="Increase font size" aria-label="Increase font size"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m2 19 5.5-13 5.5 13"/><path d="M4 14.5h7"/><path d="M16 8h6"/><path d="M19 5v6"/></svg></button>

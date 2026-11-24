@@ -19,6 +19,10 @@ A REAL browser (Playwright Chromium) drives a REAL
   way, its buttons start at the left with Settings, wrap in a narrow
   panel too, and the buttons of both strips have one size; on a phone
   a strip's space under its buttons is a fifth of the desktop's 8px;
+* the High contrast and Auto mode buttons are on/off buttons: in each
+  of the four palettes a press switches Auto mode on and the next one
+  off, and a button that is on is painted unlike one that is off, also
+  under the pointer that pressed it;
 * the font buttons move the root font size, which every CSS size is a
   rem or em of, and the size survives a reload; the Monaco editors (a
   file's and a diff's, open or opened later; the jsdom suite has no
@@ -35,10 +39,13 @@ unreachable the test that needs them skips.
 
 from __future__ import annotations
 
+import io
+from datetime import datetime
 from pathlib import Path
 
 import pytest
-from playwright.sync_api import expect
+from PIL import Image, ImageChops
+from playwright.sync_api import Locator, expect
 
 from kiss.tests.conftest import reload_retrying_network_change
 from kiss.tests.server.test_explorer_scm_commands import (
@@ -265,6 +272,56 @@ def test_strip_stays_under_the_scrolling_list_on_the_desktop(browser, harness, c
         context.close()
 
 
+def _shot(button: Locator) -> Image.Image:
+    """The pixels of a strip button, its colour transition finished."""
+    return Image.open(io.BytesIO(button.screenshot(animations="disabled"))).convert("RGB")
+
+
+def _clear_diffs(one: Image.Image, other: Image.Image) -> int:
+    """How many pixels of two shots differ at a glance: by more than 40
+    of 255 in a colour channel."""
+    raw = ImageChops.difference(one, other).tobytes()
+    return sum(max(raw[i : i + 3]) > 40 for i in range(0, len(raw), 3))
+
+
+def test_contrast_and_auto_buttons_show_whether_they_are_on(browser, harness):
+    context, page, _frames = _open_page(browser, harness)
+    try:
+        contrast = page.locator("#contrast-btn")
+        auto = page.locator("#theme-auto-btn")
+        edge = (0, 8, 6, 24)  # a button's line and fill, left of its icon
+        # The four palettes, each at an hour whose Auto mode is the
+        # palette on screen (light at noon, dark at 10 pm), and the
+        # button that leads to the next one.
+        for hour, high, to_next in (
+            (12, False, "#contrast-btn"),
+            (12, True, "#theme-btn"),
+            (22, True, "#contrast-btn"),
+            (22, False, None),
+        ):
+            page.clock.set_fixed_time(datetime(2026, 11, 23, hour))
+            expect(contrast).to_have_attribute("aria-pressed", str(high).lower())
+            # A press leaves the pointer on the button: on and off are
+            # told apart under it, and the next press is off again.
+            auto.hover()
+            off = _shot(auto)
+            auto.click()
+            expect(auto).to_have_attribute("aria-pressed", "true")
+            on = _shot(auto)
+            assert _clear_diffs(on, off) > 40, (hour, high)
+            if high:
+                # The contrast button is on too, and wears the same.
+                assert _clear_diffs(on.crop(edge), off.crop(edge)) > 0
+                assert _clear_diffs(_shot(contrast).crop(edge), on.crop(edge)) == 0
+            auto.click()
+            expect(auto).to_have_attribute("aria-pressed", "false")
+            assert _clear_diffs(_shot(auto), off) == 0, (hour, high)
+            if to_next:
+                page.click(to_next)
+    finally:
+        context.close()
+
+
 def test_font_buttons_resize_the_page_the_editors_and_the_terminal(browser, harness):
     context, page, _frames = _open_page(browser, harness)
     try:
@@ -400,6 +457,18 @@ def test_strip_on_a_phone(browser, harness, chats):
         )
         page.tap('[data-font-step="1"]')
         assert page.evaluate(_ROOT_PX) == "14px"
+
+        # A tap switches Auto mode on and the next one off again.  The
+        # finger's hover stays where it tapped: it puts no fill on the
+        # button that is off, whose colour change has ended by then.
+        auto = page.locator("#theme-auto-btn")
+        auto.tap()
+        expect(auto).to_have_attribute("aria-pressed", "true")
+        auto.tap()
+        expect(auto).to_have_attribute("aria-pressed", "false")
+        page.wait_for_function("document.querySelector('#theme-auto-btn').matches(':hover')")
+        auto.evaluate("button => button.getAnimations().forEach(a => a.finish())")
+        expect(auto).to_have_css("background-color", "rgba(0, 0, 0, 0)")
 
         # Settings, the first button of the task-info screen's strip,
         # leaves that screen for its sheet.  Closing the sheet focuses
