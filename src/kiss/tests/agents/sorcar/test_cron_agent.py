@@ -161,6 +161,27 @@ def test_schedule_times_are_pacific_whatever_the_machine_zone() -> None:
     assert cron_agent.format_schedule_time(_utc(2026, 12, 1, 17, 0)) == "2026-12-01 09:00:00 PST"
 
 
+def test_pacific_zone_loads_on_a_machine_without_a_time_zone_database(tmp_path: Path) -> None:
+    """The app starts where the system has no zone files: ``tzdata`` is a dependency.
+
+    A minimal Linux install (a container image) has no
+    ``/usr/share/zoneinfo``; kiss-web then died while importing this
+    module (``No time zone found with key America/Los_Angeles``).
+    ``PYTHONTZPATH`` naming an empty directory is that machine.
+    """
+    code = "from kiss.agents.sorcar import cron_agent; print(cron_agent.SCHEDULE_TZ)"
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        env={**os.environ, "PYTHONTZPATH": str(tmp_path)},
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "America/Los_Angeles"
+
+
 def test_repeated_fall_back_hour_fires_once() -> None:
     # 2026-11-01 01:00 PST is the second pass through 01:xx; the 01:30
     # PDT run already happened, so the next one is tomorrow's 01:30 PST.

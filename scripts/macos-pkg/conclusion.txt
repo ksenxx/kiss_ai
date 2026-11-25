@@ -1,0 +1,5 @@
+KISS Sorcar opens in its own window as soon as its installation is complete. On a slow connection the downloads can still be running now; the window then opens by itself when they are done, and ~/.kiss/install.log shows how far they are.
+
+To open KISS Sorcar later, use the "KISS Sorcar" app in the Applications folder of your home folder.
+
+Before your first task, open Settings in the app and enter the API key of a model provider.

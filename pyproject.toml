@@ -49,6 +49,9 @@ dependencies = [
     # Memory index scan and near-duplicate matrix products (kiss.core.memoryfield).
     "numpy>=1.26.0",
     "pyyaml>=6.0.0",
+    # The time zone database for ``zoneinfo`` (cron schedules are Pacific):
+    # Windows has none, and neither has a minimal Linux install.
+    "tzdata>=2025.2",
     "pydantic>=2.0.0",
     "pydantic-settings>=2.14.2",  # CVE-2026-58203 fixed in 2.14.2
     "flask>=3.0.0",

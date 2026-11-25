@@ -651,14 +651,18 @@ def _scan_cpu_seconds(command: str) -> float:
 
 def test_the_assignments_of_a_command_are_read_in_one_pass() -> None:
     """Audit 2026-11-10 S10-F3, review round 1: what the earlier assignments of a command set
-    is kept as the scan goes; replayed for every word, 8,000 of them took 18 seconds."""
+    is kept as the scan goes; replayed for every word, 8,000 of them took 18 seconds.
+
+    The bound is 2 seconds of CPU, a ninth of that.  It was 0.5: the third command takes
+    0.23 s on an idle 80-core Linux and 0.45 to 0.57 s in a full run there, where the other
+    hyperthread of the core is busy too (2026-11-25)."""
     known = "; ".join(f"T{i}=x" for i in range(4000))
     for command in (" ".join(["T=x"] * 8000),
                     " ".join(f"T{i}=$T{i - 1}" for i in range(8000)),
                     f"{known}; " + " ".join(f"T{i}=$T{i - 1}" for i in range(1, 4000)),
                     # arithmetic that assigns nothing: one long name is read once
                     "test 'a[" + "a" * 12000 + "]'", "(( " + "a" * 12000 + " ))"):
-        assert _scan_cpu_seconds(command) < 0.5, command[:40]
+        assert _scan_cpu_seconds(command) < 2.0, command[:40]
     # An assignment costs the same whatever the shell knows by then: 40,000 of them after
     # 4,000 statements take the time of the two parts.  With a copy of the shell's variables
     # for each assignment, as Bash 3 was scanned, the whole took 14 times that.  The bound

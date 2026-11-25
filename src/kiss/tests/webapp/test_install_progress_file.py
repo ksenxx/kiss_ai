@@ -71,6 +71,8 @@ def run_sandboxed_install(tmp_path: Path) -> tuple[subprocess.CompletedProcess[s
     checkout = tmp_path / "checkout"
     media = checkout / "src" / "kiss" / "webapp" / "media"
     media.mkdir(parents=True)
+    # install.sh asks git about a tree only when it has a ``.git``.
+    (checkout / ".git").mkdir()
     (checkout / "src" / "kiss" / "__init__.py").write_text("")
     (media / "chat.html").write_text("<html></html>\n")
     (checkout / "pyproject.toml").write_text('[project]\nname = "x"\n')

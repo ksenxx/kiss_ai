@@ -31,10 +31,19 @@ and the caching of it: the connection was registered and never cached,
 so it stayed open for as long as the thread lived.  ``_get_db()`` now
 retires it before the Stop propagates, at every line of the connect
 and as the function that opened it returns.
+
+A third case stops the thread a second time, while it puts that
+connection away: the cache was emptied after the connection was
+closed, so a Stop in between left the thread a closed connection that
+``_get_db()`` handed out as valid for as long as the thread lived (the
+hammer above, one run in a thousand on a loaded 80-core Linux: its
+injections are half a millisecond apart and the cleanup waits for a
+lock the peers hold).  The cache is now emptied first.
 """
 
 from __future__ import annotations
 
+import concurrent.futures
 import contextlib
 import functools
 import gc
@@ -275,6 +284,90 @@ def test_a_stop_between_the_open_and_the_caching_retires_the_connection() -> Non
     finally:
         released.set()
         opener.join(30)
+        close_db()
+        persistence._DB_PATH, persistence._KISS_DIR = saved
+        shutil.rmtree(home, ignore_errors=True)
+
+
+class _Stops:
+    """Raise a Stop on the entering thread as each of *places* is reached, in their order.
+
+    A place is a code object and one of its lines.  A ``sys.monitoring``
+    tool of its own: a ``sys.settrace`` function is removed by the first
+    exception it raises, and the second Stop is the point.
+    """
+
+    _TOOL = 4
+
+    def __init__(self, *places: tuple[CodeType, int]) -> None:
+        self._places = list(places)
+        self._codes = [code for code, _line in places]
+        self._thread = threading.get_ident()
+
+    def __enter__(self) -> _Stops:
+        sys.monitoring.use_tool_id(self._TOOL, __name__)
+        sys.monitoring.register_callback(self._TOOL, sys.monitoring.events.LINE, self._on_line)
+        for code in self._codes:
+            sys.monitoring.set_local_events(self._TOOL, code, sys.monitoring.events.LINE)
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        for code in self._codes:
+            sys.monitoring.set_local_events(self._TOOL, code, 0)
+        sys.monitoring.register_callback(self._TOOL, sys.monitoring.events.LINE, None)
+        sys.monitoring.free_tool_id(self._TOOL)
+
+    def _on_line(self, code: CodeType, line: int) -> None:
+        if (
+            self._places
+            and self._places[0] == (code, line)
+            and threading.get_ident() == self._thread
+        ):
+            del self._places[0]
+            raise KeyboardInterrupt("injected stop")
+
+
+def _lines_of(function: Any) -> list[int]:
+    """The source lines *function* has code on."""
+    return sorted({line for _s, _e, line in function.__code__.co_lines() if line})
+
+
+def _connect_stopped_twice() -> None:
+    """Connect the calling thread with one Stop in the connect and one in its cleanup, at every
+    pair of their lines; the thread's next ``_get_db()`` must hand out a connection that works."""
+    cleanups = (
+        persistence._close_thread_db, persistence._retire_conn, persistence._forget_open_conn,
+    )
+    for connect in (persistence._open_db_connection, persistence._connect_thread_db):
+        for first in _lines_of(connect):
+            for cleanup in cleanups:
+                for second in _lines_of(cleanup):
+                    with (
+                        _Stops((connect.__code__, first), (cleanup.__code__, second)),
+                        contextlib.suppress(KeyboardInterrupt),
+                    ):
+                        persistence._get_db()
+                    try:
+                        persistence._get_db().execute("SELECT 1").fetchall()
+                    except sqlite3.Error as exc:
+                        raise AssertionError(
+                            f"{connect.__name__}:{first} then {cleanup.__name__}:{second}"
+                        ) from exc
+                    persistence._close_thread_db()
+
+
+def test_a_second_stop_in_the_cleanup_leaves_no_closed_connection_cached() -> None:
+    """A Stop in the connect and another while its connection is put away leave the thread
+    a cache ``_get_db()`` can use, not a closed connection it hands out from then on."""
+    home = Path(tempfile.mkdtemp(prefix="audit1017-two-stops-"))
+    saved = (persistence._DB_PATH, persistence._KISS_DIR)
+    persistence._KISS_DIR, persistence._DB_PATH = (home, home / "history.db")
+    try:
+        # On a thread that ends with the test: a connection the second Stop
+        # left registered and uncached stays open until its thread is gone.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            pool.submit(_connect_stopped_twice).result(timeout=300)
+    finally:
         close_db()
         persistence._DB_PATH, persistence._KISS_DIR = saved
         shutil.rmtree(home, ignore_errors=True)

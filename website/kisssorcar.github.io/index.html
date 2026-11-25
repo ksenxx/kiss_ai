@@ -419,6 +419,31 @@
       transform: translateY(-1px);
     }
 
+    /* Download for Mac, Download for Windows: the big buttons at the top of
+       the hero, each with its note below; side by side, stacked on a phone. */
+    .hero-download {
+      margin: 1.6rem auto 2.2rem;
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 1.5rem 1rem;
+    }
+    .hero-download-option { flex: 0 1 26rem; }
+    .cta-download {
+      font-size: 1.3rem;
+      font-weight: 600;
+      padding: 1.05rem 2.3rem 1.05rem 2rem;
+      border-radius: 14px;
+      gap: 0.75rem;
+      min-width: min(20.5rem, 100%);
+      justify-content: center;
+    }
+    .cta-download svg { width: 28px; height: 28px; margin-top: -4px; }
+    .cta-download svg.windows-logo { width: 24px; height: 24px; margin-top: 0; }
+    .hero-download-note { margin: 0.75rem 0 0; font-size: 0.88rem; color: var(--text-soft); text-wrap: balance; }
+    /* The note's link lands below the sticky nav, not under it. */
+    #mac-package, #windows-setup { scroll-margin-top: 5.5rem; }
+
     /* Secondary: pipx install (click to copy) */
     .cta-pip {
       background: var(--surface);
@@ -1741,6 +1766,26 @@
         <figcaption>&mdash; Albert Einstein</figcaption>
       </figure>
     </div>
+    <div class="hero-download">
+      <div class="hero-download-option">
+      <a class="cta-btn cta-install cta-download"
+         href="https://github.com/ksenxx/kiss_ai/raw/main/installers/KISS-Sorcar.pkg"
+         aria-label="Download the KISS Sorcar installer for Mac">
+        <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12.152 6.896c-.948 0-2.415-1.078-3.96-1.04-2.04.027-3.91 1.183-4.961 3.014-2.117 3.675-.546 9.103 1.519 12.09 1.013 1.454 2.208 3.09 3.792 3.039 1.52-.065 2.09-.987 3.935-.987 1.831 0 2.35.987 3.96.948 1.637-.026 2.676-1.48 3.676-2.948 1.156-1.688 1.636-3.325 1.662-3.415-.039-.013-3.182-1.221-3.22-4.857-.026-3.04 2.48-4.494 2.597-4.559-1.429-2.09-3.623-2.324-4.39-2.376-2-.156-3.675 1.09-4.61 1.09zM15.53 3.83c.843-1.012 1.4-2.427 1.245-3.83-1.207.052-2.662.805-3.532 1.818-.78.896-1.454 2.338-1.273 3.714 1.338.104 2.715-.688 3.559-1.701"/></svg>
+        Download for Mac
+      </a>
+      <p class="hero-download-note">macOS 14 or later &middot; Apple silicon and Intel &middot; <a href="#mac-package">how to open it</a></p>
+      </div>
+      <div class="hero-download-option">
+      <a class="cta-btn cta-install cta-download"
+         href="https://github.com/ksenxx/kiss_ai/raw/main/installers/KISS-Sorcar-Setup.exe"
+         aria-label="Download the KISS Sorcar setup program for Windows">
+        <svg class="windows-logo" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M0 0h11.4v11.4H0zM12.6 0H24v11.4H12.6zM0 12.6h11.4V24H0zM12.6 12.6H24V24H12.6z"/></svg>
+        Download for Windows
+      </a>
+      <p class="hero-download-note">Windows 10 or 11 &middot; 64-bit &middot; <a href="#windows-setup">how to run it</a></p>
+      </div>
+    </div>
     <h1>Open-source general-purpose recursively self-evolving AI agent for long-horizon tasks and AI discovery and optimization.</h1>
     <div class="hero-trust" aria-label="At a glance">
       <span><strong>Apache 2.0</strong> &middot; open source</span>
@@ -2056,13 +2101,21 @@
       <div class="grid-2">
         <div class="inner-card inner-card--preferred" style="--i:0">
           <h3>Full install <span class="preferred-badge" aria-label="Recommended install method">★ Recommended</span></h3>
-          <p style="margin-bottom:0.7rem;"><strong>Preferred way to install the full KISS Sorcar stack.</strong> Works on macOS and Linux (<code>x86_64</code>, <code>aarch64</code>, <code>arm64</code>). The script clones or updates <code>~/.kiss/kiss_ai</code> and runs its <code>install.sh</code>, which builds the Python environment, installs Playwright&rsquo;s Chromium and <code>cloudflared</code>, puts the <code>sorcar</code> CLI in <code>~/.local/bin</code>, registers the <code>kiss-web</code> daemon as your user service, and opens the web app at <code>http://127.0.0.1:8787</code>. If run from inside <code>~/.kiss</code> or <code>~/.kiss/kiss_ai</code>, it opens your home directory as the working folder instead.</p>
+          <p style="margin-bottom:0.7rem;"><strong>Preferred way to install the full KISS Sorcar stack.</strong> Works on macOS and Linux (<code>x86_64</code>, <code>aarch64</code>, <code>arm64</code>); on Windows, use the <a href="#windows-setup">setup program</a> below. The script clones or updates <code>~/.kiss/kiss_ai</code> and runs its <code>install.sh</code>, which builds the Python environment, installs Playwright&rsquo;s Chromium and <code>cloudflared</code>, puts the <code>sorcar</code> CLI in <code>~/.local/bin</code>, registers the <code>kiss-web</code> daemon as your user service, and opens the web app at <code>http://127.0.0.1:8787</code>. If run from inside <code>~/.kiss</code> or <code>~/.kiss/kiss_ai</code>, it opens your home directory as the working folder instead.</p>
           <div class="code-panel">
             <div class="code-line"><span class="prompt">$</span> <span class="green">curl -fsSL https://raw.githubusercontent.com/ksenxx/kiss_ai/main/scripts/install.sh | bash</span></div>
             <div class="code-line"><span class="x"># or, from a checkout</span></div>
             <div class="code-line"><span class="prompt">$</span> <span class="green">git clone https://github.com/ksenxx/kiss_ai.git &amp;&amp; cd kiss_ai &amp;&amp; ./install.sh</span></div>
           </div>
           <p style="margin-top:0.7rem;">Updates come from the web app&rsquo;s update toast (<strong>Update</strong> or <strong>Update when idle</strong>). If an update fails, run the one-line command again &mdash; it will not delete your history.</p>
+          <p id="mac-package" style="margin-top:0.7rem;"><strong>Mac installer package:</strong> <a href="https://github.com/ksenxx/kiss_ai/raw/main/installers/KISS-Sorcar.pkg">KISS-Sorcar.pkg</a> runs the same <code>install.sh</code> for the logged-in user on macOS 14 or later (Apple silicon and Intel). It needs no Homebrew, no git and none of Apple&rsquo;s developer tools. The package is not signed with an Apple Developer ID, so macOS blocks it when you double-click it: open <strong>System Settings &rarr; Privacy &amp; Security</strong>, click <strong>Open Anyway</strong> next to the message about the package, and confirm with an administrator password. Or install it from Terminal, which is not blocked:</p>
+          <div class="code-panel">
+            <div class="code-line"><span class="prompt">$</span> <span class="green">installer -pkg ~/Downloads/KISS-Sorcar.pkg -target CurrentUserHomeDirectory</span></div>
+          </div>
+          <p id="windows-setup" style="margin-top:0.7rem;"><strong>Windows setup program:</strong> <a href="https://github.com/ksenxx/kiss_ai/raw/main/installers/KISS-Sorcar-Setup.exe">KISS-Sorcar-Setup.exe</a> runs the same <code>install.sh</code> for the user who opens it on 64-bit Windows 10 and Windows 11. It needs no administrator rights, no git, no Python and no bash on the PC. The program is not signed, so Windows SmartScreen shows &ldquo;Windows protected your PC&rdquo; for a downloaded copy: click <strong>More info</strong>, then <strong>Run anyway</strong>. KISS Sorcar gets a Start Menu shortcut and starts at every logon. To remove it, open <strong>Settings &rarr; Apps &rarr; Installed apps</strong> (<strong>Apps &amp; features</strong> on Windows 10), find <strong>KISS Sorcar</strong> and click <strong>Uninstall</strong>; your settings, API keys and history stay in <code>%USERPROFILE%\.kiss</code>. From a checkout, run <code>./install.sh</code> in Git Bash. To install without a window:</p>
+          <div class="code-panel">
+            <div class="code-line"><span class="prompt">&gt;</span> <span class="green">KISS-Sorcar-Setup.exe /S</span></div>
+          </div>
         </div>
 
         <div class="inner-card" style="--i:1">

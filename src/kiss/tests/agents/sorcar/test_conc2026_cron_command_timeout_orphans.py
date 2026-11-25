@@ -55,6 +55,7 @@ from kiss.agents.sorcar import cron_agent
 from kiss.core.processes import pid_alive, start_process_group
 from kiss.core.tool_interrupt import inject_async_exception
 from kiss.tests.conftest import IS_WINDOWS, posix_only
+from kiss.tests.server.pause import Pause
 
 # The pid the tests record and probe must be an OS pid.  Under Git bash on
 # Windows ``$!`` is the MSYS-internal pid, which differs from the Windows
@@ -390,6 +391,63 @@ def test_proc_descendants_sees_multi_level_tree() -> None:
         except (ProcessLookupError, PermissionError):
             pass
         proc.wait(timeout=10)
+
+
+@posix_only("the /proc parent-chain walk and setsid(1) are Linux's")
+def test_the_tree_kill_ends_a_parent_before_its_child(tmp_path: Path) -> None:
+    """A descendant shell is killed before the child it waits for, not after.
+
+    The descendants that left the command's group were killed in the order a
+    set of their pids yields them.  A ``setsid sh -c 'build; publish'`` whose
+    ``build`` came first saw it end and started ``publish`` before its own
+    signal arrived: one timed-out command in fifty on a loaded 80-core Linux
+    (full suite of 2026-11-25, ``shell-waits`` above).  The tree is started
+    here until a set of its two pids yields the child first, and the kill is
+    held as it turns to the parent, which gets all the time to act on a child
+    that is dead by then.
+    """
+    if not Path("/usr/bin/setsid").exists() or not Path("/proc").exists():
+        pytest.skip("POSIX setsid and /proc required")
+    mark = "KISS_CRON_RUN_parent_first"
+    pid_file = tmp_path / "pids"
+    acted = tmp_path / "acted"
+    inner = (
+        f"sleep 300 & echo $$ $! > {shlex.quote(str(pid_file))}; wait; "
+        f"touch {shlex.quote(str(acted))}"
+    )
+    command = f"setsid sh -c {shlex.quote(inner)} & wait"
+    for _ in range(400):
+        shell = subprocess.Popen(
+            command, shell=True, start_new_session=True, env={**os.environ, mark: "1"},
+        )
+        try:
+            pids: list[int] = []
+            deadline = time.monotonic() + 30.0
+            while len(pids) < 2 and time.monotonic() < deadline:
+                time.sleep(0.005)
+                if pid_file.exists():
+                    pids = [int(pid) for pid in pid_file.read_text().split()]
+            assert len(pids) == 2, "the command never ran"
+            parent, child = pids
+            if next(iter({parent, child})) == parent:
+                continue
+            held = Pause(cron_agent._kill_pinned.__code__, lambda args: args["pid"] == parent)
+            with held:
+                killer = threading.Thread(
+                    target=cron_agent._kill_command_tree, args=(shell, mark),
+                )
+                killer.start()
+                assert held.paused.wait(30), "the kill never turned to the parent"
+                time.sleep(0.5)
+                held.release()
+                killer.join(30)
+            assert not acted.exists(), "the parent outlived its child and ran its next command"
+            return
+        finally:
+            cron_agent._kill_command_tree(shell, mark)
+            shell.wait(timeout=10)
+            pid_file.unlink(missing_ok=True)
+    pytest.fail("no tree whose child's pid a set yields first in 400 starts")
 
 
 # Runs a program as init of a pid namespace of its own, with a /proc of that namespace.

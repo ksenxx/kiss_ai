@@ -5,6 +5,19 @@
 # add your name here
 # Install KISS Sorcar: the kiss-web daemon, its webapp and the sorcar CLI.
 #
+# One installer for macOS, Linux and Windows.  On Windows it runs in Git
+# Bash (Git for Windows), the shell the agent's own shell tool uses
+# there; the venv's programs are then ``.venv/Scripts/*.exe``, not
+# ``.venv/bin/*`` (VENV_BIN below).  The Mac package
+# (scripts/build-macos-pkg.sh) and the Windows setup program
+# (scripts/build-windows-exe.sh) both unpack a copy of the sources and
+# run this script.
+#
+# It needs no administrator password, no compiler, no Homebrew and no
+# git (a tree without git history installs too), and it asks nothing:
+# what a machine lacks (uv, Python, Chromium, cloudflared) is downloaded
+# into the home directory.
+#
 # What ends up on the machine:
 #
 #   ~/.kiss/kiss/                 the app directory: $KISS_HOME/<its name without
@@ -20,7 +33,8 @@
 #     to a remote)
 #     src/kiss/webapp/media/  the webapp frontend kiss-web serves
 #     .venv/                      the Python environment (``uv sync``)
-#   ~/.local/bin/sorcar           the CLI (``uv run --directory ~/.kiss/kiss sorcar``)
+#   ~/.local/bin/sorcar           the CLI (``uv run --directory ~/.kiss/kiss sorcar``;
+#                                 on Windows also ``sorcar.cmd``)
 #   ~/.local/bin/cloudflared      the public tunnel of the webapp
 #
 # Steps:
@@ -51,8 +65,9 @@
 # $HOME (see daemon_work_dir).
 #
 # Usage:
-#   ./install.sh                  interactive: asks before installing Homebrew
-#   ./install.sh --non-interactive  every question takes its default answer
+#   ./install.sh                  at a terminal: Ctrl-C twice aborts the install
+#   ./install.sh --non-interactive  an automated caller: the run detaches from
+#                                 the terminal's signals (see below)
 #   ./install.sh --restart-only   install nothing; only (re)start kiss-web from
 #                                 the app already in $KISS_HOME, serving the
 #                                 directory it is run from -- how kiss-web
@@ -64,6 +79,8 @@
 #                        $KISS_HOME/kiss when the name has no leading dot
 #   KISS_NONINTERACTIVE  same as --non-interactive
 #   KISS_SKIP_LAUNCH     do not start kiss-web or open the webapp
+#   KISS_NO_REVEAL       do not show the app's launcher in the file manager
+#                        once the webapp's window is open
 #   KISS_WEB_PORT        port of the kiss-web daemon (default 8787)
 #   KISS_CODE_CLI        the one editor CLI to retire the VS Code extension
 #                        with (default: code, code-insiders, cursor and
@@ -151,21 +168,21 @@ fi
 # ---------------------------------------------------------------------------
 # Interactive mode (the default at a terminal)
 # ---------------------------------------------------------------------------
-# A human running ``./install.sh`` at a terminal is asked ``[Y/n]``
-# before Homebrew is installed (see ``confirm`` below); "no" skips it and
-# carries on.  The tool the install cannot proceed without (uv) is still
-# installed without a question when missing, and an already-installed
-# tool is used as-is — this script never upgrades third-party software.
+# The script asks no question in either mode.  The tool the install
+# cannot proceed without (uv) is installed when missing, and an
+# already-installed tool is used as-is — this script never upgrades
+# third-party software.  The mode only decides how the run treats the
+# terminal: an interactive run stays attached to it (Ctrl-C twice
+# aborts, see ``handle_interrupt``), a non-interactive one moves into a
+# session of its own first (the re-exec below) so that no terminal
+# signal can cut it short.
 #
-# ``_KISS_INTERACTIVE`` is 0 instead when
+# ``_KISS_INTERACTIVE`` is 0 when
 #
 # * ``--non-interactive`` is passed or ``KISS_NONINTERACTIVE`` is set —
 #   what an automated caller does; or
-# * ``/dev/tty`` cannot be opened, i.e. there is no terminal to ask on
+# * ``/dev/tty`` cannot be opened, i.e. there is no terminal
 #   (cron, CI, a daemon), including inside the detached re-exec below.
-#
-# Non-interactive runs behave as before: every question takes its default
-# answer (Yes).
 # BEGIN: kiss-interactive-mode
 _KISS_INTERACTIVE=1
 if [ -n "${KISS_NONINTERACTIVE:-}" ]; then
@@ -258,6 +275,58 @@ fi
 # any always-zero command, like the ``tar | tar`` copy below) propagates a
 # non-zero exit from its body instead of returning the tail's status.
 set -eo pipefail
+
+# On Windows the home directory is the user's profile: that is where the
+# app keeps its state (Python's ``Path.home()``), while Git Bash can take
+# HOME from elsewhere (HOMEDRIVE and HOMEPATH name a network drive on a
+# PC that belongs to a domain).
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*)
+        [ -z "${USERPROFILE:-}" ] || HOME="$(cygpath -u "$USERPROFILE")"
+        export HOME
+        ;;
+esac
+
+# ---------------------------------------------------------------------------
+# A Mac without Apple's developer tools
+#
+# On a Mac that has neither Xcode nor the Command Line Tools,
+# /usr/bin/git, /usr/bin/python3, install_name_tool, make, cc and some
+# seventy other commands are stubs.  Running one does not just fail: it
+# opens the system dialog 'The "git" command requires the command line
+# developer tools. Would you like to install the tools now?'.  This
+# script asks git for the checkout's files, and uv runs /usr/bin/python3
+# (interpreter discovery) and install_name_tool (after it installs a
+# managed Python, astral-sh/uv#14893) on its own, so an install on such
+# a Mac opened that dialog several times.
+#
+# The stubs look the tools up in the active developer directory, and
+# DEVELOPER_DIR overrides it (xcode-select(1)).  Pointed at a directory
+# that does not exist, a stub prints "xcrun: error: missing DEVELOPER_DIR
+# path" and exits 1 at once, with no dialog: every caller here already
+# treats that as "the tool is not there".  The directory named is where
+# the Command Line Tools install themselves, so the stubs start working
+# without another change the day the user installs them.
+#
+# ``xcode-select -p`` alone does not tell: it repeats a DEVELOPER_DIR it
+# inherits (the kiss-web daemon exports the same one, see
+# kiss/core/macos_developer_tools.py, and its Update button runs this
+# script), hence the test that the directory is there.
+#
+# scripts/install.sh carries the identical block (a test keeps the two
+# the same): it runs git before it hands over to this script.
+# BEGIN: kiss-macos-developer-tools  (tests extract this block verbatim)
+macos_developer_tools_missing() {
+    # True on a Mac with neither Xcode nor the Command Line Tools.
+    local dir
+    [ "$(uname -s)" = Darwin ] || return 1
+    dir="$(xcode-select -p 2>/dev/null)" || return 0
+    [ ! -d "$dir" ]
+}
+if macos_developer_tools_missing; then
+    export DEVELOPER_DIR=/Library/Developer/CommandLineTools
+fi
+# END: kiss-macos-developer-tools
 
 # ``--restart-only``: kiss-web finishing the restart an earlier run
 # deferred because tasks were in flight (record_deferred_restart).  The
@@ -486,11 +555,6 @@ CURRENT_CMD_PID=""
 # PID of that command's heartbeat subshell, stopped alongside it on abort
 # so it does not outlive the script by up to one HEARTBEAT_INTERVAL.
 CURRENT_HB_PID=""
-# The ``confirm`` question currently waiting for an answer, if any.  A
-# single Ctrl-C at a question runs ``handle_interrupt`` but, on bash 5,
-# leaves the ``read`` waiting; re-printing the question after the notice
-# tells the user the script still expects an answer.
-CONFIRM_PENDING=""
 # The notice goes to stderr: the trap runs after whatever foreground
 # command the signal hit, and when that command's stdout was a file
 # (``list_app_files > "$list"``) the notice would otherwise land in it.
@@ -519,9 +583,6 @@ handle_interrupt() {
     echo "   ⚠ Interrupt received but ignored — uv and Playwright can sit"
     echo "      silent for 30-60 s while they download or extract.  Press"
     echo "      Ctrl+C again within 3 s to really abort."
-    if [ -n "$CONFIRM_PENDING" ]; then
-        printf '   %s [Y/n] ' "$CONFIRM_PENDING"
-    fi
 } >&2
 
 # Re-route stdout/stderr to the log file when the controlling terminal
@@ -660,64 +721,13 @@ run_with_heartbeat() {
     return $rc
 }
 
-# Ask the user a yes/no question; returns 0 for "yes" and 1 for "no".
-#
-# When ``_KISS_INTERACTIVE`` is 0 (see the "Interactive mode" block at the top)
-# this asks nothing and answers "yes", which is the historical behaviour
-# of every caller.  Otherwise the question goes to stdout (so it is logged
-# and stays in order with the surrounding output) and the answer is read
-# from ``/dev/tty`` rather than stdin, so it works for ``curl ... | bash``
-# too.
-#
-# Guards, each of which once crashed this script under ``set -e``:
-#
-# * ``read`` runs in an ``||`` list so a non-zero status can never trip
-#   ``set -e``; EOF (Ctrl-D) and a ``/dev/tty`` that can no longer be
-#   opened (the terminal went away after the startup probe) both take the
-#   default "yes" instead of dying;
-# * the single Ctrl-C that ``handle_interrupt`` deliberately ignores is not
-#   mistaken for an answer: bash 5 keeps the ``read`` waiting after the
-#   trap (the trap re-prints the question via ``CONFIRM_PENDING``), and a
-#   bash whose ``read`` gives up with status > 128 simply reads again.
-#
-# ``read -s`` turns off the terminal's own echo and the answer is printed
-# back through stdout instead, so question and answer travel the same
-# ``tee`` pipe and land in the log complete and in order (a direct append
-# to the log file could overtake ``tee``).
-confirm() {
-    local question="$1" answer rc
-    if [ "$_KISS_INTERACTIVE" != 1 ]; then
-        return 0
-    fi
-    CONFIRM_PENDING="$question"
-    printf '   %s [Y/n] ' "$question"
-    while :; do
-        rc=0
-        IFS= read -rs answer </dev/tty || rc=$?
-        if [ "$rc" -gt 128 ]; then
-            continue
-        fi
-        if [ "$rc" -ne 0 ]; then
-            CONFIRM_PENDING=""
-            echo "(no answer from the terminal; assuming yes)"
-            return 0
-        fi
-        printf '%s\n' "${answer:-yes}"
-        case "$answer" in
-            ""|[Yy]|[Yy][Ee][Ss]) CONFIRM_PENDING=""; return 0 ;;
-            [Nn]|[Nn][Oo]) CONFIRM_PENDING=""; return 1 ;;
-            *)
-                echo "   Please answer y or n."
-                printf '   %s [Y/n] ' "$question"
-                ;;
-        esac
-    done
-}
-
+# The platform: Darwin, Linux or Windows.  Git Bash reports its MSYS
+# runtime (``MINGW64_NT-10.0-26100``), as do MSYS2 and Cygwin shells.
 OS="$(uname -s)"
 ARCH="$(uname -m)"
 case "$OS" in
     Darwin|Linux) ;;
+    MINGW*|MSYS*|CYGWIN*) OS=Windows ;;
     *)  fail "Unsupported OS: $OS" ;;
 esac
 
@@ -730,63 +740,14 @@ if ! command -v curl &>/dev/null; then
     fail "curl is required but not found. Please install curl first."
 fi
 
-# Make Homebrew visible even when this script runs detached from a login
-# shell.  The webapp's update button spawns install.sh from the kiss-web
-# daemon, whose launchd/systemd environment has a minimal PATH without
-# /opt/homebrew/bin (or /usr/local/bin on Intel Macs).  Without this,
-# `command -v brew` failed even though Homebrew was installed, so
-# `ensure_homebrew` tried to re-install it.
-if [ "$OS" = "Darwin" ] && ! command -v brew &>/dev/null; then
-    if [ -x /opt/homebrew/bin/brew ]; then
-        eval "$(/opt/homebrew/bin/brew shellenv)"
-    elif [ -x /usr/local/bin/brew ]; then
-        eval "$(/usr/local/bin/brew shellenv)"
-    fi
+# Git Bash hands a path to a Windows program (uv, Python) in Windows
+# spelling, except a path that holds an apostrophe: that one it passes on
+# as it is, and the program does not find it.
+if [ "$OS" = Windows ]; then
+    case "$HOME$PROJECT_DIR" in
+        *\'*) fail "${BRAND_PRODUCT_NAME:-KISS Sorcar} cannot be installed from or into a folder whose name holds an apostrophe ($HOME, $PROJECT_DIR)." ;;
+    esac
 fi
-
-ensure_homebrew() {
-    [ "$OS" = "Darwin" ] || return 0
-
-    if command -v brew &>/dev/null; then
-        echo "   Homebrew already installed at $(command -v brew)"
-        return 0
-    fi
-
-    if [ -n "${KISS_NO_BREW:-}" ]; then
-        echo "   KISS_NO_BREW set — skipping Homebrew install. KISS Sorcar may not"
-        echo "   be able to install some tools on demand without it."
-        return 0
-    fi
-
-    echo ""
-    echo "   Homebrew (https://brew.sh) is not installed."
-    echo "   Installing it enables KISS Sorcar to install necessary tools on demand"
-    echo "   (e.g. git, cloudflared, and other runtime dependencies)."
-    echo "   Set KISS_NO_BREW=1 to skip this step."
-    echo ""
-    if ! confirm "Install Homebrew now?"; then
-        echo "   Skipping the Homebrew install; KISS Sorcar may not be able to"
-        echo "   install some tools on demand without it."
-        return 0
-    fi
-    echo "   Installing Homebrew..."
-    # `|| true`: a failed Homebrew bootstrap (no sudo, no network)
-    # must not abort the install — the check below prints a warning
-    # and the script continues without brew.
-    NONINTERACTIVE=1 /bin/bash -c \
-        "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh || true)" || true
-    # Make brew available in the current shell session.
-    if [ -x /opt/homebrew/bin/brew ]; then
-        eval "$(/opt/homebrew/bin/brew shellenv)"
-    elif [ -x /usr/local/bin/brew ]; then
-        eval "$(/usr/local/bin/brew shellenv)"
-    fi
-    if command -v brew &>/dev/null; then
-        echo "   Homebrew installed at $(command -v brew)"
-    else
-        warn "Homebrew install did not complete; continuing without it."
-    fi
-}
 
 # ---------------------------------------------------------------------------
 # Runtime setup (as in install.sh, with the app directory as the project)
@@ -799,6 +760,35 @@ ensure_homebrew() {
 # kiss-web always listens on 8787; the override exists for the tests.
 KISS_WEB_PORT="${KISS_WEB_PORT:-8787}"
 
+# BEGIN: kiss-platform  (tests extract this block verbatim)
+on_windows() {
+    # True in Git Bash (or an MSYS2 or Cygwin shell) on Windows.
+    case "$(uname -s)" in
+        MINGW*|MSYS*|CYGWIN*) return 0 ;;
+    esac
+    return 1
+}
+
+# Where a venv keeps its programs: ``bin`` on macOS and Linux, ``Scripts``
+# on Windows (as ``python.exe``, ``kiss-web.exe``; Git Bash runs and tests
+# ``Scripts/python`` as that file, so no suffix is spelled out here).
+if on_windows; then VENV_BIN=Scripts; else VENV_BIN=bin; fi
+
+shell_path() {
+    # Filter: a line a native program printed, as this shell reads it.
+    # Python on Windows ends its lines with CR LF and prints paths as
+    # ``C:\Users\me``; Git Bash wants no CR and ``/c/Users/me``.  $1 =
+    # ``text`` leaves the spelling alone (the line is not a path).
+    if ! on_windows; then
+        cat
+    elif [ "${1:-}" = text ]; then
+        tr -d '\r'
+    else
+        tr -d '\r' | cygpath -u -f -
+    fi
+}
+# END: kiss-platform
+
 ensure_uv() {
     # Print the path of uv, installing it into ~/.local/bin when missing.
     local candidate
@@ -810,14 +800,21 @@ ensure_uv() {
         fi
     done
     echo "   Installing uv (https://astral.sh/uv)..." >&2
-    curl -LsSf https://astral.sh/uv/install.sh | UV_NO_MODIFY_PATH=1 sh >&2 || return 1
+    if on_windows; then
+        UV_NO_MODIFY_PATH=1 powershell -NoProfile -ExecutionPolicy Bypass \
+            -Command 'irm https://astral.sh/uv/install.ps1 | iex' >&2 < /dev/null || return 1
+    else
+        curl -LsSf https://astral.sh/uv/install.sh | UV_NO_MODIFY_PATH=1 sh >&2 || return 1
+    fi
     [ -x "$HOME/.local/bin/uv" ] || return 1
     echo "$HOME/.local/bin/uv"
 }
 
 add_local_bin_to_shell_rc() {
     # Put ~/.local/bin (uv, sorcar, cloudflared) on PATH in the login
-    # shell's rc file, once.
+    # shell's rc file, once.  On Windows that file is Git Bash's; the
+    # user's own PATH, which cmd, PowerShell and the daemon read, is kept
+    # in the registry (install_sorcar_cli adds the directory there).
     local rc line
     case "${SHELL:-}" in
         */zsh|*/zsh-5) rc="$HOME/.zshrc" ;;
@@ -843,8 +840,11 @@ add_local_bin_to_shell_rc() {
 
 install_cloudflared() {
     # cloudflared serves the public tunnel URL of the web app.  Best
-    # effort: Homebrew on macOS, else the latest GitHub release.
-    local arch bin_dir="$HOME/.local/bin" url
+    # effort: the latest GitHub release, into ~/.local/bin (a .tgz for
+    # macOS, the program itself for Linux and Windows; Cloudflare builds
+    # no Windows program for ARM, where the x64 one runs emulated).
+    local arch bin_dir="$HOME/.local/bin" file=cloudflared
+    local url="https://github.com/cloudflare/cloudflared/releases/latest/download"
     command -v cloudflared &>/dev/null && return 0
     [ -x "$bin_dir/cloudflared" ] && return 0
     case "$(uname -m)" in
@@ -855,17 +855,19 @@ install_cloudflared() {
     echo "   Installing cloudflared..."
     mkdir -p "$bin_dir"
     if [ "$(uname -s)" = "Darwin" ]; then
-        if command -v brew &>/dev/null && brew install cloudflared; then
-            return 0
-        fi
-        url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-$arch.tgz"
-        curl -fsSL "$url" | tar xzf - -C "$bin_dir" || warn "cloudflared download failed; the web app will have no public URL"
+        curl -fsSL "$url/cloudflared-darwin-$arch.tgz" | tar xzf - -C "$bin_dir" \
+            || warn "cloudflared download failed; the web app will have no public URL"
     else
-        url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-$arch"
-        curl -fsSL -o "$bin_dir/cloudflared" "$url" \
-            || { rm -f "$bin_dir/cloudflared"; warn "cloudflared download failed; the web app will have no public URL"; }
+        if on_windows; then
+            file=cloudflared.exe
+            url="$url/cloudflared-windows-amd64.exe"
+        else
+            url="$url/cloudflared-linux-$arch"
+        fi
+        curl -fsSL -o "$bin_dir/$file" "$url" \
+            || { rm -f "$bin_dir/$file"; warn "cloudflared download failed; the web app will have no public URL"; }
     fi
-    [ -f "$bin_dir/cloudflared" ] && chmod 755 "$bin_dir/cloudflared"
+    [ -f "$bin_dir/$file" ] && chmod 755 "$bin_dir/$file"
     return 0
 }
 
@@ -878,11 +880,12 @@ kiss_web_fingerprint() {
     # mtime of the bundled modules — the ``.pyc`` files too, which every
     # install writes afresh, so an updated library never matches the
     # running daemon's fingerprint.
-    "$1/.venv/bin/python" - "$1" "$2" <<'EOF'
+    "$1/.venv/$VENV_BIN/python" - "$1" "$2" <<'EOF' | shell_path text
 import hashlib, os, sys
 project, workdir = sys.argv[1], sys.argv[2]
 digest = hashlib.sha256()
-with open(os.path.join(project, ".venv", "bin", "kiss-web"), "rb") as f:
+launcher = ("Scripts", "kiss-web.exe") if os.name == "nt" else ("bin", "kiss-web")
+with open(os.path.join(project, ".venv", *launcher), "rb") as f:
     digest.update(f.read())
 digest.update(workdir.encode())
 latest = 0
@@ -924,7 +927,7 @@ kiss_web_is_idle() {
     KISS_WEB_RESTART_PENDING=""
     for endpoint in "$@"; do
         KISS_WEB_RESTART_PENDING="$(KISS_SORCAR_LOCAL="$endpoint" KISS_ACTIVE_TASKS_STRICT=1 \
-            "$python" "$PROJECT_DIR/scripts/check-kiss-web-active-tasks.py")" || return 1
+            "$python" "$PROJECT_DIR/scripts/check-kiss-web-active-tasks.py" | shell_path)" || return 1
     done
 }
 
@@ -951,7 +954,8 @@ stored_remote_password() {
     # Print the ``remote_password`` of the state directory $1 as the app
     # at $2 reads it (empty when none is stored or it cannot be read);
     # never stores one.
-    KISS_HOME="$1" "$2/.venv/bin/python" -m kiss.core.remote_password --show 2>/dev/null 9>&- || true
+    KISS_HOME="$1" "$2/.venv/$VENV_BIN/python" -m kiss.core.remote_password --show 2>/dev/null 9>&- \
+        | shell_path text || true
 }
 
 home_relative() {
@@ -1527,15 +1531,16 @@ move_problems_to() {
 
 start_kiss_web_daemon() {
     # Register kiss-web from kiss_project $1 as the user's service
-    # (launchd on macOS, systemd on Linux, a detached process elsewhere)
-    # serving work dir $2, and (re)start it when that is safe.
-    local project="$1" workdir="$2" kiss_web="$1/.venv/bin/kiss-web"
-    local python="$1/.venv/bin/python" home lock
+    # (launchd on macOS, systemd on Linux, a program started at logon on
+    # Windows, a detached process elsewhere) serving work dir $2, and
+    # (re)start it when that is safe.
+    local project="$1" workdir="$2" kiss_web="$1/.venv/$VENV_BIN/kiss-web"
+    local python="$1/.venv/$VENV_BIN/python" home lock
     if [ ! -x "$kiss_web" ]; then
         echo "   kiss-web not built in $project; not starting the daemon."
         return 0
     fi
-    home="$("$python" -c 'from kiss.core.config import kiss_home; print(kiss_home())')" || return 0
+    home="$("$python" -c 'from kiss.core.config import kiss_home; print(kiss_home())' | shell_path)" || return 0
     mkdir -p "$home"
     lock="$home/.kiss-web.restart.lock"
     if ! acquire_kiss_web_restart_lock "$lock"; then
@@ -1549,8 +1554,8 @@ start_kiss_web_daemon() {
 restart_kiss_web_locked() {
     # The decision and restart of start_kiss_web_daemon, under the lock:
     # kiss_project $1, work dir $2, state dir $3.
-    local project="$1" workdir="$2" home="$3" kiss_web="$1/.venv/bin/kiss-web"
-    local python="$1/.venv/bin/python" endpoint fingerprint stamp waited=0 old
+    local project="$1" workdir="$2" home="$3" kiss_web="$1/.venv/$VENV_BIN/kiss-web"
+    local python="$1/.venv/$VENV_BIN/python" endpoint fingerprint stamp waited=0 old
     endpoint="$home/sorcar-local.json"
     fingerprint="$(kiss_web_fingerprint "$project" "$workdir")" || return 0
     if [ "$(cat "$home/.kiss-web.fingerprint" 2>/dev/null)" = "$fingerprint" ] \
@@ -1613,6 +1618,15 @@ restart_kiss_web_locked() {
         stop_stray_kiss_web
         systemctl --user start kiss-web.service || warn "systemctl start failed"
         loginctl enable-linger "$(id -un)" 2>/dev/null || true
+    elif on_windows; then
+        # Windows has no per-user service manager: the app's own module
+        # registers kiss-web to start at every logon, stops the kiss-web
+        # holding the port and starts this one without a console window
+        # (kiss/server/windows_install.py).
+        echo "   Restarting kiss-web (it also starts at every logon)..."
+        "$python" -m kiss.server.windows_install restart-daemon \
+            --workdir "$workdir" --port "$KISS_WEB_PORT" < /dev/null \
+            || warn "kiss-web could not be started"
     else
         echo "   Starting kiss-web as a detached background process..."
         stop_stray_kiss_web
@@ -1682,19 +1696,30 @@ keep_source() {
     return 1
 }
 
+project_is_git_checkout() {
+    # True when $PROJECT_DIR is a git checkout of its own and git runs.
+    # ``.git`` is looked for first: a tree without one that merely sits
+    # inside some other repository (the Mac package's payload in a home
+    # directory kept under version control) is in a work tree too, and
+    # ``git ls-files`` lists none of its files.
+    [ -e "$PROJECT_DIR/.git" ] \
+        && (cd "$PROJECT_DIR" && git rev-parse --is-inside-work-tree >/dev/null 2>&1)
+}
+
 list_app_files() {
     # Print, relative to the checkout, every file the app needs: the
     # project files uv builds the venv from, and the kiss package without
     # its tests and without the webapp's JS tooling (package.json, eslint,
     # the jsdom tests) — only the ``media`` frontend, which kiss-web serves.
-    # A git checkout lists its tracked files; a tarball falls back to find.
+    # A git checkout lists its tracked files; a tree without git history
+    # (a tarball, the Mac package's payload) falls back to find.
     local path
     for path in pyproject.toml uv.lock README.md LICENSE; do
         [ -f "$PROJECT_DIR/$path" ] && echo "$path"
     done
     (
         cd "$PROJECT_DIR"
-        if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        if project_is_git_checkout; then
             git ls-files src/kiss
         else
             find src/kiss \( -name __pycache__ -o -name node_modules -o -name out \) -prune \
@@ -1732,9 +1757,13 @@ copy_app_files() {
     }
     rm -f "$list"
     # The checkout's commit, shown next to the version in the Settings
-    # panel (web_server._read_commit); a tarball has none.
-    git -C "$PROJECT_DIR" rev-parse --short HEAD > "$APP_DIR/src/kiss/core/_commit.txt" \
-        2>/dev/null || rm -f "$APP_DIR/src/kiss/core/_commit.txt"
+    # panel (web_server._read_commit).  A tree without git history keeps
+    # the ``_commit.txt`` it ships (the Mac package's payload has one; a
+    # tarball has none).
+    if [ -e "$PROJECT_DIR/.git" ]; then
+        git -C "$PROJECT_DIR" rev-parse --short HEAD > "$APP_DIR/src/kiss/core/_commit.txt" \
+            2>/dev/null || rm -f "$APP_DIR/src/kiss/core/_commit.txt"
+    fi
     echo "   Copied $count files to $APP_DIR"
 }
 
@@ -1755,14 +1784,27 @@ copy_brand_overlay() {
     done
 }
 
+# The Python lines a first install may build its environment on: the
+# ones uv.lock has a wheel of every compiled dependency for (a test
+# checks the lock file against this range).  Left to itself uv takes the
+# newest CPython there is, downloading it on a machine that has no
+# Python of its own, and on a line younger than the lock file it has to
+# build pydantic-core, pyyaml, aiohttp and others from source, which
+# takes a C and a Rust compiler: with CPython 3.15 out, ``uv sync``
+# failed on every machine that had neither.
+APP_PYTHON_RANGE=">=3.13,<3.15"
+
 build_app_venv() {
     # Build the Python environment of $APP_DIR with uv ($1).
     echo "   Installing Python dependencies in $APP_DIR..."
+    # An app directory that has a ``.python-version`` keeps its line: the
+    # pin written below by the run that built its venv.
+    [ -f "$APP_DIR/.python-version" ] || echo "$APP_PYTHON_RANGE" > "$APP_DIR/.python-version"
     run_with_heartbeat "uv sync" "$1" sync --directory "$APP_DIR" || return 1
     # Pin the interpreter line uv chose: the ``.pyc`` files written below
     # load only on that line, so a later ``uv run`` must not switch it.
-    "$APP_DIR/.venv/bin/python" -c 'import sys; print("%d.%d" % sys.version_info[:2])' \
-        > "$APP_DIR/.python-version"
+    "$APP_DIR/.venv/$VENV_BIN/python" -c 'import sys; print("%d.%d" % sys.version_info[:2])' \
+        | shell_path text > "$APP_DIR/.python-version"
 }
 
 compile_app_library() {
@@ -1772,7 +1814,7 @@ compile_app_library() {
     # imports it once ``foo.py`` is gone; ``unchecked-hash`` keeps Python
     # from looking for a source to validate it against.  The files of
     # COMPILE_KEEP_SOURCE stay as scripts and lose their ``.pyc`` instead.
-    local python="$APP_DIR/.venv/bin/python" src="$APP_DIR/src" path rel
+    local python="$APP_DIR/.venv/$VENV_BIN/python" src="$APP_DIR/src" path rel
     local compiled=0 scripts=0
     "$python" -m compileall -q -f -b --invalidation-mode unchecked-hash "$src" || return 1
     find "$src" -name __pycache__ -type d -prune -exec rm -rf {} +
@@ -1790,8 +1832,55 @@ compile_app_library() {
 }
 # END: kiss-app-files
 
+stop_running_app() {
+    # Windows only: stop the kiss-web that runs from $APP_DIR, before its
+    # files are replaced.  Windows keeps the files of a running program
+    # locked (``uv sync`` fails on ``.venv\Scripts\kiss-web.exe``: "being
+    # used by another process"), so there the daemon cannot stay up
+    # during an update as it does on macOS and Linux; step [5/5] starts
+    # the new one.  Never with tasks in flight: status 1 then, and
+    # nothing was touched.
+    local python="$APP_DIR/.venv/$VENV_BIN/python"
+    [ -x "$python" ] && kiss_web_port_open || return 0
+    kiss_web_is_idle "$python" "$KISS_HOME_DIR/sorcar-local.json" || return 1
+    "$python" -m kiss.server.windows_install stop-daemon \
+        --port "$KISS_WEB_PORT" --app "$APP_DIR" < /dev/null || true
+}
+
+cmd_path() {
+    # Path $1 as a ``.cmd`` file names it: in Windows spelling, with the
+    # profile directory as %USERPROFILE%.  cmd reads a ``.cmd`` file in
+    # the console's code page, in which a profile name outside ASCII
+    # (José) written here as UTF-8 would name another directory.
+    local path profile
+    path="$(cygpath -w "$1")"
+    profile="$(cygpath -w "$HOME")"
+    case "$path" in
+        "$profile"\\*) path="%USERPROFILE%${path#"$profile"}" ;;
+    esac
+    printf '%s' "$path"
+}
+
 install_sorcar_cli() {
-    # The ``sorcar`` CLI wrapper, bound to $APP_DIR through uv ($1).
+    # The ``sorcar`` CLI wrapper, bound to $APP_DIR through uv ($1).  On
+    # Windows that bash script serves Git Bash, and ``sorcar.cmd`` beside
+    # it does the same for cmd and PowerShell.  The user's PATH there
+    # gets $BIN_DIR and, for a Git that is not on it (one installed for
+    # Git Bash only, or the setup program's), the directory of ``git``:
+    # the daemon runs git, and is started with that PATH.
+    local git_cmd=""
+    if on_windows; then
+        [ ! -f /cmd/git.exe ] || git_cmd="$(cygpath -w /cmd)"
+        printf '%s\r\n' '@echo off' \
+            "rem Installed by ${BRAND_PRODUCT_NAME:-KISS Sorcar} install.sh" \
+            'set "KISS_WORKDIR=%CD%"' \
+            "\"$(cmd_path "$1")\" run --directory \"$(cmd_path "$APP_DIR")\" sorcar %*" \
+            > "$BIN_DIR/sorcar.cmd" || warn "could not install the sorcar CLI at $BIN_DIR/sorcar.cmd"
+        # shellcheck disable=SC2086  # $git_cmd is one path or nothing
+        "$APP_DIR/.venv/$VENV_BIN/python" -m kiss.server.windows_install add-path \
+            "$(cygpath -w "$BIN_DIR")" ${git_cmd:+"$git_cmd"} < /dev/null \
+            || warn "could not add $BIN_DIR to your PATH"
+    fi
     if printf '%s\n' '#!/bin/bash' \
             "# Installed by ${BRAND_PRODUCT_NAME:-KISS Sorcar} install.sh" \
             'export KISS_WORKDIR="$PWD"' \
@@ -1829,7 +1918,7 @@ install_playwright_chromium() {
     # Playwright's Chromium for the browser tools, through uv ($1).
     echo "   Installing Playwright Chromium..."
     if ! run_with_heartbeat "playwright install" "$1" run --directory "$APP_DIR" python -m playwright install chromium; then
-        warn "Playwright Chromium install failed; run '$APP_DIR/.venv/bin/python -m playwright install chromium' later."
+        warn "Playwright Chromium install failed; run '$APP_DIR/.venv/$VENV_BIN/python -m playwright install chromium' later."
     elif [ "$(uname -s)" = "Linux" ]; then
         # Chromium's system libraries need root (install-deps calls sudo
         # itself); only try when that cannot stall on a password prompt.
@@ -1837,7 +1926,7 @@ install_playwright_chromium() {
             (cd "$APP_DIR" && "$1" run python -m playwright install-deps chromium) \
                 || warn "Chromium system libraries not installed (playwright install-deps failed)."
         else
-            echo "   Chromium system libraries: run 'sudo $APP_DIR/.venv/bin/python -m playwright install-deps chromium' if the browser fails to start."
+            echo "   Chromium system libraries: run 'sudo $APP_DIR/.venv/$VENV_BIN/python -m playwright install-deps chromium' if the browser fails to start."
         fi
     fi
 }
@@ -1869,9 +1958,9 @@ fi
     echo "App directory: $APP_DIR"
     echo "OS: $OS ($ARCH)"
     if [ "$_KISS_INTERACTIVE" = 1 ]; then
-        echo "Mode: interactive (asks before installing Homebrew; pass --non-interactive to skip the question)"
+        echo "Mode: interactive (Ctrl-C twice aborts)"
     else
-        echo "Mode: non-interactive (every question takes its default answer)"
+        echo "Mode: non-interactive"
     fi
     echo ""
 
@@ -1884,17 +1973,13 @@ fi
     if [ "$_KISS_RESTART_ONLY" = 1 ]; then
         report_step "Restarting kiss-web onto the app in $APP_DIR..."
         start_kiss_web_daemon "$APP_DIR" "$USER_PWD" \
-            || warn "kiss-web was not restarted; start it with '$APP_DIR/.venv/bin/kiss-web'."
+            || warn "kiss-web was not restarted; start it with '$APP_DIR/.venv/$VENV_BIN/kiss-web'."
         retire_legacy_app_dir "$KISS_HOME_DIR" "$APP_DIR"
         exit 0
     fi
 
-    if [ "$OS" = "Darwin" ]; then
-        # Homebrew is optional: it is only the preferred way to install
-        # cloudflared (install_cloudflared falls back to a GitHub download).
-        report_step "Checking Homebrew..."
-        ensure_homebrew
-        echo ""
+    if [ "$OS" = Windows ] && ! stop_running_app; then
+        fail "${BRAND_PRODUCT_NAME:-KISS Sorcar} is running tasks, and Windows cannot update a running app. Run the install again when they are done."
     fi
 
     report_step "[1/5] Copying ${BRAND_PRODUCT_NAME:-KISS Sorcar} to $APP_DIR..."
@@ -1908,6 +1993,9 @@ fi
     fi
     echo "   Using uv at $UV"
     if ! build_app_venv "$UV"; then
+        if [ "$OS" = Windows ]; then
+            fail "uv sync failed in $APP_DIR (close every program that runs from it, a sorcar in a terminal for one, and run the install again)"
+        fi
         fail "uv sync failed in $APP_DIR"
     fi
     echo ""
@@ -1968,7 +2056,7 @@ fi
     # one only when none is stored yet, so an update never changes the
     # password.  It is also shown in the box at the end of this script.
     PREVIOUS_PASSWORD="$(stored_remote_password "$KISS_HOME_DIR" "$APP_DIR")"
-    REMOTE_PASSWORD="$(KISS_HOME="$KISS_HOME_DIR" "$APP_DIR/.venv/bin/python" -m kiss.core.remote_password 9>&-)" \
+    REMOTE_PASSWORD="$(KISS_HOME="$KISS_HOME_DIR" "$APP_DIR/.venv/$VENV_BIN/python" -m kiss.core.remote_password 9>&- | shell_path text)" \
         || { REMOTE_PASSWORD=""; warn "could not set the remote-access password."; }
     if [ -z "$REMOTE_PASSWORD" ]; then
         :
@@ -2024,7 +2112,7 @@ fi
         service_home="$(service_kiss_home | head -n 1)"
         service_home="${service_home%/}"
         if [ -n "$service_home" ] && [ "$service_home" != "${KISS_HOME_DIR%/}" ] \
-            && [ -x "$(app_dir_of "$service_home")/.venv/bin/kiss-web" ]; then
+            && [ -x "$(app_dir_of "$service_home")/.venv/$VENV_BIN/kiss-web" ]; then
             RESTART_HOME="$service_home"
             RESTART_WHY="The kiss-web service runs from brand home $RESTART_HOME; restarting that app."
         elif [ "${KISS_HOME_DIR%/}" = "$HOME/.kiss" ] && [ -n "$first_brand_home" ]; then
@@ -2050,11 +2138,11 @@ fi
             brand_password="$(stored_remote_password "$RESTART_HOME" "$restart_app")"
             [ -z "$brand_password" ] || REMOTE_PASSWORD="$brand_password"
             KISS_HOME="$RESTART_HOME" start_kiss_web_daemon "$restart_app" "$USER_PWD" \
-                || warn "kiss-web was not restarted; start it with '$restart_app/.venv/bin/kiss-web'."
+                || warn "kiss-web was not restarted; start it with '$restart_app/.venv/$VENV_BIN/kiss-web'."
             retire_legacy_app_dir "$RESTART_HOME" "$restart_app"
         else
             start_kiss_web_daemon "$APP_DIR" "$USER_PWD" \
-                || warn "kiss-web was not restarted; start it with '$APP_DIR/.venv/bin/kiss-web'."
+                || warn "kiss-web was not restarted; start it with '$APP_DIR/.venv/$VENV_BIN/kiss-web'."
             retire_legacy_app_dir "$KISS_HOME_DIR" "$APP_DIR"
         fi
     else
@@ -2130,6 +2218,10 @@ open_in_browser() {
             # stay open in a browser that outlives the installer.
             (nohup xdg-open "$1" >/dev/null 2>&1 3>&- 9>&- &)
             ;;
+        Windows)
+            # What Explorer does with a URL: the default browser opens it.
+            rundll32 url.dll,FileProtocolHandler "$1" >/dev/null 2>&1
+            ;;
         *)
             return 1
             ;;
@@ -2144,12 +2236,14 @@ open_in_browser() {
 # Wait for the daemon's URL file, then open the Local URL
 # (http://127.0.0.1:PORT, plain HTTP on loopback) as a standalone app
 # window: kiss-app (next to kiss-web in the app's venv) registers the
-# desktop launcher, opens the webapp in a Chromium app-mode window and
-# then shows the launcher's folder in the file manager, so the user
-# sees where the app is.  Without kiss-app, or if it fails, the URL
-# opens in the default browser.  On a remote machine (an SSH session, or Linux without a
-# display) there is no window to open here, so the cloudflared URL is
-# printed for the user to open on their own device.
+# desktop launcher (an app in ~/Applications on macOS, a menu entry on
+# Linux, a Start Menu shortcut on Windows), opens the webapp in a
+# Chromium app-mode window and then shows the launcher's folder in the
+# file manager, so the user sees where the app is.  Without kiss-app,
+# or if it fails, the URL opens in the default browser.  On a remote
+# machine (an SSH session, or Linux without a display) there is no
+# window to open here, so the cloudflared URL is printed for the user to
+# open on their own device.
 # ``KISS_SKIP_LAUNCH`` skips this too.
 [ -n "${KISS_SKIP_LAUNCH:-}" ] || report_step "Waiting for the kiss-web daemon to open the webapp..."
 # BEGIN: kiss-open-webapp
@@ -2160,9 +2254,9 @@ find_kiss_web() {
     # its own.  Any copy will do: the URLs come from remote-url.json.
     local candidate
     for candidate in \
-        "$APP_DIR/.venv/bin/kiss-web" \
+        "$APP_DIR/.venv/$VENV_BIN/kiss-web" \
         "$(command -v kiss-web 2>/dev/null || true)" \
-        "$PROJECT_DIR/.venv/bin/kiss-web"; do
+        "$PROJECT_DIR/.venv/$VENV_BIN/kiss-web"; do
         if [ -n "$candidate" ] && [ -x "$candidate" ]; then
             printf '%s\n' "$candidate"
             return 0
@@ -2176,7 +2270,7 @@ find_kiss_app() {
     # that home's app venv (a brand's app when a brand daemon was
     # restarted), else the one next to kiss-web $2.
     local candidate
-    for candidate in "$(app_dir_of "$1")/.venv/bin/kiss-app" "${2%/*}/kiss-app"; do
+    for candidate in "$(app_dir_of "$1")/.venv/$VENV_BIN/kiss-app" "${2%/*}/kiss-app"; do
         if [ -x "$candidate" ]; then
             printf '%s\n' "$candidate"
             return 0
@@ -2254,8 +2348,12 @@ open_webapp() {
         if KISS_HOME="$app_home" "$kiss_app" --url "$loopback" --wait 0; then
             # After the window: the launcher's folder in the file
             # manager (Finder on macOS), so the user sees where the
-            # app is and can pin it.
-            [ "$launcher" = 0 ] \
+            # app is and can pin it.  Not with KISS_NO_REVEAL: the Mac
+            # package sets it, because macOS holds ``open -R`` of the
+            # new app bundle against the application the install runs
+            # under and asks the user whether "Installer" may modify
+            # apps on the Mac.
+            [ "$launcher" = 0 ] || [ -n "${KISS_NO_REVEAL:-}" ] \
                 || KISS_HOME="$app_home" "$kiss_app" --reveal-launcher \
                 || warn "Could not show the desktop launcher's folder."
             return 0

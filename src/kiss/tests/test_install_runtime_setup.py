@@ -13,12 +13,14 @@ Every test extracts the block verbatim from ``install.sh`` (between
 ``# BEGIN: kiss-runtime-setup`` and the matching END marker) and runs it
 under a real bash with a sandboxed ``$HOME`` and a PATH made of stub
 executables (``uv``, ``curl``, ``systemctl``, ``launchctl``, ``lsof``,
-``fuser``, ``sudo``, ``uname``, ``brew``) that record their calls, plus
-symlinks to the real coreutils.  The "daemon" started by the service
-stubs is a real process that writes the endpoint file and listens on a
-port, exactly as kiss-web does, so the block's "is it up" logic is
-exercised for real.  The active-task probe talks to a real fake daemon
-over ``wss://`` (``kiss.tests.local_ws.fake_daemon``).
+``fuser``, ``sudo``, ``uname``, ``cygpath``, ``powershell``) that record
+their calls, plus symlinks to the real coreutils.  A ``uname`` stub that
+reports Git Bash's ``MINGW64_NT-...`` runs the block's Windows branches.
+The "daemon" started by the service stubs is a real process that writes
+the endpoint file and listens on a port, exactly as kiss-web does, so the
+block's "is it up" logic is exercised for real.  The active-task probe
+talks to a real fake daemon over ``wss://``
+(``kiss.tests.local_ws.fake_daemon``).
 
 """
 
@@ -52,6 +54,13 @@ _BEGIN = "# BEGIN: kiss-runtime-setup"
 _END = "# END: kiss-runtime-setup"
 _PROBLEMS_BEGIN = "# BEGIN: kiss-install-problems"
 _PROBLEMS_END = "# END: kiss-install-problems"
+# What ``uname -s`` prints in Git Bash on Windows.
+_GIT_BASH = "MINGW64_NT-10.0-26100"
+# ``cygpath -u -f -``: the Windows paths on stdin, as Git Bash spells them.
+_CYGPATH_STUB = r"""
+[ "$*" = "-u -f -" ] || exit 2
+sed -e 's|\\|/|g' -e 's|^C:|/c|'
+"""
 # Real utilities the block needs; everything else on PATH is a stub.
 _TOOLS = (
     "bash",
@@ -307,6 +316,58 @@ def test_ensure_uv_fails_when_the_installer_leaves_no_binary(sandbox: Sandbox) -
     assert res.stdout == "rc=1\n"
 
 
+def test_ensure_uv_on_windows_runs_the_powershell_installer(sandbox: Sandbox) -> None:
+    """Git Bash gets astral's PowerShell installer; no uv after it is a failure."""
+    sandbox.uname(_GIT_BASH)
+    sandbox.stub(
+        "powershell", f'echo "UV_NO_MODIFY_PATH=$UV_NO_MODIFY_PATH" >> {str(sandbox.calls)!r}\n'
+    )
+    res = sandbox.run('ensure_uv || echo "rc=$?"')
+    assert res.stdout == "rc=1\n"
+    assert "Installing uv" in res.stderr
+    assert sandbox.logged_calls() == [
+        "powershell -NoProfile -ExecutionPolicy Bypass "
+        "-Command irm https://astral.sh/uv/install.ps1 | iex",
+        "UV_NO_MODIFY_PATH=1",
+    ]
+
+
+# --------------------------------------------------------------------------
+# on_windows / VENV_BIN / shell_path
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("system", "expected"),
+    [
+        (_GIT_BASH, "Scripts windows"),
+        ("MSYS_NT-10.0-26100", "Scripts windows"),
+        ("CYGWIN_NT-10.0-26100", "Scripts windows"),
+        (None, "bin other"),  # the host's own uname: macOS or Linux
+    ],
+)
+def test_venv_programs_are_in_scripts_on_windows(
+    sandbox: Sandbox, system: str | None, expected: str
+) -> None:
+    if system:
+        sandbox.uname(system)
+    res = sandbox.run('on_windows && os=windows || os=other; echo "$VENV_BIN $os"')
+    assert res.stdout == expected + "\n", res.stderr
+
+
+def test_shell_path_reads_what_a_windows_program_printed(sandbox: Sandbox) -> None:
+    """On Windows the CR goes and ``cygpath`` respells a path; elsewhere nothing changes."""
+    commands = r"""
+        printf 'C:\\Users\\me\r\n' | shell_path | tr '\r' '@'
+        printf 'pass\\word\r\n' | shell_path text | tr '\r' '@'
+    """
+    assert sandbox.run(commands).stdout == "C:\\Users\\me@\npass\\word@\n"
+    sandbox.uname(_GIT_BASH)
+    sandbox.stub("cygpath", _CYGPATH_STUB)
+    assert sandbox.run(commands).stdout == "/c/Users/me\npass\\word\n"
+    assert sandbox.logged_calls() == ["cygpath -u -f -"]
+
+
 # --------------------------------------------------------------------------
 # add_local_bin_to_shell_rc
 # --------------------------------------------------------------------------
@@ -357,15 +418,41 @@ def test_cloudflared_on_path_or_in_local_bin_is_kept(sandbox: Sandbox) -> None:
     assert "curl" not in "".join(sandbox.logged_calls())
 
 
-def test_cloudflared_linux_download(sandbox: Sandbox) -> None:
-    sandbox.uname("Linux", "x86_64")
-    sandbox.stub("curl", 'while [ $# -gt 1 ]; do [ "$1" = -o ] && echo bin > "$2"; shift; done\n')
+@pytest.mark.parametrize(
+    ("system", "machine", "asset", "program"),
+    [
+        ("Linux", "x86_64", "cloudflared-linux-amd64", "cloudflared"),
+        ("Darwin", "x86_64", "cloudflared-darwin-amd64.tgz", "cloudflared"),
+        (_GIT_BASH, "x86_64", "cloudflared-windows-amd64.exe", "cloudflared.exe"),
+        (_GIT_BASH, "aarch64", "cloudflared-windows-amd64.exe", "cloudflared.exe"),
+    ],
+)
+def test_cloudflared_is_the_release_of_the_platform(
+    sandbox: Sandbox, system: str, machine: str, asset: str, program: str
+) -> None:
+    """Cloudflare's release: a tarball on macOS, the program on Linux and Windows (x64 only)."""
+    sandbox.uname(system, machine)
+    payload = sandbox.root / "cloudflared"
+    payload.write_text("#!/bin/bash\n", encoding="utf-8")
+    tgz = sandbox.root / "cloudflared.tgz"
+    with tarfile.open(tgz, "w:gz") as tar:
+        tar.add(payload, arcname="cloudflared")
+    # ``curl -o FILE`` saves the program; without ``-o`` the tarball goes down the pipe.
+    sandbox.stub(
+        "curl",
+        f"""\
+        while [ $# -gt 1 ]; do [ "$1" = -o ] && {{ echo bin > "$2"; exit 0; }}; shift; done
+        cat {str(tgz)!r}
+        """,
+    )
     res = sandbox.run("install_cloudflared")
+    assert res.returncode == 0, res.stderr
     assert "Installing cloudflared" in res.stdout
-    target = sandbox.home / ".local/bin/cloudflared"
-    assert target.read_text() == "bin\n"
+    target = sandbox.home / ".local/bin" / program
+    assert target.read_text() == ("#!/bin/bash\n" if system == "Darwin" else "bin\n")
     assert target.stat().st_mode & 0o777 == 0o755
-    assert any("cloudflared-linux-amd64" in c for c in sandbox.logged_calls())
+    (call,) = sandbox.logged_calls()
+    assert call.startswith("curl ") and call.endswith(f"/releases/latest/download/{asset}")
 
 
 def test_cloudflared_linux_download_failure_is_a_warning(sandbox: Sandbox) -> None:
@@ -383,32 +470,6 @@ def test_cloudflared_unsupported_architecture(sandbox: Sandbox) -> None:
     res = sandbox.run("install_cloudflared")
     assert "unsupported architecture riscv64" in res.stdout
     assert not any(c.startswith("curl") for c in sandbox.logged_calls())
-
-
-def test_cloudflared_macos_prefers_homebrew(sandbox: Sandbox) -> None:
-    sandbox.uname("Darwin", "arm64")
-    sandbox.stub("brew", "")
-    res = sandbox.run("install_cloudflared")
-    assert res.returncode == 0, res.stderr
-    assert "brew install cloudflared" in sandbox.logged_calls()
-    assert not any(c.startswith("curl") for c in sandbox.logged_calls())
-
-
-def test_cloudflared_macos_falls_back_to_the_release_tarball(sandbox: Sandbox) -> None:
-    sandbox.uname("Darwin", "x86_64")
-    sandbox.stub("brew", "exit 1\n")
-    payload = sandbox.root / "cloudflared"
-    payload.write_text("#!/bin/bash\n", encoding="utf-8")
-    tgz = sandbox.root / "cloudflared.tgz"
-    with tarfile.open(tgz, "w:gz") as tar:
-        tar.add(payload, arcname="cloudflared")
-    sandbox.stub("curl", f"cat {str(tgz)!r}\n")
-    res = sandbox.run("install_cloudflared")
-    assert res.returncode == 0, res.stderr
-    target = sandbox.home / ".local/bin/cloudflared"
-    assert target.read_text() == "#!/bin/bash\n"
-    assert target.stat().st_mode & 0o777 == 0o755
-    assert any("cloudflared-darwin-amd64.tgz" in c for c in sandbox.logged_calls())
 
 
 def test_cloudflared_macos_tarball_failure_is_a_warning(sandbox: Sandbox) -> None:
@@ -840,6 +901,39 @@ def test_start_falls_back_to_a_detached_process_without_systemd(sandbox: Sandbox
     assert sandbox.logged_calls() == ["systemctl --user show-environment"]
     assert (sandbox.home / ".kiss" / "kiss-web.cwd").read_text().strip() == str(sandbox.workdir)
     assert (sandbox.home / ".kiss" / ".kiss-web.fingerprint").exists()
+
+
+def test_start_on_windows_hands_the_restart_to_the_app(sandbox: Sandbox) -> None:
+    """Windows has no service manager: the app's ``windows_install`` module restarts kiss-web.
+
+    The block looks for the venv's programs in ``Scripts`` (here a link
+    to ``bin``, where this host's Python looks for the launcher it
+    fingerprints).  The module run is the real one, which refuses off
+    Windows, so the restart ends in a warning.
+    """
+    project = sandbox.project()
+    scripts = project / ".venv" / "Scripts"
+    scripts.symlink_to("bin")
+    log = sandbox.root / "python.log"
+    (scripts / "python").write_text(
+        f'#!/bin/bash\n[ "$1" = -m ] && echo "$*" >> {str(log)!r}\nexec {sys.executable!r} "$@"\n',
+        encoding="utf-8",
+    )
+    sandbox.uname(_GIT_BASH)
+    sandbox.stub("cygpath", _CYGPATH_STUB, log=False)
+    res = sandbox.run(
+        f'start_kiss_web_daemon "{project}" "{sandbox.workdir}"',
+        env={"KISS_WEB_START_TIMEOUT": "1"},
+    )
+    assert res.returncode == 0, res.stderr
+    assert "Restarting kiss-web (it also starts at every logon)" in res.stdout
+    assert log.read_text(encoding="utf-8").splitlines() == [
+        "-m kiss.server.windows_install restart-daemon "
+        f"--workdir {sandbox.workdir} --port {sandbox.port}"
+    ]
+    assert "kiss.server.windows_install runs on Windows only." in res.stderr
+    assert "WARNING: kiss-web could not be started" in res.stdout
+    assert "kiss-web did not come up within 1s" in res.stdout
 
 
 def _launchctl_stub(

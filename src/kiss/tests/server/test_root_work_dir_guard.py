@@ -330,10 +330,14 @@ class TestDispatchRootWorkDirGuard(IsolatedAsyncioTestCase):
         root."""
         reader_a, writer_a = await self._connect()
         # Window A establishes a known-safe daemon-global fallback
-        # (``_cmd_set_work_dir`` adopts it) besides its own pin.
+        # (``_cmd_set_work_dir`` adopts it) besides its own pin.  Its
+        # reply is awaited: window B's commands run on other threads,
+        # and a ``getFiles`` that overtook the adoption listed the
+        # daemon's default folder (Windows full run of 2026-11-25).
         await self._send(
-            writer_a, {"type": "setWorkDir", "workDir": str(self.dir_a)},
+            writer_a, {"type": "setWorkDir", "workDir": str(self.dir_a), "reply": True},
         )
+        await self._drain_until(reader_a, lambda m: m.get("type") == "configData")
         reader_b, writer_b = await self._connect()
         await self._send(writer_b, {"type": "setWorkDir", "workDir": "/"})
         await self._send(writer_b, {"type": "getFiles", "prefix": ""})

@@ -35,7 +35,6 @@ import pytest
 from kiss.tests.conftest import find_free_port
 from kiss.tests.scripts.test_install_brand_homes_vscode_notice import STUB_UV
 from kiss.tests.scripts.test_install_update_lock import (
-    STUB_BREW,
     STUB_CLOUDFLARED,
     STUB_CURL,
     STUB_GIT,
@@ -80,7 +79,7 @@ class RestartOnlyTest(unittest.TestCase):
         stubs = self.tmp / "stubs"
         stubs.mkdir()
         for name, body in (
-            ("git", STUB_GIT), ("curl", STUB_CURL), ("brew", STUB_BREW), ("uname", STUB_UNAME),
+            ("git", STUB_GIT), ("curl", STUB_CURL), ("uname", STUB_UNAME),
         ):
             (stubs / name).write_text(body)
             (stubs / name).chmod(0o755)

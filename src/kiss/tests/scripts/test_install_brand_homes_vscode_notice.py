@@ -46,7 +46,6 @@ from pathlib import Path
 import pytest
 
 from kiss.tests.scripts.test_install_update_lock import (
-    STUB_BREW,
     STUB_CLOUDFLARED,
     STUB_CURL,
     STUB_GIT,
@@ -170,7 +169,6 @@ class BrandHomesAndVscodeNoticeTest(unittest.TestCase):
         for name, body in (
             ("git", STUB_GIT),
             ("curl", STUB_CURL),
-            ("brew", STUB_BREW),
             ("uv", STUB_UV),
             ("uname", STUB_UNAME),
             ("cloudflared", STUB_CLOUDFLARED),

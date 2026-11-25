@@ -58,11 +58,13 @@ def install_sh_function(name: str) -> str:
 def _open_webapp_block() -> str:
     # The block uses machine_is_remote / open_in_browser from the shared
     # helpers block that precedes it in install.sh, app_dir_of (the app
-    # of a state directory) and warn (kiss-install-problems: a warning
-    # is printed and recorded for the web app's notification).
+    # of a state directory), warn (kiss-install-problems: a warning
+    # is printed and recorded for the web app's notification) and
+    # VENV_BIN (kiss-platform: where a venv keeps its programs).
     return "\n".join(
         [
             install_sh_function("app_dir_of"),
+            install_sh_block("kiss-platform"),
             install_sh_block("kiss-install-problems"),
             install_sh_block("kiss-browser-helpers"),
             install_sh_block("kiss-open-webapp"),
@@ -92,7 +94,7 @@ class _Sandbox:
     can never be picked up (and no real browser is ever launched).
     """
 
-    _TOOLS = ("bash", "sed", "head", "sleep", "cp", "nohup")
+    _TOOLS = ("bash", "sed", "head", "sleep", "cp", "nohup", "uname")
 
     def __init__(self, tmp_path: Path) -> None:
         self.home = tmp_path / "home"
@@ -435,6 +437,20 @@ def test_reveal_failure_is_a_warning_only(tmp_path: Path) -> None:
     assert sb.kiss_app_calls() == sb.expected_kiss_app_calls()
     assert sb.browser_calls() == []
     assert "   WARNING: Could not show the desktop launcher's folder." in proc.stdout
+
+
+def test_kiss_no_reveal_opens_the_window_only(tmp_path: Path) -> None:
+    """With ``KISS_NO_REVEAL`` (the Mac package sets it) the launcher's folder is not shown."""
+    sb = _Sandbox(tmp_path)
+    sb.stub_kiss_web()
+    sb.stub_kiss_app()
+    sb.stub_browser("open")
+    sb.url_file.write_text(_url_json(loopback=_LOOPBACK))
+    proc = sb.run(os_name="Darwin", env={"KISS_NO_REVEAL": "1"})
+    assert proc.returncode == 0, proc.stderr
+    assert sb.kiss_app_calls() == sb.expected_kiss_app_calls(revealed=False)
+    assert sb.browser_calls() == []
+    assert f"Opening the webapp in its own window at {_LOOPBACK}" in proc.stdout
 
 
 def test_remote_machine_never_runs_kiss_app(tmp_path: Path) -> None:

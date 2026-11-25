@@ -19,8 +19,11 @@
 #    commits); a main of any other shape is replaced
 # 4. If ahead, bump version in _version.py and README.md (SYSTEM.md renders
 #    its "Version:" from _version.py through the {{VERSION}} placeholder)
-# 5. Commit changes with "Version bumped"
-# 6. Push to origin
+# 5. Build the Mac installer package of the new version (installers/) from
+#    the bumped tree minus the paths listed in scripts/exclude.json, so the
+#    release must run on a Mac; a build that fails releases nothing
+# 6. Commit the version bump and the package with "Version bumped", then
+#    push to origin (a pull that brings new commits rebuilds the package)
 # 7. Push one "Release X.Y.Z" commit holding origin's tree minus the paths
 #    listed in scripts/exclude.json, parented on the previous release commit,
 #    as the kiss_ai repo's main, and tag it with the version; every earlier
@@ -49,6 +52,15 @@ PUBLIC_REPO_SSH="git@github.com:ksenxx/kiss_ai.git"
 VERSION_FILE="src/kiss/core/_version.py"
 README_FILE="README.md"
 PYPI_PACKAGE_NAME="kiss-agent-framework"
+# The Mac installer package of the release (see build_macos_package). It is
+# tracked and committed with every version bump, so the public repo's main
+# always serves the package of the version it is at. The Download buttons of
+# README.md and of the website link to this path on that main, which is why
+# the name carries no version.
+MACOS_PKG_FILE="installers/KISS-Sorcar.pkg"
+# The Windows setup program of the release (see build_windows_setup), tracked,
+# committed and linked to in the same way.
+WINDOWS_EXE_FILE="installers/KISS-Sorcar-Setup.exe"
 # JSON list of literal file/folder paths (repo-relative, no globs) that MUST
 # NOT be pushed to the public kiss_ai repo. Everything listed here is stripped
 # from every commit of the history pushed to $PUBLIC_REPO_URL while remaining
@@ -879,6 +891,64 @@ build_pypi_dists() {
     return "$status"
 }
 
+# Run the installer builder scripts/<builder> of <tree-ish> minus the paths of
+# $EXCLUDE_FILE with <builder arguments>. <commit> is the commit the tree was
+# cut from: the installed app shows it next to its version
+# (src/kiss/core/_commit.txt). Like build_pypi_dists, the build runs on an
+# exported copy of the filtered tree, with that tree's own builder, never on
+# the working checkout: an installer is a public download, so nothing the
+# public repo leaves out may reach it.
+build_installer() {
+    local tree_ish="$1" commit="$2" builder="$3"
+    local tree src_dir status=0
+    shift 3
+    tree=$(filtered_tree "$tree_ish") || return 1
+    src_dir=$(mktemp -d)
+    (set -o pipefail; git archive "$tree" | tar -x -C "$src_dir") || status=1
+    if (( status == 0 )); then
+        git rev-parse --short "$commit" > "$src_dir/src/kiss/core/_commit.txt" || status=1
+    fi
+    if (( status == 0 )); then
+        bash "$src_dir/scripts/$builder" "$@" || status=1
+    fi
+    rm -rf "$src_dir"
+    return "$status"
+}
+
+# Build the Mac installer package of <tree-ish>, cut from <commit>, at
+# <output> (see build_installer). The builder needs macOS (pkgbuild,
+# productbuild).
+# KISS_PKG_SIGN_IDENTITY (a "Developer ID Installer: ..." certificate),
+# KISS_PKG_KEYCHAIN and KISS_PKG_NOTARIZE_PROFILE, when set, become the
+# builder's --sign, --keychain and --notarize: without them the package is
+# unsigned and a Mac that downloads it opens it only after the user allows it
+# under System Settings > Privacy & Security.
+build_macos_package() {
+    local args=(-o "$3")
+    [[ -z "${KISS_PKG_SIGN_IDENTITY:-}" ]] || args+=(--sign "$KISS_PKG_SIGN_IDENTITY")
+    [[ -z "${KISS_PKG_KEYCHAIN:-}" ]] || args+=(--keychain "$KISS_PKG_KEYCHAIN")
+    [[ -z "${KISS_PKG_NOTARIZE_PROFILE:-}" ]] || args+=(--notarize "$KISS_PKG_NOTARIZE_PROFILE")
+    build_installer "$1" "$2" build-macos-pkg.sh "${args[@]}"
+}
+
+# Build the Windows setup program of <tree-ish>, cut from <commit>, at
+# <output> (see build_installer). The builder needs makensis (NSIS), which
+# runs on macOS and Linux. The program is unsigned: Windows SmartScreen asks
+# the user who downloads it to confirm ("More info", "Run anyway").
+build_windows_setup() {
+    build_installer "$1" "$2" build-windows-exe.sh -o "$3"
+}
+
+# Build the installers of the index (the tree about to be committed), cut
+# from <commit>, at $MACOS_PKG_FILE and $WINDOWS_EXE_FILE and stage them.
+stage_installers() {
+    local tree
+    tree=$(git write-tree) || return 1
+    build_macos_package "$tree" "$1" "$MACOS_PKG_FILE" || return 1
+    build_windows_setup "$tree" "$1" "$WINDOWS_EXE_FILE" || return 1
+    git add -- "$MACOS_PKG_FILE" "$WINDOWS_EXE_FILE"
+}
+
 # Build and upload release <version> from <commit> (the public release commit).
 publish_to_pypi() {
     local version="$1" commit="$2"
@@ -996,16 +1066,50 @@ main() {
     update_version_file "$VERSION"
     update_readme_version "$VERSION"
 
-    # Step 5: Commit the version bump
-    print_step "Committing version bump..."
+    # Step 5: Build the installers (the Mac package, the Windows setup
+    # program) of the bumped tree. Nothing is committed or pushed yet, so a
+    # build that fails (no Mac, no makensis, a missing signing certificate)
+    # drops the bump and leaves nothing behind: every other local change is
+    # in the stash.
+    print_step "Building the Mac and Windows installers..."
     git add -A
-    git commit -m "Version bumped to $VERSION"
-    print_info "Committed version bump"
+    if ! stage_installers "$ORIGIN_HEAD"; then
+        print_error "Failed to build the installers - nothing was released"
+        git reset -q --hard
+        exit 1
+    fi
 
-    # Step 6: Pull latest from origin (rebase), then push (with retry)
+    # Step 6: Commit the version bump with the installers, pull latest from
+    # origin (rebase), then push (with retry)
+    print_step "Committing version bump..."
+    git commit -m "Version bumped to $VERSION"
+    print_info "Committed version bump, $MACOS_PKG_FILE and $WINDOWS_EXE_FILE"
+
     print_step "Syncing with origin..."
+    PACKAGED_COMMIT="$ORIGIN_HEAD"
     for attempt in 1 2 3; do
         git pull --rebase origin "$CURRENT_BRANCH"
+        # Commits the pull put under the version bump are released with it,
+        # so the installers are rebuilt to hold them too.
+        if [[ "$(git rev-parse HEAD~1)" != "$PACKAGED_COMMIT" ]]; then
+            # A push that failed can have reached origin all the same. If
+            # origin then moved on, HEAD is somebody's commit on top of the
+            # pushed version bump, whose installers cannot be rebuilt any more.
+            if git merge-base --is-ancestor HEAD "origin/$CURRENT_BRANCH"; then
+                print_error "origin moved on after it took the version bump - nothing was released; run the release again"
+                exit 1
+            fi
+            print_info "Origin moved - rebuilding the installers"
+            PACKAGED_COMMIT=$(git rev-parse HEAD~1)
+            if ! stage_installers "$PACKAGED_COMMIT"; then
+                # The version bump is committed but not pushed: without it
+                # the checkout is at the commits the pull brought.
+                print_error "Failed to rebuild the installers - nothing was released"
+                git reset -q --hard HEAD~1
+                exit 1
+            fi
+            git commit -q --amend --no-edit
+        fi
         if git push origin "$CURRENT_BRANCH"; then
             break
         fi

@@ -50,7 +50,6 @@ from kiss.tests.scripts.test_install_brand_homes_vscode_notice import (
     STUB_UV,
 )
 from kiss.tests.scripts.test_install_update_lock import (
-    STUB_BREW,
     STUB_CLOUDFLARED,
     STUB_CURL,
     STUB_GIT,
@@ -129,7 +128,6 @@ class BrandAppliedTest(unittest.TestCase):
         for name, body in (
             ("git", STUB_GIT),
             ("curl", STUB_CURL),
-            ("brew", STUB_BREW),
             ("uv", STUB_UV_SYNC_FAILS),
             ("uname", STUB_UNAME),
             ("cloudflared", STUB_CLOUDFLARED),

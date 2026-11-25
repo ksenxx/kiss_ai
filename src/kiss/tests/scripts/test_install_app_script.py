@@ -12,12 +12,15 @@ The tests extract the ``kiss-app-files`` block of the script verbatim and
 run it for real in a sandbox: against this checkout (git) and against a
 small fake checkout without git (the ``find`` fallback), then import the
 compiled library and resolve every bundled SEA from the installed copy.
+The Python environment is built with the real uv for a project without
+dependencies.
 """
 
 from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -25,6 +28,7 @@ from pathlib import Path
 import pytest
 
 from kiss.tests.conftest import posix_only
+from kiss.tests.scripts.test_install_script_heartbeat import _extract_signal_helpers
 
 pytestmark = posix_only("install.sh is a bash installer (Darwin/Linux only)")
 
@@ -33,14 +37,19 @@ INSTALL_APP = REPO / "install.sh"
 MEDIA = "src/kiss/webapp/media"
 
 
-def extract_app_files_block() -> str:
-    """Return the ``kiss-app-files`` block of install.sh."""
+def extract_block(name: str) -> str:
+    """Return the block of install.sh between ``# BEGIN: <name>`` and ``# END: <name>``."""
     text = INSTALL_APP.read_text()
     match = re.search(
-        r"^# BEGIN: kiss-app-files.*?\n(.*?)^# END: kiss-app-files$", text, re.MULTILINE | re.DOTALL
+        rf"^# BEGIN: {name}\b.*?\n(.*?)^# END: {name}$", text, re.MULTILINE | re.DOTALL
     )
-    assert match, "kiss-app-files block not found in install.sh"
+    assert match, f"{name} block not found in install.sh"
     return match.group(1)
+
+
+def extract_app_files_block() -> str:
+    """Return the ``kiss-app-files`` block of install.sh after the ``kiss-platform`` one it uses."""
+    return extract_block("kiss-platform") + extract_block("kiss-app-files")
 
 
 def run_block(project_dir: Path, home: Path, commands: str) -> subprocess.CompletedProcess[str]:
@@ -244,6 +253,7 @@ def fake_checkout(root: Path) -> Path:
         "pyproject.toml": "[project]\nname='x'\n",
         "src/kiss/__init__.py": "",
         "src/kiss/core/mod.py": "VALUE = 1\n",
+        "src/kiss/core/_commit.txt": "abc1234\n",
         "src/kiss/core/__pycache__/mod.cpython-313.pyc": "stale",
         "src/kiss/core/stale.pyc": "stale",
         "src/kiss/core/.DS_Store": "junk",
@@ -263,13 +273,21 @@ def fake_checkout(root: Path) -> Path:
     return checkout
 
 
-def test_find_fallback_without_git(tmp_path: Path) -> None:
-    """A checkout without git is copied by ``find`` with the same exclusions."""
+@pytest.mark.parametrize("inside_another_repository", [False, True])
+def test_find_fallback_without_git(tmp_path: Path, inside_another_repository: bool) -> None:
+    """A tree without git history is copied by ``find`` with the same exclusions.
+
+    Also when it lies inside some other repository, as the Mac package's
+    payload does in a home directory kept under version control: git
+    answers there, and lists none of the tree's files.
+    """
+    if inside_another_repository:
+        subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
     checkout = fake_checkout(tmp_path)
     home = tmp_path / "home"
     result = run_block(checkout, home, "copy_app_files\ncopy_brand_overlay\ncompile_app_library")
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "Copied 6 files to " in result.stdout, result.stdout
+    assert "Copied 7 files to " in result.stdout, result.stdout
     assert "Byte-compiled 2 modules; 1 Python scripts kept as source" in result.stdout
     app = home / "kiss"
     installed = sorted(
@@ -279,12 +297,16 @@ def test_find_fallback_without_git(tmp_path: Path) -> None:
         "pyproject.toml",
         "src/kiss/__init__.pyc",
         "src/kiss/agents/seas/demo/demo_sea.py",
+        "src/kiss/core/_commit.txt",
         "src/kiss/core/mod.pyc",
         f"{MEDIA}/brand.css",
         f"{MEDIA}/chat.html",
     ]
     assert (app / MEDIA / "brand.css").read_text() == "branded"
     assert "src/kiss/webapp/media/brand.css" in result.stdout
+    # The commit such a tree ships (the Mac package's payload has one) is
+    # the one the Settings panel shows.
+    assert (app / "src/kiss/core/_commit.txt").read_text() == "abc1234\n"
 
 
 def test_rerun_replaces_stale_files(tmp_path: Path) -> None:
@@ -317,3 +339,48 @@ def test_compile_failure_is_reported(tmp_path: Path) -> None:
     result = run_block(checkout, home, "copy_app_files\ncompile_app_library")
     assert result.returncode != 0
     assert (home / "kiss/src/kiss/core/broken.py").exists()
+
+
+@pytest.mark.skipif(shutil.which("uv") is None, reason="uv is not installed")
+def test_venv_is_built_on_a_python_line_of_the_range(tmp_path: Path) -> None:
+    """A first build asks uv for the Python lines of the range; later builds keep the line it got.
+
+    uv is the real one, started through a script that first appends the
+    ``.python-version`` it is about to read to a file.  The environment
+    holds no ``UV_*`` variable: one naming a project environment would
+    make uv build this project's environment there.
+    """
+    app = tmp_path / "home" / "kiss"
+    app.mkdir(parents=True)
+    (app / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "1"\nrequires-python = ">=3.13"\n'
+    )
+    requests = tmp_path / "requests.txt"
+    uv = tmp_path / "uv"
+    uv.write_text(f'#!/bin/bash\ncat "{app}/.python-version" >> "{requests}"\nexec uv "$@"\n')
+    uv.chmod(0o755)
+    harness = (
+        "set -eo pipefail\n"
+        f"{_extract_signal_helpers(INSTALL_APP)}\n"
+        f'APP_DIR="{app}"\n'
+        f"{extract_app_files_block()}\n"
+        f'build_app_venv "{uv}"\n'
+    )
+    env = {"HOME": os.environ["HOME"], "PATH": os.environ["PATH"], "KISS_HEARTBEAT_INTERVAL": "60"}
+    for _ in ("first install", "update"):
+        result = subprocess.run(
+            ["bash", "-c", harness], capture_output=True, text=True, env=env, cwd=tmp_path
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+    line = subprocess.run(
+        [str(app / ".venv/bin/python"), "-c", 'import sys; print("%d.%d" % sys.version_info[:2])'],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert (app / ".python-version").read_text() == line
+    first, update = requests.read_text().splitlines()
+    assert update == line.strip()
+    bounds = re.fullmatch(r">=3\.(\d+),<3\.(\d+)", first)
+    assert bounds, first
+    assert line.strip() in [f"3.{minor}" for minor in range(int(bounds[1]), int(bounds[2]))]

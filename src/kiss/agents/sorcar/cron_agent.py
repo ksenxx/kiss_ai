@@ -1325,7 +1325,7 @@ def _parent_pid(proc_dir: int) -> int | None:
         return None
 
 
-def _pin_descendants(shell_pid: int, candidates: set[int], pinned: dict[int, int]) -> set[int]:
+def _pin_descendants(shell_pid: int, candidates: set[int], pinned: dict[int, int]) -> list[int]:
     """Open the ``/proc`` directory of each of *candidates* and tell the shell's descendants.
 
     A pid is a number, a stranger's as soon as the process that had it
@@ -1343,7 +1343,8 @@ def _pin_descendants(shell_pid: int, candidates: set[int], pinned: dict[int, int
             pid, for the caller to close.
 
     Returns:
-        The pids in *pinned* whose process descends from the shell.
+        The pids in *pinned* whose process descends from the shell, each
+        after its parent's.
     """
     for pid in candidates:
         with contextlib.suppress(OSError):  # it ended meanwhile, or no descriptor is left
@@ -1352,18 +1353,18 @@ def _pin_descendants(shell_pid: int, candidates: set[int], pinned: dict[int, int
             pinned.update(
                 zip((pid,), map(os.open, (f"/proc/{pid}",), (os.O_RDONLY | os.O_DIRECTORY,)))
             )
-    descendants: set[int] = set()
+    descendants: dict[int, None] = {}  # a set that keeps the order its pids were found in
     found = True
     while found:
         found = False
-        for pid in pinned.keys() - descendants:
+        for pid in pinned.keys() - descendants.keys():
             parent = _parent_pid(pinned[pid])
             if parent == shell_pid or (
                 parent in descendants and _parent_pid(pinned[parent]) is not None
             ):
-                descendants.add(pid)
+                descendants[pid] = None
                 found = True
-    return descendants
+    return list(descendants)
 
 
 def _kill_pinned(pid: int, proc_dir: int) -> None:
@@ -1401,7 +1402,10 @@ def _kill_command_tree(proc: subprocess.Popen, mark: str) -> None:
     misses — kills the descendants ``/proc`` shows by parent chain, each
     through its open ``/proc`` directory (:func:`_pin_descendants`): a
     pid is not signalled, nor a group named for one, because a
-    descendant that ended since has left its pid to a stranger.
+    descendant that ended since has left its pid to a stranger.  A
+    parent is killed before its children: a shell that saw the command
+    it waited for die would start its next one before its own signal
+    arrived.
     Descendants are pinned BEFORE the group kill: once the shell dies
     its orphans re-parent to init and the chain is lost (which is also
     why a second scan would find nothing).  The chain does not lead to

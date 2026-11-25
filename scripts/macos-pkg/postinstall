@@ -1,0 +1,127 @@
+#!/bin/bash
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
+# postinstall of the KISS Sorcar Mac package (scripts/build-macos-pkg.sh).
+#
+# The package's payload is a copy of the KISS Sorcar sources, which the
+# Installer has just written to ~/.kiss/kiss_pkg ($2).  This script runs
+# the installer in it, install.sh, the one every other way of installing
+# KISS Sorcar runs: it builds the app in ~/.kiss/kiss, starts the kiss-web
+# daemon and opens the app's window.
+#
+# How install.sh is run:
+#
+# * Non-interactive: nobody is at a terminal.
+# * Without showing the app in Finder at the end (KISS_NO_REVEAL).  The
+#   Installer's last page says where the app is, and macOS holds the
+#   ``open -R`` of the new app bundle against the Installer: it asks the
+#   user whether "Installer" may modify apps on the Mac.
+# * With a clean environment.  The Installer gives this script a TMPDIR
+#   and a working directory that it deletes when the script returns, and
+#   what install.sh leaves running (the downloads, the app's window) must
+#   not inherit them.  SHELL is the user's login shell (zsh unless the
+#   user changed it): install.sh puts ~/.local/bin, where the sorcar
+#   command is, on the PATH in that shell's rc file.
+# * From the directory the kiss-web daemon already serves, if there is
+#   one: install.sh makes the daemon serve the directory it is run from,
+#   and installing the package over an existing copy must not move it.
+#   A first install serves the home directory.
+# * In the background, with a deadline.  The Installer kills a package
+#   script that runs longer than ten minutes ("Task has exceeded its 600
+#   seconds of runtime") and reports the installation as failed, while a
+#   first install downloads about 1 GB.  So this script waits for the
+#   install until it has itself run for WAIT_SECONDS; past that it
+#   returns successfully and the install finishes on its own, opening
+#   the app's window when it is done.
+# * With its standard output discarded.  install.sh prints the
+#   remote-access password there, and the Installer's log
+#   (/var/log/install.log) is no place for it.  install.sh keeps its own
+#   log in ~/.kiss/install.log, and the app's Settings show the password.
+#
+# A failed install is reported in a dialog with the reason install.sh
+# gave, also when it fails after this script has returned.
+
+# shellcheck source=alert.sh
+. "$(dirname "$0")/alert.sh"
+
+PAYLOAD="$2"
+STATE_DIR="$HOME/.kiss"
+# The outcome of the install, written when it ends: line 1 is install.sh's
+# exit status, line 2 the reason of a failure.
+STATUS_FILE="$STATE_DIR/.pkg-install-status"
+# Two minutes short of the Installer's limit; the override exists for the tests.
+WAIT_SECONDS="${KISS_PKG_WAIT_SECONDS:-480}"
+
+daemon_work_dir() {
+    # Print the directory the kiss-web daemon serves, the home directory
+    # when there is no daemon yet or its directory is gone.
+    local plist="$HOME/Library/LaunchAgents/com.kiss.web-server.plist" dir
+    dir="$(/usr/libexec/PlistBuddy -c 'Print :WorkingDirectory' "$plist" 2>/dev/null)" || dir=""
+    if [ -n "$dir" ] && [ -d "$dir" ]; then
+        echo "$dir"
+    else
+        echo "$HOME"
+    fi
+}
+
+failure_reason() {
+    # Print why install.sh failed: what it wrote to file $1 (its standard
+    # error) before it had a log -- the update lock held by another
+    # install -- else the first error it recorded for the daemon.
+    if [ -s "$1" ]; then
+        tail -n 1 "$1"
+    else
+        grep -m 1 'ERROR:' "$STATE_DIR/.install-problems" 2>/dev/null \
+            || echo "install.sh stopped without saying why."
+    fi
+}
+
+run_installer() {
+    # Run install.sh and record its outcome in STATUS_FILE.
+    local rc=0 reason="" errors="$STATUS_FILE.err" tmp user shell
+    tmp="$(getconf DARWIN_USER_TEMP_DIR 2>/dev/null)" || tmp=""
+    [ -d "$tmp" ] || tmp=/tmp
+    user="$(id -un)"
+    shell="$(dscl /Search -read "/Users/$user" UserShell 2>/dev/null | sed 's/^UserShell: //')"
+    cd "$(daemon_work_dir)" 2>/dev/null || cd "$HOME" || return 1
+    env -i HOME="$HOME" USER="$user" LOGNAME="$user" SHELL="${shell:-/bin/zsh}" TMPDIR="$tmp" \
+        LANG=en_US.UTF-8 PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin \
+        KISS_NO_REVEAL=1 \
+        bash "$PAYLOAD/install.sh" --non-interactive > /dev/null 2> "$errors" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        reason="$(failure_reason "$errors")"
+    fi
+    rm -f "$errors"
+    printf '%s\n%s\n' "$rc" "$reason" > "$STATUS_FILE.tmp"
+    mv -f "$STATUS_FILE.tmp" "$STATUS_FILE"
+    if [ "$rc" -ne 0 ]; then
+        alert "KISS Sorcar could not be installed." \
+            "$reason"$'\n\n'"The log is in ~/.kiss/install.log."
+    fi
+}
+
+if [ ! -f "$PAYLOAD/install.sh" ]; then
+    echo "KISS Sorcar: no install.sh in the package's payload ($PAYLOAD)." >&2
+    exit 1
+fi
+mkdir -p "$STATE_DIR"
+rm -f "$STATUS_FILE"
+run_installer < /dev/null > /dev/null 2>&1 &
+
+# SECONDS: bash's count of the seconds since this script started.
+while [ ! -f "$STATUS_FILE" ] && [ "$SECONDS" -lt "$WAIT_SECONDS" ]; do
+    sleep 2
+done
+if [ ! -f "$STATUS_FILE" ]; then
+    echo "KISS Sorcar is still installing in the background; its log is ~/.kiss/install.log."
+    exit 0
+fi
+{ read -r rc; read -r reason; } < "$STATUS_FILE"
+if [ "$rc" != 0 ]; then
+    echo "KISS Sorcar could not be installed: $reason" >&2
+    exit 1
+fi
+echo "KISS Sorcar is installed."
+exit 0

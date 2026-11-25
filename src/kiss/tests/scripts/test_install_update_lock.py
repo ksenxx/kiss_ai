@@ -109,16 +109,6 @@ while [ ! -e "$KISS_TEST_RELEASE2" ]; do sleep 0.05; done
 exit 22
 """
 
-# On Darwin the real uname sends install.sh through ensure_homebrew before
-# the git stage these tests hold at.  A brew on PATH short-circuits both
-# the top-level `brew shellenv` eval (which would prepend real host
-# directories to the stub PATH) and ensure_homebrew's curl-driven
-# bootstrap (which would corrupt the curl-started mark).
-STUB_BREW = """#!/bin/bash
-echo "Homebrew 4.0.0 (test stub)"
-exit 0
-"""
-
 # Full-run stubs.  Each long-lived leftover records its pid in the
 # ``daemon`` mark so the test can prove it is alive and clean it up.
 #
@@ -204,6 +194,9 @@ def _seed_project(project: Path) -> None:
     """Lay out a minimal checkout at *project*: install.sh and a tiny src/kiss."""
     (project / "src" / "kiss" / "webapp" / "media").mkdir(parents=True)
     (project / "scripts").mkdir()
+    # install.sh asks git about a tree only when it has a ``.git``; that
+    # question is where the git stub holds the installer.
+    (project / ".git").mkdir()
     shutil.copy(SCRIPT, project / "install.sh")
     shutil.copy(ACTIVE_TASKS_SCRIPT, project / "scripts" / ACTIVE_TASKS_SCRIPT.name)
     (project / "pyproject.toml").write_text('[project]\nname = "kiss-test"\nversion = "0"\n')
@@ -234,7 +227,6 @@ class RootInstallLockTest(unittest.TestCase):
         for name, body in (
             ("git", STUB_GIT),
             ("curl", STUB_CURL),
-            ("brew", STUB_BREW),
         ):
             self._write_stub(name, body)
         self.project = self.tmp / "project"

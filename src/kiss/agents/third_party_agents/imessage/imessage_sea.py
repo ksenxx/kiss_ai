@@ -16,6 +16,7 @@ Usage::
 from __future__ import annotations
 
 import json
+import sqlite3
 import subprocess
 import sys
 from typing import Any
@@ -27,6 +28,7 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
     ToolMethodBackend,
     channel_main,
 )
+from kiss.agents.third_party_agents.imessage import chat_db
 from kiss.core.config import kiss_home
 
 _IMESSAGE_DIR = kiss_home() / "third_party_agents" / "imessage"
@@ -77,6 +79,18 @@ def _run_osascript(script: str) -> tuple[str, str]:
 def _escape_applescript(value: str) -> str:
     """Escape backslashes and double quotes for an AppleScript string literal."""
     return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _chat_db_error(error: Exception) -> str:
+    """Return the JSON error for a failed Messages database read.
+
+    A SQLite error usually means the process lacks Full Disk Access, so
+    the message says how to grant it.
+    """
+    message = str(error)
+    if isinstance(error, sqlite3.Error):
+        message += f". {chat_db.FULL_DISK_ACCESS_HINT}"
+    return json.dumps({"ok": False, "error": message})
 
 
 def _check_service(service: str) -> None:
@@ -131,6 +145,7 @@ class IMessageChannelBackend(ToolMethodBackend):
     def __init__(self) -> None:
         self._enabled: bool = False
         self._connection_info: str = ""
+        self._chat_db = chat_db.CHAT_DB
 
     def connect(self) -> bool:
         """Check macOS and Messages.app availability."""
@@ -200,58 +215,50 @@ class IMessageChannelBackend(ToolMethodBackend):
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
-    def list_conversations(self) -> str:
-        """List recent iMessage conversations.
+    def list_conversations(self, limit: int = 50) -> str:
+        """List the most recently active iMessage/SMS conversations, newest first.
+
+        Args:
+            limit: Maximum conversations to return. Default: 50.
 
         Returns:
-            JSON string with conversation list.
+            JSON string with the conversations: id (pass it to
+            list_messages as chat_id), identifier, name, service,
+            is_group, participants and last_message_at.
         """
         if sys.platform != "darwin":  # pragma: no branch
             return _PLATFORM_ERROR
         try:
-            script = """tell application "Messages"
-    set convos to {}
-    repeat with c in every chat
-        set end of convos to (id of c as string) & "|" & (display name of c as string)
-    end repeat
-    return convos
-end tell"""
-            stdout, stderr = _run_osascript(script)
-            if stderr:  # pragma: no branch
-                return json.dumps({"ok": False, "error": stderr})
-            convos = []
-            for item in stdout.split(", "):  # pragma: no branch
-                parts = item.split("|", 1)
-                convos.append(
-                    {
-                        "id": parts[0].strip(),
-                        "name": parts[1].strip() if len(parts) > 1 else "",
-                    }
-                )
-            return json.dumps({"ok": True, "conversations": convos}, indent=2)[:8000]
+            convos = chat_db.list_conversations(self._chat_db, limit)
+            return json.dumps({"ok": True, "conversations": convos}, indent=2)
         except Exception as e:
-            return json.dumps({"ok": False, "error": str(e)})
+            return _chat_db_error(e)
 
-    def get_messages(self, recipient: str, limit: int = 20) -> str:
-        """Get recent messages with a recipient (basic implementation).
+    def list_messages(self, chat_id: str = "", since: str = "", limit: int = 50) -> str:
+        """List iMessage/SMS messages, oldest first, from the Messages database.
 
         Args:
-            recipient: Phone number or email to get messages for.
-            limit: Maximum messages to return. Default: 20.
+            chat_id: Conversation to read: a chat id from list_conversations,
+                or a phone number / email for a one-to-one chat. Empty reads
+                every conversation.
+            since: ISO 8601 date-time, e.g. "2026-11-22T05:00:00Z" or
+                "2026-11-21T21:00:00-08:00" (no offset means UTC); only
+                messages at or after it are returned. Empty means no limit.
+            limit: Maximum messages to return (the newest ones). Default: 50.
 
         Returns:
-            JSON string with message list (basic).
+            JSON string with the messages: id, date (local time with UTC
+            offset), chat_id, chat_identifier, chat_name, sender ("me" for
+            your own), is_from_me, service, text, is_reaction (tapbacks)
+            and attachments.
         """
         if sys.platform != "darwin":  # pragma: no branch
             return _PLATFORM_ERROR
-        return json.dumps(
-            {
-                "ok": True,
-                "note": "Full message history requires direct database access. "
-                "Use BlueBubbles for complete iMessage history access.",
-                "messages": [],
-            }
-        )
+        try:
+            messages = chat_db.list_messages(self._chat_db, chat_id, since, limit)
+            return json.dumps({"ok": True, "messages": messages}, indent=2)
+        except Exception as e:
+            return _chat_db_error(e)
 
 
 class IMessageAgent(BaseChannelAgent):

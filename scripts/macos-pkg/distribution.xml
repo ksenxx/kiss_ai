@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The Installer's description of the KISS Sorcar Mac package;
+  scripts/build-macos-pkg.sh fills in the version and hands it to
+  productbuild.
+-->
+<installer-gui-script minSpecVersion="2">
+    <title>KISS Sorcar</title>
+    <welcome file="welcome.txt" mime-type="text/plain"/>
+    <conclusion file="conclusion.txt" mime-type="text/plain"/>
+    <!--
+      Only "Install for me only": everything goes into the home directory
+      of the user who opens the package, the Installer asks for no
+      administrator password and runs the package's scripts as that user.
+    -->
+    <domains enable_anywhere="false" enable_currentUserHome="true" enable_localSystem="false"/>
+    <!--
+      arm64 is named so that an Apple silicon Mac runs the scripts
+      natively: without it the Installer runs them under Rosetta, and
+      install.sh would take the Mac for an Intel one.
+    -->
+    <options customize="never" require-scripts="false" hostArchitectures="arm64,x86_64"/>
+    <!--
+      The oldest macOS the package installs on; the reason for this floor
+      is in scripts/build-macos-pkg.sh.  A check of the package's own
+      rather than <allowed-os-versions>, whose refusal does not say what
+      is missing ("You cannot install KISS Sorcar in this location").
+    -->
+    <installation-check script="macos_is_new_enough()"/>
+    <script><![CDATA[
+function macos_is_new_enough() {
+    if (system.compareVersions(system.version.ProductVersion, '14.0') >= 0) {
+        return true;
+    }
+    // An install from the command line (installer -pkg) prints the message alone.
+    my.result.title = 'This Mac needs a newer macOS for KISS Sorcar';
+    my.result.message = 'KISS Sorcar needs macOS 14 or later, and this Mac runs macOS ' +
+        system.version.ProductVersion + '. Update macOS under System Settings > General >' +
+        ' Software Update, then open this package again.';
+    my.result.type = 'Fatal';
+    return false;
+}
+    ]]></script>
+    <choices-outline>
+        <line choice="org.kiss-sorcar.pkg"/>
+    </choices-outline>
+    <choice id="org.kiss-sorcar.pkg" visible="false">
+        <pkg-ref id="org.kiss-sorcar.pkg"/>
+    </choice>
+    <pkg-ref id="org.kiss-sorcar.pkg" version="@VERSION@" onConclusion="none">kiss-sorcar.pkg</pkg-ref>
+</installer-gui-script>

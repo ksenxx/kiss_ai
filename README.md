@@ -6,7 +6,16 @@
   <img alt="KISS Sorcar" src="https://raw.githubusercontent.com/ksenxx/kiss_ai/main/assets/logo/kiss-sorcar-logo-light.png" width="520">
 </picture>
 
-[![Version](https://img.shields.io/badge/version-2026.11.18-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
+<p>
+  <a href="https://github.com/ksenxx/kiss_ai/raw/main/installers/KISS-Sorcar.pkg"><img alt="Download KISS Sorcar for Mac" src="https://raw.githubusercontent.com/ksenxx/kiss_ai/main/assets/download-for-mac.png" width="330"></a>
+  <a href="https://github.com/ksenxx/kiss_ai/raw/main/installers/KISS-Sorcar-Setup.exe"><img alt="Download KISS Sorcar for Windows" src="https://raw.githubusercontent.com/ksenxx/kiss_ai/main/assets/download-for-windows.png" width="330"></a>
+  <br>
+  <sub>Mac: macOS 14 or later &middot; Apple silicon and Intel &middot; <a href="#mac-installer-package">how to open it</a></sub>
+  <br>
+  <sub>Windows: Windows 10 or 11, 64-bit &middot; <a href="#windows-setup-program">how to run it</a></sub>
+</p>
+
+[![Version](https://img.shields.io/badge/version-2026.11.19-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green?style=flat-square)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.13-blue?style=flat-square)](https://www.python.org/)
 [![Website](https://img.shields.io/badge/website-kisssorcar.github.io-1976d2?style=flat-square)](https://kisssorcar.github.io/)
@@ -128,6 +137,38 @@ From a local checkout, run the equivalent command:
 git clone https://github.com/ksenxx/kiss_ai.git && cd kiss_ai && ./install.sh
 ```
 
+- **What it needs**: `install.sh` asks no question and needs no administrator password, no compiler and no Homebrew. It downloads what is missing (uv, Python, Chromium, cloudflared) into your home directory.
+- **Windows**: The one-line command above is for macOS and Linux. On Windows, use the [Windows setup program](#windows-setup-program), or open Git Bash in a checkout and run `./install.sh` there.
+
+### Mac installer package
+
+[Download KISS-Sorcar.pkg](https://github.com/ksenxx/kiss_ai/raw/main/installers/KISS-Sorcar.pkg) and open it. It runs the same `install.sh` for the logged-in user on macOS 14 or later (Apple silicon and Intel) and needs no Homebrew, no git and none of Apple's developer tools. The Mac must be online: the installer downloads Python, the libraries and Chromium, about 1 GB.
+
+- **First open**: The package is not signed with an Apple Developer ID, so macOS blocks it when you double-click it. Open **System Settings > Privacy & Security**, click **Open Anyway** next to the message about the package, and confirm with an administrator password. Or install it from Terminal, which is not blocked:
+
+  ```bash
+  installer -pkg ~/Downloads/KISS-Sorcar.pkg -target CurrentUserHomeDirectory
+  ```
+
+- **After the install**: KISS Sorcar opens in its own window. Enter the API key of a model provider in **Settings** before your first task.
+- **Building it**: `scripts/build-macos-pkg.sh` builds the package from a checkout. `scripts/release.sh` builds `installers/KISS-Sorcar.pkg` for every release and commits it with the version bump; with `KISS_PKG_SIGN_IDENTITY` (a "Developer ID Installer" certificate) and `KISS_PKG_NOTARIZE_PROFILE` set, the released package is signed and notarized, and macOS opens it without the extra step.
+- **Checking it**: `scripts/check-macos-pkg-vm.sh <tart image> ANTHROPIC_API_KEY` installs the package on a clean virtual Mac of another macOS version and runs a task there; `scripts/check-macos-install.sh` runs the same check on a Mac that has KISS Sorcar installed.
+
+### Windows setup program
+
+[Download KISS-Sorcar-Setup.exe](https://github.com/ksenxx/kiss_ai/raw/main/installers/KISS-Sorcar-Setup.exe) and open it. It runs the same `install.sh` for the user who opens it on 64-bit Windows 10 and Windows 11 (ARM PCs run it through their x64 emulation) and needs no administrator rights, no git, no Python and no bash on the PC. The PC must be online: the installer downloads Python, the libraries and Chromium, about 1 GB, which takes a few minutes.
+
+- **First open**: The program is not signed, so Windows SmartScreen shows "Windows protected your PC" for a downloaded copy. Click **More info**, then **Run anyway**. To install without a window, run it from a terminal with `/S`:
+
+  ```
+  KISS-Sorcar-Setup.exe /S
+  ```
+
+- **What it does**: It unpacks a copy of the sources into `%USERPROFILE%\.kiss\kiss_pkg` and runs `install.sh` through Git Bash. A PC without Git for Windows first gets the portable Git for Windows in `%LOCALAPPDATA%\Programs\Git`. `install.sh` builds the app in `%USERPROFILE%\.kiss\kiss` and starts the `kiss-web` daemon, which also starts at every logon of that user (a per-user "Run" registry entry, without a console window). It adds a **KISS Sorcar** shortcut to the Start Menu, puts the `sorcar` command (`sorcar.cmd`) in `%USERPROFILE%\.local\bin` and adds that folder to the user's PATH.
+- **After the install**: KISS Sorcar opens in its own window. Enter the API key of a model provider in **Settings** before your first task.
+- **Updating**: Windows cannot replace the files of a running program, so on Windows the installer stops `kiss-web` before it updates the app and starts it again afterwards (on macOS and Linux the daemon keeps running during an update). It refuses to update while tasks are running.
+- **Uninstalling**: Open **Settings > Apps > Installed apps** (**Apps & features** on Windows 10), find **KISS Sorcar** and click **Uninstall**. This removes the app, the Start Menu shortcut, the logon start and the `sorcar` command. Your settings, API keys and history stay in `%USERPROFILE%\.kiss`.
+- **Building it**: `scripts/build-windows-exe.sh` builds the program from a checkout with NSIS (`makensis`: `brew install makensis` on macOS, `apt install nsis` on Linux). `scripts/release.sh` builds `installers/KISS-Sorcar-Setup.exe` for every release and commits it with the version bump.
 
 ### Docker
 

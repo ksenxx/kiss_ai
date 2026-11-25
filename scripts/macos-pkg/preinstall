@@ -1,0 +1,56 @@
+#!/bin/bash
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
+# preinstall of the KISS Sorcar Mac package (scripts/build-macos-pkg.sh).
+#
+# Runs before the Installer writes the payload, a copy of the KISS Sorcar
+# sources, to ~/.kiss/kiss_pkg ($2):
+#
+# * It refuses while KISS Sorcar is being installed or updated: by an
+#   earlier run of this package that is still downloading in the
+#   background, by the app's Update button, by the curl installer.  Each
+#   of them holds the update lock, a flock(2) on ~/.kiss/.update.lock that
+#   the kernel releases when its holder ends.  Replacing the payload
+#   under a running install.sh would break that install, and the lock
+#   would refuse this package's own install afterwards anyway.
+# * It removes the payload of the version installed before, so that a
+#   file the new version no longer ships is not installed from the old
+#   copy.
+#
+# Nothing holds the lock from this check until the install.sh that
+# postinstall starts takes it, and nothing has to.  The installers that
+# read the payload are runs of this package, and macOS installs one
+# package at a time: an earlier run's postinstall has returned before this
+# script starts, with its install.sh finished or holding the lock for good.
+# The other installers read ~/.kiss/kiss_ai; one that takes the lock in
+# that gap makes this package's install.sh stop with "another KISS update
+# is already running", which postinstall reports.
+
+# shellcheck source=alert.sh
+. "$(dirname "$0")/alert.sh"
+
+LOCK="$HOME/.kiss/.update.lock"
+
+update_lock_is_held() {
+    # True when another process holds the lock.  The probe takes it for an
+    # instant; an installer that starts in that instant is refused, as it
+    # would be a moment later by this package's own install.
+    [ -e "$LOCK" ] || return 1
+    ! perl -e 'use Fcntl qw(:flock);
+               open(my $f, ">>", $ARGV[0]) or exit 0;
+               exit(flock($f, LOCK_EX | LOCK_NB) ? 0 : 1)' "$LOCK"
+}
+
+if update_lock_is_held; then
+    echo "KISS Sorcar is being installed or updated right now; nothing was installed." >&2
+    alert "KISS Sorcar is being installed or updated right now." \
+        "Open this package again when that has finished. Its progress is in ~/.kiss/install.log."
+    exit 1
+fi
+
+case "$2" in
+    */.kiss/kiss_pkg) rm -rf "$2" ;;
+esac
+exit 0

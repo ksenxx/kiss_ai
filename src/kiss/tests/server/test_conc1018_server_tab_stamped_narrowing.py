@@ -37,6 +37,11 @@ from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.local_ws import LocalReader, LocalWriter, open_local_connection
 
 
+def _replays_of(events: list[dict[str, Any]], chat_id: str) -> list[dict[str, Any]]:
+    """The ``task_events`` transcripts of *chat_id* among *events*."""
+    return [e for e in events if e["type"] == "task_events" and e.get("chat_id") == chat_id]
+
+
 class TestTabStampedNarrowing(unittest.IsolatedAsyncioTestCase):
     """Stamped non-task events follow the local-peer narrowing."""
 
@@ -142,6 +147,20 @@ class TestTabStampedNarrowing(unittest.IsolatedAsyncioTestCase):
         for got in (got_a, got_b, got_c):
             self.assertIn("tabs_state", [e["type"] for e in got])
 
+    async def _collect_replays(self, reader: LocalReader, chat_id: str) -> list[dict[str, Any]]:
+        """The transcripts of *chat_id* that *reader* gets, up to half a second after the first.
+
+        The first is waited for thirty seconds: a daemon on a loaded Windows
+        machine took more than a fixed second and a half to answer the resume,
+        and a window that closed on nobody's copy read as a lost replay.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 30.0
+        replays: list[dict[str, Any]] = []
+        while not replays and loop.time() < deadline:
+            replays = _replays_of(await self._collect(reader, 0.2), chat_id)
+        return replays + _replays_of(await self._collect(reader, 0.5), chat_id)
+
     async def _unscoped_replays(
         self, chat_id: str, task_id: str | None,
     ) -> list[list[dict[str, Any]]]:
@@ -167,15 +186,12 @@ class TestTabStampedNarrowing(unittest.IsolatedAsyncioTestCase):
             resume["taskId"] = task_id
         await self._send(writer_a, resume)
 
-        got = await asyncio.gather(
-            self._collect(reader_a, 1.5),
-            self._collect(reader_b, 1.5),
-            self._collect(reader_c, 1.5),
+        got_a, got_c = await asyncio.gather(
+            self._collect_replays(reader_a, chat_id), self._collect_replays(reader_c, chat_id),
         )
-        return [
-            [e for e in events if e["type"] == "task_events" and e.get("chat_id") == chat_id]
-            for events in got
-        ]
+        # Peer B's copy, were one sent, left the daemon with the other two.
+        got_b = _replays_of(await self._collect(reader_b, 0.5), chat_id)
+        return [got_a, got_b, got_c]
 
     async def test_unscoped_replay_skips_peers_that_addressed_only_other_tabs(self) -> None:
         task_id, chat_id = th._add_task("replayed task")

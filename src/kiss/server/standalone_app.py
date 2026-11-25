@@ -662,6 +662,94 @@ def write_icns(png: Path, icns: Path) -> bool:
     return icns.is_file()
 
 
+def windows_launcher_path(home: Path | None = None, brand: dict[str, str] = BRAND) -> Path:
+    """Return the brand's Start Menu shortcut, ``<Programs>/<Product Name>.lnk`` (written or not).
+
+    The user's Start Menu is under ``%APPDATA%``; a *home* names another
+    profile directory (the tests'), whose Start Menu is in its
+    ``AppData/Roaming``.
+    """
+    appdata = os.environ.get("APPDATA", "")
+    if home is None and appdata:
+        roaming = Path(appdata)
+    else:
+        roaming = (home or Path.home()) / "AppData" / "Roaming"
+    programs = roaming / "Microsoft" / "Windows" / "Start Menu" / "Programs"
+    return programs / f"{brand['product_name']}.lnk"
+
+
+def write_ico(png: Path, ico: Path) -> bool:
+    """Convert *png* to the Windows icon file *ico*; True on success.
+
+    Uses Pillow, which the app's environment has through its
+    dependencies.  False (and no file) without it or when *png* cannot
+    be converted, in which case the shortcut is written without an icon
+    of its own.
+    """
+    try:
+        from PIL import Image
+
+        ico.parent.mkdir(parents=True, exist_ok=True)
+        with Image.open(png) as image:
+            image.save(ico, format="ICO", sizes=[(s, s) for s in (16, 24, 32, 48, 64, 128, 256)])
+    except (ImportError, OSError, ValueError):
+        ico.unlink(missing_ok=True)
+        return False
+    return True
+
+
+_SHORTCUT_SCRIPT = """\
+$shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut($env:KISS_SHORTCUT)
+$shortcut.TargetPath = $env:KISS_SHORTCUT_TARGET
+$shortcut.Arguments = $env:KISS_SHORTCUT_ARGUMENTS
+$shortcut.WorkingDirectory = $env:KISS_SHORTCUT_WORKDIR
+$shortcut.Description = $env:KISS_SHORTCUT_DESCRIPTION
+if ($env:KISS_SHORTCUT_ICON) { $shortcut.IconLocation = $env:KISS_SHORTCUT_ICON }
+$shortcut.Save()
+"""
+"""PowerShell that writes a ``.lnk``; its values come in through the environment, unquoted."""
+
+
+def write_windows_launcher(
+    shortcut: Path, brand: dict[str, str], icon: Path, exe: Path, kiss_home: Path
+) -> None:  # pragma: no cover — Windows only
+    """Write the Start Menu shortcut *shortcut* (see :func:`windows_launcher_path`).
+
+    It starts ``kiss-app --home <kiss_home>`` through the ``pythonw.exe``
+    next to *exe*, so that no console window opens with the app; *exe*
+    itself where that venv has none.  The icon is *icon* converted to
+    ``<kiss_home>/<slug>.ico``.
+
+    Raises:
+        OSError: PowerShell cannot be run, does not finish within
+            :data:`SETUP_TIMEOUT_SECS` or did not write the shortcut.
+    """
+    pythonw = exe.with_name("pythonw.exe")
+    arguments = ["--home", str(kiss_home)]
+    if pythonw.exists():
+        target, arguments = pythonw, ["-m", "kiss.server.standalone_app", *arguments]
+    else:
+        target = exe
+    ico = kiss_home / f"{brand_slug(brand)}.ico"
+    shortcut.parent.mkdir(parents=True, exist_ok=True)
+    env = {
+        **os.environ,
+        "KISS_SHORTCUT": str(shortcut),
+        "KISS_SHORTCUT_TARGET": str(target),
+        "KISS_SHORTCUT_ARGUMENTS": subprocess.list2cmdline(arguments),
+        "KISS_SHORTCUT_WORKDIR": str(Path.home()),
+        "KISS_SHORTCUT_DESCRIPTION": brand["product_name"],
+        "KISS_SHORTCUT_ICON": str(ico) if write_ico(icon, ico) else "",
+    }
+    command = ["powershell", "-NoProfile", "-NonInteractive", "-Command", _SHORTCUT_SCRIPT]
+    try:
+        result = run_process_group(command, SETUP_TIMEOUT_SECS, env)
+    except subprocess.TimeoutExpired as exc:
+        raise OSError(f"PowerShell did not write {shortcut} in time") from exc
+    if result.returncode != 0 or not shortcut.exists():
+        raise OSError(f"PowerShell did not write {shortcut}: {result.stderr.strip()}")
+
+
 def macos_launcher_script(exe: Path, kiss_home: Path) -> str:
     """Return the shell script of the macOS bundle: ``kiss-app --foreground`` for *kiss_home*."""
     return (
@@ -1267,16 +1355,21 @@ def install_launcher(
 
     Linux: ``<applications_dir>/<slug>.desktop`` (then
     ``update-desktop-database`` when available, so menus refresh at
-    once).  macOS: ``~/Applications/<Product Name>.app``.  None on any
-    other platform, which has no launcher format here.  *exe* is the
+    once).  macOS: ``~/Applications/<Product Name>.app``.  Windows: the
+    Start Menu shortcut ``<Product Name>.lnk``.  None on any other
+    platform, which has no launcher format here.  *exe* is the
     ``kiss-app`` command to launch, by default this very script;
     *state_dir* the ``KISS_HOME`` it runs for, by default this one;
     *browser* the engine the launcher is written for (its Wayland app
     id, its macOS bundle), by default :func:`find_browser`.
     """
     exe = exe or Path(sys.argv[0]).resolve()
-    home = home or Path.home()
     state_dir = state_dir or kiss_home()
+    if system == "Windows":  # pragma: no cover — Windows only
+        shortcut = windows_launcher_path(home, brand)
+        write_windows_launcher(shortcut, brand, icon, exe, state_dir)
+        return shortcut
+    home = home or Path.home()
     browser = browser or find_browser(system)
     if system == "Linux":
         entry = linux_launcher_path(home, brand)
@@ -1304,6 +1397,8 @@ def launcher_path(
 
     None on a platform that has no launcher format here.
     """
+    if system == "Windows":
+        return windows_launcher_path(home, brand)
     home = home or Path.home()
     if system == "Linux":
         return linux_launcher_path(home, brand)
@@ -1357,7 +1452,8 @@ def reveal_launcher(
 
     macOS: Finder opens ``~/Applications`` with the app bundle selected
     (``open -R``).  Linux: ``xdg-open`` opens the applications directory
-    the ``.desktop`` entry sits in.  The file manager is started
+    the ``.desktop`` entry sits in.  Windows: Explorer opens the Start
+    Menu folder of the shortcut.  The file manager is started
     detached, like the browser, so it outlives the caller.  None, and
     nothing shown, when there is no launcher to show (a platform
     without one, one not installed yet), no file manager opener, or
@@ -1367,6 +1463,12 @@ def reveal_launcher(
     path = launcher_path(brand, home, system)
     if path is None or not path.exists():
         return None
+    if system == "Windows":  # pragma: no cover — Windows only
+        try:
+            os.startfile(path.parent)  # type: ignore[attr-defined]
+        except OSError:  # no desktop to open a window on
+            return None
+        return path
     if system == "Darwin":
         command = ["open", "-R", str(path)]
     else:
@@ -1517,6 +1619,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--url", help="webapp URL (default: the running daemon's loopback URL)")
     parser.add_argument(
+        "--home",
+        help="state directory of the daemon (default: $KISS_HOME, else the app's own); "
+        "what the Windows shortcut passes, which cannot set an environment variable",
+    )
+    parser.add_argument(
         "--wait",
         type=float,
         default=120.0,
@@ -1543,6 +1650,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if not math.isfinite(args.wait):  # NaN, infinity: a deadline that never comes
         parser.error("argument --wait: SECS must be a finite number")
+    if args.home:
+        os.environ["KISS_HOME"] = args.home
 
     if args.install_launcher:
         try:

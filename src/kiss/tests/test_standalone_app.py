@@ -39,6 +39,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from PIL import Image
 
 from kiss.core.brand import BRAND
 from kiss.server import standalone_app
@@ -1478,15 +1479,61 @@ def test_macos_launcher_is_an_app_bundle(tmp_path: Path) -> None:
 
 
 def test_other_platforms_have_no_launcher(tmp_path: Path) -> None:
-    """Windows (and anything else) gets no launcher file."""
+    """A platform that is not Linux, macOS or Windows gets no launcher file."""
     assert (
         standalone_app.install_launcher(
-            BRAND, tmp_path / "i.png", tmp_path / "x", home=tmp_path, system="Windows"
+            BRAND, tmp_path / "i.png", tmp_path / "x", home=tmp_path, system="FreeBSD"
         )
         is None
     )
-    assert standalone_app.uninstall_launcher(BRAND, home=tmp_path, system="Windows") is None
+    assert standalone_app.uninstall_launcher(BRAND, home=tmp_path, system="FreeBSD") is None
     assert list(tmp_path.iterdir()) == []
+
+
+def test_windows_launcher_is_a_start_menu_shortcut(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Windows launcher is ``<Product Name>.lnk`` in the Start Menu of the profile.
+
+    Writing it takes Windows (``kiss/tests/server/test_windows_install.py``);
+    where it goes is the same answer everywhere.
+    """
+    programs = Path("Microsoft", "Windows", "Start Menu", "Programs")
+    shortcut = tmp_path / "AppData" / "Roaming" / programs / f"{BRAND['product_name']}.lnk"
+    assert standalone_app.windows_launcher_path(tmp_path) == shortcut
+    assert standalone_app.launcher_path(home=tmp_path, system="Windows") == shortcut
+    branded = standalone_app.launcher_path(SEAMLESS_LOOP, tmp_path, "Windows")
+    assert branded == shortcut.with_name(f"{SEAMLESS_LOOP['product_name']}.lnk")
+    # Without a home it is the user's own: %APPDATA%, else the profile's AppData.
+    monkeypatch.setenv("APPDATA", str(tmp_path / "roaming"))
+    assert standalone_app.windows_launcher_path() == tmp_path / "roaming" / programs / shortcut.name
+    monkeypatch.delenv("APPDATA")
+    assert standalone_app.windows_launcher_path() == (
+        Path.home() / "AppData" / "Roaming" / programs / shortcut.name
+    )
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_write_ico_converts_the_app_icon(tmp_path: Path) -> None:
+    """The app's PNG becomes a Windows icon up to 256 pixels; what is no image leaves no file."""
+    ico = tmp_path / "icons" / "app.ico"
+    assert standalone_app.write_ico(standalone_app.ICON_FILE, ico) is True
+    with Image.open(ico) as image:
+        assert image.format == "ICO"
+        assert image.size == (256, 256)
+        assert {(16, 16), (48, 48), (256, 256)} <= image.info["sizes"]
+    text = tmp_path / "text.png"
+    text.write_text("not an image", encoding="utf-8")
+    assert standalone_app.write_ico(text, tmp_path / "text.ico") is False
+    assert not (tmp_path / "text.ico").exists()
+
+
+def test_home_option_names_the_state_directory(tmp_path: Path) -> None:
+    """``--home DIR`` is ``KISS_HOME=DIR`` for the run: the daemon's URL file is read there."""
+    home = tmp_path / "given home"
+    proc = _run(["--home", str(home), "--print-command"], _env(tmp_path))
+    assert proc.returncode == 1
+    assert f"no URL in {home / 'remote-url.json'} after" in proc.stderr
 
 
 def _expected_launcher(tmp_path: Path, product_name: str, slug: str) -> Path:
@@ -1545,8 +1592,9 @@ def test_reveal_launcher_shows_its_folder(tmp_path: Path, monkeypatch: pytest.Mo
     # Nothing installed yet: nothing to show, nothing opened.
     assert standalone_app.reveal_launcher(BRAND, home=home, system="Linux") is None
     assert standalone_app.reveal_launcher(BRAND, home=home, system="Darwin") is None
-    assert standalone_app.launcher_path(BRAND, home=home, system="Windows") is None
     assert standalone_app.reveal_launcher(BRAND, home=home, system="Windows") is None
+    assert standalone_app.launcher_path(BRAND, home=home, system="FreeBSD") is None
+    assert standalone_app.reveal_launcher(BRAND, home=home, system="FreeBSD") is None
     assert not log.exists()
 
     entry = standalone_app.install_launcher(

@@ -5,6 +5,8 @@
 Key facts for assistants and coding agents:
 
 - Install (full, macOS/Linux): `curl -fsSL https://raw.githubusercontent.com/ksenxx/kiss_ai/main/scripts/install.sh | bash`
+- Install (Mac installer package, macOS 14 or later, Apple silicon and Intel): download https://github.com/ksenxx/kiss_ai/raw/main/installers/KISS-Sorcar.pkg and open it
+- Install (Windows setup program, Windows 10 or 11, 64-bit, no administrator rights needed): download https://github.com/ksenxx/kiss_ai/raw/main/installers/KISS-Sorcar-Setup.exe and open it
 - Install (Python package only): `pipx install kiss-agent-framework` or `uv tool install kiss-agent-framework` (requires Python 3.13+)
 - PyPI package name: `kiss-agent-framework`; daemon entry point: `kiss-web`; Python client API: `kiss.server.sorcar.run`
 - Source repository: https://github.com/ksenxx/kiss_ai
@@ -17,7 +19,7 @@ Key facts for assistants and coding agents:
 - [Documentation index](https://kisssorcar.github.io/docs/index.md): Table of contents for all Markdown documentation
 - [Overview](https://kisssorcar.github.io/docs/overview.md): What KISS Sorcar is, the name, and a feature comparison vs Claude Code and Cursor
 - [Terminal-Bench 2.0 benchmark](https://kisssorcar.github.io/docs/benchmarks.md): KISS Sorcar vs Pi, Codex CLI, and Claude Code on the HarnessTax study's 30 Terminal-Bench 2.0 tasks and seven models (75.6% of attempts solved vs 70.0 / 65.7 / 65.1), paired Pi reruns on Claude Fable 5 (+11.1 and +10.5 points), the 59 unsampled tasks, caveats, and reproduction pointers
-- [Installation](https://kisssorcar.github.io/docs/installation.md): One-line installer, install from a checkout, Docker, pipx/uv, model API-key configuration, updating
+- [Installation](https://kisssorcar.github.io/docs/installation.md): One-line installer, install from a checkout, Mac installer package, Windows setup program, Docker, pipx/uv, model API-key configuration, updating
 - [Client interfaces](https://kisssorcar.github.io/docs/cli.md): The `kiss-web` daemon, the web/mobile app features, the `sorcar` terminal command, and the Python client API `kiss.server.sorcar.run`
 - [Python API reference](https://kisssorcar.github.io/docs/api.md): KISSAgent, RelentlessAgent, SorcarAgent, ChatSorcarAgent, and GitWorktreeOps
 - [Supported models](https://kisssorcar.github.io/docs/models.md): 993-model catalog across 7 provider categories with capability totals

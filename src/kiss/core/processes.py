@@ -75,17 +75,33 @@ def find_bash() -> str | None:
     ``shutil.which("bash")`` on every platform; on Windows, where the Git
     for Windows installer adds only ``Git\\cmd`` to ``PATH`` and leaves
     ``bash.exe`` in ``Git\\bin``, the usual install locations are probed
-    as well.  ``subprocess.Popen(["bash", ...])`` there fails with
-    ``WinError 2`` unless the caller passes the path this returns.
+    as well: Git for all users, and Git for this user alone in
+    ``%LOCALAPPDATA%\\Programs\\Git`` (where the KISS Sorcar setup
+    program also puts the Git it downloads).  The ``bash.exe`` of
+    Windows itself (``System32``) is never the answer: it starts the
+    Windows Subsystem for Linux, a different machine as far as paths
+    and programs go, or just says that no distribution is installed.
+    ``subprocess.Popen(["bash", ...])`` there fails with ``WinError 2``
+    unless the caller passes the path this returns.
 
     Returns:
         Absolute path of the bash executable, or ``None`` when none is
         installed.
     """
     found = shutil.which("bash")
-    if found or not IS_WINDOWS:
+    if not IS_WINDOWS:
         return found
-    for candidate in _WINDOWS_BASH_CANDIDATES:  # pragma: no cover — Windows only
+    system32 = os.path.join(  # pragma: no cover — Windows only
+        os.environ.get("SystemRoot", r"C:\Windows"), "System32"
+    )
+    if found and os.path.normcase(os.path.dirname(found)) != os.path.normcase(
+        system32
+    ):  # pragma: no cover — Windows only
+        return found
+    user_git = os.path.join(  # pragma: no cover — Windows only
+        os.environ.get("LOCALAPPDATA", ""), "Programs", "Git", "bin", "bash.exe"
+    )
+    for candidate in (*_WINDOWS_BASH_CANDIDATES, user_git):  # pragma: no cover — Windows only
         if os.path.exists(candidate):
             return candidate
     return None  # pragma: no cover — Windows without Git bash

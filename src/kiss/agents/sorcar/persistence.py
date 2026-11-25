@@ -1399,12 +1399,15 @@ def _close_thread_db() -> None:
     an open connection for the life of the process.
     """
     tl_conn: sqlite3.Connection | None = getattr(_thread_local, "conn", None)
-    if tl_conn is not None:
-        _retire_conn(tl_conn)
+    # Forgotten BEFORE it is closed, as in ``_get_db``: a Stop landing in
+    # the retirement must not leave the cache pointing at a closed
+    # connection, which ``_get_db`` would hand out as valid from then on.
     _thread_local.conn = None
     _thread_local.gen = -1
     _thread_local.path = None
     _thread_local.file_id = None
+    if tl_conn is not None:
+        _retire_conn(tl_conn)
 
 
 _HISTORY_SELECT = (
@@ -2631,6 +2634,9 @@ def _open_db_connection(current_path: str, gen_snapshot: int) -> _LockedConnecti
         tl.conn = conn  # in the ``try``: from here the thread's cache owns the handle
         return conn
     except BaseException:
+        # A Stop as this returned: out of the cache before it is closed, or a
+        # second Stop in the caller's cleanup leaves the thread a closed handle.
+        tl.conn = None
         _forget_open_conn(conn)
         try:
             conn.close()

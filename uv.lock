@@ -1622,6 +1622,7 @@ dependencies = [
     { name = "semgrep" },
     { name = "slack-sdk" },
     { name = "sounddevice" },
+    { name = "tzdata" },
     { name = "vosk" },
     { name = "websockets" },
 ]
@@ -1731,6 +1732,7 @@ requires-dist = [
     { name = "semgrep", specifier = ">=1.169.0" },
     { name = "slack-sdk", specifier = ">=3.30.0" },
     { name = "sounddevice", specifier = ">=0.5.0" },
+    { name = "tzdata", specifier = ">=2025.2" },
     { name = "vosk", specifier = "==0.3.44" },
     { name = "websockets", specifier = ">=15.0" },
 ]

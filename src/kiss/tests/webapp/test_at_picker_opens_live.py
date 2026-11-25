@@ -72,11 +72,17 @@ def test_typing_at_opens_the_file_picker_with_the_work_dirs_files(tmp_path: Path
                 items = page.evaluate(_ITEM_TEXTS_JS)
                 expected = {"./notes.md", "./src/", "./src/app.py", "./src/util.py"}
                 assert set(items) >= expected, items
-                # Narrowing the mention filters the list.
+                # Narrowing the mention filters the list.  The answer to "@u"
+                # already lists this file alone; the one waited for answers
+                # the whole word (the item marks what was asked), because Tab
+                # on a list painted for an earlier draft closes it and
+                # completes nothing (1 run in 3 on Windows, 2026-11-25).
                 page.keyboard.type("util")
                 page.wait_for_function(
                     "() => Array.from(document.querySelectorAll('#autocomplete .ac-item'))"
-                    ".map(el => el.dataset.text).join('|') === './src/util.py'",
+                    ".map(el => el.dataset.text + ' <- ' +"
+                    " (el.querySelector('.ac-hl') || {}).textContent)"
+                    ".join('|') === './src/util.py <- util'",
                     timeout=30_000,
                 )
                 # Tab accepts the highlighted entry into the composer.

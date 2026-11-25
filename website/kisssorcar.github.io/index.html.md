@@ -6,6 +6,8 @@
 - Source: <https://github.com/ksenxx/kiss_ai>
 - PyPI: <https://pypi.org/project/kiss-agent-framework/>
 - Paper: <https://arxiv.org/abs/2604.23822>
+- Download for Mac: <https://github.com/ksenxx/kiss_ai/raw/main/installers/KISS-Sorcar.pkg> (macOS 14 or later, Apple silicon and Intel)
+- Download for Windows: <https://github.com/ksenxx/kiss_ai/raw/main/installers/KISS-Sorcar-Setup.exe> (Windows 10 or 11, 64-bit)
 - Full docs: <https://kisssorcar.github.io/docs/index.md>
 - LLM index: <https://kisssorcar.github.io/llms.txt>
 
@@ -33,6 +35,24 @@ Or from a checkout:
 
 ```bash
 git clone https://github.com/ksenxx/kiss_ai.git && cd kiss_ai && ./install.sh
+```
+
+On Windows, run that `./install.sh` in Git Bash, or use the Windows setup program below. The one-line command is for macOS and Linux.
+
+### Mac installer package (macOS 14 or later)
+
+[Download KISS-Sorcar.pkg](https://github.com/ksenxx/kiss_ai/raw/main/installers/KISS-Sorcar.pkg) and open it. It runs the same `install.sh` for the logged-in user and needs no Homebrew, no git and none of Apple's developer tools. The package is not signed with an Apple Developer ID, so macOS blocks it when you double-click it: open **System Settings > Privacy & Security**, click **Open Anyway** next to the message about the package, and confirm with an administrator password. Or install it from Terminal, which is not blocked:
+
+```bash
+installer -pkg ~/Downloads/KISS-Sorcar.pkg -target CurrentUserHomeDirectory
+```
+
+### Windows setup program (Windows 10 or 11, 64-bit)
+
+[Download KISS-Sorcar-Setup.exe](https://github.com/ksenxx/kiss_ai/raw/main/installers/KISS-Sorcar-Setup.exe) and open it. It runs the same `install.sh` for the user who opens it and needs no administrator rights, no git, no Python and no bash on the PC. The program is not signed, so Windows SmartScreen shows "Windows protected your PC" for a downloaded copy: click **More info**, then **Run anyway**. KISS Sorcar gets a Start Menu shortcut and starts at every logon. To remove it, open **Settings > Apps > Installed apps** (**Apps & features** on Windows 10), find **KISS Sorcar** and click **Uninstall**; your settings, API keys and history stay in `%USERPROFILE%\.kiss`. To install without a window:
+
+```
+KISS-Sorcar-Setup.exe /S
 ```
 
 ### Python package install (Python 3.13+)

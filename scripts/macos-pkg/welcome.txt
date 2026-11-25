@@ -1,0 +1,7 @@
+This installs KISS Sorcar for you, the user who is logged in.
+
+Everything goes into your home folder: the app in ~/.kiss, its commands in ~/.local/bin and its icon in the Applications folder of your home folder. You are not asked for an administrator password.
+
+Your Mac must be online. The installer downloads Python, the libraries KISS Sorcar uses and a copy of the Chromium browser for its browser tools, about 1 GB in all, so the installation takes a few minutes.
+
+Nothing else has to be on this Mac first: no Homebrew, no git and none of Apple's developer tools.

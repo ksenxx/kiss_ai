@@ -44,13 +44,33 @@ fi
 # END: kiss-service-cgroup-escape
 set -e
 
+# On a Mac with neither Xcode nor the Command Line Tools, /usr/bin/git is
+# a stub that opens the "install the command line developer tools" dialog
+# when it is run.  With DEVELOPER_DIR pointed at the (missing) directory
+# those tools install into, it fails at once instead and no dialog opens.
+# The block is the root install.sh's, byte for byte (a test checks); the
+# full explanation is there.
+# BEGIN: kiss-macos-developer-tools  (tests extract this block verbatim)
+macos_developer_tools_missing() {
+    # True on a Mac with neither Xcode nor the Command Line Tools.
+    local dir
+    [ "$(uname -s)" = Darwin ] || return 1
+    dir="$(xcode-select -p 2>/dev/null)" || return 0
+    [ ! -d "$dir" ]
+}
+if macos_developer_tools_missing; then
+    export DEVELOPER_DIR=/Library/Developer/CommandLineTools
+fi
+# END: kiss-macos-developer-tools
+
 # Capture the user's shell PWD *before* any ``cd``: ./install.sh at the end
 # runs from it, so the kiss-web daemon it starts serves this directory.
 USER_PWD="$PWD"
 
 # Returns 0 only if git is actually runnable. On macOS, /usr/bin/git is a stub
-# that exits non-zero with an xcode-select message when the Command Line Tools
-# are not installed, so `command -v git` is not sufficient.
+# that exits non-zero with an xcrun or xcode-select message when the Command
+# Line Tools are not installed, so `command -v git` is not sufficient.  (The
+# block above keeps that run from opening the install dialog.)
 have_working_git() {
   command -v git &> /dev/null || return 1
   local out
@@ -70,25 +90,14 @@ install_git() {
   echo "git not found (or not runnable) in PATH; attempting to install git..."
   case "$(uname -s)" in
     Darwin)
+      # Only with a Homebrew that is already there.  ``xcode-select
+      # --install`` and Homebrew's own installer both bring up the
+      # installer of Apple's developer tools, which nobody asked for:
+      # without git the download below fetches a zip of the repository.
       if command -v brew &> /dev/null; then
         brew install git
-      elif command -v xcode-select &> /dev/null; then
-        # xcode-select --install opens a GUI dialog to install Command Line Tools (which include git)
-        xcode-select --install 2> /dev/null 9>&- || true
-        echo "A GUI dialog should have appeared to install the Xcode Command Line Tools."
-        echo "After it finishes, re-run this script."
       else
-        echo "Neither 'brew' nor 'xcode-select' is available on this macOS system."
-        echo "Attempting to install Homebrew non-interactively..."
-        if command -v curl &> /dev/null; then
-          NONINTERACTIVE=1 /bin/bash -c \
-            "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" \
-            && eval "$(/opt/homebrew/bin/brew shellenv 2>/dev/null || /usr/local/bin/brew shellenv 2>/dev/null)" \
-            && brew install git \
-            || echo "Homebrew bootstrap failed. Please install git manually from https://git-scm.com/download/mac"
-        else
-          echo "curl is also unavailable; please install git manually from https://git-scm.com/download/mac"
-        fi
+        echo "Continuing without git: KISS Sorcar is downloaded as a zip archive instead."
       fi
       ;;
     Linux)

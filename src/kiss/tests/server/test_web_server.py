@@ -4450,8 +4450,13 @@ class TestBroadcastLoopNone(unittest.TestCase):
         printer.broadcast({"type": "test_event"})
 
 
+@_FAKE_SCRIPT_ON_PATH
 class TestStartTunnelGenericException(IsolatedAsyncioTestCase):
-    """Test _start_tunnel when cloudflared raises a non-FNFE exception."""
+    """Test _start_tunnel when cloudflared raises a non-FNFE exception.
+
+    On Windows the fake is not found, so a PC with cloudflared installed
+    (install.sh puts it in ``~/.local/bin``) opened a real tunnel.
+    """
 
     async def asyncSetUp(self) -> None:
         self._tmpdir = tempfile.mkdtemp()

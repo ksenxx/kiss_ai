@@ -50,6 +50,12 @@ echo "install" >> "$fix/events.log"
 exit $install_rc
 EOF
     chmod +x install.sh
+    # The release builds the Mac installer package and the Windows setup
+    # program with the released tree's own builders (-o <installer>):
+    # stand-ins that write one.
+    printf '#!/bin/bash\nmkdir -p "$(dirname "$2")" && echo package > "$2"\n' \
+        > scripts/build-macos-pkg.sh
+    cp scripts/build-macos-pkg.sh scripts/build-windows-exe.sh
     git add -A
     git commit -q -m "initial"
     git remote add origin "$fix/origin.git"

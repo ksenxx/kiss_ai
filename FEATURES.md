@@ -309,7 +309,7 @@ Version 2026.11.7 · HEAD `d522176885` (6,001 commits) · compiled 2026-11-10 ·
 
 ### Standalone app, install and branding
 
-- `kiss-app` opens the web app in its own window (a Chromium-family browser in `--app` mode with its own profile) and installs a launcher (`.desktop` on Linux, `.app` on macOS); `/manifest.webmanifest` describes the app.
+- `kiss-app` opens the web app in its own window (a Chromium-family browser in `--app` mode with its own profile) and installs a launcher (`.desktop` on Linux, `.app` on macOS, a Start Menu shortcut on Windows); `/manifest.webmanifest` describes the app.
 - `install.sh` is the single installer:
   - Copies the app into `~/.kiss/kiss`.
   - Byte-compiles it.
@@ -946,7 +946,7 @@ Findings by project:
 
 - **How it is reached**: `kiss-app`, with `--url`, `--wait`, `--foreground`, `--print-command`, `--install-launcher`, `--uninstall-launcher` and `--reveal-launcher`.
 - **Notes**:
-  - The same page in a Chromium-family browser in app mode, with a launcher on Linux and macOS.
+  - The same page in a Chromium-family browser in app mode, with a launcher on Linux, macOS and Windows.
   - Added 10-16 (section 14).
 
 ### iOS Home Screen
@@ -4351,8 +4351,9 @@ The left sidebar, a drawer on a phone:
     3. Clones `ksenxx/kiss_ai` into `~/.kiss/kiss_ai` (a ZIP of `main` when git is unusable) or fast-forwards the existing clone (when the pull fails, local edits are stashed and the clone is reset to its upstream).
     4. Runs that clone's `install.sh` from the directory the command was typed in.
   - `./install.sh` in a checkout installs that checkout as it stands.
-- **`install.sh`** (104,023 bytes, 2,281 lines) **CHANGED**:
-  - Since 10-14, the single installer of the app itself (the `kiss-web` daemon, its web app and the `sorcar` CLI) for macOS and Linux on `x86_64`, `aarch64` and `arm64`.
+- **`install.sh`** (110,026 bytes, 2,380 lines) **CHANGED**:
+  - Since 10-14, the single installer of the app itself (the `kiss-web` daemon, its web app and the `sorcar` CLI) for macOS and Linux, and since 11-24 for Windows too (run in Git Bash), on `x86_64`, `aarch64` and `arm64`.
+  - It asks nothing and needs no administrator password, compiler, Homebrew or git (11-24): what a machine lacks (uv, Python, Chromium, cloudflared) is downloaded into the home directory. The Homebrew step and its `[Y/n]` question were removed; on macOS cloudflared now comes from its GitHub release, as on Linux.
   - Its former steps (git, Node, VS Code CLI, extension build, extension install) went with the VS Code extension, removed 10-14.
   - A re-run updates the app in place.
   - **Five steps**:
@@ -4376,7 +4377,7 @@ The left sidebar, a drawer on a phone:
     - One stray `SIGINT` or `SIGTERM` is ignored and a second within 3 s aborts.
     - When the terminal closes (`SIGHUP`), the run carries on with its output in the log; the password is then not printed, and Settings shows it.
   - **Daemon service**:
-    - `kiss-web` is registered as the user's service (the LaunchAgent `com.kiss.web-server` on macOS, the systemd user unit `kiss-web.service` with lingering on Linux, a detached process on a Linux without a systemd user manager) and serves the directory the installer was run from (the home directory when that is inside `~/.kiss`).
+    - `kiss-web` is registered as the user's service (the LaunchAgent `com.kiss.web-server` on macOS, the systemd user unit `kiss-web.service` with lingering on Linux, a detached process on a Linux without a systemd user manager, a logon entry under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` on Windows, written by `src/kiss/server/windows_install.py`) and serves the directory the installer was run from (the home directory when that is inside `~/.kiss`).
     - The restart is skipped when the running daemon already serves this exact runtime (a fingerprint of the launcher, the work dir and the newest modification time among the library's `.py` and `.pyc` files, the bytecode being written afresh by every full install), which keeps its tunnel URL.
     - The restart never happens while the daemon reports tasks in flight.
   - **Deferred restart** **NEW** (10-30):
@@ -4406,11 +4407,20 @@ The left sidebar, a drawer on a phone:
     1. The installer waits up to 120 s (`KISS_WEBAPP_WAIT_SECS`; 900 s before) for the daemon's `remote-url.json`.
     2. It opens `http://127.0.0.1:8787` with `kiss-app` and shows the launcher's folder in the file manager; without a usable browser it falls back to the default browser, and on a remote machine (an SSH session, or Linux without a display) it prints the tunnel URL instead.
   - **Controls**:
-    - `--non-interactive` (or `KISS_NONINTERACTIVE`): answers the one question a terminal run asks, `[Y/n]` before Homebrew is installed on macOS (optional, the preferred source of cloudflared; `KISS_NO_BREW` skips it).
+    - `--non-interactive` (or `KISS_NONINTERACTIVE`): for an automated caller; the run detaches from the terminal's signals. No run asks a question.
     - `--restart-only`.
-    - `KISS_SKIP_LAUNCH` (no daemon start, no window), `KISS_HOME`, `KISS_WEB_PORT` (8787) and `KISS_CODE_CLI`.
+    - `KISS_SKIP_LAUNCH` (no daemon start, no window), `KISS_NO_REVEAL` (the launcher's folder is not shown), `KISS_HOME`, `KISS_WEB_PORT` (8787) and `KISS_CODE_CLI`.
     - Timeouts: `KISS_WEB_START_TIMEOUT` (90 s), `KISS_WEB_DRAIN_TIMEOUT` (30 s) and `KISS_HEARTBEAT_INTERVAL` (15 s).
     - The log is `~/.kiss/install.log`.
+- **Installers for a machine with nothing set up** **NEW** (11-24):
+  - Both unpack the same payload (`scripts/installer-payload.sh`: the sources `install.sh` installs, `install.sh` itself and the scripts it needs) into `~/.kiss/kiss_pkg` and run `install.sh --non-interactive` there.
+  - **Mac package** `installers/KISS-Sorcar.pkg` (`scripts/build-macos-pkg.sh`): installs for the current user without Apple's developer tools.
+  - **Windows setup program** `installers/KISS-Sorcar-Setup.exe` (`scripts/build-windows-exe.sh`, NSIS; builds on macOS, Linux and Windows):
+    - Installs for the user who runs it, without administrator rights, on 64-bit Windows 10 and later; `/S` installs without a window.
+    - `scripts/windows-exe/setup.ps1` finds Git Bash or downloads the portable Git for Windows into the profile, then runs `install.sh`.
+    - Registers an uninstaller (Settings > Apps) that removes the app, the Start Menu shortcut, the logon start and the CLI and keeps the settings and history in `~/.kiss`.
+    - It is not signed: Windows SmartScreen asks before running a downloaded copy.
+  - `scripts/release.sh` rebuilds both from the released tree and commits them with the version bump.
 - **`kiss-app`** **NEW** (10-16; `src/kiss/server/standalone_app.py`, 1,486 lines):
   - Opens the web app as a standalone window, Chromium's app mode (`--app=<URL>`) under its own profile `~/.kiss/webapp-profile`, choosing the browser in priority order:
     1. The browser `$KISS_APP_BROWSER` names (once set it is the only candidate: when it does not resolve, no window opens and the command exits with status 1).
@@ -4418,6 +4428,7 @@ The left sidebar, a drawer on a phone:
   - `--install-launcher` registers a brand-named launcher whose icon the running window carries too:
     - Linux: a `.desktop` entry with `StartupWMClass` set to the window's Wayland app id.
     - macOS: a clone `.app` bundle in `~/Applications` holding APFS-cloned copies of the browser's binary and frameworks, the binary re-signed ad hoc under the brand's identifier, because Chromium's sandboxed helper processes read only the bundle they run from.
+    - Windows (11-24): a Start Menu shortcut with the brand's icon that runs `kiss-app --home <state directory>` without a console window.
   - While the daemon is not answering yet, the window opens on a packaged waiting page (`appStart.html`) that polls it every half second.
   - On macOS, a launch while the app is open brings its window to the front.
   - The other flags are `--url`, `--wait` (120 s), `--foreground`, `--print-command`, `--uninstall-launcher` and `--reveal-launcher`.
@@ -4504,8 +4515,9 @@ The left sidebar, a drawer on a phone:
   - The daemon serves the same profile for its tunnel URL, else its LAN URL, at `GET /webclip.mobileconfig` (the "..." menu's "iPhone Home Screen" item).
   - On an iPhone with rounded display corners that the page knows (the Face ID models from the iPhone X on, told apart by screen size and pixel ratio), held upright in the Home Screen web app, the composer keeps one 8px gap to the left, right and bottom edge of the screen and rounds its bottom corners by the display's corner radius less that gap so the two curves run parallel, keeping what is in the composer above the home indicator; nothing changes in a Safari tab, with the phone held sideways, or on a phone not in the list (`media/displayCorners.js`, inlined in the page head, and the `.display-corners` rules of `media/remote-codex.css`) **NEW** (11-21).
 - **Windows**:
-  - There has been no Windows installer since the extension, which installed MinGit and uv there, was removed 10-14; `install.sh` stops with `Unsupported OS` on anything but macOS and Linux.
-  - Windows code paths remain (`kiss-app` finds Chrome, Edge and Brave there but registers no launcher; the installer's active-tasks probe uses a 5 s timeout there), and fixes from the cross-platform test runs landed through 11-09 (section 22).
+  - Windows is installed by the setup program `installers/KISS-Sorcar-Setup.exe` or by `install.sh` in Git Bash (11-24, section 21 "Local installer and standalone app"); from 10-14, when the extension that installed MinGit and uv there was removed, until then there was no Windows installer.
+  - `src/kiss/server/windows_install.py` holds what the installer needs there: the logon start, starting the daemon hidden in a fresh logon environment, stopping the daemon of one app directory, the user `PATH` entry and the uninstall.
+  - Fixes from the cross-platform test runs landed through 11-24 (section 22).
 
 ## 22. Developer tooling and tests
 

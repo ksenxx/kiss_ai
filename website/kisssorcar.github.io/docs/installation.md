@@ -1,6 +1,6 @@
 # Installing KISS Sorcar
 
-> Install KISS Sorcar with the one-line installer, from a checkout, in Docker, or as a Python package. Requires Python 3.13+.
+> Install KISS Sorcar with the one-line installer, from a checkout, with the Mac installer package, with the Windows setup program, in Docker, or as a Python package. Requires Python 3.13+.
 
 ## Full Install (one-liner)
 
@@ -8,7 +8,7 @@
 curl -fsSL https://raw.githubusercontent.com/ksenxx/kiss_ai/main/scripts/install.sh | bash
 ```
 
-The bootstrap script clones or updates `~/.kiss/kiss_ai`, then runs its `install.sh` from the directory you ran the command in, so the daemon serves that directory.
+The bootstrap script clones or updates `~/.kiss/kiss_ai`, then runs its `install.sh` from the directory you ran the command in, so the daemon serves that directory. This one-line command is for macOS and Linux; on Windows, use the [Windows setup program](#windows-setup-program) or install from a checkout.
 
 ## Full Install from a Checkout
 
@@ -18,19 +18,49 @@ cd kiss_ai
 ./install.sh
 ```
 
-`install.sh` targets macOS and Linux on `x86_64`, `aarch64`, and `arm64`. It runs five steps:
+`install.sh` targets macOS and Linux on `x86_64`, `aarch64`, and `arm64`, and 64-bit Windows 10 and 11. On Windows, open Git Bash (it comes with Git for Windows) in the checkout and run the same `./install.sh`. The script asks no question and needs no administrator password, no compiler, no Homebrew and no git (a copy of the sources without git history installs too): it downloads what is missing (uv, Python, Chromium, cloudflared) into your home directory. It runs five steps:
 
 1. Copies the project into `~/.kiss/kiss` (the library, the SEAs, the web app frontend).
 2. Builds the Python environment with `uv`.
 3. Byte-compiles the library (SEAs and the few files a runtime reads as scripts stay source).
-4. Installs the `sorcar` CLI and the `rsorcar` and `sorcar-docker` launchers into `~/.local/bin`, Playwright's Chromium and `cloudflared`.
-5. Refreshes `~/.kiss/MODEL_INFO.json`, registers `kiss-web` as your user service (launchd on macOS, a systemd user unit on Linux, a detached process otherwise), restarts it only when no task is running, sets a fresh random remote-access password (printed in a box of `*` at the end; only its hash is stored), and opens the web app at `http://127.0.0.1:8787` as a standalone app: a window of its own without browser UI (Chromium's app mode, started by `kiss-app` in Google Chrome, Chromium, Edge or Brave when one is installed, else in Playwright's Chromium, with its own profile under `~/.kiss/webapp-profile`), and a launcher in your applications menu (`~/.local/share/applications/kiss-sorcar.desktop` on Linux, `~/Applications/KISS Sorcar.app` on macOS) so you can reopen it like any program; a white-label brand gets its own name and icon there, and the running window shows that icon in the dock or taskbar too (on Linux the launcher names the window's X11 class and Wayland app id; on macOS the bundle runs the browser's binary through a symlink under its own identity). Without such a browser the URL opens in the default browser. On a remote or SSH machine it prints the cloudflared URL instead.
+4. Installs the `sorcar` CLI and the `rsorcar` and `sorcar-docker` launchers into `~/.local/bin` (on Windows also `sorcar.cmd`, and the folder is added to your user PATH), Playwright's Chromium and `cloudflared` (from Cloudflare's GitHub release).
+5. Refreshes `~/.kiss/MODEL_INFO.json`, registers `kiss-web` as your user service (launchd on macOS, a systemd user unit on Linux, a per-user "Run" registry entry on Windows that starts it at every logon without a console window, a detached process otherwise), restarts it only when no task is running, sets a fresh random remote-access password (printed in a box of `*` at the end; only its hash is stored), and opens the web app at `http://127.0.0.1:8787` as a standalone app: a window of its own without browser UI (Chromium's app mode, started by `kiss-app` in Google Chrome, Chromium, Edge or Brave when one is installed, else in Playwright's Chromium, with its own profile under `~/.kiss/webapp-profile`), and a launcher in your applications menu (`~/.local/share/applications/kiss-sorcar.desktop` on Linux, `~/Applications/KISS Sorcar.app` on macOS, a Start Menu shortcut on Windows) so you can reopen it like any program; a white-label brand gets its own name and icon there, and the running window shows that icon in the dock or taskbar too (on Linux the launcher names the window's X11 class and Wayland app id; on macOS the bundle runs the browser's binary through a symlink under its own identity). Without such a browser the URL opens in the default browser. On a remote or SSH machine it prints the cloudflared URL instead.
 
-Options: `KISS_SKIP_LAUNCH=1` skips starting the daemon and opening the app; `--non-interactive` runs without prompts. The installer logs to `~/.kiss/install.log` and tracks its progress in `~/.kiss/.install-progress`.
+Options: `KISS_SKIP_LAUNCH=1` skips starting the daemon and opening the app; `--non-interactive` is for an automated caller: the run detaches from the terminal so that no terminal signal can cut it short (the installer asks no question in either mode). The installer logs to `~/.kiss/install.log` and tracks its progress in `~/.kiss/.install-progress`.
+
+## Mac Installer Package
+
+[Download KISS-Sorcar.pkg](https://github.com/ksenxx/kiss_ai/raw/main/installers/KISS-Sorcar.pkg) and open it. It runs the same `install.sh` for the logged-in user on macOS 14 or later (Apple silicon and Intel) and needs no Homebrew, no git and none of Apple's developer tools. The Mac must be online: the installer downloads Python, the libraries and Chromium, about 1 GB.
+
+The package is not signed with an Apple Developer ID, so macOS blocks it when you double-click it. Open **System Settings > Privacy & Security**, click **Open Anyway** next to the message about the package, and confirm with an administrator password. Or install it from Terminal, which is not blocked:
+
+```bash
+installer -pkg ~/Downloads/KISS-Sorcar.pkg -target CurrentUserHomeDirectory
+```
+
+KISS Sorcar opens in its own window when the installation is complete. Enter the API key of a model provider in **Settings** before your first task.
+
+## Windows Setup Program
+
+[Download KISS-Sorcar-Setup.exe](https://github.com/ksenxx/kiss_ai/raw/main/installers/KISS-Sorcar-Setup.exe) and open it. It runs the same `install.sh` for the user who opens it on 64-bit Windows 10 and Windows 11 (ARM PCs run it through their x64 emulation) and needs no administrator rights, no git, no Python and no bash on the PC. The PC must be online: the installer downloads Python, the libraries and Chromium, about 1 GB, which takes a few minutes.
+
+The program is not signed, so Windows SmartScreen shows "Windows protected your PC" for a downloaded copy. Click **More info**, then **Run anyway**. To install without a window, run it from a terminal with `/S`:
+
+```
+KISS-Sorcar-Setup.exe /S
+```
+
+The setup program unpacks a copy of the sources into `%USERPROFILE%\.kiss\kiss_pkg` and runs `install.sh` through Git Bash. A PC without Git for Windows first gets the portable Git for Windows in `%LOCALAPPDATA%\Programs\Git`. `install.sh` builds the app in `%USERPROFILE%\.kiss\kiss` and starts the `kiss-web` daemon, which also starts at every logon of that user. It adds a **KISS Sorcar** shortcut to the Start Menu, puts the `sorcar` command (`sorcar.cmd`) in `%USERPROFILE%\.local\bin` and adds that folder to the user's PATH.
+
+KISS Sorcar opens in its own window when the installation is complete. Enter the API key of a model provider in **Settings** before your first task.
+
+To uninstall, open **Settings > Apps > Installed apps** (**Apps & features** on Windows 10), find **KISS Sorcar** and click **Uninstall**. This removes the app, the Start Menu shortcut, the logon start and the `sorcar` command. Your settings, API keys and history stay in `%USERPROFILE%\.kiss`.
 
 ## Updating
 
 When a new version is available, the web app shows an update toast with **Update** and **Update when idle**. The daemon then runs `scripts/install.sh` (the bootstrap) in `~/.kiss/kiss_ai`, which runs `install.sh`. If the update fails, run the one-line installer again. It will not delete your history.
+
+Windows cannot replace the files of a running program, so on Windows the installer stops `kiss-web` before it updates the app and starts it again afterwards (on macOS and Linux the daemon keeps running during an update). It refuses to update while tasks are running.
 
 ## Docker
 
