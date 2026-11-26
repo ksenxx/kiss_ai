@@ -1,30 +1,30 @@
 # Models in the bundled catalog
 
-KISS Sorcar ships a catalog of **993 models** across **7 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json); `uv run python -m kiss.scripts.update_models` refreshes that file and rewrites the counts and lists below, so do not edit them by hand. Models are grouped by the provider that routes them (whose API key or CLI serves the model). How costs are computed from these prices is described in [README.md](README.md#models-supported).
+KISS Sorcar ships a catalog of **1005 models** across **7 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json); `uv run python -m kiss.scripts.update_models` refreshes that file and rewrites the counts and lists below, so do not edit them by hand. Models are grouped by the provider that routes them (whose API key or CLI serves the model). How costs are computed from these prices is described in [README.md](README.md#models-supported).
 
 The Amazon Bedrock entries (`bedrock/<Bedrock model or inference-profile id>`, such as `bedrock/us.anthropic.claude-opus-4-6-v1` or `bedrock/global.anthropic.claude-haiku-4-5-20251001-v1:0`) are the Claude ids the updater found in its AWS region (`AWS_REGION`, default `us-east-1`): the system-defined cross-region inference profiles and any foundation model id that accepts on-demand calls there. Each one is a copy of its `claude-*` entry (same context length, capabilities and `-low`/`-medium`/`-high`/`-max` effort suffixes) with the prices scaled by Bedrock's regional premium: a `global.` profile costs the same as the `claude-*` entry, a geographic (`us.`, `eu.`, `apac.`, `jp.`, `au.`) or in-region (`anthropic.`) id of a Claude 4.5-or-later model 10% more. Configure `AWS_BEARER_TOKEN_BEDROCK` or an `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` pair, plus `AWS_REGION`, to use them; re-running the updater on a machine in another region relists the ids that region serves. An id the region serves that is not in the catalog can still be used by name or added under Settings → Custom Models.
 
 | Provider category | Catalog entries |
 |---|---:|
-| OpenAI | 99 |
+| OpenAI | 119 |
 | Anthropic | 82 |
 | Amazon Bedrock (`bedrock/*`) | 144 |
 | Gemini | 61 |
-| OpenRouter | 515 |
+| OpenRouter | 507 |
 | Claude Code CLI (`cc/*`) | 79 |
 | Codex CLI (`codex/*`) | 13 |
 
 Current catalog capability totals:
 
-- **941** generation-capable models
-- **807** function-calling-capable models
+- **954** generation-capable models
+- **805** function-calling-capable models
 - **6** embedding models
-- **38** decision models
+- **37** decision models
 
 Full model list:
 
 <details>
-<summary><strong>OpenAI (99)</strong></summary>
+<summary><strong>OpenAI (119)</strong></summary>
 
 - `gpt-4.1`
 - `gpt-4.1-2025-04-14`
@@ -77,6 +77,11 @@ Full model list:
 - `gpt-5.6-terra-medium`
 - `gpt-5.6-terra-xhigh`
 - `gpt-6-astra`
+- `gpt-6-astra-healthcare`
+- `gpt-6-astra-healthcare-high`
+- `gpt-6-astra-healthcare-low`
+- `gpt-6-astra-healthcare-medium`
+- `gpt-6-astra-healthcare-xhigh`
 - `gpt-6-astra-high`
 - `gpt-6-astra-low`
 - `gpt-6-astra-medium`
@@ -92,6 +97,11 @@ Full model list:
 - `gpt-6-sol-medium`
 - `gpt-6-sol-xhigh`
 - `gpt-6.1-sol`
+- `gpt-6.1-sol-healthcare`
+- `gpt-6.1-sol-healthcare-high`
+- `gpt-6.1-sol-healthcare-low`
+- `gpt-6.1-sol-healthcare-medium`
+- `gpt-6.1-sol-healthcare-xhigh`
 - `gpt-6.1-sol-high`
 - `gpt-6.1-sol-low`
 - `gpt-6.1-sol-medium`
@@ -102,11 +112,21 @@ Full model list:
 - `gpt-6.1-terra-medium`
 - `gpt-6.1-terra-xhigh`
 - `gpt-6.2-astra`
+- `gpt-6.2-astra-healthcare`
+- `gpt-6.2-astra-healthcare-high`
+- `gpt-6.2-astra-healthcare-low`
+- `gpt-6.2-astra-healthcare-medium`
+- `gpt-6.2-astra-healthcare-xhigh`
 - `gpt-6.2-astra-high`
 - `gpt-6.2-astra-low`
 - `gpt-6.2-astra-medium`
 - `gpt-6.2-astra-xhigh`
 - `gpt-6.2-sol`
+- `gpt-6.2-sol-healthcare`
+- `gpt-6.2-sol-healthcare-high`
+- `gpt-6.2-sol-healthcare-low`
+- `gpt-6.2-sol-healthcare-medium`
+- `gpt-6.2-sol-healthcare-xhigh`
 - `gpt-6.2-sol-high`
 - `gpt-6.2-sol-low`
 - `gpt-6.2-sol-medium`
@@ -434,7 +454,7 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>OpenRouter (515)</strong></summary>
+<summary><strong>OpenRouter (507)</strong></summary>
 
 - `openrouter/aion-labs/aion-2.0`
 - `openrouter/aion-labs/aion-3.0`
@@ -608,7 +628,6 @@ Full model list:
 - `openrouter/jaredpalmer/kev-4b`
 - `openrouter/kt/midm-k-3.0-pro`
 - `openrouter/liquid/d1-ultra`
-- `openrouter/liquid/d1.1`
 - `openrouter/liquid/d1.2`
 - `openrouter/liquid/d1.2-ultra`
 - `openrouter/liquid/lfm-2.5-24b-a2b`
@@ -640,9 +659,7 @@ Full model list:
 - `openrouter/mistralai/mistral-large-2407`
 - `openrouter/mistralai/mistral-large-2512`
 - `openrouter/mistralai/mistral-large-4-0`
-- `openrouter/mistralai/mistral-medium-3`
 - `openrouter/mistralai/mistral-medium-3-5`
-- `openrouter/mistralai/mistral-medium-3.1`
 - `openrouter/mistralai/mistral-nemo`
 - `openrouter/mistralai/mistral-saba`
 - `openrouter/mistralai/mistral-small-24b-instruct-2501`
@@ -654,9 +671,6 @@ Full model list:
 - `openrouter/mistralai/voxtral-small-24b-2507`
 - `openrouter/moondream/moondream3-preview`
 - `openrouter/moondream/moondream3.1-9b-a2b`
-- `openrouter/moonshotai/kimi-k2`
-- `openrouter/moonshotai/kimi-k2-0905`
-- `openrouter/moonshotai/kimi-k2-thinking`
 - `openrouter/moonshotai/kimi-k2.5`
 - `openrouter/moonshotai/kimi-k2.6`
 - `openrouter/moonshotai/kimi-k2.7-code`
@@ -866,13 +880,12 @@ Full model list:
 - `openrouter/togethercomputer/tev1-4b-experimental`
 - `openrouter/typesafe/jev-1.13`
 - `openrouter/typesafe/jev-1.14`
-- `openrouter/unbiased/pareto-26.10`
-- `openrouter/unbiased/pareto-26.10-preview`
-- `openrouter/unbiased/pareto-26.9`
 - `openrouter/undi95/remm-slerp-l2-13b`
 - `openrouter/upstage/solar-decide`
 - `openrouter/upstage/solar-decide-flash`
+- `openrouter/upstage/solar-mini-4-5`
 - `openrouter/upstage/solar-mini4`
+- `openrouter/upstage/solar-pro-4-contributor`
 - `openrouter/upstage/solar-pro4`
 - `openrouter/writer/palmyra-x5`
 - `openrouter/x-ai/grok-4.20`
@@ -887,9 +900,8 @@ Full model list:
 - `openrouter/x-ai/grok-4.5-medium`
 - `openrouter/x-ai/grok-4.6`
 - `openrouter/x-ai/grok-4.7`
-- `openrouter/xiaomi/mimo-v2.5`
-- `openrouter/xiaomi/mimo-v2.5-pro`
 - `openrouter/xiaomi/mimo-v2.6-flash`
+- `openrouter/xiaomi/mimo-v2.6-flash-mopd`
 - `openrouter/xiaomi/mimo-v2.6-pro`
 - `openrouter/xiaomi/mimo-v2.6-pro-ultraspeed`
 - `openrouter/z-ai/glm-4.5`

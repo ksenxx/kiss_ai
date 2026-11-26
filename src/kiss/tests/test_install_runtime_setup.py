@@ -35,9 +35,11 @@ import subprocess
 import sys
 import tarfile
 import textwrap
+import threading
 import time
 from collections.abc import Awaitable, Callable
 from functools import partial
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -81,6 +83,7 @@ _TOOLS = (
     "chmod",
     "dirname",
     "nohup",
+    "perl",
     "tar",
     "env",
     "sort",
@@ -89,6 +92,7 @@ _TOOLS = (
     "true",
     "false",
     "find",
+    "mktemp",
 )
 
 
@@ -153,7 +157,10 @@ class Sandbox:
         With *venv*, ``.venv/bin/python`` is the test's own interpreter
         (it imports ``kiss``) and ``.venv/bin/kiss-web`` is a stand-in
         daemon: it records its working directory, writes the endpoint
-        file under its home and listens on ``$KISS_WEB_PORT``.
+        file (with its pid) under its home and listens on
+        ``$KISS_WEB_PORT``.  Like the real daemon it does not leave
+        SIGHUP ignored (a hangup stops it) and its command line names
+        the ``kiss-web`` launcher.
         """
         project = self.home / ".kiss" / name
         (project / "src" / "kiss").mkdir(parents=True)
@@ -174,13 +181,15 @@ class Sandbox:
                     mkdir -p "$home"
                     echo "$PWD" > "$home/kiss-web.cwd"
                     echo "$$" >> {str(self.pids)!r}
-                    printf '{{"url":"wss://127.0.0.1:1/","token":"t"}}' > "$home/sorcar-local.json"
-                    exec "$(dirname "$0")/python" -c 'import os, socket, time
+                    printf '{{"url":"wss://127.0.0.1:1/","token":"t",\\n  "pid": %s}}' "$$" \\
+                        > "$home/sorcar-local.json"
+                    exec "$(dirname "$0")/python" -c 'import os, signal, socket, time
+                    signal.signal(signal.SIGHUP, signal.SIG_DFL)
                     s = socket.socket()
                     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                     s.bind(("127.0.0.1", int(os.environ["KISS_WEB_PORT"])))
                     s.listen()
-                    time.sleep(120)'
+                    time.sleep(120)' "$0"
                     """
                 ),
                 encoding="utf-8",
@@ -193,8 +202,12 @@ class Sandbox:
         commands: str,
         env: dict[str, str] | None = None,
         timeout: float = 120,
+        terminal: bool = False,
     ) -> subprocess.CompletedProcess[str]:
         """Run *commands* after the block, under bash, in the sandbox.
+
+        With *terminal* the bash is the session leader of a new
+        pseudo-terminal, which closes when the commands end.
 
         The block waits ``KISS_WEB_START_TIMEOUT`` seconds for the
         stand-in daemon to bind its port; 60 by default here because
@@ -221,8 +234,12 @@ class Sandbox:
         }
         full_env["SHELL"] = "/bin/bash"
         full_env.update(env or {})
+        argv = ["bash", "-c", script]
+        if terminal:
+            argv = [sys.executable, "-c", "import pty, sys; pty.spawn(sys.argv[1:])", *argv]
         return subprocess.run(
-            ["bash", "-c", script],
+            argv,
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             timeout=timeout,
@@ -257,6 +274,38 @@ def _wait_port(port: int, timeout: float = 10) -> bool:
                 return True
         time.sleep(0.05)
     return False
+
+
+# --------------------------------------------------------------------------
+# fetch
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("tool", ["curl", "wget"])
+def test_fetch_downloads_with_curl_or_with_wget(sandbox: Sandbox, tool: str) -> None:
+    """The real tool and a real web server: to stdout, into a file, and a 404 fails.
+
+    Ubuntu's desktop ships wget and no curl.  The wget half needs wget
+    installed, which a Mac has not: it is skipped there.
+    """
+    real = shutil.which(tool)
+    if real is None:
+        pytest.skip(f"{tool} is not installed")
+    (sandbox.tools / tool).symlink_to(real)
+    served = sandbox.root / "served"
+    served.mkdir()
+    (served / "file.txt").write_text("payload\n")
+    handler = partial(SimpleHTTPRequestHandler, directory=str(served))
+    with ThreadingHTTPServer(("127.0.0.1", 0), handler) as server:
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        url = f"http://127.0.0.1:{server.server_port}"
+        res = sandbox.run(
+            f'fetch {url}/file.txt; fetch {url}/file.txt "$HOME/saved"; cat "$HOME/saved"; '
+            f'fetch {url}/missing 2>/dev/null || echo "rc=$?"'
+        )
+        server.shutdown()
+    failed = {"curl": "rc=22", "wget": "rc=8"}[tool]
+    assert res.stdout == f"payload\npayload\n{failed}\n", res.stdout + res.stderr
 
 
 # --------------------------------------------------------------------------
@@ -301,6 +350,52 @@ def test_ensure_uv_installs_with_the_official_installer(sandbox: Sandbox) -> Non
     assert "Installing uv" in res.stderr
     assert "curl -LsSf https://astral.sh/uv/install.sh" in sandbox.logged_calls()[0]
     assert (sandbox.root / "installer.env").read_text() == "modify_path=1\n"
+
+
+@pytest.mark.parametrize("users_rc", [None, ".wgetrc", "my.wgetrc"])
+def test_ensure_uv_keeps_the_wget_of_uvs_installer_quiet(
+    sandbox: Sandbox, users_rc: str | None
+) -> None:
+    """Without curl, uv's installer downloads uv with a bare ``wget``.
+
+    That wget prints a line of progress for every 50 KB, hundreds of
+    lines in the install's output, so it runs with a wgetrc that says
+    ``verbose = off`` after the user's own settings (a proxy, say):
+    those of ``~/.wgetrc``, or of the file ``$WGETRC`` names.  The
+    stand-in installer downloads as uv's does; the stand-in wget
+    records the wgetrc it was given.
+    """
+    env = {}
+    users_settings = ""
+    if users_rc:
+        users_settings = "https_proxy = http://proxy:3128/"  # no newline at its end
+        (sandbox.home / users_rc).write_text(users_settings, encoding="utf-8")
+    if users_rc == "my.wgetrc":
+        env["WGETRC"] = str(sandbox.home / users_rc)
+    installer = sandbox.root / "installer.sh"
+    installer.write_text(
+        'wget https://releases.astral.sh/uv.tar.gz -O "$HOME/uv.tar.gz"\n'
+        'mkdir -p "$HOME/.local/bin"\n'
+        'printf "#!/bin/bash\\n" > "$HOME/.local/bin/uv"\n'
+        'chmod 755 "$HOME/.local/bin/uv"\n',
+        encoding="utf-8",
+    )
+    seen = sandbox.root / "wgetrc.seen"
+    sandbox.stub(
+        "wget",
+        f"""
+        case "$1" in
+            -q) cat {str(installer)!r} ;;
+            *) {{ echo "$WGETRC"; cat "$WGETRC"; }} > {str(seen)!r} ;;
+        esac
+        """,
+    )
+    res = sandbox.run("ensure_uv", env=env)
+    assert res.stdout.strip() == str(sandbox.home / ".local/bin/uv"), res.stdout + res.stderr
+    assert sandbox.logged_calls()[0] == "wget -q -O - https://astral.sh/uv/install.sh"
+    given, settings = seen.read_text(encoding="utf-8").split("\n", 1)
+    assert settings == users_settings + "\nverbose = off\n"
+    assert not Path(given).exists(), "the wgetrc of the install was left behind"
 
 
 def test_ensure_uv_fails_when_the_download_fails(sandbox: Sandbox) -> None:
@@ -901,6 +996,58 @@ def test_start_falls_back_to_a_detached_process_without_systemd(sandbox: Sandbox
     assert sandbox.logged_calls() == ["systemctl --user show-environment"]
     assert (sandbox.home / ".kiss" / "kiss-web.cwd").read_text().strip() == str(sandbox.workdir)
     assert (sandbox.home / ".kiss" / ".kiss-web.fingerprint").exists()
+
+
+def test_detached_daemon_outlives_the_terminal_that_started_it(sandbox: Sandbox) -> None:
+    """The daemon keeps serving after the terminal the install ran in has closed.
+
+    The start is the session leader of a real pseudo-terminal, as an
+    installer run by ``docker exec -t`` or ``ssh -t`` is.  When it ends,
+    the kernel hangs up the terminal's foreground process group, and a
+    daemon in that group shuts down on the SIGHUP.
+    """
+    project = sandbox.project()
+    sandbox.uname("Linux")
+    sandbox.stub("systemctl", "exit 1\n")
+    res = sandbox.run(f'start_kiss_web_daemon "{project}" "{sandbox.workdir}"', terminal=True)
+    assert "kiss-web is up" in res.stdout, res.stdout + res.stderr
+    time.sleep(0.5)  # longer than the hangup takes to stop a daemon it reaches
+    assert _wait_port(sandbox.port, timeout=1), "the daemon stopped with the terminal"
+
+
+def test_detached_start_replaces_the_daemon_of_an_earlier_install(sandbox: Sandbox) -> None:
+    """A second install stops the first one's daemon, which holds the port.
+
+    The machine has neither lsof nor fuser (a minimal container), so the
+    pid comes from the endpoint file the daemon wrote.
+    """
+    project = sandbox.project()
+    sandbox.uname("Linux")
+    sandbox.stub("systemctl", "exit 1\n")
+    start = f'start_kiss_web_daemon "{project}" "{sandbox.workdir}"'
+    assert "kiss-web is up" in sandbox.run(start).stdout
+    first = sandbox.pids.read_text(encoding="utf-8").split()[-1]
+    # Another build of the app: the daemon no longer serves this runtime.
+    (project / "src" / "kiss" / "a.py").write_text("x = 2\n", encoding="utf-8")
+    res = sandbox.run(start)
+    assert "kiss-web is up" in res.stdout, res.stdout + res.stderr
+    assert sandbox.pids.read_text(encoding="utf-8").split()[-1] != first
+    assert subprocess.run(["ps", "-p", first], capture_output=True, check=False).returncode != 0
+    assert _wait_port(sandbox.port, timeout=1), "no daemon serves after the second install"
+
+
+def test_detached_daemon_starts_where_perl_has_no_posix_module(sandbox: Sandbox) -> None:
+    """A perl that cannot load POSIX (a minimal build) starts the daemon all the same."""
+    project = sandbox.project()
+    sandbox.uname("Linux")
+    sandbox.stub("systemctl", "exit 1\n")
+    lib = sandbox.root / "perl"
+    lib.mkdir()
+    (lib / "POSIX.pm").write_text('die "POSIX is not built\\n";\n', encoding="utf-8")
+    res = sandbox.run(
+        f'start_kiss_web_daemon "{project}" "{sandbox.workdir}"', env={"PERL5LIB": str(lib)}
+    )
+    assert "kiss-web is up" in res.stdout, res.stdout + res.stderr
 
 
 def test_start_on_windows_hands_the_restart_to_the_app(sandbox: Sandbox) -> None:

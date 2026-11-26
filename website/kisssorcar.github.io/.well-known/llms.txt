@@ -7,6 +7,7 @@ Key facts for assistants and coding agents:
 - Install (full, macOS/Linux): `curl -fsSL https://raw.githubusercontent.com/ksenxx/kiss_ai/main/scripts/install.sh | bash`
 - Install (Mac installer package, macOS 14 or later, Apple silicon and Intel): download https://github.com/ksenxx/kiss_ai/raw/main/installers/KISS-Sorcar.pkg and open it
 - Install (Windows setup program, Windows 10 or 11, 64-bit, no administrator rights needed): download https://github.com/ksenxx/kiss_ai/raw/main/installers/KISS-Sorcar-Setup.exe and open it
+- Install (Linux installer, 64-bit x86-64 and ARM64, no root needed): download https://github.com/ksenxx/kiss_ai/raw/main/installers/KISS-Sorcar-Linux.run and run `bash ~/Downloads/KISS-Sorcar-Linux.run` in a terminal
 - Install (Python package only): `pipx install kiss-agent-framework` or `uv tool install kiss-agent-framework` (requires Python 3.13+)
 - PyPI package name: `kiss-agent-framework`; daemon entry point: `kiss-web`; Python client API: `kiss.server.sorcar.run`
 - Source repository: https://github.com/ksenxx/kiss_ai

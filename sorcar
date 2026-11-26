@@ -2,5 +2,5 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-uv run python -m kiss.agents.sorcar.worktree_sorcar_agent "${@:1}"
+uv run sorcar "$@"
 

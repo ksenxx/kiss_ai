@@ -19,11 +19,12 @@
 #    commits); a main of any other shape is replaced
 # 4. If ahead, bump version in _version.py and README.md (SYSTEM.md renders
 #    its "Version:" from _version.py through the {{VERSION}} placeholder)
-# 5. Build the Mac installer package of the new version (installers/) from
-#    the bumped tree minus the paths listed in scripts/exclude.json, so the
-#    release must run on a Mac; a build that fails releases nothing
-# 6. Commit the version bump and the package with "Version bumped", then
-#    push to origin (a pull that brings new commits rebuilds the package)
+# 5. Build the installers of the new version (installers/: the Mac package,
+#    the Windows setup program, the Linux installer) from the bumped tree
+#    minus the paths listed in scripts/exclude.json; the Mac package makes
+#    the release run on a Mac; a build that fails releases nothing
+# 6. Commit the version bump and the installers with "Version bumped", then
+#    push to origin (a pull that brings new commits rebuilds the installers)
 # 7. Push one "Release X.Y.Z" commit holding origin's tree minus the paths
 #    listed in scripts/exclude.json, parented on the previous release commit,
 #    as the kiss_ai repo's main, and tag it with the version; every earlier
@@ -61,6 +62,9 @@ MACOS_PKG_FILE="installers/KISS-Sorcar.pkg"
 # The Windows setup program of the release (see build_windows_setup), tracked,
 # committed and linked to in the same way.
 WINDOWS_EXE_FILE="installers/KISS-Sorcar-Setup.exe"
+# The Linux installer of the release (see build_linux_installer), tracked,
+# committed and linked to in the same way.
+LINUX_RUN_FILE="installers/KISS-Sorcar-Linux.run"
 # JSON list of literal file/folder paths (repo-relative, no globs) that MUST
 # NOT be pushed to the public kiss_ai repo. Everything listed here is stripped
 # from every commit of the history pushed to $PUBLIC_REPO_URL while remaining
@@ -939,14 +943,23 @@ build_windows_setup() {
     build_installer "$1" "$2" build-windows-exe.sh -o "$3"
 }
 
+# Build the Linux installer of <tree-ish>, cut from <commit>, at <output>
+# (see build_installer). The builder needs tar and gzip alone. The user runs
+# the file in a terminal ("bash KISS-Sorcar-Linux.run").
+build_linux_installer() {
+    build_installer "$1" "$2" build-linux-run.sh -o "$3"
+}
+
 # Build the installers of the index (the tree about to be committed), cut
-# from <commit>, at $MACOS_PKG_FILE and $WINDOWS_EXE_FILE and stage them.
+# from <commit>, at $MACOS_PKG_FILE, $WINDOWS_EXE_FILE and $LINUX_RUN_FILE
+# and stage them.
 stage_installers() {
     local tree
     tree=$(git write-tree) || return 1
     build_macos_package "$tree" "$1" "$MACOS_PKG_FILE" || return 1
     build_windows_setup "$tree" "$1" "$WINDOWS_EXE_FILE" || return 1
-    git add -- "$MACOS_PKG_FILE" "$WINDOWS_EXE_FILE"
+    build_linux_installer "$tree" "$1" "$LINUX_RUN_FILE" || return 1
+    git add -- "$MACOS_PKG_FILE" "$WINDOWS_EXE_FILE" "$LINUX_RUN_FILE"
 }
 
 # Build and upload release <version> from <commit> (the public release commit).
@@ -1067,11 +1080,11 @@ main() {
     update_readme_version "$VERSION"
 
     # Step 5: Build the installers (the Mac package, the Windows setup
-    # program) of the bumped tree. Nothing is committed or pushed yet, so a
+    # program, the Linux installer) of the bumped tree. Nothing is committed or pushed yet, so a
     # build that fails (no Mac, no makensis, a missing signing certificate)
     # drops the bump and leaves nothing behind: every other local change is
     # in the stash.
-    print_step "Building the Mac and Windows installers..."
+    print_step "Building the Mac, Windows and Linux installers..."
     git add -A
     if ! stage_installers "$ORIGIN_HEAD"; then
         print_error "Failed to build the installers - nothing was released"
@@ -1083,7 +1096,7 @@ main() {
     # origin (rebase), then push (with retry)
     print_step "Committing version bump..."
     git commit -m "Version bumped to $VERSION"
-    print_info "Committed version bump, $MACOS_PKG_FILE and $WINDOWS_EXE_FILE"
+    print_info "Committed version bump, $MACOS_PKG_FILE, $WINDOWS_EXE_FILE and $LINUX_RUN_FILE"
 
     print_step "Syncing with origin..."
     PACKAGED_COMMIT="$ORIGIN_HEAD"

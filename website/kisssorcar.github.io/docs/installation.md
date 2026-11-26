@@ -1,6 +1,6 @@
 # Installing KISS Sorcar
 
-> Install KISS Sorcar with the one-line installer, from a checkout, with the Mac installer package, with the Windows setup program, in Docker, or as a Python package. Requires Python 3.13+.
+> Install KISS Sorcar with the one-line installer, from a checkout, with the Mac installer package, with the Windows setup program, with the Linux installer, in Docker, or as a Python package. Requires Python 3.13+.
 
 ## Full Install (one-liner)
 
@@ -8,7 +8,7 @@
 curl -fsSL https://raw.githubusercontent.com/ksenxx/kiss_ai/main/scripts/install.sh | bash
 ```
 
-The bootstrap script clones or updates `~/.kiss/kiss_ai`, then runs its `install.sh` from the directory you ran the command in, so the daemon serves that directory. This one-line command is for macOS and Linux; on Windows, use the [Windows setup program](#windows-setup-program) or install from a checkout.
+The bootstrap script clones or updates `~/.kiss/kiss_ai`, then runs its `install.sh` from the directory you ran the command in, so the daemon serves that directory. This one-line command is for macOS and Linux; on Windows, use the [Windows setup program](#windows-setup-program) or install from a checkout. A Linux without `curl` (an Ubuntu desktop ships `wget` alone) installs with the [Linux installer](#linux-installer).
 
 ## Full Install from a Checkout
 
@@ -55,6 +55,22 @@ The setup program unpacks a copy of the sources into `%USERPROFILE%\.kiss\kiss_p
 KISS Sorcar opens in its own window when the installation is complete. Enter the API key of a model provider in **Settings** before your first task.
 
 To uninstall, open **Settings > Apps > Installed apps** (**Apps & features** on Windows 10), find **KISS Sorcar** and click **Uninstall**. This removes the app, the Start Menu shortcut, the logon start and the `sorcar` command. Your settings, API keys and history stay in `%USERPROFILE%\.kiss`.
+
+## Linux Installer
+
+[Download KISS-Sorcar-Linux.run](https://github.com/ksenxx/kiss_ai/raw/main/installers/KISS-Sorcar-Linux.run), open a terminal and run it:
+
+```bash
+bash ~/Downloads/KISS-Sorcar-Linux.run
+```
+
+It runs the same `install.sh` for the user who runs it on 64-bit Linux (x86-64 and ARM64) and needs no root, no git, no Python and no curl: `wget` is enough, which is what an Ubuntu desktop ships. The machine must be online: the installer downloads Python, the libraries and Chromium, about 1 GB. It is tested on Ubuntu 24.04 LTS, 26.04 LTS and 26.10, Debian 13, Fedora 44 and 45, openSUSE Tumbleweed and Arch Linux.
+
+The installer unpacks a copy of the sources into `~/.kiss/kiss_pkg` and runs `install.sh`, which builds the app in `~/.kiss/kiss`, puts the `sorcar` command in `~/.local/bin` and starts the `kiss-web` daemon as a systemd user service, which also starts whenever the machine starts. The daemon's working folder is the directory you ran the command from, your home directory in a new terminal.
+
+KISS Sorcar opens in its own window when the installation is complete; on a machine without a display (a server reached over ssh) the installer prints the address to open from another device and the remote-access password. Enter the API key of a model provider in **Settings** before your first task.
+
+A desktop install has the system libraries the agent's browser needs. A minimal system (a server, a container) may lack them; the installer installs them when it runs as root or `sudo` asks no password, and otherwise prints the command that does: `sudo ~/.kiss/kiss/.venv/bin/python -m playwright install-deps chromium`.
 
 ## Updating
 

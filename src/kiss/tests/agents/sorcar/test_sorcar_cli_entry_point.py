@@ -148,6 +148,27 @@ class TestConsoleScriptWiring:
         assert proc.returncode == 0
         assert "Run the KISS SorcarAgent on a task." in proc.stdout
 
+    @pytest.mark.skipif(IS_WINDOWS, reason="./sorcar is a POSIX shell wrapper")
+    def test_checkout_wrapper_reaches_the_console_script(self, tmp_path: Path) -> None:
+        # The checkout's ./sorcar wrapper once ran a module that had been
+        # deleted (kiss.agents.sorcar.worktree_sorcar_agent) and died with
+        # "No module named".  UV_PROJECT_ENVIRONMENT and UV_NO_SYNC make
+        # its `uv run` use this test's environment as it is, so the test
+        # builds no second environment and re-syncs nothing.
+        wrapper = Path(__file__).resolve().parents[5] / "sorcar"
+        env = _base_env(tmp_path) | {"UV_PROJECT_ENVIRONMENT": sys.prefix, "UV_NO_SYNC": "1"}
+        proc = subprocess.run(
+            ["bash", str(wrapper), "--help"],
+            env=env,
+            cwd=str(wrapper.parent),
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert "Run the KISS SorcarAgent on a task." in proc.stdout
+
 
 class TestArgumentHandling:
     """Cheap tests that never reach the LLM."""

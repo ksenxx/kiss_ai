@@ -7503,10 +7503,12 @@ class RemoteAccessServer:
             else:
                 argv = [bash, str(script), "--non-interactive"]
         else:
+            # wget where there is no curl: Ubuntu's desktop ships wget alone.
             argv = [
                 bash, "-c",
                 'set -o pipefail; '
-                'curl -fsSL "$KISS_BOOTSTRAP_URL" | bash',
+                'if command -v curl >/dev/null; then curl -fsSL "$KISS_BOOTSTRAP_URL"; '
+                'else wget -qO- "$KISS_BOOTSTRAP_URL"; fi | bash',
             ]
             env["KISS_BOOTSTRAP_URL"] = _bootstrap_install_url()
             env["KISS_NONINTERACTIVE"] = "1"

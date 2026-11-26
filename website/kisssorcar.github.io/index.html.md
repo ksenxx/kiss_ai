@@ -8,6 +8,7 @@
 - Paper: <https://arxiv.org/abs/2604.23822>
 - Download for Mac: <https://github.com/ksenxx/kiss_ai/raw/main/installers/KISS-Sorcar.pkg> (macOS 14 or later, Apple silicon and Intel)
 - Download for Windows: <https://github.com/ksenxx/kiss_ai/raw/main/installers/KISS-Sorcar-Setup.exe> (Windows 10 or 11, 64-bit)
+- Download for Linux: <https://github.com/ksenxx/kiss_ai/raw/main/installers/KISS-Sorcar-Linux.run> (64-bit Linux, x86-64 and ARM64; run it with `bash ~/Downloads/KISS-Sorcar-Linux.run`)
 - Full docs: <https://kisssorcar.github.io/docs/index.md>
 - LLM index: <https://kisssorcar.github.io/llms.txt>
 
@@ -53,6 +54,14 @@ installer -pkg ~/Downloads/KISS-Sorcar.pkg -target CurrentUserHomeDirectory
 
 ```
 KISS-Sorcar-Setup.exe /S
+```
+
+### Linux installer (64-bit, x86-64 and ARM64)
+
+[Download KISS-Sorcar-Linux.run](https://github.com/ksenxx/kiss_ai/raw/main/installers/KISS-Sorcar-Linux.run). It runs the same `install.sh` for the user who runs it and needs no root, no git, no Python and no curl: `wget` is enough, which is what an Ubuntu desktop ships. Tested on Ubuntu 24.04 LTS, 26.04 LTS and 26.10, Debian 13, Fedora 44 and 45, openSUSE Tumbleweed and Arch Linux. Open a terminal and run:
+
+```bash
+bash ~/Downloads/KISS-Sorcar-Linux.run
 ```
 
 ### Python package install (Python 3.13+)

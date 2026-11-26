@@ -30,6 +30,8 @@ import os
 import shutil
 import tempfile
 import threading
+from functools import partial
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from unittest import IsolatedAsyncioTestCase
@@ -213,6 +215,55 @@ class TestDispatchPath(IsolatedAsyncioTestCase):
                 await writer.wait_closed()
             except Exception:
                 pass
+
+    async def test_run_update_bootstrap_comes_through_wget_without_curl(self) -> None:
+        """Where there is no curl the bootstrap is downloaded with wget.
+
+        Ubuntu's desktop ships wget and no curl.  The server's real
+        pipeline runs with the real wget against a real web server (wget
+        reads no ``file://`` URL), on a PATH of bash and wget alone.
+        Skipped where wget is not installed (macOS).
+        """
+        tools = Path(self.tmpdir) / "tools"
+        tools.mkdir()
+        for tool in ("bash", "wget"):
+            real = shutil.which(tool)
+            if real is None:
+                self.skipTest(f"{tool} is not installed")
+            (tools / tool).symlink_to(real)
+        marker = Path(self.tmpdir) / "wget-bootstrap-ran.marker"
+        served = Path(self.tmpdir) / "served"
+        served.mkdir()
+        (served / "install.sh").write_text(f"echo ran > '{marker}'\n")
+        web = ThreadingHTTPServer(
+            ("127.0.0.1", 0), partial(SimpleHTTPRequestHandler, directory=str(served)),
+        )
+        threading.Thread(target=web.serve_forever, daemon=True).start()
+        self.addCleanup(web.server_close)
+        self.addCleanup(web.shutdown)
+        saved = {name: os.environ.get(name) for name in ("PATH", "KISS_UPDATE_BOOTSTRAP_URL")}
+        os.environ["PATH"] = str(tools)
+        os.environ["KISS_UPDATE_BOOTSTRAP_URL"] = f"http://127.0.0.1:{web.server_port}/install.sh"
+        reader, writer = await self._connect()
+        try:
+            await self._send(writer, {"type": "runUpdate"})
+            for _ in range(200):
+                if marker.is_file() and marker.read_text() == "ran\n":
+                    break
+                await asyncio.sleep(0.05)
+        finally:
+            for name, value in saved.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except Exception:
+                pass
+        self.assertTrue(marker.is_file(), "the bootstrap did not run")
+        self.assertEqual(marker.read_text(), "ran\n")
 
     async def test_run_update_executes_install_script(self) -> None:
         """``runUpdate`` runs install.sh and broadcasts a notice.

@@ -8,14 +8,27 @@
 
 <p>
   <a href="https://github.com/ksenxx/kiss_ai/raw/main/installers/KISS-Sorcar.pkg"><img alt="Download KISS Sorcar for Mac" src="https://raw.githubusercontent.com/ksenxx/kiss_ai/main/assets/download-for-mac.png" width="330"></a>
+  <br>
+  System Settings → Privacy &amp; Security, click Open Anyway.
+  <br>
+  <sub>macOS 14 or later &middot; Apple silicon and Intel &middot; <a href="#mac-installer-package">how to open it</a></sub>
+</p>
+<p>
   <a href="https://github.com/ksenxx/kiss_ai/raw/main/installers/KISS-Sorcar-Setup.exe"><img alt="Download KISS Sorcar for Windows" src="https://raw.githubusercontent.com/ksenxx/kiss_ai/main/assets/download-for-windows.png" width="330"></a>
   <br>
-  <sub>Mac: macOS 14 or later &middot; Apple silicon and Intel &middot; <a href="#mac-installer-package">how to open it</a></sub>
+  Click More info, then Run anyway.
   <br>
-  <sub>Windows: Windows 10 or 11, 64-bit &middot; <a href="#windows-setup-program">how to run it</a></sub>
+  <sub>Windows 10 or 11, 64-bit &middot; <a href="#windows-setup-program">how to run it</a></sub>
+</p>
+<p>
+  <a href="https://github.com/ksenxx/kiss_ai/raw/main/installers/KISS-Sorcar-Linux.run"><img alt="Download KISS Sorcar for Linux" src="https://raw.githubusercontent.com/ksenxx/kiss_ai/main/assets/download-for-linux.png" width="330"></a>
+  <br>
+  Open a terminal and run <code>bash ~/Downloads/KISS-Sorcar-Linux.run</code>
+  <br>
+  <sub>64-bit Linux &middot; x86-64 and ARM64 &middot; <a href="#linux-installer">how to install it</a></sub>
 </p>
 
-[![Version](https://img.shields.io/badge/version-2026.11.19-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
+[![Version](https://img.shields.io/badge/version-2026.11.20-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green?style=flat-square)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.13-blue?style=flat-square)](https://www.python.org/)
 [![Website](https://img.shields.io/badge/website-kisssorcar.github.io-1976d2?style=flat-square)](https://kisssorcar.github.io/)
@@ -41,7 +54,7 @@ This README is the quick start. The detailed references are:
 - [src/kiss/server/README.md](src/kiss/server/README.md): every `sorcar.run()` option, tools, hooks, and the Sorcar Extension Agent authoring guide.
 - [src/kiss/agents/third_party_agents/README.md](src/kiss/agents/third_party_agents/README.md): the messaging and service agents, sign-in, and worked examples.
 - [MODELS.md](MODELS.md): the full per-provider model list.
-- [kisssorcar.github.io/docs](https://kisssorcar.github.io/docs/): installation, CLI, API, and messaging guides.
+- [kisssorcar.github.io/docs](https://kisssorcar.github.io/docs/index.md): installation, CLI, API, and messaging guides.
 
 ______________________________________________________________________
 
@@ -57,7 +70,6 @@ ______________________________________________________________________
   - [Configure model access](#configure-model-access)
 - [Using KISS Sorcar](#using-kiss-sorcar)
   - [Web and mobile app](#web-and-mobile-app)
-  - [The `kiss-web` daemon](#the-kiss-web-daemon)
   - [Python client API](#python-client-api)
   - [Sorcar Extension Agents (SEAs)](#sorcar-extension-agents-seas)
   - [Skills, MCP servers, and customization](#skills-mcp-servers-and-customization)
@@ -75,10 +87,10 @@ ______________________________________________________________________
 
 ## Terminal-Bench 2.0: KISS Sorcar vs Pi, Codex CLI, and Claude Code
 
-The [HarnessTax](https://harnesstax.github.io/) study (Pan, Yang, Arabzadeh, Chiang, Stoica, Zaharia; UC Berkeley and Arena Intelligence) holds the model fixed, swaps the harness between Claude Code, Codex CLI, and Pi, and finds that the harness moves cost far more than it moves what gets solved. We added KISS Sorcar to their Terminal-Bench 2.0 table under the same evaluation setup:
+The [HarnessTax](https://harnesstax.github.io/) study (Pan, Yang, Arabzadeh, Chiang, Stoica, Zaharia; UC Berkeley and Arena Intelligence) holds the model fixed, swaps the harness between Claude Code, Codex CLI, and Pi, and finds that the harness moves cost far more than it moves what gets solved. We added KISS Sorcar to their Terminal-Bench 2.0 table on the same tasks, models, attempts, and verifier (the run settings that differ are listed below the table):
 
 - **Tasks and attempts**: The same 30 sampled tasks across the same seven models, with three attempts per task, graded by the official Terminal-Bench 2.0 verifier.
-- **System prompt**: Cut to 727 words of coding rules (`papers/kisssorcar/evidence/tb2_prompt.txt`).
+- **System prompt**: Cut to 727 words of coding rules.
 - **Overall solve rate**: Averaged over the seven models, KISS Sorcar solved 75.6% of attempts, compared to Pi at 70.0%, Codex CLI at 65.7%, and Claude Code at 65.1%, with the best point estimate on every model.
 
 | Model | KISS Sorcar solved | $/att. | Pi solved | $/att. | Codex CLI solved | $/att. | Claude Code solved | $/att. |
@@ -88,7 +100,7 @@ The [HarnessTax](https://harnesstax.github.io/) study (Pan, Yang, Arabzadeh, Chi
 | Claude Sonnet 4.6 | **76.7** | 2.23 | 65.6 | 0.61 | 63.3 | 0.55 | 62.2 | 0.67 |
 | Claude Haiku 4.5 | **51.1** | 0.39 | 47.8 | 0.25 | 31.1 | 0.21 | 41.1 | 0.26 |
 | GPT-5.6 Sol | **85.6** | 0.69 | 83.3 | 0.42 | 78.9 | 0.76 | 71.1 | 1.35 |
-| GPT-5.6 Luna | **78.9** | 0.05 | 76.7 | 0.04 | 72.2 | 0.06 | 70.0 | 0.10 |
+| GPT-5.6 Luna | **78.9** | 0.05 | 76.7 | 0.05 | 72.2 | 0.06 | 70.0 | 0.10 |
 | Kimi K3 | **82.2** | 1.14 | 73.3 | 0.38 | 70.0 | 0.45 | 66.7 | 0.52 |
 | **Mean of 7 models** | **75.6** | 1.03 | 70.0 | 0.51 | 65.7 | 0.55 | 65.1 | 0.77 |
 
@@ -105,13 +117,7 @@ The [HarnessTax](https://harnesstax.github.io/) study (Pan, Yang, Arabzadeh, Chi
 Thirty tasks is a small sample (the pooled 95% interval, 63.8 to 85.9, contains all three published means), so we reran Pi ourselves in a paired comparison on Claude Fable 5 with no turn cap and the same price table:
 
 - **Study's 30 sampled tasks**: KISS Sorcar solved 80.0% of attempts vs. Pi's 68.9%, a gap of +11.1 points (95% interval +3.3 to +20.0) for five cents more per attempt.
-- **57 unsampled tasks**: KISS Sorcar solved 82.5% of attempts vs. Pi's 71.9%, a gap of +10.5 points (95% interval +2.9 to +18.7) for 63 cents more per attempt.
-- **Scope**: Only Pi was rerun, on one model. The benchmark exercises the loop, six tools, and the coding rules, with discovery procedures, memory, reviewer, and IDE features switched off.
-- **References and artifacts**:
-  - **Full write-up**: [The Harness Tax, Audited](https://kisssorcar.github.io/blog/harness-tax-terminal-bench-blog.html).
-  - **Method and intervals**: [the paper](https://kisssorcar.github.io/assets/kiss_sorcar.pdf), Section 5.
-  - **Per-attempt records**: `papers/kisssorcar/evidence/tb2_trials.json`.
-  - **Benchmark runners**: Stored in the separate `benchmarkings` package (a sibling checkout or `KISS_BENCHMARKINGS_DIR`), located by the paper scripts under `papers/kisssorcar/`. The repository's own `benchmarkings/` folder holds only the `/discover` benchmarks: `coral_pilot/` (setup, grader, and results of a three-task CORAL pilot: circle packing, transaction scheduling, and a VLIW SIMD kernel) and the single-pass halftoning harness in [benchmarkings/halftoning/](benchmarkings/halftoning/README.md) (human-vision PSNR, ring anisotropy, Floyd-Steinberg and Zhou-Fang baselines, and a Kodak dev/held-out split).
+- **57 unsampled tasks**: KISS Sorcar solved 82.5% of attempts vs. Pi's 71.9%, a gap of +10.5 points (95% interval +2.9 to +18.7) for 63 cents more per attempt. Two of the 59 unsampled tasks (`qemu-alpine-ssh` and `qemu-startup`) are left out because their verifier failed for KISS Sorcar before running any test while it worked for Pi; with them kept, the gap is +6.8 points (95% interval -2.3 to +15.8).
 
 ## What is in the Name
 
@@ -156,7 +162,7 @@ git clone https://github.com/ksenxx/kiss_ai.git && cd kiss_ai && ./install.sh
 
 ### Windows setup program
 
-[Download KISS-Sorcar-Setup.exe](https://github.com/ksenxx/kiss_ai/raw/main/installers/KISS-Sorcar-Setup.exe) and open it. It runs the same `install.sh` for the user who opens it on 64-bit Windows 10 and Windows 11 (ARM PCs run it through their x64 emulation) and needs no administrator rights, no git, no Python and no bash on the PC. The PC must be online: the installer downloads Python, the libraries and Chromium, about 1 GB, which takes a few minutes.
+[Download KISS-Sorcar-Setup.exe](https://github.com/ksenxx/kiss_ai/raw/main/installers/KISS-Sorcar-Setup.exe) and open it. It runs the same `install.sh` for the user who opens it on 64-bit Windows 10 and Windows 11 (ARM PCs run it through Windows' built-in emulation; x64 parts of the install, such as `cloudflared`, need Windows 11 there) and needs no administrator rights, no git, no Python and no bash on the PC. The PC must be online: the installer downloads Python, the libraries and Chromium, about 1 GB, which takes a few minutes.
 
 - **First open**: The program is not signed, so Windows SmartScreen shows "Windows protected your PC" for a downloaded copy. Click **More info**, then **Run anyway**. To install without a window, run it from a terminal with `/S`:
 
@@ -169,6 +175,23 @@ git clone https://github.com/ksenxx/kiss_ai.git && cd kiss_ai && ./install.sh
 - **Updating**: Windows cannot replace the files of a running program, so on Windows the installer stops `kiss-web` before it updates the app and starts it again afterwards (on macOS and Linux the daemon keeps running during an update). It refuses to update while tasks are running.
 - **Uninstalling**: Open **Settings > Apps > Installed apps** (**Apps & features** on Windows 10), find **KISS Sorcar** and click **Uninstall**. This removes the app, the Start Menu shortcut, the logon start and the `sorcar` command. Your settings, API keys and history stay in `%USERPROFILE%\.kiss`.
 - **Building it**: `scripts/build-windows-exe.sh` builds the program from a checkout with NSIS (`makensis`: `brew install makensis` on macOS, `apt install nsis` on Linux). `scripts/release.sh` builds `installers/KISS-Sorcar-Setup.exe` for every release and commits it with the version bump.
+
+### Linux installer
+
+[Download KISS-Sorcar-Linux.run](https://github.com/ksenxx/kiss_ai/raw/main/installers/KISS-Sorcar-Linux.run), open a terminal and run it:
+
+```bash
+bash ~/Downloads/KISS-Sorcar-Linux.run
+```
+
+It runs the same `install.sh` for the user who runs it on 64-bit Linux (x86-64 and ARM64) and needs no root, no git, no Python and no curl: `wget` is enough, which is what an Ubuntu desktop ships. The machine must be online: the installer downloads Python, the libraries and Chromium, about 1 GB.
+
+- **What it does**: It unpacks a copy of the sources into `~/.kiss/kiss_pkg` and runs `install.sh`, which builds the app in `~/.kiss/kiss`, puts the `sorcar` command in `~/.local/bin` and starts the `kiss-web` daemon as a systemd user service, which also starts whenever the machine starts. The daemon's working folder is the directory you ran the command from, your home directory in a new terminal.
+- **After the install**: KISS Sorcar opens in its own window; on a machine without a display (a server reached over ssh) the installer prints the address to open from another device and the remote-access password. Enter the API key of a model provider in **Settings** before your first task.
+- **Tested on**: Ubuntu 24.04 LTS, 26.04 LTS and 26.10, Debian 13, Fedora 44 and 45, openSUSE Tumbleweed and Arch Linux, on x86-64 and ARM64 (Arch Linux on x86-64 only).
+- **Chromium's libraries**: A desktop install has the system libraries the agent's browser needs. A minimal system (a server, a container) may lack them; the installer installs them when it runs as root or `sudo` asks no password, and otherwise prints the command that does: `sudo ~/.kiss/kiss/.venv/bin/python -m playwright install-deps chromium`.
+- **Building it**: `scripts/build-linux-run.sh` builds the installer from a checkout; it needs only `tar` and `gzip`. `scripts/release.sh` builds `installers/KISS-Sorcar-Linux.run` for every release and commits it with the version bump.
+- **Checking it**: `scripts/check-linux-run.sh <image> ANTHROPIC_API_KEY` installs it in a clean container of a distribution (`ubuntu:26.04`, `fedora:45`) and runs two tasks there; `scripts/check-linux-vm.sh <template> ANTHROPIC_API_KEY` does the same in a virtual machine ([lima](https://lima-vm.io) templates such as `ubuntu-26.04` and `fedora-45`), where it also restarts the machine and opens the app's window on a display; `scripts/check-linux-install.sh` runs the same check on a Linux machine that has KISS Sorcar installed.
 
 ### Docker
 
@@ -191,6 +214,7 @@ pipx install kiss-agent-framework
 uv tool install kiss-agent-framework
 ```
 
+- **Python client API**: `pipx` and `uv tool install` keep the package in an isolated environment and expose only its commands. To import `kiss.server.sorcar` from your own code, install the package into that code's environment with `pip install kiss-agent-framework` or `uv add kiss-agent-framework`.
 - **Python version**: KISS Sorcar requires Python 3.13+.
 
 ### Configure model access
@@ -222,8 +246,8 @@ Claude models can also run through Amazon Bedrock:
 
 - **Model IDs**:
   - The catalog lists Bedrock-served Claude IDs as `bedrock/<Bedrock model or inference-profile id>` (for example, `bedrock/global.anthropic.claude-opus-5-5` or `bedrock/us.anthropic.claude-opus-4-6-v1`), including the standard `-high` and `-max` effort suffixes.
-  - Any other ID served by the configured region can be used directly by name.
-  - An ID not listed in the catalog can be typed as a model name or added under Settings -> Custom Models (name only, no endpoint), which places it in the model picker starting at the next daemon start.
+  - Any other ID served by the configured region runs directly by name from the terminal (`sorcar -m bedrock/<id>`), or when a running agent switches to it with its `set_model` tool.
+  - A task started through the daemon (the web app or the Python client API) accepts only the models the daemon lists, so add an ID missing from the catalog under Settings -> Custom Models first (name only, no endpoint); the daemon lists it, and the model picker shows it, from the next daemon start.
   - When Bedrock is the only configured provider, the default and fast models are the `global.` profiles of the Anthropic default and fast models.
 - **Explicit credentials**: Set either a Bedrock API key or an AWS access key pair, plus the AWS region:
 
@@ -237,11 +261,11 @@ export AWS_REGION=us-east-1           # default when unset
 
 #### Settings: API keys
 
-You can configure API keys, a custom model endpoint, and custom HTTP headers in the Settings panel of the web app:
+You can configure API keys, a custom model endpoint, and custom HTTP headers in the Settings panel of the web app.
 
 #### Settings: Custom Models
 
-The Custom Models section of the Settings panel registers your own models (such as a local vLLM or Ollama endpoint, or a provider model absent from the bundled catalog):
+The Custom Models section of the Settings panel registers your own models (such as a local vLLM or Ollama endpoint, or a provider model absent from the bundled catalog).
 
 #### Settings: Bedrock, Claude Code, and Codex
 
@@ -249,9 +273,9 @@ The Custom Models section of the Settings panel registers your own models (such 
 - **Claude Code section (`cc/*` models)**: Configures models that run the `claude` CLI:
   - **Auth status**: Shows whether the `claude` CLI is logged in and how it will bill (`claude auth status`).
   - **Bill my Claude subscription for cc/ models**: Enabled by default.
-    - When on, the CLI runs without `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN`, so a `claude login` session on a Pro or Max plan pays for the turn instead of API tokens.
+    - When on, the CLI runs without `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN`, so a `claude auth login` session on a Pro or Max plan pays for the turn instead of API tokens.
     - When off, the CLI inherits the daemon's environment and an API key bills per token.
-  - **Subscription token**: Accepts an optional token from `claude setup-token` (`CLAUDE_CODE_OAUTH_TOKEN`) for machines where nobody ran `claude login`.
+  - **Subscription token**: Accepts an optional token from `claude setup-token` (`CLAUDE_CODE_OAUTH_TOKEN`) for machines where nobody ran `claude auth login`.
 - **Codex section (`codex/*` models)**: Configures models that run the `codex` CLI:
   - **Login status**: Shows whether the `codex` CLI is logged in and how it will bill (`codex login status`).
   - **Bill my ChatGPT subscription for codex/ models**: Enabled by default.
@@ -262,7 +286,7 @@ The Custom Models section of the Settings panel registers your own models (such 
 
 #### How CLI models run (`cc/*` and `codex/*`)
 
-Both CLIs are driven as plain models with their built-in tools, MCP servers, hooks, and project instructions turned off, operating with Sorcar's system prompt and tools like every other model:
+Both CLIs are driven as plain models with their built-in tools, MCP servers, hooks, and project instructions turned off, operating with Sorcar's system prompt and tools like every other model.
 
 
 #### Router agents
@@ -276,11 +300,11 @@ The model picker lists six bundled router agents under the `Router` group. These
     1. **Small tier**: Opens with `openrouter/z-ai/glm-5.3-flash`, `gpt-6-luna-xhigh`, `openrouter/openai/gpt-6-luna-xhigh`.
     2. **Medium tier**: Opens with `openrouter/meta/muse-wonder`, `gemini-4-argon`, `openrouter/google/gemini-4-argon`.
     3. **Frontier tier**: Opens with `gpt-6-astra`, `openrouter/openai/gpt-6-astra`, `claude-fable-5-2-max`, its OpenRouter twin, `claude-opus-5-5-max`.
-  - Keeps guarded work, uncheckable work, and final acceptance of the whole task on the frontier tier.
+  - Keeps work that has no mechanical check in its own loop (plan and final acceptance on the frontier model, execution on the medium pick), and never routes guarded work, final acceptance of the whole task, root-cause analysis after two failed fixes, or prose sent on the user's behalf to the small or medium tier.
   - Switches its own model only at phase boundaries.
 - **`bestrouter`**:
   - Starts every task on `claude-opus-5-5-medium`, which answers simple questions and queries directly.
-  - Switches to `openrouter/google/gemini-4-carbon` to write human-facing documents, papers, reports, and results (including the final summary).
+  - Switches to `gemini-4-neon-high` to write human-facing documents, papers, reports, and results (including the final summary).
   - Switches to `claude-fable-5-2-max` for all other work, including software development and analysis; a task that mainly dispatches sub-agents may dispatch, wait, and log on `claude-opus-5-5-medium`, while judgment steps (such as triaging a failed test run or acting on a sub-agent's failure) run on `claude-fable-5-2-max`.
   - Runs `gpt-6-astra-xhigh` to review the work of both models read-only through a non-blocking `run_agent` call on at most 75% of the budget.
 - **`orautorouter`**:
@@ -321,17 +345,17 @@ Open the web app in a browser and type or speak your task. The chat interface pr
 - **Chat history**: Organizes chats and tasks with tags, editable summaries, sorting, filtering, and live metrics.
 - **Wake-word voice chat**
   - Speak "Hey Sorcar, …" via **Voice trigger** in the "…" menu to talk to Sorcar or steer a running agent by voice.
-- **Voice dictation**: Click the mic button below the composer (where **Inject promptlet** used to be) to listen without a wake word:
+- **Voice dictation**: Click the mic button below the composer (where **Inject promptlet** used to be) to listen without a wake word.
 - **Live steering**
   - Inject a message into a running agent or switch its model mid-run.
-  - Wrap the message in `<task>…</task>` to queue it as the next task instead (after a click on an earlier task in the Chats panel, it continues that task; see **Task tree** above).
-  - A queued `<task>/command …</task>` runs as that slash command, through its SEA, in a run of its own once the current run has finished:
+  - Wrap the message in `<task>…</task>` to queue it as the next task instead (after a click on an earlier task in the Chats panel, it continues that task).
+  - A queued `<task>/command …</task>` runs as that slash command, through its SEA, in a run of its own once the current run has finished.
 - **Agent questions**
   - When an agent asks a question, every connected surface brings its tab forward and turns the composer into the answer box.
 - **Browser tab**
   - Streams a real browser running alongside the daemon to every connected surface, selecting the browser executable in fallback order: `KISS_BROWSER` when set, the machine's default browser when it is Chromium-based, the first installed Chromium-family browser, then Playwright's bundled Chromium.
 - **Scheduled automations**
-  - Plain-language scheduling and UI controls:
+  - Ask in plain language ("every weekday at 9am, summarize my unread Slack messages") and the built-in cron agent creates, lists, pauses, resumes, or removes the schedule; the Schedule panel has buttons for the same actions.
 
 #### Remote access
 
@@ -497,7 +521,7 @@ Every SEA folder in a scanned directory whose settings do not mark it `hidden` i
 - **Help**: `/xxx help` prints the SEA's `description()` without making a model call.
 - **Sub-task dispatch**: Any task can invoke the same SEA as a sub-task via `run_agent(agent="xxx", task=...)`.
 - **Inline command descriptions**: If a task you type names a slash command elsewhere in its text, or an earlier task in the same chat does (such as `... You must use /discover ...` followed by `continue`), each named command's `description()` is appended after the task under `# Slash commands the user named` so the agent knows what the command does before calling it with `run_agent`. A task that itself runs a slash command gets no such block, and neither does a sub-agent's task.
-- **Composer completion popup**: Typing `/` at the start of any word in the composer opens a completion popup (a `/` inside a path such as `src/` or `@docs/` does not). Accepting a command replaces the text from that `/` to the cursor while preserving text before and after it. Because ranking is derived from task history, every surface shows commands in the same order:
+- **Composer completion popup**: Typing `/` at the start of any word in the composer opens a completion popup (a `/` inside a path such as `src/` or `@docs/` does not). Accepting a command replaces the whole command word, including any part after the cursor, while preserving the text before and after it. Because ranking is derived from task history, every surface shows commands in the same order:
   1. The three commands run most recently.
   2. Commands run at least twice, ordered from most-run to least-run.
   3. All remaining commands.
@@ -518,17 +542,17 @@ Channel agents (`/slack`, `/gmail`, and others) register as slash commands, alon
     - `/sync <remote>/<branch>`: Merges another remote branch instead of `origin/main`.
     - `/sync this machine only`: Skips remote machines (also passed to each remote sub-task so it does not fan out again).
 - `/sync_history_and_memory`: Merges `history.db` and `memories/` across the local machine and every SSH-registered machine in one `sync_history_and_memory` tool call with no other tools and a $1 budget.
-  - **Three-wave execution**: Connects to every SSH machine concurrently over a single multiplexed SSH connection (machines registered by URL rather than SSH are reported as skipped; a machine that fails in one wave is omitted from later waves and reported as skipped or half-synced):
+  - **Three-wave execution**: Connects to every SSH machine concurrently, over one multiplexed SSH connection per machine (machines registered by URL rather than SSH are reported as skipped; a machine that fails in one wave is omitted from later waves and reported as skipped or half-synced):
     1. Finds the Sorcar home directory of the daemon each machine was registered with (`~/.kiss` on a stock install or a branded install's own home directory, allowing stock and branded installs to sync with each other).
     2. Pulls each machine's database rows and memories into the local machine.
     3. Pushes the combined union back to each machine so a single run converges every machine that finishes all three waves.
-  - **History merge (`scripts/sync_db.py`)**:
+  - **History merge (`src/kiss/scripts/sync_db.py`)**:
     - Unions tasks by ID and events by `(task_id, seq)`, carrying deletions across unless a row is younger than its deletion (since a reused ID is a new task); a key deleted again after reappearing travels with its newer deletion timestamp.
     - Stamps a task row leaving its home database with that machine's short host name in its `machine` column, keeps the existing name on rows originating from a third machine, and clears the stamp when a row returns to the machine it ran on. The Chats panel on every machine then lists synced tasks under the registered machine that ran them, while rows from unregistered hosts remain listed as local.
     - Holds back still-running tasks whose latest activity (the later of start time and newest event) is younger than 300 s on their home machine (or 24 h for rows still holding the web app's start placeholder) so they travel once finished without data loss.
   - **Memory merge**:
     - Transfers memory pages only when their content hash differs.
-    - Holds the same page locks an agent acquires to write or delete a page during the merge on each side, ensuring concurrent writes land cleanly before or after the merge.
+    - Holds, on each side during the merge, the same memory lock an agent takes to write or delete a page, ensuring concurrent writes land cleanly before or after the merge.
     - The page with the newer `updated` timestamp wins; two writes no further apart than the measured spread of the machines' clocks are reported as a conflict instead, and each side keeps its own version.
   - **Usage variants**:
     - `/sync_history_and_memory`: Syncs every registered SSH machine.
@@ -546,7 +570,7 @@ Channel agents (`/slack`, `/gmail`, and others) register as slash commands, alon
     - `/machine add <name> <https://host:port> <password>`: Registers a remote daemon by HTTPS URL and password.
   - **Remote chats and task routing**:
     - Merges every registered machine's tasks alongside local tasks in the Chats panel, ordered with running tasks first, then pinned ones, then the rest, each newest first.
-    - Keeps displaying the last unfiltered default page returned by an unresponsive machine rather than dropping it; when a search or tag filter is active, when the machine has never answered, or after its registration changes, it contributes nothing until it answers again.
+    - Keeps displaying the page an unresponsive machine last answered with rather than dropping it, both for the unfiltered list and for the latest search or tag view it answered; for any other filtered view, when the machine has never answered, or after its registration changes, it contributes nothing until it answers again.
     - Exposes the machine in the chat header's machine drop-down to run chat tasks remotely, and supports `run_agent(machine=<name>, ...)` to run sub-tasks there using that machine's tools, files, and models (nesting its tab under the caller's on every surface).
 - `/rsi7d`: Performs seven-day recursive self-improvement on the bundled SEAs from their logged runs.
   - Passes each SEA to `/discover`, which edits the SEA script in place in a detached worktree at `<scratch dir>/rsi7d/discover/<name>`, evaluating one replay of a past run per candidate point.
@@ -554,10 +578,10 @@ Channel agents (`/slack`, `/gmail`, and others) register as slash commands, alon
   - Removes the detached worktree afterward while keeping evaluated commits under `refs/discover/<child task id>/`.
 - `/merge`: Resolves a conflicted git merge.
 - `/task_update`: Generates a progress report on a task.
-- `/autorouter`: Routes tasks across models automatically (see the model routers section above).
-- `/bestrouter`: Runs the multi-model router protocol (see the model routers section above).
-- `/orautorouter`: Model router variant (see the model routers section above).
-- `/orbestrouter`: Model router variant (see the model routers section above).
+- `/autorouter`: Routes tasks across models automatically (see [Router agents](#router-agents) above).
+- `/bestrouter`: Runs the multi-model router protocol (see [Router agents](#router-agents) above).
+- `/orautorouter`: Model router variant (see [Router agents](#router-agents) above).
+- `/orbestrouter`: Model router variant (see [Router agents](#router-agents) above).
 - `/ccxbestrouter`: Runs the `/bestrouter` protocol on Claude Code and Codex models.
 - `/brbestrouter`: Runs the `/bestrouter` protocol on Amazon Bedrock's Claude models.
 - `/skillopt`: Optimizes a skill or prompt constant against an evaluation set.
@@ -572,7 +596,7 @@ Channel agents (`/slack`, `/gmail`, and others) register as slash commands, alon
   - A dry run by default: it reports what it would merge and writes nothing. With `--apply` in the task text it merges the groups that pass, keeps the originals in `<memory>/.archive/` and records the groups it left alone for a lasting reason (separate records, a merged page too large, a fact not kept) so the next run moves on to others. A group whose check ended in a reply that could not be used is not recorded and is examined again.
   - `--list` shows past merges, `--restore <merge>` undoes one (without needing `--apply`), and `--memory <name>` narrows the job to one memory.
 - `/memory_quiz`: Checks that what your finished tasks learned can be found in memory.
-  - For each task of yours from the last 2 days (`--days N`; at most 20 per run, `--limit N`) that ran on this machine and ended in a report, the task's model writes up to 5 questions about the durable knowledge in the report, and the checking model (chosen as for `/memory_consolidate`) confirms that the report states each answer. Memory is then searched as a new task in that directory would search it, and the checking model reads the first 5 results.
+  - For each task of yours from the last 2 days (`--days N`; at most 20 per run, `--limit N`) that ran on this machine and ended in a report, the quiz run's model writes up to 5 questions about the durable knowledge in the report, and the checking model (chosen as for `/memory_consolidate`) confirms that the report states each answer. Memory is then searched as a new task in that directory would search it, and the checking model reads the first 5 results.
   - Each question ends as a hit (found), a retrieval gap (stored, but the search did not bring it up) or a construction gap (never stored). `--task <id prefix>` questions one task.
   - Writes only its log, `<memory root>/.quiz/log.jsonl`, unless the task text holds `--write`; then the facts of a task's construction gaps go into one new page marked `writer: quiz`, each with the report sentence it came from.
 - `/write`: Writes prose for a general audience.
@@ -591,13 +615,13 @@ Channel agents (`/slack`, `/gmail`, and others) register as slash commands, alon
        - A composition of two frontier points covering different aspects (or, if no pair qualifies, a fork of the oldest frontier point that is an ancestor of another so the two can compose later).
        - Fresh ideas from a web search, `gpt-6-astra`, or `gemini-4-argon`.
     6. Checks any frontier or TIE point that meets the goal on dev metrics once on the held-out split:
-       - Ends the loop if held-out metrics also meet the goal and are no worse than the baseline on the task's first-priority metric.
+       - Ends the loop if held-out metrics also meet the goal, are no worse than the baseline on the task's first-priority metric, and are neither dominated nor equaled by the baseline's held-out metrics.
        - Evicts the point as OVERFIT otherwise (restoring the baseline to the frontier if eviction leaves it empty).
     7. Stops at the budget or round limit (100 rounds unless the task specifies otherwise), runs held-out checks across frontier and TIE points in the task's metric-priority order, selects the first point that is no worse than the baseline on the first-priority metric and is neither dominated nor equaled by it (or falls back to the baseline), resets the working tree to that commit, and reports it with its dev and held-out metrics.
   - **Read-only and research modes**:
     - Tasks asking only for research, ideas, or a ranking still execute the loop and rank candidates by measured dev metrics.
     - Tasks forbidding changes to the repository run the loop in a lab copy of the artifact's current files at `<scratch dir>/lab` (with its own `git init` and `create_worktree`), returning the best point as `<scratch dir>/best.patch` from `git diff --binary` for the user to apply.
-- `/discover_viz`: Turns the persisted trajectory of a `/discover` run into one self-contained HTML animation of its Pareto frontier (`/discover_viz <task id or its first characters>`; no id animates the newest `/discover` run, and the id of a task that is not itself a `/discover` run but dispatched some animates the newest of those, saying so in the tool's reply; a task that ran no discovery loop is refused with a list of recent runs):
+- `/discover_viz`: Turns the persisted trajectory of a `/discover` run into one self-contained HTML animation of its Pareto frontier (`/discover_viz <task id or its first six or more characters>`; no id animates the newest `/discover` run, and the id of a task that is not itself a `/discover` run but dispatched some animates the newest of those, saying so in the tool's reply; a task that ran no discovery loop is refused with a list of recent runs):
   - **What the page shows**:
     - The evaluated points appear one by one, each drawn under its parent; a compose is joined to both of its points.
     - Hovering or focusing a point shows its `pareto.md` fields as a tooltip (for a point that never entered the frontier, the fields of its `explored-ideas.md` row).
@@ -649,7 +673,7 @@ Additional bundled SEA rules and registration:
   - The git-ignored `src/kiss/agents/claude_skills/` folder of the checkout, where Claude Code plugins can be dropped (`<plugin>/skills/<name>/SKILL.md`, loaded as `<plugin>:<name>`).
 - A `SKILL.md` file whose YAML frontmatter does not parse still loads without metadata, using its first paragraph as the description.
 - No skills ship with the repository itself.
-- The web app's **Skills** panel adds a skill from the [skills.sh](https://skills.sh) registry to `~/.kiss/skills` after a security check (see [Desktop sidebar panels](#desktop-sidebar-panels)):
+- The web app's **Skills** panel adds a skill from the [skills.sh](https://skills.sh) registry to `~/.kiss/skills` after a security check:
   - Only a skill kept in a GitHub repository can be added, and one whose name the agent already has is refused.
   - A skill may hold at most 500 files, 5 MiB in one file, and 20 MiB in all, in folders at most 32 deep, and nothing but plain files (no links, no sparse files).
   - The skill is taken from the default branch of its repository. The repository archive may be at most 256 MiB, with 100,000 entries and 2 GiB unpacked, and a download may take 5 minutes.
@@ -659,9 +683,8 @@ Additional bundled SEA rules and registration:
 
 #### MCP servers
 
-- **Discovery and catalog**:
+- **Discovery**:
   - Discovers server configurations from `~/.kiss/mcp.json`, `<project>/.kiss/mcp.json`, and `<project>/.mcp.json`.
-  - Ships a curated catalog of privacy-first MCP connectors in [connectors/](connectors/README.md).
 - **Authentication**:
   - Signs into remote servers that follow the MCP authorization spec (Notion, Linear, Asana, or any URL) directly from chat via the `connect_mcp_server` tool (`zoom` is also supported using a pre-registered app named by `KISS_MCP_ZOOM_CLIENT_ID`).
   - Stores tokens under `~/.kiss/mcp_auth/`, one file per server name and URL, so a server with the same name at another URL is never handed another server's token.
@@ -680,7 +703,7 @@ Additional bundled SEA rules and registration:
 - **Deferred tool loading**:
   - Includes every configured server's tool definitions in every model request by default.
   - Defers servers when configured (off by default: set `"alwaysLoad": false` in a server entry, or set an `mcp_upfront_tool_chars` budget in `config.json`), exposing their tools on demand through `mcp_tool_search` and `mcp_tool_call`.
-  - Deferring saves tokens at the cost of some accuracy and, in the evaluation run for it, did not improve reasoning ([connectors/](connectors/README.md#deferring-large-servers-opt-in)).
+  - Deferring saves tokens at the cost of some accuracy and, in the evaluation run for it, did not improve reasoning.
 
 #### Tricks
 
@@ -770,19 +793,20 @@ KISS Sorcar includes 44 third-party agents that act on messaging services, mailb
   - Every service agent carries `check_<service>_auth` and `authenticate_<service>` tools so a task can connect a service on the spot.
   - Clicking an unconnected service in the Connectors panel of the web app starts a task that runs this connection flow.
 - **OAuth flows**:
-  - The six Google Workspace agents connect through Composio because Google only lets verified OAuth apps request Workspace scopes, so no Google token is stored locally.
-  - GitHub, Microsoft Teams, Slack, and Discord use public OAuth apps with device-code or PKCE flows and no client secret.
+  - Gmail, Google Calendar, Docs, Drive, and Sheets connect through Composio because Google only lets verified OAuth apps request Workspace scopes, so no Google token is stored locally.
+  - Google Chat, the sixth Google agent, differs: Composio has no managed Google Chat app, so signing in as yourself needs a custom Composio auth config (`KISS_COMPOSIO_AUTH_CONFIG_GOOGLECHAT`), and the agent can instead act as a Chat bot from a service-account key kept locally at `$KISS_HOME/third_party_agents/googlechat/service_account.json`.
+  - GitHub, Microsoft Teams, Slack, and Discord use public OAuth apps with device-code or PKCE flows and no client secret. No KISS-owned app is registered for them yet, so the sign-in asks for the client ID of an app you registered, set in `KISS_<PROVIDER>_CLIENT_ID`.
 - **Browser completion**:
-  - Every sign-in finishes on a page that only you may complete, displayed in the Browser tab under the daemon.
-  - The agent never asks for your password or a 2FA code.
+  - A browser sign-in (OAuth, Composio, or a QR code) finishes on a page that only you may complete, displayed in the Browser tab under the daemon; the agent never asks for your password in these flows, and no sign-in tool takes a 2FA code.
+  - The other connectors take a credential as a tool argument: API-key services (Brave, Notion, Telegram, and others) open the provider's developer portal so you can copy a token, Email and BlueBubbles take a password, IRC an optional server password, Nextcloud Talk an app password in place of its browser sign-in, and PostgreSQL a connection URI that carries one.
 - **Linux credential isolation**:
-  - On Linux, credentials for the 18 Muse-covered connectors are isolated by default behind a local auth daemon (`python -m kiss.agents.third_party_agents.muse_auth`).
+  - On Linux, credentials for the 18 Muse-covered connectors are isolated by default behind a local auth daemon that starts on demand (managed with `python -m kiss.agents.third_party_agents.muse_auth status|grant|revoke|audit|stop`).
   - The daemon swaps opaque surrogate tokens for real tokens at the network edge and enforces an allow/deny/ask policy with an audit log.
   - Set `KISS_MUSE_AUTH=0` to opt out.
 
 ## Models Supported
 
-KISS Sorcar ships a catalog of **993 models** across **7 provider categories**:
+KISS Sorcar ships a catalog of **1005 models** across **7 provider categories**:
 
 - **Catalog metadata**:
   - **Built-in prices**: Standard token rates, plus `image_output_price_per_1M` for generated image tokens on image-generation models (Gemini image models bill generated image tokens well above their text output rate; models without `image_output_price_per_1M` bill image tokens at their text output rate).
@@ -819,7 +843,7 @@ KISS Sorcar ships a catalog of **993 models** across **7 provider categories**:
 
 ### Cost and budget tracking
 
-Request and turn costs follow these rules. They are alternatives, not steps taken in order: a call whose model adapter returns a cost (the charge an `openrouter/*` response reports, the price of a `cc/*` or `codex/*` turn an API key paid for) is billed that amount, and every other call is priced from the catalog and scaled by the tier its response reports:
+A request or turn is billed in one of two ways: a call whose model adapter returns a cost (the charge an `openrouter/*` response reports, the price of a `cc/*` or `codex/*` turn an API key paid for) is billed that amount, and every other call is priced from the catalog and scaled by the tier its response reports.
 
 ## Contributing
 

@@ -124,6 +124,18 @@ install_git() {
   have_working_git
 }
 
+# Download the repository as main.zip into the current directory: with
+# curl, or with wget on a machine that has no curl (Ubuntu's desktop ships
+# wget alone).
+download_archive() {
+  local url=https://github.com/ksenxx/kiss_ai/archive/refs/heads/main.zip
+  if command -v curl &> /dev/null; then
+    curl -L -o main.zip "$url"
+  else
+    wget -q -O main.zip "$url"
+  fi
+}
+
 # ---------------------------------------------------------------------------
 # Cross-process update lock.
 #
@@ -252,7 +264,7 @@ if [ -d ~/.kiss/kiss_ai ]; then
     if have_working_git; then
       git clone https://github.com/ksenxx/kiss_ai.git ~/.kiss/kiss_ai
     else
-      curl -L -o main.zip https://github.com/ksenxx/kiss_ai/archive/refs/heads/main.zip
+      download_archive
       unzip main.zip
       rm main.zip
       mv kiss_ai-main ~/.kiss/kiss_ai
@@ -262,7 +274,7 @@ else
   if have_working_git; then
     git clone https://github.com/ksenxx/kiss_ai.git ~/.kiss/kiss_ai
   else
-    curl -L -o main.zip https://github.com/ksenxx/kiss_ai/archive/refs/heads/main.zip
+    download_archive
     unzip main.zip
     rm main.zip
     mv kiss_ai-main ~/.kiss/kiss_ai
@@ -287,7 +299,7 @@ if [ ! -f install.sh ]; then
     if have_working_git; then
       git clone https://github.com/ksenxx/kiss_ai.git ~/.kiss/kiss_ai
     else
-      curl -L -o main.zip https://github.com/ksenxx/kiss_ai/archive/refs/heads/main.zip
+      download_archive
       unzip main.zip
       rm main.zip
       mv kiss_ai-main ~/.kiss/kiss_ai

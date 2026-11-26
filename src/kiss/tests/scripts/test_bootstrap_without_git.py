@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""The curl bootstrap on a Mac that has no git.
+"""The curl bootstrap on a machine that has no git.
 
 On a Mac with neither Xcode nor the Command Line Tools ``/usr/bin/git``
 is a stub.  ``scripts/install.sh`` has to get KISS Sorcar onto such a
@@ -18,6 +18,11 @@ that fails the way the stub does once ``DEVELOPER_DIR`` is set, an
 ``curl`` is a script that delivers an archive the test prepared, not
 GitHub's (the tests use no network); it and ``xcode-select`` record how
 they were called.
+
+An Ubuntu desktop ships neither git nor curl, and the daemon's Update
+button, which runs the bootstrap there, has no terminal for ``sudo`` to
+ask a password in: the second test runs the bootstrap on a ``PATH`` of
+such a machine, where ``wget`` delivers the archive.
 """
 
 from __future__ import annotations
@@ -34,6 +39,9 @@ from kiss.tests.conftest import posix_only
 
 BOOTSTRAP = Path(__file__).resolve().parents[4] / "scripts" / "install.sh"
 ARCHIVE_URL = "https://github.com/ksenxx/kiss_ai/archive/refs/heads/main.zip"
+
+# What the bootstrap runs on Linux besides the commands a test stands in for.
+LINUX_TOOLS = ("bash", "cat", "head", "mkdir", "mv", "perl", "rm", "sed", "sleep", "unzip")
 
 pytestmark = [
     posix_only("runs the real bash bootstrap scripts/install.sh"),
@@ -93,3 +101,37 @@ def test_mac_without_git_installs_from_the_zip_archive(tmp_path: Path) -> None:
         "xcode-select -p",
         f"curl -L -o main.zip {ARCHIVE_URL}",
     ]
+
+
+def test_linux_without_git_and_curl_downloads_the_archive_with_wget(tmp_path: Path) -> None:
+    """No git, no curl, no package manager to ask: wget downloads the archive."""
+    home = tmp_path / "home"
+    bin_dir = tmp_path / "bin"
+    home.mkdir()
+    bin_dir.mkdir()
+    calls = tmp_path / "calls.txt"
+    archive = tmp_path / "prepared.zip"
+    with zipfile.ZipFile(archive, "w") as prepared:
+        prepared.writestr(
+            "kiss_ai-main/install.sh", '#!/bin/bash\necho ran > "$HOME/handed-over.txt"\n'
+        )
+    for tool in LINUX_TOOLS:
+        (bin_dir / tool).symlink_to(shutil.which(tool) or tool)
+    write_command(bin_dir, "uname", "echo Linux")
+    write_command(bin_dir, "wget", f'echo "wget $*" >> "{calls}"\ncat "{archive}" > "$3"')
+    result = subprocess.run(
+        ["bash", str(BOOTSTRAP)],
+        cwd=tmp_path,
+        env={"HOME": str(home), "PATH": str(bin_dir)},
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    assert "No supported package manager found; cannot install git automatically." in output
+    assert (home / "handed-over.txt").read_text() == "ran\n"
+    assert not (home / ".kiss" / "main.zip").exists()
+    assert calls.read_text().splitlines() == [f"wget -q -O main.zip {ARCHIVE_URL}"]

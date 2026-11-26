@@ -3,9 +3,10 @@
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
 # The payload of a KISS Sorcar installer: sourced by scripts/build-macos-pkg.sh
-# (the Mac package) and scripts/build-windows-exe.sh (the Windows setup
-# program), which both carry the same copy of the sources and run its
-# install.sh on the user's machine.
+# (the Mac package), scripts/build-windows-exe.sh (the Windows setup
+# program) and scripts/build-linux-run.sh (the Linux installer), which all
+# carry the same copy of the sources and run its install.sh on the user's
+# machine.
 #
 # The script that sources this file sets PROJECT_DIR (the checkout) and
 # defines ``die``.

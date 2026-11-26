@@ -1,6 +1,6 @@
 #!/bin/bash
 # End-to-end test for the installer step of scripts/release.sh: the Mac
-# installer package and the Windows setup program.
+# installer package, the Windows setup program and the Linux installer.
 # Run: bash scripts/test_release_macos_pkg.sh
 #
 # Part 1 (macOS only: the builder needs pkgbuild) builds the real package of
@@ -9,15 +9,18 @@
 # that its payload holds the app with its version and commit, no path of
 # scripts/exclude.json and not the package of the release before. Where
 # makensis and 7-Zip are installed it does the same for the Windows setup
-# program (build_windows_setup).
+# program (build_windows_setup), and everywhere for the Linux installer
+# (build_linux_installer).
 #
 # Part 2 runs the real main() of release.sh on a scratch repo with bare
 # "origin" and "public" remotes; only the outward-facing pieces are stubbed
 # (PyPI publishing, gh, and the public push URL). The fixture's
-# scripts/build-macos-pkg.sh and scripts/build-windows-exe.sh are a recorder:
+# scripts/build-macos-pkg.sh, scripts/build-windows-exe.sh and
+# scripts/build-linux-run.sh are a recorder:
 # the "package" it writes lists the arguments and the tree it was run on, so
 # the pushed commits show what the release built and when:
-#   * the package and the setup program of the bumped version are in the
+#   * the package, the setup program and the Linux installer of the bumped
+#     version are in the
 #     "Version bumped" commit that reaches origin and in the release commit
 #     that reaches the public repo,
 #   * it is built from the committed tree minus the excluded paths,
@@ -86,8 +89,28 @@ else
     echo "SKIP: the real setup program needs makensis and 7-Zip"
 fi
 
+cd "$REPO_ROOT"
+bash -c 'source "$1"; build_linux_installer HEAD HEAD "$2"' _ "$RELEASE_SH" "$WORK/real.run" \
+    > "$WORK/build.log" 2>&1 || { cat "$WORK/build.log"; fail "build_linux_installer failed"; }
+mkdir "$WORK/run"
+# The archive starts at the line the installer's script names.
+tail -n "+$(grep -a -m1 '^PAYLOAD_LINE=' "$WORK/real.run" | cut -d= -f2)" "$WORK/real.run" \
+    | tar -xzf - -C "$WORK/run" || fail "the Linux installer does not unpack"
+for required in install.sh scripts/install.sh pyproject.toml uv.lock src/kiss/__init__.py; do
+    [[ -f "$WORK/run/$required" ]] || fail "Linux installer lacks $required"
+done
+cmp -s "$WORK/run/src/kiss/core/_version.py" <(git show HEAD:src/kiss/core/_version.py) \
+    || fail "Linux installer holds another version than HEAD"
+[[ "$(cat "$WORK/run/src/kiss/core/_commit.txt")" == "$(git rev-parse --short HEAD)" ]] \
+    || fail "Linux installer names commit $(cat "$WORK/run/src/kiss/core/_commit.txt"), not HEAD"
+while IFS= read -r excluded; do
+    [[ ! -e "$WORK/run/$excluded" ]] || fail "Linux installer contains excluded path $excluded"
+done < <(bash -c 'source "$1"; read_exclude_paths' _ "$RELEASE_SH")
+[[ ! -e "$WORK/run/installers" ]] || fail "Linux installer contains the installers of the release before"
+pass "the real Linux installer holds the app, the version and the commit of HEAD and no excluded path"
+
 # --- Part 2: the release builds, commits and pushes the package -------------
-# The recorder standing in for both builders. FAIL_BUILD (a file
+# The recorder standing in for the three builders. FAIL_BUILD (a file
 # name) makes it fail on a tree that holds that file; MOVE_ORIGIN (a fixture
 # dir) makes it push a commit adding the file $LATE to that fixture's origin,
 # once, as another machine would between the build and the push.
@@ -126,6 +149,7 @@ echo "never public" > private.txt
 printf '#!/bin/bash\necho install >> "%s/events.log"\n' "$FIX" > install.sh
 cp "$WORK/recorder.sh" scripts/build-macos-pkg.sh
 cp "$WORK/recorder.sh" scripts/build-windows-exe.sh
+cp "$WORK/recorder.sh" scripts/build-linux-run.sh
 git add -A
 git commit -q -m "initial"
 git remote add origin "$FIX/origin.git"
@@ -147,8 +171,10 @@ EOF
 
 PKG=installers/KISS-Sorcar.pkg
 EXE=installers/KISS-Sorcar-Setup.exe
+RUN=installers/KISS-Sorcar-Linux.run
 pushed_pkg() { git -C "$FIX/origin.git" show "main:$PKG"; }
 pushed_exe() { git -C "$FIX/origin.git" show "main:$EXE"; }
+pushed_run() { git -C "$FIX/origin.git" show "main:$RUN"; }
 
 # --- Test 1: the package is committed with the version bump and pushed ------
 OUT=$(bash "$WORK/driver.sh" 2>&1) || fail "release main() failed:
@@ -157,7 +183,7 @@ VERSION="$(date +%Y).$(date +%-m).0"
 [[ "$(git -C "$FIX/origin.git" log -1 --format=%s main)" == "Version bumped to $VERSION" ]] \
     || fail "origin's tip is not the version bump: $(git -C "$FIX/origin.git" log -1 --format=%s main)"
 [[ "$(git -C "$FIX/origin.git" show --format= --name-only main | LC_ALL=C sort | tr '\n' ' ')" \
-    == "$EXE $PKG src/kiss/core/_version.py " ]] \
+    == "$RUN $EXE $PKG src/kiss/core/_version.py " ]] \
     || fail "the version bump commit holds: $(git -C "$FIX/origin.git" show --format= --name-only main | tr '\n' ' ')"
 pushed_pkg | grep -qx "version=__version__ = \"$VERSION\"" \
     || fail "the pushed package is not of version $VERSION: $(pushed_pkg | head -1)"
@@ -167,12 +193,16 @@ pushed_exe | grep -qx "version=__version__ = \"$VERSION\"" \
     || fail "the pushed setup program is not of version $VERSION: $(pushed_exe | head -1)"
 pushed_exe | grep -qx "commit=$(git rev-parse --short HEAD~1)" \
     || fail "the pushed setup program does not name the commit it was cut from: $(pushed_exe | grep '^commit=')"
+pushed_run | grep -qx "version=__version__ = \"$VERSION\"" \
+    || fail "the pushed Linux installer is not of version $VERSION: $(pushed_run | head -1)"
+pushed_run | grep -qx "commit=$(git rev-parse --short HEAD~1)" \
+    || fail "the pushed Linux installer does not name the commit it was cut from: $(pushed_run | grep '^commit=')"
 pass "the package of the bumped version is committed with the version bump and pushed to origin"
 
 pushed_pkg | grep -qx "file=./src/kiss/core/_version.py" || fail "the builder did not run on the released tree"
-if { pushed_pkg; pushed_exe; } | grep -q -e "private.txt" -e "wip.txt" -e "^arg="; then
+if { pushed_pkg; pushed_exe; pushed_run; } | grep -q -e "private.txt" -e "wip.txt" -e "^arg="; then
     fail "an installer was built with an excluded path, uncommitted work or arguments:
-$(pushed_pkg; pushed_exe)"
+$(pushed_pkg; pushed_exe; pushed_run)"
 fi
 pass "the package is built from the committed tree minus the excluded paths, unsigned by default"
 
@@ -180,6 +210,8 @@ cmp -s <(pushed_pkg) <(git -C "$FIX/public.git" show "main:$PKG") \
     || fail "the public release commit does not hold the package pushed to origin"
 cmp -s <(pushed_exe) <(git -C "$FIX/public.git" show "main:$EXE") \
     || fail "the public release commit does not hold the setup program pushed to origin"
+cmp -s <(pushed_run) <(git -C "$FIX/public.git" show "main:$RUN") \
+    || fail "the public release commit does not hold the Linux installer pushed to origin"
 [[ "$(tr '\n' ' ' < "$FIX/events.log")" == "gh pypi install " ]] \
     || fail "wrong publish order: $(tr '\n' ' ' < "$FIX/events.log")"
 [[ -f wip.txt ]] || fail "the stash was not restored after the release"
@@ -197,6 +229,7 @@ $OUT"
     == "arg=--sign arg=Developer ID Installer: T (X) arg=--keychain arg=/k.keychain arg=--notarize arg=profile " ]] \
     || fail "the signing variables did not reach the builder: $(pushed_pkg | grep '^arg=' | tr '\n' ' ')"
 [[ -z "$(pushed_exe | grep '^arg=')" ]] || fail "the Mac signing variables reached the Windows builder"
+[[ -z "$(pushed_run | grep '^arg=')" ]] || fail "the Mac signing variables reached the Linux builder"
 pass "the signing variables reach the builder as --sign, --keychain and --notarize"
 
 echo "$OUT" | grep -q "Origin moved - rebuilding the installers" || fail "the release did not rebuild the package:
@@ -206,6 +239,7 @@ $OUT"
     || fail "origin's history is: $(git -C "$FIX/origin.git" log -3 --format=%s main | tr '\n' ' ')"
 pushed_pkg | grep -qx "file=./late.txt" || fail "the pushed package lacks the commit that reached origin after the build"
 pushed_exe | grep -qx "file=./late.txt" || fail "the pushed setup program lacks the commit that reached origin after the build"
+pushed_run | grep -qx "file=./late.txt" || fail "the pushed Linux installer lacks the commit that reached origin after the build"
 pushed_pkg | grep -qx "commit=$(git rev-parse --short HEAD~1)" \
     || fail "the rebuilt package does not name the commit below the bump: $(pushed_pkg | grep '^commit=')"
 cmp -s <(pushed_pkg) <(git -C "$FIX/public.git" show "main:$PKG") \

@@ -4377,7 +4377,7 @@ The left sidebar, a drawer on a phone:
     - One stray `SIGINT` or `SIGTERM` is ignored and a second within 3 s aborts.
     - When the terminal closes (`SIGHUP`), the run carries on with its output in the log; the password is then not printed, and Settings shows it.
   - **Daemon service**:
-    - `kiss-web` is registered as the user's service (the LaunchAgent `com.kiss.web-server` on macOS, the systemd user unit `kiss-web.service` with lingering on Linux, a detached process on a Linux without a systemd user manager, a logon entry under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` on Windows, written by `src/kiss/server/windows_install.py`) and serves the directory the installer was run from (the home directory when that is inside `~/.kiss`).
+    - `kiss-web` is registered as the user's service (the LaunchAgent `com.kiss.web-server` on macOS, the systemd user unit `kiss-web.service` with lingering on Linux, a detached process in a session of its own on a Linux without a systemd user manager (so it outlives the terminal the install ran in), a logon entry under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` on Windows, written by `src/kiss/server/windows_install.py`) and serves the directory the installer was run from (the home directory when that is inside `~/.kiss`).
     - The restart is skipped when the running daemon already serves this exact runtime (a fingerprint of the launcher, the work dir and the newest modification time among the library's `.py` and `.pyc` files, the bytecode being written afresh by every full install), which keeps its tunnel URL.
     - The restart never happens while the daemon reports tasks in flight.
   - **Deferred restart** **NEW** (10-30):
@@ -4413,14 +4413,19 @@ The left sidebar, a drawer on a phone:
     - Timeouts: `KISS_WEB_START_TIMEOUT` (90 s), `KISS_WEB_DRAIN_TIMEOUT` (30 s) and `KISS_HEARTBEAT_INTERVAL` (15 s).
     - The log is `~/.kiss/install.log`.
 - **Installers for a machine with nothing set up** **NEW** (11-24):
-  - Both unpack the same payload (`scripts/installer-payload.sh`: the sources `install.sh` installs, `install.sh` itself and the scripts it needs) into `~/.kiss/kiss_pkg` and run `install.sh --non-interactive` there.
+  - All three unpack the same payload (`scripts/installer-payload.sh`: the sources `install.sh` installs, `install.sh` itself and the scripts it needs) into `~/.kiss/kiss_pkg` and run `install.sh` there: the Mac package and the Windows setup program with `--non-interactive`, the Linux installer in the terminal it was started from.
   - **Mac package** `installers/KISS-Sorcar.pkg` (`scripts/build-macos-pkg.sh`): installs for the current user without Apple's developer tools.
   - **Windows setup program** `installers/KISS-Sorcar-Setup.exe` (`scripts/build-windows-exe.sh`, NSIS; builds on macOS, Linux and Windows):
     - Installs for the user who runs it, without administrator rights, on 64-bit Windows 10 and later; `/S` installs without a window.
     - `scripts/windows-exe/setup.ps1` finds Git Bash or downloads the portable Git for Windows into the profile, then runs `install.sh`.
     - Registers an uninstaller (Settings > Apps) that removes the app, the Start Menu shortcut, the logon start and the CLI and keeps the settings and history in `~/.kiss`.
     - It is not signed: Windows SmartScreen asks before running a downloaded copy.
-  - `scripts/release.sh` rebuilds both from the released tree and commits them with the version bump.
+  - **Linux installer** `installers/KISS-Sorcar-Linux.run` **NEW** (11-25; `scripts/build-linux-run.sh`, which needs `tar` and `gzip` only):
+    - One file for x86-64 and ARM64: the shell script `scripts/linux-run/header.sh` followed by a gzip-compressed tar archive of the payload; run with `bash ~/Downloads/KISS-Sorcar-Linux.run`, for the user who runs it, without root.
+    - Checks the archive before it replaces anything (a download that was cut short stops there). Takes the update lock before it replaces the payload, so it refuses to run while another install or update holds it, and hands the lock to `install.sh`, so nothing replaces the payload under its own install.
+    - `install.sh` and the Update button download with `wget` where `curl` is missing (an Ubuntu desktop ships `wget` alone).
+    - `scripts/check-linux-run.sh <image>` installs it in a clean container of a distribution and checks the app there; `scripts/check-linux-vm.sh <template>` does so in a virtual machine (lima), where the daemon is the systemd user service: it restarts the machine, requires the daemon to serve again before anyone logs in, and runs the installer a second time on a display, where the app's window must open. `scripts/check-linux-install.sh` checks an installed Linux machine.
+  - `scripts/release.sh` rebuilds all three from the released tree and commits them with the version bump.
 - **`kiss-app`** **NEW** (10-16; `src/kiss/server/standalone_app.py`, 1,486 lines):
   - Opens the web app as a standalone window, Chromium's app mode (`--app=<URL>`) under its own profile `~/.kiss/webapp-profile`, choosing the browser in priority order:
     1. The browser `$KISS_APP_BROWSER` names (once set it is the only candidate: when it does not resolve, no window opens and the command exits with status 1).
@@ -4434,7 +4439,7 @@ The left sidebar, a drawer on a phone:
   - The other flags are `--url`, `--wait` (120 s), `--foreground`, `--print-command`, `--uninstall-launcher` and `--reveal-launcher`.
 - **Updates**:
   - The daemon asks PyPI for a newer release at start and every hour, and the toast offers:
-    - **Update**: runs the bootstrap of `~/.kiss/kiss_ai` (it syncs the clone, then installs) detached and non-interactive, output in `~/.kiss/update.log` (the curl one-liner when the clone is gone; `$KISS_UPDATE_BOOTSTRAP_URL` overrides its URL), one run at a time and with the run-admission barrier up, so no new task starts under the installer.
+    - **Update**: runs the bootstrap of `~/.kiss/kiss_ai` (it syncs the clone, then installs) detached and non-interactive, output in `~/.kiss/update.log` (the one-line installer when the clone is gone, downloaded with curl, or with wget where curl is missing; `$KISS_UPDATE_BOOTSTRAP_URL` overrides its URL), one run at a time and with the run-admission barrier up, so no new task starts under the installer.
     - **Update when idle**: re-checks every 5 s and starts the update in the same atomic step that finds no task running.
     - **Remind me later**: a 24 h snooze that a still newer release breaks.
   - An open page reloads itself once it reconnects to a daemon whose per-process token differs (`GET /api/daemon`, 10-23) **NEW**.

@@ -394,8 +394,8 @@ members = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/ksen/kiss"
-Repository = "https://github.com/ksen/kiss"
+Homepage = "https://github.com/ksenxx/kiss_ai"
+Repository = "https://github.com/ksenxx/kiss_ai"
 
 [project.scripts]
 check = "kiss.scripts.check:main"

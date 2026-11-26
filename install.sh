@@ -9,8 +9,9 @@
 # Bash (Git for Windows), the shell the agent's own shell tool uses
 # there; the venv's programs are then ``.venv/Scripts/*.exe``, not
 # ``.venv/bin/*`` (VENV_BIN below).  The Mac package
-# (scripts/build-macos-pkg.sh) and the Windows setup program
-# (scripts/build-windows-exe.sh) both unpack a copy of the sources and
+# (scripts/build-macos-pkg.sh), the Windows setup program
+# (scripts/build-windows-exe.sh) and the Linux installer
+# (scripts/build-linux-run.sh) all unpack a copy of the sources and
 # run this script.
 #
 # It needs no administrator password, no compiler, no Homebrew and no
@@ -736,8 +737,8 @@ case "$ARCH" in
     *)  fail "Unsupported architecture: $ARCH" ;;
 esac
 
-if ! command -v curl &>/dev/null; then
-    fail "curl is required but not found. Please install curl first."
+if ! command -v curl &>/dev/null && ! command -v wget &>/dev/null; then
+    fail "curl or wget is required but neither was found. Please install one of them first."
 fi
 
 # Git Bash hands a path to a Windows program (uv, Python) in Windows
@@ -789,9 +790,20 @@ shell_path() {
 }
 # END: kiss-platform
 
+fetch() {
+    # Download URL $1 into file $2, or to stdout without $2: with curl, or
+    # with wget on a machine that has no curl (Ubuntu's desktop ships
+    # wget alone).
+    if command -v curl &>/dev/null; then
+        curl -LsSf ${2:+-o "$2"} "$1"
+    else
+        wget -q -O "${2:--}" "$1"
+    fi
+}
+
 ensure_uv() {
     # Print the path of uv, installing it into ~/.local/bin when missing.
-    local candidate
+    local candidate wgetrc
     for candidate in "$(command -v uv 2>/dev/null || true)" \
                      "$HOME/.local/bin/uv" "$HOME/.cargo/bin/uv"; do
         if [ -n "$candidate" ] && [ -x "$candidate" ]; then
@@ -804,7 +816,16 @@ ensure_uv() {
         UV_NO_MODIFY_PATH=1 powershell -NoProfile -ExecutionPolicy Bypass \
             -Command 'irm https://astral.sh/uv/install.ps1 | iex' >&2 < /dev/null || return 1
     else
-        curl -LsSf https://astral.sh/uv/install.sh | UV_NO_MODIFY_PATH=1 sh >&2 || return 1
+        # Without curl, uv's installer downloads uv with a bare ``wget``,
+        # which prints a line of progress for every 50 KB, hundreds of
+        # lines: it gets a wgetrc that says ``verbose = off`` after the
+        # user's own settings (a proxy, say).
+        wgetrc="$(mktemp)" || return 1
+        [ ! -f "${WGETRC:-$HOME/.wgetrc}" ] || cat "${WGETRC:-$HOME/.wgetrc}" > "$wgetrc"
+        printf '\nverbose = off\n' >> "$wgetrc"
+        fetch https://astral.sh/uv/install.sh | UV_NO_MODIFY_PATH=1 WGETRC="$wgetrc" sh >&2 \
+            || { rm -f "$wgetrc"; return 1; }
+        rm -f "$wgetrc"
     fi
     [ -x "$HOME/.local/bin/uv" ] || return 1
     echo "$HOME/.local/bin/uv"
@@ -855,7 +876,7 @@ install_cloudflared() {
     echo "   Installing cloudflared..."
     mkdir -p "$bin_dir"
     if [ "$(uname -s)" = "Darwin" ]; then
-        curl -fsSL "$url/cloudflared-darwin-$arch.tgz" | tar xzf - -C "$bin_dir" \
+        fetch "$url/cloudflared-darwin-$arch.tgz" | tar xzf - -C "$bin_dir" \
             || warn "cloudflared download failed; the web app will have no public URL"
     else
         if on_windows; then
@@ -864,7 +885,7 @@ install_cloudflared() {
         else
             url="$url/cloudflared-linux-$arch"
         fi
-        curl -fsSL -o "$bin_dir/$file" "$url" \
+        fetch "$url" "$bin_dir/$file" \
             || { rm -f "$bin_dir/$file"; warn "cloudflared download failed; the web app will have no public URL"; }
     fi
     [ -f "$bin_dir/$file" ] && chmod 755 "$bin_dir/$file"
@@ -1139,13 +1160,17 @@ release_kiss_web_restart_lock() {
 
 stop_stray_kiss_web() {
     # A kiss-web outside the service (an old direct spawn) would keep the
-    # port and make the new daemon crash-loop.  Best effort: needs lsof
-    # or fuser, and only touches processes that are kiss-web.
+    # port and make the new daemon crash-loop.  Best effort: lsof or
+    # fuser name the process on the port; where neither is installed (a
+    # minimal container) the endpoint file $1, when given, names the
+    # daemon that wrote it.  Only processes that are kiss-web are touched.
     local pid pids=""
     if command -v lsof &>/dev/null; then
         pids="$(lsof -t -iTCP:"$KISS_WEB_PORT" -sTCP:LISTEN 2>/dev/null || true)"
     elif command -v fuser &>/dev/null; then
         pids="$(fuser "$KISS_WEB_PORT/tcp" 2>/dev/null || true)"
+    elif [ -n "${1:-}" ]; then
+        pids="$(sed -n 's/.*"pid": *\([0-9][0-9]*\).*/\1/p' "$1" 2>/dev/null || true)"
     fi
     for pid in $pids; do
         case "$(ps -o command= -p "$pid" 2>/dev/null)" in
@@ -1629,13 +1654,17 @@ restart_kiss_web_locked() {
             || warn "kiss-web could not be started"
     else
         echo "   Starting kiss-web as a detached background process..."
-        stop_stray_kiss_web
+        stop_stray_kiss_web "$endpoint"
         # ``exec`` so no shell lingers holding this script's output open;
         # ``3>&-`` keeps the saved terminal (the password box's fd) and
         # ``9>&-`` the update lock out of the daemon.  The closes are a
         # separate ``exec``: ``exec CMD 9>&-`` leaks bash 3.2's (macOS)
         # undo copy of fd 9 into CMD, which then holds the lock.
-        (cd "$workdir" && exec 3>&- 9>&- && exec nohup "$kiss_web" >> "$home/kiss-web-stdout.log" 2>> "$home/kiss-web-stderr.log" < /dev/null) &
+        # The daemon gets a session of its own (``setsid``): it shuts down
+        # on SIGHUP, which the terminal this install runs in sends its
+        # session when it closes.  A perl without the POSIX module starts
+        # it in this session.
+        (cd "$workdir" && exec 3>&- 9>&- && exec perl -e 'eval { require POSIX; POSIX::setsid() }; exec { $ARGV[0] } @ARGV' "$kiss_web" >> "$home/kiss-web-stdout.log" 2>> "$home/kiss-web-stderr.log" < /dev/null) &
     fi
     while [ "$waited" -lt "${KISS_WEB_START_TIMEOUT:-90}" ]; do
         if [ "$endpoint" -nt "$stamp" ] && kiss_web_port_open; then
